@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- The approved source of truth is `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md` at tag `spec-v1.0.0`.
+- The approved source of truth is `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md` at tag `design-approved-v1.0.0`; `spec-v1.0.0` preserves the reviewed design content before approval metadata was recorded.
 - Rust production code uses Rust 1.97.1, edition 2024, with committed `Cargo.lock` and no unreviewed `unsafe` blocks.
 - Swift code uses Swift 6.3 language mode with strict concurrency and treats controllable concurrency warnings as errors.
 - Canonical accounting uses checked fixed-point values. `f64` is forbidden in balances, positions, fees, funding, margin, event identity, and reconciliation.
@@ -93,7 +93,7 @@ The exact stage records are `docs/stage-gates/stage-0-foundations.md`, `stage-1-
 Each record contains these fields with concrete values generated during that gate:
 
 - A title naming the stage and outcome.
-- `Design specification commit`: the 40-character SHA returned by `git rev-list -n 1 spec-v1.0.0`.
+- `Design specification commit`: the 40-character SHA returned by `git rev-list -n 1 design-approved-v1.0.0`.
 - `Implementation commit`: the clean pre-gate commit returned by `git rev-parse HEAD` before verification starts.
 - `Toolchain manifest hash`: the lowercase 64-character SHA-256 emitted by `stage-gate`.
 - `Regression archive manifest hash`: the lowercase 64-character SHA-256 emitted by `stage-gate`, or the literal `not-applicable-stage-0` for Stage 0.

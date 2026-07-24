@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- The canonical requirement source is `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md` at `spec-v1.0.0`.
+- The canonical requirement source is `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md` at `design-approved-v1.0.0`; `spec-v1.0.0` preserves the reviewed design content before approval metadata was recorded.
 - “Covered” means a named task creates the behavior and a named stage or release gate verifies it.
 - The future execution boundary is deliberately deferred, not omitted accidentally.
 - A specification change requires a new reviewed design revision and an updated traceability row before implementation.

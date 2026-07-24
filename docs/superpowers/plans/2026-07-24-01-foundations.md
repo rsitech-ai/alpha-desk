@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- The approved source of truth is `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md` at tag `spec-v1.0.0`.
+- The approved source of truth is `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md` at tag `design-approved-v1.0.0`; `spec-v1.0.0` preserves the reviewed design content before approval metadata was recorded.
 - Rust production code uses Rust 1.97.1, edition 2024, with committed `Cargo.lock` and no unreviewed `unsafe` blocks.
 - Swift code uses Swift 6.3 language mode with strict concurrency and treats controllable concurrency warnings as errors.
 - Canonical accounting uses checked fixed-point values. `f64` is forbidden in balances, positions, fees, funding, margin, event identity, and reconciliation.
@@ -1639,7 +1639,7 @@ Expected: FAIL because the gate runner does not exist.
 `stage-gate run config/stage-gates/stage-0.toml --output target/stage-gates/stage-0.json` must:
 
 1. Require an empty `git status --porcelain` result before executing checks.
-2. Verify `spec-v1.0.0` resolves to the approved design commit recorded in configuration.
+2. Verify `design-approved-v1.0.0` resolves to the approved design commit recorded in configuration.
 3. Record the current clean implementation commit before any command runs.
 4. Run `just verify`, `just quality`, schema checks, fixture checks, Compose smoke test, Ansible verification, and reproducibility checks in the configured order.
 5. Hash `Cargo.lock`, the schema descriptor set, fixture manifest, toolchain files, and produced binaries with SHA-256.

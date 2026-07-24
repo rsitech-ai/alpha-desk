@@ -5,7 +5,7 @@ The approved production design is implemented through eight gated plans. Execute
 ## Canonical Sources
 
 - Approved design: `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md`
-- Approved design tag: `spec-v1.0.0`
+- Approved design tag: `design-approved-v1.0.0` (reviewed content tag: `spec-v1.0.0`)
 - Program roadmap: `docs/superpowers/plans/2026-07-24-00-hyperliquid-alpha-desk-program-roadmap.md`
 - Specification traceability: `docs/superpowers/plans/2026-07-24-99-spec-traceability.md`
 
