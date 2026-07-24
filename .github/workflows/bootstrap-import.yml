@@ -1,4 +1,4 @@
-name: Bootstrap Alpha Desk Source Snapshot
+name: Bootstrap Alpha Desk Git History
 
 on:
   push:
@@ -19,25 +19,24 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: Verify and unpack source snapshot
+      - name: Verify complete Git bundle
         shell: bash
         run: |
           set -euo pipefail
-          cat bootstrap/worktree.part.* > /tmp/worktree.tar.xz.b64
-          echo 'b29592e5f51d3677c5d6e9af994058c8c394022ff01139bd4c0acda99368c0b5  /tmp/worktree.tar.xz.b64' | sha256sum --check
-          base64 --decode /tmp/worktree.tar.xz.b64 > /tmp/worktree.tar.xz
-          echo 'bcab65c033fc5b0fa5a2ae1081c885201c4527a344affb3a28d47bab409b8cef  /tmp/worktree.tar.xz' | sha256sum --check
-          mkdir /tmp/alpha-desk-source
-          tar -xJf /tmp/worktree.tar.xz -C /tmp/alpha-desk-source
+          cat bootstrap/alpha-desk.bundle.part.* > /tmp/alpha-desk.bundle.b64
+          echo '23ceb77823d7d56abc96d4159ef835c4cda891678737d8598e5fcdc0ac74ba19  /tmp/alpha-desk.bundle.b64' | sha256sum --check
+          base64 --decode /tmp/alpha-desk.bundle.b64 > /tmp/alpha-desk.bundle
+          echo 'cc77a19323492fcdec7743bd7240b7013d3df4ed206d086a1e3d680090ff924e  /tmp/alpha-desk.bundle' | sha256sum --check
+          git bundle verify /tmp/alpha-desk.bundle
 
-      - name: Replace bootstrap contents with source tree
+      - name: Import exact local branch history
         shell: bash
         run: |
           set -euo pipefail
-          rsync -a --delete --exclude .git/ /tmp/alpha-desk-source/ ./
-          git config user.name 'Alpha Desk Bootstrap'
-          git config user.email 'alpha-desk-bootstrap@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          git commit -m 'feat: import Hyperliquid Alpha Desk implementation'
-          git push origin HEAD:agent/import-current-implementation
+          git fetch /tmp/alpha-desk.bundle \
+            refs/heads/feat/hyperliquid-alpha-desk-v1:refs/remotes/import/source
+          test "$(git rev-parse refs/remotes/import/source)" = '5386fc3190d862375ed1ccbac0c19bcff90f19f5'
+          git push \
+            --force-with-lease=refs/heads/agent/import-current-implementation:${GITHUB_SHA} \
+            origin \
+            refs/remotes/import/source:refs/heads/agent/import-current-implementation
