@@ -1,8 +1,9 @@
 # Hyperliquid Alpha Desk — Production Design Specification
 
-**Document status:** Design draft for owner review  
+**Document status:** Approved for implementation  
 **Version:** 1.0.0  
 **Date:** 2026-07-24  
+**Owner approval recorded:** 2026-07-24  
 **Primary product:** Private internal alpha desk  
 **Primary implementation languages:** Rust and Swift  
 **Deployment model:** Self-hosted and local-only  
