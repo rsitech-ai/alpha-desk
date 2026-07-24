@@ -1,0 +1,43 @@
+name: Bootstrap Alpha Desk Source Snapshot
+
+on:
+  push:
+    branches: [agent/import-current-implementation]
+    paths:
+      - bootstrap/READY
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out bootstrap branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Verify and unpack source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat bootstrap/worktree.part.* > /tmp/worktree.tar.xz.b64
+          echo 'b29592e5f51d3677c5d6e9af994058c8c394022ff01139bd4c0acda99368c0b5  /tmp/worktree.tar.xz.b64' | sha256sum --check
+          base64 --decode /tmp/worktree.tar.xz.b64 > /tmp/worktree.tar.xz
+          echo 'bcab65c033fc5b0fa5a2ae1081c885201c4527a344affb3a28d47bab409b8cef  /tmp/worktree.tar.xz' | sha256sum --check
+          mkdir /tmp/alpha-desk-source
+          tar -xJf /tmp/worktree.tar.xz -C /tmp/alpha-desk-source
+
+      - name: Replace bootstrap contents with source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete --exclude .git/ /tmp/alpha-desk-source/ ./
+          git config user.name 'Alpha Desk Bootstrap'
+          git config user.email 'alpha-desk-bootstrap@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat: import Hyperliquid Alpha Desk implementation'
+          git push origin HEAD:agent/import-current-implementation
