@@ -211,13 +211,23 @@ cat >"$fake_bin/docker" <<'EOF'
 set -euo pipefail
 
 scenario="${FAKE_DOCKER_SCENARIO:-success}"
+expected_compose_file="${EXPECTED_COMPOSE_FILE:?EXPECTED_COMPOSE_FILE is required}"
 nats_id="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 minio_id="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 extra_id="1111111111111111111111111111111111111111111111111111111111111111"
 
 case "${1:-}" in
   compose)
-    service="${*: -1}"
+    [[ "$#" -eq 9 ]] || exit 2
+    [[ "$2" == "--project-name" ]] || exit 2
+    [[ "$3" == "alpha-desk-dev" ]] || exit 2
+    [[ "$4" == "-f" ]] || exit 2
+    [[ "$5" == "$expected_compose_file" ]] || exit 2
+    [[ "$expected_compose_file" == /* ]] || exit 2
+    [[ "$6" == "ps" ]] || exit 2
+    [[ "$7" == "--all" ]] || exit 2
+    [[ "$8" == "--quiet" ]] || exit 2
+    service="$9"
     case "$scenario:$service" in
       nats-missing:nats-init|minio-missing:minio-init)
         :
@@ -240,7 +250,14 @@ case "${1:-}" in
     esac
     ;;
   inspect)
-    container_id="${*: -1}"
+    [[ "$#" -eq 6 ]] || exit 2
+    [[ "$2" == "--type" ]] || exit 2
+    [[ "$3" == "container" ]] || exit 2
+    [[ "$4" == "--format" ]] || exit 2
+    [[ "$5" == '{{json .State}}' ]] || exit 2
+    container_id="$6"
+    [[ "$container_id" == "$nats_id" || "$container_id" == "$minio_id" ]] ||
+      exit 2
     if [[ "$container_id" == "$nats_id" && "$scenario" == "nats-running" ]]; then
       printf '%s\n' '{"Status":"running","Running":true,"ExitCode":0}'
     elif [[ "$container_id" == "$nats_id" && "$scenario" == "nats-nonzero" ]]; then
@@ -261,8 +278,27 @@ chmod +x \
   "$fake_bin/pg_isready" \
   "$fake_bin/psql"
 
+command_drift_failures=0
+
+if EXPECTED_COMPOSE_FILE="$compose_file" \
+  "$fake_bin/docker" compose ps nats-init >/dev/null 2>&1; then
+  printf 'dev-stack-contract:error fake Docker accepted incomplete Compose argv\n' >&2
+  ((command_drift_failures += 1))
+fi
+
+if EXPECTED_COMPOSE_FILE="$compose_file" \
+  "$fake_bin/docker" inspect \
+    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+    >/dev/null 2>&1; then
+  printf 'dev-stack-contract:error fake Docker accepted incomplete inspect argv\n' >&2
+  ((command_drift_failures += 1))
+fi
+
+((command_drift_failures == 0)) || exit 1
+
 wait_output="$(
   PATH="$fake_bin:$PATH" \
+    EXPECTED_COMPOSE_FILE="$compose_file" \
     DEV_STACK_WAIT_TIMEOUT_SECONDS=0 \
     DEV_STACK_WAIT_POLL_SECONDS=0 \
     "$wait_script"
@@ -291,6 +327,7 @@ for scenario in \
   nats-unsafe \
   minio-missing; do
   if PATH="$fake_bin:$PATH" \
+    EXPECTED_COMPOSE_FILE="$compose_file" \
     FAKE_DOCKER_SCENARIO="$scenario" \
     DEV_STACK_WAIT_TIMEOUT_SECONDS=0 \
     DEV_STACK_WAIT_POLL_SECONDS=0 \
@@ -319,6 +356,7 @@ EOF
 chmod +x "$fake_bin/curl"
 
 if PATH="$fake_bin:$PATH" \
+  EXPECTED_COMPOSE_FILE="$compose_file" \
   FAKE_DOCKER_SCENARIO=success \
   DEV_STACK_WAIT_TIMEOUT_SECONDS=0 \
   DEV_STACK_WAIT_POLL_SECONDS=0 \
