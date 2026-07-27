@@ -14,11 +14,18 @@ cat >"$fixture_root/Cargo.toml" <<'EOF'
 name = "unsafe-gate-fixture"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+hex = "0.4.3"
 EOF
 
 cat >"$fixture_root/src/lib.rs" <<'EOF'
 // The text `unsafe {}` in a comment is not unsafe Rust.
 pub const DESCRIPTION: &str = "unsafe { core::hint::unreachable_unchecked() }";
+
+pub fn encode(bytes: &[u8]) -> String {
+    hex::encode(bytes)
+}
 EOF
 
 cargo +1.97.1 generate-lockfile --manifest-path "$fixture_root/Cargo.toml" --offline
@@ -44,11 +51,55 @@ if ((relocated_cache_status != 0)); then
   exit 1
 fi
 
+relative_probe_root="$fixture_root/relative-probe"
+relative_cargo_home="relative-cargo-home"
+mkdir -p "$relative_probe_root/$relative_cargo_home/registry"
+for cache_input in registry/index registry/cache; do
+  ln -s \
+    "$caller_cargo_home/$cache_input" \
+    "$relative_probe_root/$relative_cargo_home/$cache_input"
+done
+set +e
+(
+  cd "$relative_probe_root"
+  HOME="" \
+    RUSTUP_HOME="$caller_rustup_home" \
+    CARGO_HOME="$relative_cargo_home" \
+    "$gate" --manifest-path "$fixture_root/Cargo.toml"
+)
+relative_safe_status=$?
+set -e
+if ((relative_safe_status != 0)); then
+  echo "a relative Cargo home must resolve from the caller working directory" >&2
+  exit 1
+fi
+
 cat >"$fixture_root/src/lib.rs" <<'EOF'
 pub fn read(value: &u8) -> u8 {
     unsafe { core::ptr::read_volatile(value) }
 }
 EOF
+
+relative_unsafe_stderr="$fixture_root/relative-unsafe.stderr"
+set +e
+(
+  cd "$relative_probe_root"
+  HOME="" \
+    RUSTUP_HOME="$caller_rustup_home" \
+    CARGO_HOME="$relative_cargo_home" \
+    "$gate" --manifest-path "$fixture_root/Cargo.toml"
+) 2>"$relative_unsafe_stderr"
+relative_unsafe_status=$?
+set -e
+if ((relative_unsafe_status == 0)); then
+  echo "real unsafe code must fail with a relative Cargo home" >&2
+  exit 1
+fi
+if ! grep -Fq 'usage of an `unsafe` block' "$relative_unsafe_stderr"; then
+  cat "$relative_unsafe_stderr" >&2
+  echo "relative Cargo-home rejection must come from the unsafe lint" >&2
+  exit 1
+fi
 
 if "$gate" --manifest-path "$fixture_root/Cargo.toml"; then
   echo "a real unsafe block must fail the compiler gate" >&2

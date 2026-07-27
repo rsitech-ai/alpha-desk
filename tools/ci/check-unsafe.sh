@@ -65,6 +65,16 @@ if [[ "$("$trusted_cargo" --version)" != "cargo 1.97.1 "* ]]; then
   exit 1
 fi
 
+caller_cache_home_input="${CARGO_HOME:-${HOME:?HOME must identify the caller cache}/.cargo}"
+if ! caller_cache_home="$(
+  cd "$caller_cache_home_input" 2>/dev/null && pwd -P
+)" || [[ -z "$caller_cache_home" ]]; then
+  printf \
+    'unsafe-gate-error: caller Cargo home is missing or not a directory: %q\n' \
+    "$caller_cache_home_input" >&2
+  exit 1
+fi
+
 gate_root="$(mktemp -d "${TMPDIR:-/tmp}/alpha-desk-unsafe-gate.XXXXXX")"
 cleanup() {
   rm -rf -- "$gate_root"
@@ -74,7 +84,6 @@ trap cleanup EXIT
 isolated_cargo_home="$gate_root/cargo-home"
 gate_target_dir="$gate_root/target"
 gate_build_dir="$gate_root/build"
-caller_cache_home="${CARGO_HOME:-${HOME:?HOME must identify the caller cache}/.cargo}"
 mkdir -p "$isolated_cargo_home/registry" "$gate_target_dir" "$gate_build_dir"
 
 # Preserve only registry index and packaged-crate cache inputs. Cargo verifies
