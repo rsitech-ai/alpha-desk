@@ -11,6 +11,15 @@ observability system. The local bridge is not a network-isolation boundary.
 Traces and logs go to the OpenTelemetry debug exporter. The resource and PID
 limits are laptop guardrails that still require realistic ingest testing.
 
+## Docker Desktop host-kernel warnings
+
+ClickHouse can report that transparent huge pages are set to `always` and that
+task delay accounting is disabled in Docker Desktop's Linux VM. These are local
+VM performance and observability limitations, not query or data correctness
+failures. This stack does not add privileges to hide them. Production host
+provisioning must set transparent huge pages to `madvise` and enable task delay
+accounting when its metrics are required.
+
 ## Provisional contracts
 
 - `alpha-archive` is the provisional local MinIO bucket. A later archive

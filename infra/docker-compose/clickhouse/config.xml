@@ -1,10 +1,12 @@
 <clickhouse>
+    <listen_host remove="remove"/>
+    <listen_host remove="remove"/>
     <listen_host>0.0.0.0</listen_host>
     <background_schedule_pool_size>128</background_schedule_pool_size>
     <logger>
         <level>information</level>
         <console>true</console>
-        <log remove="remove"/>
-        <errorlog remove="remove"/>
+        <log replace="replace"/>
+        <errorlog replace="replace"/>
     </logger>
 </clickhouse>
