@@ -1,5 +1,12 @@
+use num_bigint::BigInt;
+use num_traits::{Signed, ToPrimitive, Zero};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{cmp::Ordering, fmt, str::FromStr};
+use std::{
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    str::FromStr,
+};
 use thiserror::Error;
 
 pub const MAX_DECIMAL_SCALE: u8 = 38;
@@ -38,7 +45,7 @@ pub enum ValueError {
     Overflow,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy)]
 pub struct Decimal {
     raw: i128,
     scale: u8,
@@ -90,10 +97,10 @@ impl Decimal {
         rounding: RoundingMode,
     ) -> Result<Self, ValueError> {
         validate_scale(output_scale)?;
-        let product = self.raw.checked_mul(rhs.raw).ok_or(ValueError::Overflow)?;
+        let product = BigInt::from(self.raw) * BigInt::from(rhs.raw);
         let product_scale = u16::from(self.scale) + u16::from(rhs.scale);
-        let raw = rescale_raw(product, product_scale, u16::from(output_scale), rounding)?;
-        Self::from_raw(raw, output_scale)
+        let raw = rescale_big(product, product_scale, u16::from(output_scale), rounding)?;
+        Self::from_raw(big_to_i128(raw)?, output_scale)
     }
 
     pub fn checked_div(
@@ -107,31 +114,26 @@ impl Decimal {
             return Err(ValueError::DivisionByZero);
         }
         let shift = i32::from(output_scale) + i32::from(rhs.scale) - i32::from(self.scale);
-        let (numerator, denominator) = if shift >= 0 {
-            let factor = pow10(u32::try_from(shift).map_err(|_| ValueError::Overflow)?)?;
-            (
-                self.raw.checked_mul(factor).ok_or(ValueError::Overflow)?,
-                rhs.raw,
-            )
+        let mut numerator = BigInt::from(self.raw);
+        let mut denominator = BigInt::from(rhs.raw);
+        if shift >= 0 {
+            numerator *= pow10_big(u32::try_from(shift).map_err(|_| ValueError::Overflow)?);
         } else {
-            let factor = pow10(shift.unsigned_abs())?;
-            (
-                self.raw,
-                rhs.raw.checked_mul(factor).ok_or(ValueError::Overflow)?,
-            )
-        };
-        Self::from_raw(div_round(numerator, denominator, rounding)?, output_scale)
+            denominator *= pow10_big(shift.unsigned_abs());
+        }
+        let raw = div_round_big(numerator, denominator, rounding)?;
+        Self::from_raw(big_to_i128(raw)?, output_scale)
     }
 
     pub fn rescale(self, target_scale: u8, rounding: RoundingMode) -> Result<Self, ValueError> {
         validate_scale(target_scale)?;
-        let raw = rescale_raw(
-            self.raw,
+        let raw = rescale_big(
+            BigInt::from(self.raw),
             u16::from(self.scale),
             u16::from(target_scale),
             rounding,
         )?;
-        Self::from_raw(raw, target_scale)
+        Self::from_raw(big_to_i128(raw)?, target_scale)
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -152,6 +154,52 @@ impl Decimal {
             })
         }
     }
+
+    fn canonical_parts(self) -> (i128, u8) {
+        if self.raw == 0 {
+            return (0, 0);
+        }
+
+        let mut raw = self.raw;
+        let mut scale = self.scale;
+        while scale > 0 && raw % 10 == 0 {
+            raw /= 10;
+            scale -= 1;
+        }
+        (raw, scale)
+    }
+
+    fn numeric_cmp(self, other: Self) -> Ordering {
+        let left = BigInt::from(self.raw) * pow10_big(u32::from(other.scale));
+        let right = BigInt::from(other.raw) * pow10_big(u32::from(self.scale));
+        left.cmp(&right)
+    }
+}
+
+impl PartialEq for Decimal {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical_parts() == other.canonical_parts()
+    }
+}
+
+impl Eq for Decimal {}
+
+impl PartialOrd for Decimal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Decimal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.numeric_cmp(*other)
+    }
+}
+
+impl Hash for Decimal {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.canonical_parts().hash(state);
+    }
 }
 
 fn validate_scale(scale: u8) -> Result<(), ValueError> {
@@ -165,64 +213,73 @@ fn validate_scale(scale: u8) -> Result<(), ValueError> {
     }
 }
 
-fn pow10(exponent: u32) -> Result<i128, ValueError> {
-    10_i128.checked_pow(exponent).ok_or(ValueError::Overflow)
+fn pow10_big(exponent: u32) -> BigInt {
+    let mut value = BigInt::from(1_u8);
+    for _ in 0..exponent {
+        value *= 10_u8;
+    }
+    value
 }
 
-fn rescale_raw(
-    raw: i128,
+fn rescale_big(
+    raw: BigInt,
     source_scale: u16,
     target_scale: u16,
     rounding: RoundingMode,
-) -> Result<i128, ValueError> {
+) -> Result<BigInt, ValueError> {
     match target_scale.cmp(&source_scale) {
         Ordering::Equal => Ok(raw),
-        Ordering::Greater => {
-            let factor = pow10(u32::from(target_scale - source_scale))?;
-            raw.checked_mul(factor).ok_or(ValueError::Overflow)
-        }
-        Ordering::Less => {
-            let factor = pow10(u32::from(source_scale - target_scale))?;
-            div_round(raw, factor, rounding)
+        Ordering::Greater => Ok(raw * pow10_big(u32::from(target_scale - source_scale))),
+        Ordering::Less => div_round_big(
+            raw,
+            pow10_big(u32::from(source_scale - target_scale)),
+            rounding,
+        ),
+    }
+}
+
+fn div_round_big(
+    numerator: BigInt,
+    denominator: BigInt,
+    mode: RoundingMode,
+) -> Result<BigInt, ValueError> {
+    if denominator.is_zero() {
+        return Err(ValueError::DivisionByZero);
+    }
+    let quotient = &numerator / &denominator;
+    let remainder = &numerator % &denominator;
+    if remainder.is_zero() || mode == RoundingMode::TowardZero {
+        return Ok(quotient);
+    }
+
+    let same_sign = numerator.is_negative() == denominator.is_negative();
+    let step = if same_sign {
+        BigInt::from(1_u8)
+    } else {
+        BigInt::from(-1_i8)
+    };
+    match mode {
+        RoundingMode::TowardZero => Ok(quotient),
+        RoundingMode::Floor if same_sign => Ok(quotient),
+        RoundingMode::Floor => Ok(quotient - BigInt::from(1_u8)),
+        RoundingMode::Ceiling if same_sign => Ok(quotient + BigInt::from(1_u8)),
+        RoundingMode::Ceiling => Ok(quotient),
+        RoundingMode::NearestTiesToEven => {
+            let twice_remainder = remainder.abs() * 2_u8;
+            let divisor = denominator.abs();
+            if twice_remainder < divisor
+                || (twice_remainder == divisor && (&quotient % 2_u8).is_zero())
+            {
+                Ok(quotient)
+            } else {
+                Ok(quotient + step)
+            }
         }
     }
 }
 
-fn div_round(numerator: i128, denominator: i128, mode: RoundingMode) -> Result<i128, ValueError> {
-    if denominator == 0 {
-        return Err(ValueError::DivisionByZero);
-    }
-    let quotient = numerator
-        .checked_div(denominator)
-        .ok_or(ValueError::Overflow)?;
-    let remainder = numerator
-        .checked_rem(denominator)
-        .ok_or(ValueError::Overflow)?;
-    if remainder == 0 || mode == RoundingMode::TowardZero {
-        return Ok(quotient);
-    }
-
-    let same_sign = (numerator < 0) == (denominator < 0);
-    let step = if same_sign { 1_i128 } else { -1_i128 };
-    match mode {
-        RoundingMode::TowardZero => Ok(quotient),
-        RoundingMode::Floor if same_sign => Ok(quotient),
-        RoundingMode::Floor => quotient.checked_sub(1).ok_or(ValueError::Overflow),
-        RoundingMode::Ceiling if same_sign => quotient.checked_add(1).ok_or(ValueError::Overflow),
-        RoundingMode::Ceiling => Ok(quotient),
-        RoundingMode::NearestTiesToEven => {
-            let twice_remainder = remainder
-                .unsigned_abs()
-                .checked_mul(2)
-                .ok_or(ValueError::Overflow)?;
-            let divisor = denominator.unsigned_abs();
-            if twice_remainder < divisor || (twice_remainder == divisor && quotient % 2 == 0) {
-                Ok(quotient)
-            } else {
-                quotient.checked_add(step).ok_or(ValueError::Overflow)
-            }
-        }
-    }
+fn big_to_i128(value: BigInt) -> Result<i128, ValueError> {
+    value.to_i128().ok_or(ValueError::Overflow)
 }
 
 impl FromStr for Decimal {

@@ -58,6 +58,8 @@ name = "domain-types"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "num-bigint",
+ "num-traits",
  "proptest",
  "serde",
  "serde_json",
@@ -222,6 +224,25 @@ dependencies = [
 [[package]]
 name = "model-runtime"
 version = "0.1.0"
+
+[[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "num-traits"

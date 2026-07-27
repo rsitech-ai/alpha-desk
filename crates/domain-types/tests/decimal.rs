@@ -3,7 +3,7 @@ use domain_types::{
     ValueError,
 };
 use proptest::prelude::*;
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 #[test]
 fn price_parses_at_metadata_scale_and_formats_without_float() {
@@ -241,6 +241,104 @@ fn probability_scaling_avoids_intermediate_overflow() {
             .unwrap()
             .checked_scale_i128_toward_zero(i128::MAX),
         Ok(170_141_013_319_285_771_262_455_572_028_580_389_842)
+    );
+}
+
+#[test]
+fn decimal_and_newtype_comparisons_are_numeric_across_scales() {
+    let one_at_one_decimal_place = Decimal::from_raw(10, 1).unwrap();
+    let one_at_zero_decimal_places = Decimal::from_raw(1, 0).unwrap();
+    let two = Decimal::from_raw(2, 0).unwrap();
+
+    assert_eq!(one_at_one_decimal_place, one_at_zero_decimal_places);
+    assert!(one_at_one_decimal_place < two);
+    assert!(two > one_at_one_decimal_place);
+
+    let mut decimal_set = HashSet::new();
+    decimal_set.insert(one_at_one_decimal_place);
+    decimal_set.insert(one_at_zero_decimal_places);
+    assert_eq!(decimal_set.len(), 1);
+
+    let price_one = Price::from_raw(10, 1).unwrap();
+    let price_two = Price::from_raw(2, 0).unwrap();
+    assert!(price_one < price_two);
+    assert_eq!(price_one, Price::from_raw(1, 0).unwrap());
+}
+
+#[test]
+fn multiplication_and_division_only_overflow_when_the_final_raw_value_does() {
+    let max = Decimal::from_raw(i128::MAX, 0).unwrap();
+    let one_at_one_decimal_place = Decimal::from_raw(10, 1).unwrap();
+    let expected_one_at_scale_38 = Decimal::from_raw(10_i128.pow(38), 38).unwrap();
+
+    assert_eq!(
+        max.checked_div(max, 38, RoundingMode::TowardZero),
+        Ok(expected_one_at_scale_38)
+    );
+    assert_eq!(
+        max.checked_mul(one_at_one_decimal_place, 0, RoundingMode::TowardZero),
+        Ok(max)
+    );
+    assert_eq!(
+        max.checked_mul(
+            Decimal::from_raw(2, 0).unwrap(),
+            0,
+            RoundingMode::TowardZero
+        ),
+        Err(ValueError::Overflow)
+    );
+}
+
+#[test]
+fn tiny_products_round_exactly_for_all_modes_and_signs() {
+    let tiny = Decimal::from_raw(1, 38).unwrap();
+    let negative_tiny = Decimal::from_raw(-1, 38).unwrap();
+
+    for (rounding, positive_expected, negative_expected) in [
+        (RoundingMode::TowardZero, 0, 0),
+        (RoundingMode::Floor, 0, -1),
+        (RoundingMode::Ceiling, 1, 0),
+        (RoundingMode::NearestTiesToEven, 0, 0),
+    ] {
+        assert_eq!(
+            tiny.checked_mul(tiny, 0, rounding),
+            Ok(Decimal::from_raw(positive_expected, 0).unwrap())
+        );
+        assert_eq!(
+            negative_tiny.checked_mul(tiny, 0, rounding),
+            Ok(Decimal::from_raw(negative_expected, 0).unwrap())
+        );
+        assert_eq!(
+            negative_tiny.checked_mul(negative_tiny, 0, rounding),
+            Ok(Decimal::from_raw(positive_expected, 0).unwrap())
+        );
+    }
+}
+
+#[test]
+fn division_rounding_handles_negative_denominators_with_exact_intermediates() {
+    let one = Decimal::from_raw(1, 0).unwrap();
+    let negative_three = Decimal::from_raw(-3, 0).unwrap();
+
+    for (rounding, expected) in [
+        (RoundingMode::TowardZero, 0),
+        (RoundingMode::Floor, -1),
+        (RoundingMode::Ceiling, 0),
+        (RoundingMode::NearestTiesToEven, 0),
+    ] {
+        assert_eq!(
+            one.checked_div(negative_three, 0, rounding),
+            Ok(Decimal::from_raw(expected, 0).unwrap())
+        );
+    }
+
+    assert_eq!(
+        Decimal::from_raw(i128::MAX, 0).unwrap().checked_div(
+            Decimal::from_raw(-i128::MAX, 0).unwrap(),
+            38,
+            RoundingMode::TowardZero
+        ),
+        Ok(Decimal::from_raw(-10_i128.pow(38), 38).unwrap())
     );
 }
 
