@@ -1,5 +1,6 @@
 use std::fs;
 use std::process::Command;
+use test_fixtures::FixtureManifest;
 
 fn write_pair(root: &std::path::Path, id: &str) {
     fs::write(
@@ -50,6 +51,21 @@ fn generate_and_verify_print_a_stable_hash_and_sorted_summary() {
         String::from_utf8(verified.stdout).unwrap(),
         "fixture:a-first:ok\nfixture:z-last:ok\nmanifest:ok\n"
     );
+
+    let basename_verified = Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
+        .current_dir(temporary.path())
+        .args(["verify", "manifest.toml"])
+        .output()
+        .unwrap();
+    assert!(
+        basename_verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&basename_verified.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(basename_verified.stdout).unwrap(),
+        "fixture:a-first:ok\nfixture:z-last:ok\nmanifest:ok\n"
+    );
 }
 
 #[test]
@@ -61,4 +77,34 @@ fn invalid_arguments_fail_without_panicking() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
+}
+
+#[test]
+fn unsafe_ids_cannot_inject_cli_status_or_terminal_controls() {
+    for id in ["evil\nmanifest:ok", "evil\rcarriage", "evil\u{1b}escape"] {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("blocks")).unwrap();
+        fs::create_dir_all(temporary.path().join("expected")).unwrap();
+        write_pair(temporary.path(), "safe");
+        let manifest = FixtureManifest::generate(temporary.path()).unwrap();
+        manifest.write_atomic(temporary.path()).unwrap();
+        let mut manifest = FixtureManifest::load(temporary.path().join("manifest.toml")).unwrap();
+        manifest.fixture[0].id = id.to_owned();
+        manifest.write_atomic(temporary.path()).unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
+            .arg("verify")
+            .arg(temporary.path().join("manifest.toml"))
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr.iter().filter(|byte| **byte == b'\n').count(),
+            1
+        );
+        assert!(!output.stderr.contains(&b'\r'));
+        assert!(!output.stderr.contains(&0x1b));
+    }
 }

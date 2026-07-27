@@ -1,17 +1,22 @@
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use test_fixtures::{FixtureEntry, FixtureManifest};
 
-const SOURCE_DIGEST: &str = "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356";
-const EXPECTED_DIGEST: &str = "e5f1eb4d806641698a35efe20e098efd20d7d57a9b90ee69079d5bb650920726";
+const SOURCE_DIGEST: &str = "dbca188380b064253b36c62435221b9ec1c3c35c9eef60b1296f5faa861ec28e";
+const EXPECTED_DIGEST: &str = "0d926e5ff7da1b6248cf88a2bc91c65f848dd1a7ef08dc66a1d0bdbc0cb3d0b2";
 
 fn valid_bundle() -> (tempfile::TempDir, FixtureManifest) {
     let temporary = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temporary.path().join("blocks")).unwrap();
     std::fs::create_dir_all(temporary.path().join("expected")).unwrap();
-    std::fs::write(temporary.path().join("blocks/trade.json"), b"{}\n").unwrap();
+    std::fs::write(
+        temporary.path().join("blocks/trade.json"),
+        b"{\"schema\":\"hl.source.fixture.v1\"}\n",
+    )
+    .unwrap();
     std::fs::write(
         temporary.path().join("expected/trade.canonical.json"),
-        b"{\"ok\":true}\n",
+        b"{\"schema_version\":\"1.0.0\"}\n",
     )
     .unwrap();
     (
@@ -29,6 +34,10 @@ fn valid_bundle() -> (tempfile::TempDir, FixtureManifest) {
             }],
         },
     )
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[test]
@@ -82,6 +91,51 @@ fn duplicate_ids_and_paths_are_rejected() {
 }
 
 #[test]
+fn lexical_path_aliases_are_rejected_before_normalization() {
+    for alias in [
+        "blocks/./trade.json",
+        "blocks/../blocks/trade.json",
+        "blocks//trade.json",
+        "blocks/trade.json/",
+        "blocks\\trade.json",
+        "/blocks/trade.json",
+        "C:/blocks/trade.json",
+    ] {
+        let (temporary, mut manifest) = valid_bundle();
+        manifest.fixture[0].source_path = alias.to_owned();
+
+        let error = manifest.verify(temporary.path()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("non-canonical fixture path")
+                || error.to_string().contains("unsafe fixture path"),
+            "{alias:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn lexical_aliases_cannot_bypass_duplicate_path_rejection() {
+    let (temporary, mut manifest) = valid_bundle();
+    manifest.fixture.push(FixtureEntry {
+        id: "alias".to_owned(),
+        source_path: "blocks/./trade.json".to_owned(),
+        source_sha256: SOURCE_DIGEST.to_owned(),
+        source_schema: "hl.source.fixture.v1".to_owned(),
+        expected_path: "expected/./trade.canonical.json".to_owned(),
+        expected_sha256: EXPECTED_DIGEST.to_owned(),
+        expected_schema: "1.0.0".to_owned(),
+    });
+
+    let error = manifest.verify(temporary.path()).unwrap_err();
+
+    assert!(
+        error.to_string().contains("non-canonical fixture path")
+            || error.to_string().contains("duplicate fixture path")
+    );
+}
+
+#[test]
 fn malformed_or_uppercase_sha256_digests_are_rejected() {
     for digest in [
         "abc",
@@ -108,6 +162,110 @@ fn digest_mismatches_are_rejected() {
     let error = manifest.verify(temporary.path()).unwrap_err();
 
     assert!(error.to_string().contains("fixture digest mismatch"));
+}
+
+#[test]
+fn entry_id_must_match_its_exact_source_and_expected_paths() {
+    let (temporary, mut manifest) = valid_bundle();
+    manifest.fixture[0].id = "different".to_owned();
+
+    let error = manifest.verify(temporary.path()).unwrap_err();
+
+    assert!(error.to_string().contains("fixture entry pairing mismatch"));
+}
+
+#[test]
+fn cross_paired_expected_outputs_are_rejected() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temporary.path().join("blocks")).unwrap();
+    std::fs::create_dir_all(temporary.path().join("expected")).unwrap();
+    for id in ["a", "b"] {
+        std::fs::write(
+            temporary.path().join(format!("blocks/{id}.json")),
+            b"{\"schema\":\"hl.source.fixture.v1\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temporary
+                .path()
+                .join(format!("expected/{id}.canonical.json")),
+            b"{\"schema_version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+    }
+    let fixture = |id: &str, expected_id: &str| FixtureEntry {
+        id: id.to_owned(),
+        source_path: format!("blocks/{id}.json"),
+        source_sha256: SOURCE_DIGEST.to_owned(),
+        source_schema: "hl.source.fixture.v1".to_owned(),
+        expected_path: format!("expected/{expected_id}.canonical.json"),
+        expected_sha256: EXPECTED_DIGEST.to_owned(),
+        expected_schema: "1.0.0".to_owned(),
+    };
+    let manifest = FixtureManifest {
+        version: 1,
+        fixture: vec![fixture("a", "b"), fixture("b", "a")],
+    };
+
+    let error = manifest.verify(temporary.path()).unwrap_err();
+
+    assert!(error.to_string().contains("fixture entry pairing mismatch"));
+}
+
+#[test]
+fn verifier_requires_valid_json_and_truthful_schema_claims() {
+    let (temporary, mut wrong_schema) = valid_bundle();
+    wrong_schema.fixture[0].source_schema = "wrong.schema".to_owned();
+    let error = wrong_schema.verify(temporary.path()).unwrap_err();
+    assert!(error.to_string().contains("fixture schema mismatch"));
+
+    let (temporary, mut malformed) = valid_bundle();
+    let malformed_bytes = b"schema = \"hl.source.fixture.v1\"\n";
+    std::fs::write(temporary.path().join("blocks/trade.json"), malformed_bytes).unwrap();
+    malformed.fixture[0].source_sha256 = sha256(malformed_bytes);
+    let error = malformed.verify(temporary.path()).unwrap_err();
+    assert!(error.to_string().contains("parse fixture JSON"));
+}
+
+#[test]
+fn verifier_rejects_empty_or_non_string_schema_fields() {
+    for bytes in [
+        b"{\"schema\":\"\"}\n".as_slice(),
+        b"{\"schema\":1}\n".as_slice(),
+    ] {
+        let (temporary, mut manifest) = valid_bundle();
+        std::fs::write(temporary.path().join("blocks/trade.json"), bytes).unwrap();
+        manifest.fixture[0].source_sha256 = sha256(bytes);
+
+        let error = manifest.verify(temporary.path()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing non-empty string field schema")
+        );
+    }
+}
+
+#[test]
+fn verifier_rejects_unsafe_ids_before_they_reach_cli_output() {
+    for id in [
+        "evil\nmanifest-ok",
+        "evil\rcarriage",
+        "evil\u{1b}escape",
+        "evil\ttab",
+        "evil:colon",
+    ] {
+        let (temporary, mut manifest) = valid_bundle();
+        manifest.fixture[0].id = id.to_owned();
+
+        let error = manifest.verify(temporary.path()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unsafe fixture id"),
+            "{id:?}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -153,7 +311,17 @@ fn symlinked_files_and_directories_are_rejected() {
     std::fs::create_dir(&real).unwrap();
     std::fs::write(real.join("trade.json"), b"{}\n").unwrap();
     symlink(&real, temporary.path().join("blocks/nested")).unwrap();
+    std::fs::create_dir(temporary.path().join("expected/nested")).unwrap();
+    std::fs::rename(
+        temporary.path().join("expected/trade.canonical.json"),
+        temporary
+            .path()
+            .join("expected/nested/trade.canonical.json"),
+    )
+    .unwrap();
+    nested.fixture[0].id = "nested/trade".to_owned();
     nested.fixture[0].source_path = "blocks/nested/trade.json".to_owned();
+    nested.fixture[0].expected_path = "expected/nested/trade.canonical.json".to_owned();
     let error = nested.verify(temporary.path()).unwrap_err();
     assert!(error.to_string().contains("symlink"));
 }
@@ -161,8 +329,15 @@ fn symlinked_files_and_directories_are_rejected() {
 #[test]
 fn non_regular_declared_paths_are_rejected() {
     let (temporary, mut manifest) = valid_bundle();
-    std::fs::create_dir(temporary.path().join("blocks/not-a-file")).unwrap();
-    manifest.fixture[0].source_path = "blocks/not-a-file".to_owned();
+    std::fs::create_dir(temporary.path().join("blocks/not-a-file.json")).unwrap();
+    std::fs::rename(
+        temporary.path().join("expected/trade.canonical.json"),
+        temporary.path().join("expected/not-a-file.canonical.json"),
+    )
+    .unwrap();
+    manifest.fixture[0].id = "not-a-file".to_owned();
+    manifest.fixture[0].source_path = "blocks/not-a-file.json".to_owned();
+    manifest.fixture[0].expected_path = "expected/not-a-file.canonical.json".to_owned();
 
     let error = manifest.verify(temporary.path()).unwrap_err();
 
