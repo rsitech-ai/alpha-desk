@@ -1,0 +1,257 @@
+name: alpha-desk-dev
+
+x-service-security: &service-security
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  nats:
+    <<: *service-security
+    image: docker.io/library/nats:2.14.3-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
+    command:
+      - nats-server
+      - --config
+      - /etc/nats/nats.conf
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+    volumes:
+      - nats-data:/data
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    read_only: true
+    mem_limit: 256m
+    pids_limit: 128
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -qO- 'http://127.0.0.1:8222/healthz?js-enabled-only=true'
+          | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 5s
+
+  nats-init:
+    <<: *service-security
+    image: docker.io/natsio/nats-box:0.19.7-nonroot@sha256:e86b9681f330ab1aa45744dd5cb367d44205b28fac2519a2f74ca0255803161a
+    entrypoint:
+      - /bin/sh
+      - /opt/alpha-desk/init-streams.sh
+    environment:
+      NATS_URL: nats://nats:4222
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /tmp/data
+    volumes:
+      - ./nats/init-streams.sh:/opt/alpha-desk/init-streams.sh:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 64
+    restart: "no"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  clickhouse:
+    <<: *service-security
+    image: docker.io/clickhouse/clickhouse-server:26.3.17.56-alpine@sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: alpha
+      CLICKHOUSE_USER: alpha
+      CLICKHOUSE_PASSWORD: alpha_dev_only
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/alpha-desk.xml:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /etc/clickhouse-server/users.d:rw,noexec,nosuid,nodev,size=4m,mode=1777
+      - /var/log/clickhouse-server:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    read_only: true
+    mem_limit: 2g
+    pids_limit: 512
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:8123/ping | grep -qx 'Ok.'
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 20s
+
+  postgres:
+    <<: *service-security
+    image: docker.io/library/postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    user: "70:70"
+    environment:
+      POSTGRES_USER: alpha
+      POSTGRES_PASSWORD: alpha_dev_only
+      POSTGRES_DB: alpha
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/001-alpha-desk.sql:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    read_only: true
+    shm_size: 128m
+    mem_limit: 512m
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U alpha -d alpha
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  minio:
+    <<: *service-security
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command:
+      - server
+      - /data
+      - --console-address
+      - :9001
+    environment:
+      MINIO_ROOT_USER: alpha
+      MINIO_ROOT_PASSWORD: alpha-dev-only
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - minio-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    read_only: true
+    mem_limit: 512m
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:9000/minio/health/live
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  minio-init:
+    <<: *service-security
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    entrypoint:
+      - /bin/sh
+      - /opt/alpha-desk/create-buckets.sh
+    environment:
+      MINIO_ROOT_USER: alpha
+      MINIO_ROOT_PASSWORD: alpha-dev-only
+      MINIO_BUCKET: alpha-archive
+      MC_CONFIG_DIR: /tmp/.mc
+    volumes:
+      - ./minio/create-buckets.sh:/opt/alpha-desk/create-buckets.sh:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 64
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  otel-collector:
+    <<: *service-security
+    image: docker.io/otel/opentelemetry-collector-contrib:0.157.0@sha256:f2f01157055a9b2aab9df7118e1f1c9abf345e99b23bc7a2bc791db374a7d0f6
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+    volumes:
+      - ./otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    read_only: true
+    mem_limit: 256m
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - /otelcol-contrib
+        - validate
+        - --config=/etc/otelcol-contrib/config.yaml
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 5s
+
+  victoriametrics:
+    <<: *service-security
+    image: docker.io/victoriametrics/victoria-metrics:v1.148.0@sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      - -promscrape.config=/etc/victoriametrics/prometheus.yml
+      - -retentionPeriod=7d
+    ports:
+      - "127.0.0.1:8428:8428"
+    volumes:
+      - victoriametrics-data:/victoria-metrics-data
+      - ./victoriametrics/prometheus.yml:/etc/victoriametrics/prometheus.yml:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    read_only: true
+    mem_limit: 512m
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:8428/health >/dev/null
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+
+volumes:
+  nats-data:
+    name: alpha-desk-dev_nats-data
+  clickhouse-data:
+    name: alpha-desk-dev_clickhouse-data
+  postgres-data:
+    name: alpha-desk-dev_postgres-data
+  minio-data:
+    name: alpha-desk-dev_minio-data
+  victoriametrics-data:
+    name: alpha-desk-dev_victoriametrics-data
+
+networks:
+  default:
+    name: alpha-desk-dev_network
+    internal: true
