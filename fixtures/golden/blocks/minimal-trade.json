@@ -1,0 +1,1 @@
+{"account_ids":["0x1111111111111111111111111111111111111111","0x2222222222222222222222222222222222222222"],"block_height":42,"block_time_micros":1721779200000042,"event_index":0,"event_kind":"trade_matched","market_id":"perp:BTC","price":"65000.000000","quantity":"0.01000000","schema":"hl.source.fixture.v1","transaction_id":"fixture-tx-42-0","transaction_index":0}

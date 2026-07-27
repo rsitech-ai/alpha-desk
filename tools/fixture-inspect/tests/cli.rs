@@ -1,0 +1,64 @@
+use std::fs;
+use std::process::Command;
+
+fn write_pair(root: &std::path::Path, id: &str) {
+    fs::write(
+        root.join(format!("blocks/{id}.json")),
+        format!("{{\"schema\":\"hl.source.fixture.v1\",\"id\":\"{id}\"}}\n"),
+    )
+    .unwrap();
+    fs::write(
+        root.join(format!("expected/{id}.canonical.json")),
+        format!("{{\"schema_version\":\"1.0.0\",\"id\":\"{id}\"}}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn generate_and_verify_print_a_stable_hash_and_sorted_summary() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temporary.path().join("blocks")).unwrap();
+    fs::create_dir_all(temporary.path().join("expected")).unwrap();
+    write_pair(temporary.path(), "z-last");
+    write_pair(temporary.path(), "a-first");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
+        .args(["generate-manifest", "--root"])
+        .arg(temporary.path())
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated_stdout = String::from_utf8(generated.stdout).unwrap();
+    assert!(generated_stdout.starts_with("manifest-sha256:"));
+    assert_eq!(generated_stdout.trim().len(), "manifest-sha256:".len() + 64);
+
+    let verified = Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
+        .arg("verify")
+        .arg(temporary.path().join("manifest.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(verified.stdout).unwrap(),
+        "fixture:a-first:ok\nfixture:z-last:ok\nmanifest:ok\n"
+    );
+}
+
+#[test]
+fn invalid_arguments_fail_without_panicking() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
+        .arg("unknown")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
+}

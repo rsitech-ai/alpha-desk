@@ -1,0 +1,10 @@
+version = 1
+
+[[fixture]]
+id = "minimal-trade"
+source_path = "blocks/minimal-trade.json"
+source_sha256 = "468d9b766c23c607861519aad1d3cae3195349ea8ebd7bb8afbde58567998c6a"
+source_schema = "hl.source.fixture.v1"
+expected_path = "expected/minimal-trade.canonical.json"
+expected_sha256 = "c89602a6ca3fd526fbcc5e81b02b499cb51280f259f65506db7a7ea6fa883569"
+expected_schema = "1.0.0"
