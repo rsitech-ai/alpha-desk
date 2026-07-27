@@ -17,6 +17,12 @@ mod generated {
             }
         }
 
+        pub(crate) mod health {
+            pub(crate) mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/hl.health.v1.rs"));
+            }
+        }
+
         pub(crate) mod stream {
             pub(crate) mod v1 {
                 include!(concat!(env!("OUT_DIR"), "/hl.stream.v1.rs"));
@@ -27,6 +33,380 @@ mod generated {
 
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/alpha-desk-v1.pb"));
+
+const GENERATED_RUST_ARTIFACTS: &[(&str, &[u8])] = &[
+    (
+        "hl.canonical.v1.rs",
+        include_bytes!(concat!(env!("OUT_DIR"), "/hl.canonical.v1.rs")),
+    ),
+    (
+        "hl.common.v1.rs",
+        include_bytes!(concat!(env!("OUT_DIR"), "/hl.common.v1.rs")),
+    ),
+    (
+        "hl.health.v1.rs",
+        include_bytes!(concat!(env!("OUT_DIR"), "/hl.health.v1.rs")),
+    ),
+    (
+        "hl.stream.v1.rs",
+        include_bytes!(concat!(env!("OUT_DIR"), "/hl.stream.v1.rs")),
+    ),
+];
+
+const SCHEMA_MATERIAL_HEADER: &[u8] = b"alpha-desk-schema-material-v1\n";
+const SCHEMA_MATERIAL_LINE_BYTES: usize = 60;
+const MAX_SCHEMA_FILES: usize = 4_096;
+const MAX_SCHEMA_MATERIAL_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn export_contract_artifacts(
+    descriptor_path: impl AsRef<std::path::Path>,
+    rust_output_directory: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Write as _};
+
+    let descriptor_path = descriptor_path.as_ref();
+    let rust_output_directory = rust_output_directory.as_ref();
+    if descriptor_path.exists() {
+        return Err(Error::new(
+            ErrorKind::AlreadyExists,
+            "descriptor output already exists",
+        ));
+    }
+    let descriptor_parent = descriptor_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if !descriptor_parent.is_dir() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "descriptor output parent must be a directory",
+        ));
+    }
+    let descriptor_name = descriptor_path.file_name().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "descriptor output has no file name",
+        )
+    })?;
+    let canonical_descriptor = descriptor_parent.canonicalize()?.join(descriptor_name);
+    let rust_parent = rust_output_directory
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if !rust_parent.is_dir() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "generated Rust output parent must be a directory",
+        ));
+    }
+    let rust_output_existed = rust_output_directory.exists();
+    if rust_output_directory.exists() {
+        if !rust_output_directory.is_dir() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "generated Rust output is not a directory",
+            ));
+        }
+        if std::fs::read_dir(rust_output_directory)?.next().is_some() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "generated Rust output directory is not empty",
+            ));
+        }
+    }
+    let rust_name = rust_output_directory.file_name().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "generated Rust output has no directory name",
+        )
+    })?;
+    let canonical_rust_output = if rust_output_existed {
+        rust_output_directory.canonicalize()?
+    } else {
+        rust_parent.canonicalize()?.join(rust_name)
+    };
+    if canonical_descriptor.starts_with(&canonical_rust_output)
+        || canonical_rust_output.starts_with(&canonical_descriptor)
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "descriptor and generated Rust outputs must not overlap",
+        ));
+    }
+
+    let mut staged_descriptor = tempfile::Builder::new()
+        .prefix(".schema-descriptor-")
+        .tempfile_in(descriptor_parent)?;
+    staged_descriptor.write_all(FILE_DESCRIPTOR_SET)?;
+    staged_descriptor.as_file().sync_all()?;
+
+    let staged_rust = tempfile::Builder::new()
+        .prefix(".schema-rust-")
+        .tempdir_in(rust_parent)?;
+    for (name, bytes) in GENERATED_RUST_ARTIFACTS {
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(staged_rust.path().join(name))?;
+        output.write_all(bytes)?;
+        output.sync_all()?;
+    }
+    sync_directory(staged_rust.path())?;
+
+    let backup = if rust_output_existed {
+        let holder = tempfile::Builder::new()
+            .prefix(".schema-rust-backup-")
+            .tempdir_in(rust_parent)?;
+        let backup_path = holder.path().join("original");
+        std::fs::rename(rust_output_directory, &backup_path)?;
+        Some((holder, backup_path))
+    } else {
+        None
+    };
+    let staged_rust_path = staged_rust.keep();
+    if let Err(error) = std::fs::rename(&staged_rust_path, rust_output_directory) {
+        if let Some((_, backup_path)) = &backup {
+            let _ = std::fs::rename(backup_path, rust_output_directory);
+        }
+        let _ = std::fs::remove_dir_all(&staged_rust_path);
+        return Err(error);
+    }
+
+    if let Err(error) = staged_descriptor.persist_noclobber(descriptor_path) {
+        let _ = std::fs::remove_dir_all(rust_output_directory);
+        if let Some((_, backup_path)) = &backup {
+            let _ = std::fs::rename(backup_path, rust_output_directory);
+        }
+        return Err(error.error);
+    }
+    sync_directory(rust_parent)?;
+    if descriptor_parent != rust_parent {
+        sync_directory(descriptor_parent)?;
+    }
+    Ok(())
+}
+
+pub fn write_schema_material(
+    schema_root: impl AsRef<std::path::Path>,
+    output_path: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Read as _, Write as _};
+
+    let schema_root = schema_root.as_ref();
+    let output_path = output_path.as_ref();
+    let root_metadata = std::fs::symlink_metadata(schema_root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "schema root must be a real directory",
+        ));
+    }
+    let canonical_root = schema_root.canonicalize()?;
+    let output_parent = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .canonicalize()?;
+    let output_name = output_path
+        .file_name()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "material output has no file name"))?;
+    let canonical_output = output_parent.join(output_name);
+    if canonical_output.starts_with(&canonical_root) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "material output must not be inside schema root",
+        ));
+    }
+    if output_path.exists() {
+        return Err(Error::new(
+            ErrorKind::AlreadyExists,
+            "schema material output already exists",
+        ));
+    }
+
+    let mut files = Vec::new();
+    collect_schema_files(&canonical_root, &canonical_root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    if files.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "schema root contains no regular files",
+        ));
+    }
+
+    let mut material = Vec::new();
+    for (relative, path) in files {
+        let framing_size = 16usize
+            .checked_add(relative.len())
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "schema material size overflow"))?;
+        let remaining = MAX_SCHEMA_MATERIAL_BYTES
+            .checked_sub(material.len().saturating_add(framing_size))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "schema material exceeds the byte limit",
+                )
+            })?;
+        let mut source = std::fs::File::open(path)?;
+        let metadata = source.metadata()?;
+        if !metadata.is_file() || metadata.len() > u64::try_from(remaining).unwrap_or(u64::MAX) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "schema file exceeds the byte limit",
+            ));
+        }
+        let expected_length = metadata.len();
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(expected_length)
+                .unwrap_or(remaining)
+                .min(remaining),
+        );
+        std::io::Read::take(
+            &mut source,
+            u64::try_from(remaining)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)?;
+        if bytes.len() > remaining
+            || u64::try_from(bytes.len()).unwrap_or(u64::MAX) != expected_length
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "schema file changed or exceeded the byte limit during generation",
+            ));
+        }
+        append_material_record(&mut material, relative.as_bytes(), &bytes)?;
+    }
+    let mut document = Vec::with_capacity(
+        SCHEMA_MATERIAL_HEADER
+            .len()
+            .saturating_add(material.len().saturating_mul(2))
+            .saturating_add(material.len() / SCHEMA_MATERIAL_LINE_BYTES)
+            .saturating_add(1),
+    );
+    document.extend_from_slice(SCHEMA_MATERIAL_HEADER);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (index, byte) in material.iter().copied().enumerate() {
+        if index > 0 && index.is_multiple_of(SCHEMA_MATERIAL_LINE_BYTES) {
+            document.push(b'\n');
+        }
+        document.push(HEX[usize::from(byte >> 4)]);
+        document.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    document.push(b'\n');
+
+    let mut output = tempfile::Builder::new()
+        .prefix(".schema-material-")
+        .tempfile_in(&output_parent)?;
+    output.write_all(&document)?;
+    output.as_file().sync_all()?;
+    output
+        .persist_noclobber(output_path)
+        .map_err(|error| error.error)?;
+    sync_directory(&output_parent)?;
+    Ok(())
+}
+
+fn sync_directory(directory: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(directory)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Ok(())
+    }
+}
+
+fn collect_schema_files(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    files: &mut Vec<(String, std::path::PathBuf)>,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "schema tree contains a symlink or special file",
+            ));
+        }
+        if file_type.is_dir() {
+            collect_schema_files(root, &entry.path(), files)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "schema tree contains a symlink or special file",
+            ));
+        }
+        if files.len() >= MAX_SCHEMA_FILES {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "schema tree exceeds the file-count limit",
+            ));
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "schema path escaped root"))?
+            .to_str()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "schema path is not valid UTF-8"))?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        if relative.starts_with('/')
+            || relative.contains('\\')
+            || relative.chars().any(char::is_control)
+            || relative
+                .split('/')
+                .any(|segment| matches!(segment, "" | "." | ".."))
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "schema path is not portable",
+            ));
+        }
+        files.push((relative, entry.path()));
+    }
+    Ok(())
+}
+
+fn append_material_record(
+    material: &mut Vec<u8>,
+    path: &[u8],
+    content: &[u8],
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    let required = 16usize
+        .checked_add(path.len())
+        .and_then(|size| size.checked_add(content.len()))
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "schema material size overflow"))?;
+    if material.len().saturating_add(required) > MAX_SCHEMA_MATERIAL_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "schema material exceeds the byte limit",
+        ));
+    }
+    material.extend_from_slice(
+        &u64::try_from(path.len())
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "schema path is too large"))?
+            .to_be_bytes(),
+    );
+    material.extend_from_slice(path);
+    material.extend_from_slice(
+        &u64::try_from(content.len())
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "schema file is too large"))?
+            .to_be_bytes(),
+    );
+    material.extend_from_slice(content);
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireSourceEvidence {

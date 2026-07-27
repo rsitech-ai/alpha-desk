@@ -24,6 +24,7 @@ dependencies = [
  "prost",
  "prost-types",
  "protoc-bin-vendored",
+ "tempfile",
  "thiserror 2.0.19",
  "tonic-prost-build",
 ]

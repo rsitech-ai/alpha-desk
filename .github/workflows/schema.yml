@@ -1,0 +1,40 @@
+name: Schema and generated artifacts
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: schema-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generated:
+    name: Generated artifact determinism
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_DATE_EPOCH: "1784894400"
+    steps:
+      - name: Check out source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Rust toolchain
+        run: |
+          test "$(rustc +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+          test "$(cargo +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+
+      - name: Fetch locked dependencies
+        timeout-minutes: 10
+        run: cargo +1.97.1 fetch --locked
+
+      - name: Verify generated artifacts and provenance
+        run: ./tools/ci/check-generated.sh

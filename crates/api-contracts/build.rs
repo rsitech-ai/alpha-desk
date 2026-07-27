@@ -1,7 +1,7 @@
 use std::{
     env,
     error::Error,
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let protos = [
         schemas.join("common/v1/types.proto"),
         schemas.join("canonical/v1/events.proto"),
+        schemas.join("health/v1/health.proto"),
         schemas.join("stream/v1/envelope.proto"),
     ];
 
@@ -28,11 +29,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let generated_descriptor = out_dir.join("alpha-desk-v1.pb");
-    let current_descriptor = root.join("target/schema/current.pb");
-    let current_parent = current_descriptor
-        .parent()
-        .ok_or_else(|| io::Error::other("current descriptor path has no parent"))?;
-    fs::create_dir_all(current_parent)?;
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     let mut prost_config = tonic_prost_build::Config::new();
@@ -48,7 +44,5 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build_client(false)
         .build_server(false)
         .compile_with_config(prost_config, &protos, &[schemas])?;
-
-    fs::copy(&generated_descriptor, &current_descriptor)?;
     Ok(())
 }

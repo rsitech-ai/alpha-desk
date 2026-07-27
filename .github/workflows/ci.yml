@@ -1,0 +1,294 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust-quality:
+    name: Rust quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Rust toolchain
+        run: |
+          test "$(rustc +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+          test "$(cargo +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+
+      - name: Cache Cargo downloads on trusted events
+        if: github.event_name == 'push' && github.ref_protected
+        timeout-minutes: 5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Fetch locked dependencies
+        timeout-minutes: 10
+        run: cargo +1.97.1 fetch --locked
+
+      - name: Install cargo-deny 0.20.2 from verified archive
+        timeout-minutes: 10
+        env:
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          mkdir -p "$RUNNER_TEMP/cargo-deny" "$RUNNER_TEMP/bin"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/cargo-deny.tar.gz" \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/cargo-deny.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/cargo-deny.tar.gz" -C "$RUNNER_TEMP/cargo-deny"
+          find "$RUNNER_TEMP/cargo-deny" -type f -name cargo-deny -exec cp '{}' "$RUNNER_TEMP/bin/cargo-deny" \;
+          chmod 0755 "$RUNNER_TEMP/bin/cargo-deny"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Run quality gates
+        run: |
+          ./tools/ci/check-workspace.sh
+          cargo +1.97.1 fmt --all -- --check
+          cargo +1.97.1 clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
+          cargo +1.97.1 run -p architecture-check --locked --offline -- check
+          ./tools/ci/check-unsafe.sh
+          test "$(cargo +1.97.1 deny --version)" = "cargo-deny 0.20.2"
+          cargo +1.97.1 deny --locked --offline check bans licenses sources
+
+  rust-tests:
+    name: Rust tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Rust toolchain
+        run: |
+          test "$(rustc +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+          test "$(cargo +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+
+      - name: Cache Cargo downloads on trusted events
+        if: github.event_name == 'push' && github.ref_protected
+        timeout-minutes: 5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Fetch locked dependencies
+        timeout-minutes: 10
+        run: cargo +1.97.1 fetch --locked
+
+      - name: Install cargo-nextest 0.9.140 from verified archive
+        timeout-minutes: 10
+        env:
+          NEXTEST_SHA256: 4ee9aaa0d0171a985a5d0eb735b87355894c1c455972e9674fb9fdbd1387c9a3
+        run: |
+          mkdir -p "$RUNNER_TEMP/nextest" "$RUNNER_TEMP/bin"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/nextest.tar.gz" \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/nextest.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$RUNNER_TEMP/nextest"
+          find "$RUNNER_TEMP/nextest" -type f -name cargo-nextest -exec cp '{}' "$RUNNER_TEMP/bin/cargo-nextest" \;
+          chmod 0755 "$RUNNER_TEMP/bin/cargo-nextest"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Run nextest and doctests
+        run: |
+          cargo +1.97.1 nextest --version | grep -F 'cargo-nextest 0.9.140 '
+          cargo +1.97.1 nextest run --workspace --all-features --locked --offline
+          cargo +1.97.1 test --workspace --all-features --doc --locked --offline
+
+  swift:
+    name: Swift 6.3
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select and verify Xcode 26.5
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
+          swift --version | grep -F 'Swift version 6.3'
+          swift package --package-path apps/AlphaDesk dump-package >"$RUNNER_TEMP/package.json"
+          jq -e '
+            .toolsVersion._version == "6.3.0" and
+            .swiftLanguageVersions == ["6"]
+          ' "$RUNNER_TEMP/package.json"
+
+      - name: Build and test with warnings as errors
+        timeout-minutes: 20
+        run: |
+          swift build --package-path apps/AlphaDesk -Xswiftc -warnings-as-errors
+          swift test --package-path apps/AlphaDesk -Xswiftc -warnings-as-errors
+
+  compose-policy:
+    name: Static Compose policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate contract and render static configuration
+        run: |
+          docker compose -f infra/docker-compose/compose.yaml config --format json \
+            >"$RUNNER_TEMP/compose.json"
+
+      - name: Enforce static runtime policy
+        run: |
+          jq -e \
+            --slurpfile lock infra/docker-compose/images.lock \
+            --arg workspace "$GITHUB_WORKSPACE" \
+            '
+              ([.services[].image] | sort) ==
+                ([$lock[0].images[].compose_ref] | sort) and
+              all(.services[];
+                (.privileged // false) == false and
+                ((.volumes // []) | all(
+                  .type != "bind" or
+                  (
+                    .read_only == true and
+                    ((.source + "->" + .target) | IN(
+                      ($workspace + "/infra/docker-compose/clickhouse/config.xml->/etc/clickhouse-server/config.d/zz-alpha-desk.xml"),
+                      ($workspace + "/infra/docker-compose/minio/create-buckets.sh->/opt/alpha-desk/create-buckets.sh"),
+                      ($workspace + "/infra/docker-compose/nats/nats.conf->/etc/nats/nats.conf"),
+                      ($workspace + "/infra/docker-compose/nats/init-streams.sh->/opt/alpha-desk/init-streams.sh"),
+                      ($workspace + "/infra/docker-compose/otel/collector.yaml->/etc/otelcol-contrib/config.yaml"),
+                      ($workspace + "/infra/docker-compose/postgres/init.sql->/docker-entrypoint-initdb.d/001-alpha-desk.sql"),
+                      ($workspace + "/infra/docker-compose/victoriametrics/prometheus.yml->/etc/victoriametrics/prometheus.yml")
+                    )) and
+                    (.source | contains("/var/run/docker.sock") | not) and
+                    (.target | contains("/var/run/docker.sock") | not)
+                  )
+                )) and
+                ((.ports // []) | all(.host_ip == "127.0.0.1")) and
+                (.image | test("@sha256:[0-9a-f]{64}$"))
+              )
+            ' "$RUNNER_TEMP/compose.json"
+
+  integration:
+    name: Trusted integration smoke
+    needs: compose-policy
+    if: >-
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref_protected)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull and validate exact locked images
+        timeout-minutes: 20
+        run: |
+          jq -r '.images[].compose_ref' infra/docker-compose/images.lock |
+            while IFS= read -r image; do
+              docker pull "$image"
+            done
+          ./infra/docker-compose/test-contract.sh
+
+      - name: Start and verify development services
+        timeout-minutes: 10
+        run: |
+          status=0
+          docker compose -f infra/docker-compose/compose.yaml \
+            up -d --wait --wait-timeout 120 || status=$?
+          if [[ "$status" -eq 0 ]]; then
+            ./tools/ci/wait-for-dev-stack.sh || status=$?
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            docker compose -f infra/docker-compose/compose.yaml ps --all >&2 || true
+            docker compose -f infra/docker-compose/compose.yaml \
+              logs --no-color --tail 200 >&2 || true
+            exit "$status"
+          fi
+
+      - name: Stop development services
+        if: always()
+        run: >-
+          docker compose -f infra/docker-compose/compose.yaml
+          down --timeout 60 --volumes --remove-orphans
+
+  reproducible:
+    name: Reproducible service binaries
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref_protected)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SOURCE_DATE_EPOCH: "1784894400"
+    steps:
+      - name: Check out source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Rust toolchain
+        run: |
+          test "$(rustc +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+          test "$(cargo +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+
+      - name: Prove hostile build variables cannot cross the environment seal
+        env:
+          AR: /tmp/ambient-ar-must-not-run
+          CC: /tmp/ambient-cc-must-not-run
+          CFLAGS: -Dambient_cflags_must_not_apply
+          CXX: /tmp/ambient-cxx-must-not-run
+          CXXFLAGS: -Dambient_cxxflags_must_not_apply
+          LDFLAGS: -Wl,--ambient-ldflags-must-not-apply
+          RANLIB: /tmp/ambient-ranlib-must-not-run
+          RUSTC_WRAPPER: /tmp/ambient-rustc-wrapper-must-not-run
+          RUSTC_WORKSPACE_WRAPPER: /tmp/ambient-workspace-wrapper-must-not-run
+          CARGO_ENCODED_RUSTFLAGS: ambient-rustflags-must-not-apply
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: ./tools/ci/verify-reproducible-build.sh --check-environment-seal
+
+      - name: Verify reproducibility
+        timeout-minutes: 55
+        run: ./tools/ci/verify-reproducible-build.sh

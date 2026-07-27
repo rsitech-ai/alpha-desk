@@ -1,0 +1,288 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    name: Audit, secrets, SBOM, and images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out full source history
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Rust toolchain and prepare artifact directory
+        run: |
+          test "$(rustc +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+          test "$(cargo +1.97.1 --version | awk '{print $2}')" = "1.97.1"
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/security-artifacts"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          echo "$RUNNER_TEMP/cargo-tools/bin" >>"$GITHUB_PATH"
+
+      - name: Fetch locked dependencies
+        timeout-minutes: 10
+        run: cargo +1.97.1 fetch --locked
+
+      - name: Install pinned Rust security tools from verified crates
+        timeout-minutes: 30
+        env:
+          CARGO_AUDIT_SHA256: 700c2b240f7fd330c24b675fe429f73a5b676531fcc6300400b2b67f155ba12a
+          CARGO_CYCLONEDX_SHA256: 5d162f67705f0f5038759d73bf546a083bf30e8677c2e944b416bca48d9d69a8
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/cargo-audit.crate" \
+            https://crates.io/api/v1/crates/cargo-audit/0.22.2/download
+          echo "$CARGO_AUDIT_SHA256  $RUNNER_TEMP/cargo-audit.crate" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/cargo-audit-src"
+          tar -xzf "$RUNNER_TEMP/cargo-audit.crate" -C "$RUNNER_TEMP/cargo-audit-src"
+          cargo +1.97.1 install \
+            --path "$RUNNER_TEMP/cargo-audit-src/cargo-audit-0.22.2" \
+            --locked --root "$RUNNER_TEMP/cargo-tools"
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/cargo-cyclonedx.crate" \
+            https://crates.io/api/v1/crates/cargo-cyclonedx/0.5.9/download
+          echo "$CARGO_CYCLONEDX_SHA256  $RUNNER_TEMP/cargo-cyclonedx.crate" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/cargo-cyclonedx-src"
+          tar -xzf "$RUNNER_TEMP/cargo-cyclonedx.crate" -C "$RUNNER_TEMP/cargo-cyclonedx-src"
+          cargo +1.97.1 install \
+            --path "$RUNNER_TEMP/cargo-cyclonedx-src/cargo-cyclonedx-0.5.9" \
+            --locked --root "$RUNNER_TEMP/cargo-tools"
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/cargo-deny.tar.gz" \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/cargo-deny.tar.gz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/cargo-deny"
+          tar -xzf "$RUNNER_TEMP/cargo-deny.tar.gz" -C "$RUNNER_TEMP/cargo-deny"
+          find "$RUNNER_TEMP/cargo-deny" -type f -name cargo-deny \
+            -exec cp '{}' "$RUNNER_TEMP/cargo-tools/bin/cargo-deny" \;
+          chmod 0755 "$RUNNER_TEMP/cargo-tools/bin/cargo-deny"
+
+      - name: Install verified standalone security tools
+        timeout-minutes: 10
+        env:
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          SYFT_SHA256: 7aa2f03ee92739cf643279ba3990548b9925d4e22cae13f46831ee62821147fe
+          TRIVY_SHA256: bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/bin" gitleaks
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/syft.tar.gz" \
+            https://github.com/anchore/syft/releases/download/v1.49.0/syft_1.49.0_linux_amd64.tar.gz
+          echo "$SYFT_SHA256  $RUNNER_TEMP/syft.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP/bin" syft
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/trivy.tar.gz" \
+            https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz
+          echo "$TRIVY_SHA256  $RUNNER_TEMP/trivy.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP/bin" trivy
+          chmod 0755 "$RUNNER_TEMP/bin/gitleaks" "$RUNNER_TEMP/bin/syft" "$RUNNER_TEMP/bin/trivy"
+
+          test "$(cargo +1.97.1 audit --version)" = "cargo-audit-audit 0.22.2"
+          test "$(cargo +1.97.1 cyclonedx --version)" = "cargo-cyclonedx-cyclonedx 0.5.9"
+          test "$(cargo +1.97.1 deny --version)" = "cargo-deny 0.20.2"
+          test "$(gitleaks version)" = "8.30.1"
+          syft version -o json | jq -e '.version == "1.49.0"'
+          trivy --version | grep -F 'Version: 0.72.0'
+
+      - name: Fetch and identify the RustSec advisory database
+        timeout-minutes: 10
+        run: |
+          advisory_root="$RUNNER_TEMP/advisory-dbs"
+          deny_config="$RUNNER_TEMP/deny.rustsec.toml"
+          mkdir -p "$advisory_root"
+          awk -v db_path="$advisory_root" '
+            { print }
+            $0 == "[advisories]" {
+              printf "db-path = \"%s\"\n", db_path
+              print "db-urls = [\"https://github.com/RustSec/advisory-db\"]"
+            }
+          ' deny.toml >"$deny_config"
+
+          cargo +1.97.1 deny --config "$deny_config" fetch db
+          mapfile -d '' advisory_dirs < <(
+            find "$advisory_root" \
+              -mindepth 1 -maxdepth 1 -type d \
+              -name 'advisory-db-*' -print0
+          )
+          test "${#advisory_dirs[@]}" -eq 1
+          advisory_db="${advisory_dirs[0]}"
+          test "$(git -C "$advisory_db" remote get-url origin)" = \
+            "https://github.com/RustSec/advisory-db"
+          test -z "$(git -C "$advisory_db" status --porcelain=v1 --untracked-files=all)"
+
+          {
+            printf 'repository=%s\n' 'https://github.com/RustSec/advisory-db'
+            printf 'path=%s\n' "$advisory_db"
+            printf 'commit=%s\n' "$(git -C "$advisory_db" rev-parse HEAD)"
+            printf 'commit_time=%s\n' "$(git -C "$advisory_db" show -s --format=%cI HEAD)"
+          } >"$RUNNER_TEMP/security-artifacts/rustsec-db.txt"
+          printf 'RUSTSEC_DB_DIR=%s\n' "$advisory_db" >>"$GITHUB_ENV"
+          printf 'RUSTSEC_DENY_CONFIG=%s\n' "$deny_config" >>"$GITHUB_ENV"
+
+      - name: Audit Rust dependencies and policy
+        timeout-minutes: 15
+        run: |
+          expected_commit="$(
+            sed -n 's/^commit=//p' \
+              "$RUNNER_TEMP/security-artifacts/rustsec-db.txt"
+          )"
+          test -n "$expected_commit"
+          test "$(git -C "$RUSTSEC_DB_DIR" rev-parse HEAD)" = "$expected_commit"
+          audit_status=0
+          cargo +1.97.1 audit \
+            --db "$RUSTSEC_DB_DIR" \
+            --no-fetch \
+            --json >"$RUNNER_TEMP/security-artifacts/cargo-audit.json" ||
+            audit_status=$?
+          test "$(cargo +1.97.1 deny --version)" = "cargo-deny 0.20.2"
+          deny_advisories_status=0
+          cargo +1.97.1 deny \
+            --format json \
+            --config "$RUSTSEC_DENY_CONFIG" \
+            --locked \
+            --offline \
+            check advisories \
+            2>&1 | tee "$RUNNER_TEMP/security-artifacts/cargo-deny-advisories.jsonl" ||
+            deny_advisories_status=$?
+          deny_policy_status=0
+          cargo +1.97.1 deny --locked --offline check bans licenses sources ||
+            deny_policy_status=$?
+          test "$(git -C "$RUSTSEC_DB_DIR" rev-parse HEAD)" = "$expected_commit"
+          test -z "$(
+            git -C "$RUSTSEC_DB_DIR" status --porcelain=v1 --untracked-files=all
+          )"
+          if [[
+            "$audit_status" -ne 0 ||
+            "$deny_advisories_status" -ne 0 ||
+            "$deny_policy_status" -ne 0
+          ]]; then
+            printf \
+              'security:error dependency gate failed audit=%s deny_advisories=%s deny_policy=%s\n' \
+              "$audit_status" "$deny_advisories_status" "$deny_policy_status" >&2
+            exit 1
+          fi
+
+      - name: Scan Git history for secrets with redaction
+        run: |
+          gitleaks git . \
+            --redact \
+            --no-banner \
+            --report-format sarif \
+            --report-path "$RUNNER_TEMP/security-artifacts/gitleaks.sarif"
+
+      - name: Generate Cargo CycloneDX SBOMs
+        env:
+          SOURCE_DATE_EPOCH: "1784894400"
+        run: |
+          cargo +1.97.1 cyclonedx \
+            --all \
+            --all-features \
+            --format json \
+            --spec-version 1.5 \
+            --override-filename alpha-desk.cdx
+          find . -type f -name 'alpha-desk.cdx.json' -print0 |
+            sort -z |
+            tar --null --files-from=- -czf \
+              "$RUNNER_TEMP/security-artifacts/cargo-cyclonedx-sboms.tar.gz"
+
+      - name: Download and identify the Trivy vulnerability database
+        timeout-minutes: 20
+        run: |
+          trivy --cache-dir "$RUNNER_TEMP/trivy-cache" image --download-db-only
+          trivy --cache-dir "$RUNNER_TEMP/trivy-cache" version --format json \
+            >"$RUNNER_TEMP/security-artifacts/trivy-version-and-db.json"
+          trivy --version | grep -F 'Version: 0.72.0'
+          jq -e 'type == "object" and length > 0' \
+            "$RUNNER_TEMP/security-artifacts/trivy-version-and-db.json"
+          find "$RUNNER_TEMP/trivy-cache/db" -type f -print0 |
+            sort -z |
+            xargs -0 sha256sum \
+            >"$RUNNER_TEMP/security-artifacts/trivy-db-files.sha256"
+          test -s "$RUNNER_TEMP/security-artifacts/trivy-db-files.sha256"
+
+      - name: Scan exact locked container references and generate image SBOMs
+        timeout-minutes: 60
+        run: |
+          jq -e '
+            .images | length == 8 and
+            all(.[];
+              .compose_ref == (.name + ":" + .tag + "@" + .index_digest) and
+              (.compose_ref | test("@sha256:[0-9a-f]{64}$"))
+            )
+          ' infra/docker-compose/images.lock
+          jq -r '.images[].compose_ref' infra/docker-compose/images.lock \
+            >"$RUNNER_TEMP/security-artifacts/scanned-image-refs.txt"
+
+          printf 'index\timage\tsyft_status\ttrivy_status\n' \
+            >"$RUNNER_TEMP/security-artifacts/image-scan-attempts.tsv"
+          index=0
+          scan_status=0
+          while IFS= read -r image; do
+            index=$((index + 1))
+            syft_status=0
+            syft "registry:$image" \
+              -o "cyclonedx-json@1.6=$RUNNER_TEMP/security-artifacts/image-$index.cdx.json" ||
+              syft_status=$?
+            trivy_status=0
+            trivy image \
+              --cache-dir "$RUNNER_TEMP/trivy-cache" \
+              --skip-db-update \
+              --exit-code 1 \
+              --severity HIGH,CRITICAL \
+              --format json \
+              --output "$RUNNER_TEMP/security-artifacts/image-$index.trivy.json" \
+              "$image" ||
+              trivy_status=$?
+            printf '%s\t%s\t%s\t%s\n' \
+              "$index" "$image" "$syft_status" "$trivy_status" \
+              >>"$RUNNER_TEMP/security-artifacts/image-scan-attempts.tsv"
+            if [[ "$syft_status" -ne 0 || "$trivy_status" -ne 0 ]]; then
+              scan_status=1
+            fi
+          done <"$RUNNER_TEMP/security-artifacts/scanned-image-refs.txt"
+          test "$index" -eq 8
+          if [[ "$scan_status" -ne 0 ]]; then
+            printf 'security:error one or more exact image scans failed\n' >&2
+            exit 1
+          fi
+
+      - name: Upload security evidence
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/security-artifacts
+          if-no-files-found: error
+          retention-days: 14
