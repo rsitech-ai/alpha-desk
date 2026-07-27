@@ -1,0 +1,103 @@
+---
+rule_files:
+  - foundations.yml
+
+evaluation_interval: 1m
+
+tests:
+  # firing: a continuously unreachable foundation target fires after `for`.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="victoriametrics",instance="vm.invalid:8428"}'
+        values: "0x7"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AlphaDeskFoundationTargetDown
+        exp_alerts:
+          - exp_labels:
+              instance: vm.invalid:8428
+              job: victoriametrics
+              severity: high
+              team: sre
+              zone: analytics-core
+            exp_annotations:
+              summary: Alpha Desk foundation target is down
+              description: >-
+                victoriametrics has reported up=0 for more than five minutes.
+                This is target reachability only, not application correctness.
+              runbook_url: https://runbooks.alpha-desk.invalid/service-lifecycle#foundation-target-down
+
+  # nonfiring: a reachable target never enters pending state.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="victoriametrics",instance="vm.invalid:8428"}'
+        values: "1x7"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AlphaDeskFoundationTargetDown
+        exp_alerts: []
+
+  # missing: absence is its own alert and does not masquerade as current RED.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AlphaDeskTelemetrySeriesMissing
+        exp_alerts:
+          - exp_labels:
+              severity: high
+              team: sre
+              zone: analytics-core
+            exp_annotations:
+              summary: Alpha Desk telemetry initialization series is missing
+              description: >-
+                No alpha_desk_telemetry_initialized series has been observed for
+                ten minutes. Confirm scrape discovery before inferring service health.
+              runbook_url: https://runbooks.alpha-desk.invalid/service-lifecycle#telemetry-series-missing
+
+  # firing: only a recent counter increment triggers the RED assessment alert.
+  - interval: 1m
+    input_series:
+      - series: 'alpha_desk_health_assessments_total{state="red"}'
+        values: "0 0 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AlphaDeskRecentRedHealthAssessment
+        exp_alerts:
+          - exp_labels:
+              state: red
+              severity: critical
+              team: sre
+              zone: analytics-core
+            exp_annotations:
+              summary: Alpha Desk recorded a recent RED health assessment
+              description: >-
+                A RED health assessment was recorded within the last five
+                minutes. This counter increment does not prove the system is
+                currently RED.
+              runbook_url: https://runbooks.alpha-desk.invalid/service-lifecycle#recent-red-assessment
+
+  # recovery: a target returning to up=1 clears the reachability alert.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="victoriametrics",instance="vm.invalid:8428"}'
+        values: "0x6 1x3"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AlphaDeskFoundationTargetDown
+        exp_alerts:
+          - exp_labels:
+              instance: vm.invalid:8428
+              job: victoriametrics
+              severity: high
+              team: sre
+              zone: analytics-core
+            exp_annotations:
+              summary: Alpha Desk foundation target is down
+              description: >-
+                victoriametrics has reported up=0 for more than five minutes.
+                This is target reachability only, not application correctness.
+              runbook_url: https://runbooks.alpha-desk.invalid/service-lifecycle#foundation-target-down
+      - eval_time: 7m
+        alertname: AlphaDeskFoundationTargetDown
+        exp_alerts: []

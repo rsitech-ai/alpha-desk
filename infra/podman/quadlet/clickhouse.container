@@ -1,0 +1,12 @@
+[Unit]
+Description=Inactive Alpha Desk ClickHouse dependency scaffold
+
+[Container]
+Image=docker.io/clickhouse/clickhouse-server:26.3.17.56-alpine@sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd
+Pull=never
+ContainerName=alpha-desk-clickhouse
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+Volume=alpha-desk-clickhouse-data:/var/lib/clickhouse
+PublishPort=127.0.0.1:8123:8123

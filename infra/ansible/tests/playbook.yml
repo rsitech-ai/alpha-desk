@@ -1,0 +1,10 @@
+---
+- name: Validate the documentation-only Stage 0 inventory
+  hosts: stage0_example
+  gather_facts: false
+  vars:
+    alpha_inventory_kind: example
+    alpha_stage0_scaffold: true
+  roles:
+    - role: common
+    - role: alpha_service

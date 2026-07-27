@@ -1,0 +1,31 @@
+---
+- name: Verify inactive Stage 0 scaffolding
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Read the systemd template
+      ansible.builtin.slurp:
+        src: /etc/systemd/system/hl-service@.service
+      register: alpha_unit
+
+    - name: Assert the unit remains inactive
+      ansible.builtin.assert:
+        that:
+          - "'[Install]' not in (alpha_unit.content | b64decode)"
+          - "'NoNewPrivileges=true' in (alpha_unit.content | b64decode)"
+        quiet: true
+
+    - name: Validate OpenSSH configuration syntax
+      ansible.builtin.command:
+        cmd: sshd -t
+      changed_when: false
+
+    - name: Validate logrotate configuration syntax
+      ansible.builtin.command:
+        cmd: logrotate --debug /etc/logrotate.d/hyperliquid-alpha-desk
+      changed_when: false
+
+    - name: Parse chrony configuration without synchronizing the clock
+      ansible.builtin.command:
+        cmd: chronyd -p
+      changed_when: false

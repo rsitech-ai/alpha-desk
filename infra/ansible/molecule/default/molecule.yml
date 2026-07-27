@@ -1,0 +1,51 @@
+---
+dependency:
+  name: galaxy
+  enabled: false
+driver:
+  name: docker
+platforms:
+  - name: alpha-stage0-noble
+    image: alpha-desk-task9-molecule:stage0
+    pre_build_image: false
+    dockerfile: Dockerfile.j2
+    privileged: false
+    command: sleep infinity
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ../../roles
+  inventory:
+    group_vars:
+      all:
+        alpha_inventory_kind: molecule
+        alpha_stage0_scaffold: true
+verifier:
+  name: ansible
+scenario:
+  check_sequence:
+    - check
+  converge_sequence:
+    - converge
+  create_sequence:
+    - create
+  destroy_sequence:
+    - destroy
+  idempotence_sequence:
+    - idempotence
+  prepare_sequence:
+    - prepare
+  syntax_sequence:
+    - syntax
+  verify_sequence:
+    - verify
+  test_sequence:
+    - syntax
+    - create
+    - prepare
+    - converge
+    - check
+    - idempotence
+    - verify
+    - destroy

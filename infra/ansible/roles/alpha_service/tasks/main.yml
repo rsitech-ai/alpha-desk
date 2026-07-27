@@ -1,0 +1,41 @@
+---
+- name: Reassert the exact V1 service boundary
+  ansible.builtin.assert:
+    that:
+      - >-
+        alpha_v1_services | sort ==
+        ['hl-analytics', 'hl-api', 'hl-capture', 'hl-core', 'hl-research']
+      - "'hl-exec' not in alpha_v1_services"
+    fail_msg: Only the five read-only V1 services may receive scaffolding.
+    quiet: true
+
+- name: Install the inactive hardened unit template
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../systemd/hl-service@.service"
+    dest: /etc/systemd/system/hl-service@.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the explicitly non-secret environment example
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../systemd/hl-service.env.example"
+    dest: /etc/hyperliquid-alpha-desk/hl-service.env.example
+    owner: root
+    group: hl-services
+    mode: "0640"
+
+- name: Install empty non-secret configuration examples for allowed services
+  ansible.builtin.copy:
+    content: |
+      # NON-SECRET EXAMPLE ONLY.
+      # No endpoint, credential, key, or runtime authorization is configured.
+      service_name = "{{ item }}"
+      environment = "example.invalid"
+    dest: "/etc/hyperliquid-alpha-desk/{{ item }}.toml.example"
+    owner: root
+    group: "hl-{{ item }}"
+    mode: "0640"
+  loop: "{{ alpha_v1_services }}"
+  loop_control:
+    label: "{{ item }}"
