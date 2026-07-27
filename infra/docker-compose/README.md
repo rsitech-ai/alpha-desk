@@ -1,14 +1,15 @@
 # Local data infrastructure
 
 This Compose project is a reproducible **local-development-only** dependency
-stack. It uses the fixed project name `alpha-desk-dev`, binds every published
-port to `127.0.0.1`, stores data in project-specific named volumes, and contains
-only explicit non-secret development credentials.
+stack. It uses the fixed project name `alpha-desk-dev`, runs on an
+outbound-capable local bridge whose default host binding is `127.0.0.1`, binds
+every published port explicitly to `127.0.0.1`, stores data in project-specific
+named volumes, and contains only explicit non-secret development credentials.
 
 It is not a production deployment, production security claim, or durable
-observability system. Traces and logs go to the OpenTelemetry debug exporter.
-The resource and PID limits are laptop guardrails that still require realistic
-ingest testing.
+observability system. The local bridge is not a network-isolation boundary.
+Traces and logs go to the OpenTelemetry debug exporter. The resource and PID
+limits are laptop guardrails that still require realistic ingest testing.
 
 ## Provisional contracts
 

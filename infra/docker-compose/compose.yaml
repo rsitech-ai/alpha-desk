@@ -258,4 +258,6 @@ volumes:
 networks:
   default:
     name: alpha-desk-dev_network
-    internal: true
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"

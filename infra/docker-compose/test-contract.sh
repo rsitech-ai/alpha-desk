@@ -159,8 +159,17 @@ jq -e '
     (.value.name | startswith("alpha-desk-dev_"))
   ) and
   (.networks.default.name == "alpha-desk-dev_network") and
-  (.networks.default.internal == true)
-' "$compose_json" >/dev/null
+  (.networks.default.internal != true) and
+  (.networks.default.driver == "bridge") and
+  (
+    .networks.default.driver_opts[
+      "com.docker.network.bridge.host_binding_ipv4"
+    ] == "127.0.0.1"
+  )
+' "$compose_json" >/dev/null || {
+  printf 'dev-stack-contract:error default network must be a loopback-bound bridge\n' >&2
+  exit 1
+}
 
 jq -e --slurpfile lock "$lock_file" '
   [
