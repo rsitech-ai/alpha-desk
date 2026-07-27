@@ -33,6 +33,11 @@ message SourceEvidence {
   bytes content_hash = 4;
 }
 
+message TypedPayloadEnvelope {
+  string event_kind = 1;
+  bytes message = 2;
+}
+
 enum ConfirmationClass {
   CONFIRMATION_CLASS_UNSPECIFIED = 0;
   PROVISIONAL_SOURCE = 1;
@@ -130,6 +135,7 @@ message TradeMatched {
   string taker_order_id = 4;
   hl.common.v1.DecimalValue price = 5;
   hl.common.v1.DecimalValue quantity = 6;
+  uint64 deterministic_seed = 7;
 }
 
 // Account and ledger payloads.

@@ -3,10 +3,11 @@
 use prost::Message;
 use prost_types::{
     DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
-    FileDescriptorSet,
+    FileDescriptorSet, ServiceDescriptorProto,
+    field_descriptor_proto::{Label, Type},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{self, Read},
     path::Path,
@@ -122,18 +123,509 @@ fn validate_descriptor_set(label: &str, set: &FileDescriptorSet) -> Result<(), S
             "{label} descriptor set contains no files"
         )));
     }
-    let mut names = BTreeMap::new();
+    let mut names = BTreeSet::new();
     for file in &set.file {
         let name = required_text(file.name.as_deref(), "file name")?;
         let package = required_text(file.package.as_deref(), "file package")?;
-        if names.insert(name, ()).is_some() {
+        if !names.insert(name) {
             return Err(SchemaCheckError::InvalidDescriptor(format!(
                 "{label} descriptor repeats file {name}"
             )));
         }
         validate_semantic_major(name, package)?;
     }
+
+    let mut symbols = Symbols::default();
+    for file in &set.file {
+        let package = required_text(file.package.as_deref(), "file package")?;
+        collect_symbols(package, &file.message_type, &file.enum_type, &mut symbols)?;
+    }
+    for file in &set.file {
+        validate_file(label, file, &names, &symbols)?;
+    }
     Ok(())
+}
+
+#[derive(Default)]
+struct Symbols {
+    messages: BTreeSet<String>,
+    enums: BTreeSet<String>,
+}
+
+fn collect_symbols(
+    scope: &str,
+    messages: &[DescriptorProto],
+    enums: &[EnumDescriptorProto],
+    symbols: &mut Symbols,
+) -> Result<(), SchemaCheckError> {
+    let mut local_names = BTreeSet::new();
+    for message in messages {
+        let name = required_text(message.name.as_deref(), "message name")?;
+        if !local_names.insert(name) {
+            return Err(SchemaCheckError::InvalidDescriptor(format!(
+                "duplicate nested type name {scope}.{name}"
+            )));
+        }
+        let qualified = format!(".{scope}.{name}");
+        if !symbols.messages.insert(qualified.clone()) {
+            return Err(SchemaCheckError::InvalidDescriptor(format!(
+                "duplicate message symbol {qualified}"
+            )));
+        }
+        collect_symbols(
+            &format!("{scope}.{name}"),
+            &message.nested_type,
+            &message.enum_type,
+            symbols,
+        )?;
+    }
+    for enumeration in enums {
+        let name = required_text(enumeration.name.as_deref(), "enum name")?;
+        if !local_names.insert(name) {
+            return Err(SchemaCheckError::InvalidDescriptor(format!(
+                "duplicate nested type name {scope}.{name}"
+            )));
+        }
+        let qualified = format!(".{scope}.{name}");
+        if !symbols.enums.insert(qualified.clone()) {
+            return Err(SchemaCheckError::InvalidDescriptor(format!(
+                "duplicate enum symbol {qualified}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_file(
+    label: &str,
+    file: &FileDescriptorProto,
+    file_names: &BTreeSet<&str>,
+    symbols: &Symbols,
+) -> Result<(), SchemaCheckError> {
+    let name = required_text(file.name.as_deref(), "file name")?;
+    let package = required_text(file.package.as_deref(), "file package")?;
+    let syntax = required_text(file.syntax.as_deref(), "file syntax")?;
+    if syntax != "proto2" && syntax != "proto3" {
+        return invalid(format!(
+            "{label} file {name} has unsupported syntax {syntax}"
+        ));
+    }
+
+    let mut dependencies = BTreeSet::new();
+    for dependency in &file.dependency {
+        if dependency.is_empty() || !dependencies.insert(dependency.as_str()) {
+            return invalid(format!(
+                "{label} file {name} has duplicate or empty dependency"
+            ));
+        }
+        if !file_names.contains(dependency.as_str()) {
+            return invalid(format!(
+                "{label} file {name} references unknown dependency {dependency}"
+            ));
+        }
+    }
+    for index in file
+        .public_dependency
+        .iter()
+        .chain(file.weak_dependency.iter())
+    {
+        let valid = usize::try_from(*index)
+            .ok()
+            .is_some_and(|index| index < file.dependency.len());
+        if !valid {
+            return invalid(format!(
+                "{label} file {name} has invalid dependency index {index}"
+            ));
+        }
+    }
+
+    for message in &file.message_type {
+        validate_message(package, message, syntax, symbols, false)?;
+    }
+    for enumeration in &file.enum_type {
+        validate_enum(package, enumeration, syntax)?;
+    }
+    validate_services(package, &file.service, symbols)?;
+    Ok(())
+}
+
+fn validate_message(
+    scope: &str,
+    message: &DescriptorProto,
+    syntax: &str,
+    symbols: &Symbols,
+    nested: bool,
+) -> Result<(), SchemaCheckError> {
+    let name = required_text(message.name.as_deref(), "message name")?;
+    let qualified = format!("{scope}.{name}");
+    let map_entry = message
+        .options
+        .as_ref()
+        .and_then(|options| options.map_entry)
+        .unwrap_or(false);
+    if map_entry && !nested {
+        return invalid(format!("map entry {qualified} must be nested"));
+    }
+
+    let mut oneof_names = BTreeSet::new();
+    for oneof in &message.oneof_decl {
+        let oneof_name = required_text(oneof.name.as_deref(), "oneof name")?;
+        if !oneof_names.insert(oneof_name) {
+            return invalid(format!("duplicate oneof name {qualified}.{oneof_name}"));
+        }
+    }
+
+    let reserved_names = validate_reserved_names(&qualified, "field", &message.reserved_name)?;
+    let reserved_ranges = validate_message_reserved_ranges(&qualified, &message.reserved_range)?;
+
+    let mut field_names = BTreeSet::new();
+    let mut field_numbers = BTreeSet::new();
+    for field in message.field.iter().chain(message.extension.iter()) {
+        let field_name = required_text(field.name.as_deref(), "field name")?;
+        let number = required_number(field.number, "field number")?;
+        if !field_names.insert(field_name) {
+            return invalid(format!("duplicate field name {qualified}.{field_name}"));
+        }
+        if !field_numbers.insert(number) {
+            return invalid(format!("duplicate field number {number} in {qualified}"));
+        }
+        validate_field_number(number, &qualified)?;
+        if reserved_names.contains(field_name) {
+            return invalid(format!(
+                "reserved field name {qualified}.{field_name} was reused"
+            ));
+        }
+        if range_contains_message(&reserved_ranges, number) {
+            return invalid(format!(
+                "reserved field number {number} in {qualified} was reused"
+            ));
+        }
+        validate_field(&qualified, field, syntax, message.oneof_decl.len(), symbols)?;
+    }
+
+    let mut nested_names = BTreeSet::new();
+    for child in &message.nested_type {
+        let child_name = required_text(child.name.as_deref(), "nested message name")?;
+        if !nested_names.insert(child_name) {
+            return invalid(format!(
+                "duplicate nested type name {qualified}.{child_name}"
+            ));
+        }
+    }
+    for enumeration in &message.enum_type {
+        let enum_name = required_text(enumeration.name.as_deref(), "nested enum name")?;
+        if !nested_names.insert(enum_name) {
+            return invalid(format!(
+                "duplicate nested type name {qualified}.{enum_name}"
+            ));
+        }
+    }
+
+    if map_entry {
+        validate_map_entry(&qualified, message)?;
+    }
+    for child in &message.nested_type {
+        validate_message(&qualified, child, syntax, symbols, true)?;
+    }
+    for enumeration in &message.enum_type {
+        validate_enum(&qualified, enumeration, syntax)?;
+    }
+    Ok(())
+}
+
+fn validate_field(
+    message: &str,
+    field: &FieldDescriptorProto,
+    syntax: &str,
+    oneof_count: usize,
+    symbols: &Symbols,
+) -> Result<(), SchemaCheckError> {
+    let name = required_text(field.name.as_deref(), "field name")?;
+    let label_value = required_number(field.label, "field label")?;
+    let label = Label::try_from(label_value).map_err(|_| {
+        SchemaCheckError::InvalidDescriptor(format!("invalid field label for {message}.{name}"))
+    })?;
+    if syntax == "proto3" && label == Label::Required {
+        return invalid(format!(
+            "required field {message}.{name} is invalid in proto3"
+        ));
+    }
+    let type_value = required_number(field.r#type, "field type")?;
+    let field_type = Type::try_from(type_value).map_err(|_| {
+        SchemaCheckError::InvalidDescriptor(format!("invalid field type for {message}.{name}"))
+    })?;
+
+    if let Some(index) = field.oneof_index {
+        let valid = usize::try_from(index)
+            .ok()
+            .is_some_and(|index| index < oneof_count);
+        if !valid {
+            return invalid(format!("invalid oneof index {index} for {message}.{name}"));
+        }
+        if label == Label::Repeated {
+            return invalid(format!(
+                "repeated field {message}.{name} cannot belong to a oneof"
+            ));
+        }
+    } else if field.proto3_optional.unwrap_or(false) {
+        return invalid(format!(
+            "proto3 optional field {message}.{name} is missing synthetic oneof membership"
+        ));
+    }
+
+    match field_type {
+        Type::Message | Type::Group => {
+            let reference = required_text(field.type_name.as_deref(), "message type reference")?;
+            if !symbols.messages.contains(reference) {
+                return invalid(format!(
+                    "unknown type reference {reference} for {message}.{name}"
+                ));
+            }
+        }
+        Type::Enum => {
+            let reference = required_text(field.type_name.as_deref(), "enum type reference")?;
+            if !symbols.enums.contains(reference) {
+                return invalid(format!(
+                    "unknown type reference {reference} for {message}.{name}"
+                ));
+            }
+        }
+        _ if field
+            .type_name
+            .as_deref()
+            .is_some_and(|value| !value.is_empty()) =>
+        {
+            return invalid(format!(
+                "scalar field {message}.{name} has an unexpected type reference"
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_field_number(number: i32, message: &str) -> Result<(), SchemaCheckError> {
+    if !(1..=536_870_911).contains(&number) || (19_000..=19_999).contains(&number) {
+        return invalid(format!("invalid field number {number} in {message}"));
+    }
+    Ok(())
+}
+
+fn validate_map_entry(qualified: &str, message: &DescriptorProto) -> Result<(), SchemaCheckError> {
+    if message.field.len() != 2
+        || message.field[0].name.as_deref() != Some("key")
+        || message.field[0].number != Some(1)
+        || message.field[1].name.as_deref() != Some("value")
+        || message.field[1].number != Some(2)
+        || message
+            .field
+            .iter()
+            .any(|field| field.label != Some(Label::Optional as i32) || field.oneof_index.is_some())
+        || !message.extension.is_empty()
+        || !message.nested_type.is_empty()
+        || !message.enum_type.is_empty()
+        || !message.oneof_decl.is_empty()
+    {
+        return invalid(format!("malformed map entry {qualified}"));
+    }
+    let key_type = Type::try_from(required_number(
+        message.field[0].r#type,
+        "map entry key type",
+    )?)
+    .map_err(|_| {
+        SchemaCheckError::InvalidDescriptor(format!("invalid map entry key type in {qualified}"))
+    })?;
+    if !matches!(
+        key_type,
+        Type::Int32
+            | Type::Int64
+            | Type::Uint32
+            | Type::Uint64
+            | Type::Sint32
+            | Type::Sint64
+            | Type::Fixed32
+            | Type::Fixed64
+            | Type::Sfixed32
+            | Type::Sfixed64
+            | Type::Bool
+            | Type::String
+    ) {
+        return invalid(format!("invalid map entry key type in {qualified}"));
+    }
+    Ok(())
+}
+
+fn validate_enum(
+    scope: &str,
+    enumeration: &EnumDescriptorProto,
+    syntax: &str,
+) -> Result<(), SchemaCheckError> {
+    let name = required_text(enumeration.name.as_deref(), "enum name")?;
+    let qualified = format!("{scope}.{name}");
+    if enumeration.value.is_empty() {
+        return invalid(format!("enum {qualified} contains no values"));
+    }
+    let reserved_names = validate_reserved_names(&qualified, "enum", &enumeration.reserved_name)?;
+    let reserved_ranges = validate_enum_reserved_ranges(&qualified, &enumeration.reserved_range)?;
+    let allow_alias = enumeration
+        .options
+        .as_ref()
+        .and_then(|options| options.allow_alias)
+        .unwrap_or(false);
+    let mut names = BTreeSet::new();
+    let mut numbers = BTreeSet::new();
+    for value in &enumeration.value {
+        let value_name = required_text(value.name.as_deref(), "enum value name")?;
+        let number = required_number(value.number, "enum value number")?;
+        if !names.insert(value_name) {
+            return invalid(format!(
+                "duplicate enum value name {qualified}.{value_name}"
+            ));
+        }
+        if !numbers.insert(number) && !allow_alias {
+            return invalid(format!("duplicate enum number {number} in {qualified}"));
+        }
+        if reserved_names.contains(value_name) {
+            return invalid(format!(
+                "reserved enum name {qualified}.{value_name} was reused"
+            ));
+        }
+        if range_contains_enum(&reserved_ranges, number) {
+            return invalid(format!(
+                "reserved enum number {number} in {qualified} was reused"
+            ));
+        }
+    }
+    if syntax == "proto3" && enumeration.value[0].number != Some(0) {
+        return invalid(format!(
+            "first proto3 enum value in {qualified} must be zero"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_services(
+    package: &str,
+    services: &[ServiceDescriptorProto],
+    symbols: &Symbols,
+) -> Result<(), SchemaCheckError> {
+    let mut names = BTreeSet::new();
+    for service in services {
+        let name = required_text(service.name.as_deref(), "service name")?;
+        if !names.insert(name) {
+            return invalid(format!("duplicate service name {package}.{name}"));
+        }
+        let mut methods = BTreeSet::new();
+        for method in &service.method {
+            let method_name = required_text(method.name.as_deref(), "method name")?;
+            if !methods.insert(method_name) {
+                return invalid(format!(
+                    "duplicate method name {package}.{name}.{method_name}"
+                ));
+            }
+            for (direction, reference) in [
+                ("input", method.input_type.as_deref()),
+                ("output", method.output_type.as_deref()),
+            ] {
+                let reference = required_text(reference, "method type reference")?;
+                if !symbols.messages.contains(reference) {
+                    return invalid(format!(
+                        "unknown type reference {reference} for {direction} of {package}.{name}.{method_name}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_reserved_names<'a>(
+    qualified: &str,
+    kind: &str,
+    names: &'a [String],
+) -> Result<BTreeSet<&'a str>, SchemaCheckError> {
+    let mut unique = BTreeSet::new();
+    for name in names {
+        if name.is_empty() || !unique.insert(name.as_str()) {
+            return invalid(format!(
+                "duplicate or empty reserved {kind} name in {qualified}"
+            ));
+        }
+    }
+    Ok(unique)
+}
+
+fn validate_message_reserved_ranges(
+    qualified: &str,
+    ranges: &[prost_types::descriptor_proto::ReservedRange],
+) -> Result<Vec<(i32, i32)>, SchemaCheckError> {
+    let mut validated = Vec::new();
+    for range in ranges {
+        let start = required_number(range.start, "reserved field range start")?;
+        let end = required_number(range.end, "reserved field range end")?;
+        if start >= end {
+            return invalid(format!(
+                "invalid reserved field range {start}..{end} in {qualified}"
+            ));
+        }
+        validated.push((start, end));
+    }
+    ensure_non_overlapping(&mut validated, "reserved field", qualified, false)?;
+    Ok(validated)
+}
+
+fn validate_enum_reserved_ranges(
+    qualified: &str,
+    ranges: &[prost_types::enum_descriptor_proto::EnumReservedRange],
+) -> Result<Vec<(i32, i32)>, SchemaCheckError> {
+    let mut validated = Vec::new();
+    for range in ranges {
+        let start = required_number(range.start, "reserved enum range start")?;
+        let end = required_number(range.end, "reserved enum range end")?;
+        if start > end {
+            return invalid(format!(
+                "invalid reserved enum range {start}..{end} in {qualified}"
+            ));
+        }
+        validated.push((start, end));
+    }
+    ensure_non_overlapping(&mut validated, "reserved enum", qualified, true)?;
+    Ok(validated)
+}
+
+fn ensure_non_overlapping(
+    ranges: &mut [(i32, i32)],
+    kind: &str,
+    qualified: &str,
+    inclusive_end: bool,
+) -> Result<(), SchemaCheckError> {
+    ranges.sort_unstable();
+    if ranges.windows(2).any(|pair| {
+        if inclusive_end {
+            pair[1].0 <= pair[0].1
+        } else {
+            pair[1].0 < pair[0].1
+        }
+    }) {
+        return invalid(format!("overlapping {kind} ranges in {qualified}"));
+    }
+    Ok(())
+}
+
+fn range_contains_message(ranges: &[(i32, i32)], number: i32) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| (*start..*end).contains(&number))
+}
+
+fn range_contains_enum(ranges: &[(i32, i32)], number: i32) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| (*start..=*end).contains(&number))
+}
+
+fn invalid<T>(message: String) -> Result<T, SchemaCheckError> {
+    Err(SchemaCheckError::InvalidDescriptor(message))
 }
 
 fn validate_semantic_major(path: &str, package: &str) -> Result<(), SchemaCheckError> {
@@ -198,7 +690,8 @@ fn compare_file(
         &baseline.message_type,
         &current.message_type,
     )?;
-    compare_enums(baseline_package, &baseline.enum_type, &current.enum_type)
+    compare_enums(baseline_package, &baseline.enum_type, &current.enum_type)?;
+    compare_services(baseline_package, &baseline.service, &current.service)
 }
 
 fn compare_messages(
@@ -213,6 +706,7 @@ fn compare_messages(
         let current_message = current_by_name.get(name).copied().ok_or_else(|| {
             SchemaCheckError::Incompatible(format!("removed message {qualified}"))
         })?;
+        compare_message_reservations(&qualified, baseline_message, current_message)?;
         compare_fields(&qualified, &baseline_message.field, &current_message.field)?;
         compare_messages(
             &qualified,
@@ -297,6 +791,57 @@ fn compare_fields(
     Ok(())
 }
 
+fn compare_message_reservations(
+    message: &str,
+    baseline: &DescriptorProto,
+    current: &DescriptorProto,
+) -> Result<(), SchemaCheckError> {
+    for name in &baseline.reserved_name {
+        if !current.reserved_name.contains(name) {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "dropped reserved field name {message}.{name}"
+            )));
+        }
+    }
+    for range in &baseline.reserved_range {
+        let start = required_number(range.start, "baseline reserved field range start")?;
+        let end = required_number(range.end, "baseline reserved field range end")?;
+        let covered = current.reserved_range.iter().any(|candidate| {
+            candidate
+                .start
+                .zip(candidate.end)
+                .is_some_and(|(candidate_start, candidate_end)| {
+                    candidate_start <= start && candidate_end >= end
+                })
+        });
+        if !covered {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "dropped reserved field range {start}..{end} in {message}"
+            )));
+        }
+    }
+    for field in &current.field {
+        let name = required_text(field.name.as_deref(), "current field name")?;
+        let number = required_number(field.number, "current field number")?;
+        if baseline.reserved_name.contains(&name.to_owned()) {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "reserved field name {message}.{name} was reused"
+            )));
+        }
+        if baseline.reserved_range.iter().any(|range| {
+            range
+                .start
+                .zip(range.end)
+                .is_some_and(|(start, end)| (start..end).contains(&number))
+        }) {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "reserved field number {number} in {message} was reused"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn index_fields_by_name(
     fields: &[FieldDescriptorProto],
 ) -> Result<BTreeMap<&str, &FieldDescriptorProto>, SchemaCheckError> {
@@ -328,7 +873,104 @@ fn compare_enums(
             .get(name)
             .copied()
             .ok_or_else(|| SchemaCheckError::Incompatible(format!("removed enum {qualified}")))?;
+        compare_enum_reservations(&qualified, baseline_enum, current_enum)?;
         compare_enum_values(&qualified, baseline_enum, current_enum)?;
+    }
+    Ok(())
+}
+
+fn compare_enum_reservations(
+    enumeration: &str,
+    baseline: &EnumDescriptorProto,
+    current: &EnumDescriptorProto,
+) -> Result<(), SchemaCheckError> {
+    for name in &baseline.reserved_name {
+        if !current.reserved_name.contains(name) {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "dropped reserved enum name {enumeration}.{name}"
+            )));
+        }
+    }
+    for range in &baseline.reserved_range {
+        let start = required_number(range.start, "baseline reserved enum range start")?;
+        let end = required_number(range.end, "baseline reserved enum range end")?;
+        let covered = current.reserved_range.iter().any(|candidate| {
+            candidate
+                .start
+                .zip(candidate.end)
+                .is_some_and(|(candidate_start, candidate_end)| {
+                    candidate_start <= start && candidate_end >= end
+                })
+        });
+        if !covered {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "dropped reserved enum range {start}..{end} in {enumeration}"
+            )));
+        }
+    }
+    for value in &current.value {
+        let name = required_text(value.name.as_deref(), "current enum value name")?;
+        let number = required_number(value.number, "current enum value number")?;
+        if baseline.reserved_name.contains(&name.to_owned()) {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "reserved enum name {enumeration}.{name} was reused"
+            )));
+        }
+        if baseline.reserved_range.iter().any(|range| {
+            range
+                .start
+                .zip(range.end)
+                .is_some_and(|(start, end)| (start..=end).contains(&number))
+        }) {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "reserved enum number {number} in {enumeration} was reused"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn compare_services(
+    package: &str,
+    baseline: &[ServiceDescriptorProto],
+    current: &[ServiceDescriptorProto],
+) -> Result<(), SchemaCheckError> {
+    let current_by_name = current
+        .iter()
+        .map(|service| {
+            required_text(service.name.as_deref(), "service name").map(|name| (name, service))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    for baseline_service in baseline {
+        let name = required_text(baseline_service.name.as_deref(), "baseline service name")?;
+        let current_service = current_by_name.get(name).copied().ok_or_else(|| {
+            SchemaCheckError::Incompatible(format!("removed service {package}.{name}"))
+        })?;
+        let current_methods = current_service
+            .method
+            .iter()
+            .map(|method| {
+                required_text(method.name.as_deref(), "method name").map(|name| (name, method))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        for baseline_method in &baseline_service.method {
+            let method_name =
+                required_text(baseline_method.name.as_deref(), "baseline method name")?;
+            let current_method = current_methods.get(method_name).copied().ok_or_else(|| {
+                SchemaCheckError::Incompatible(format!(
+                    "removed method {package}.{name}.{method_name}"
+                ))
+            })?;
+            if baseline_method.input_type != current_method.input_type
+                || baseline_method.output_type != current_method.output_type
+                || baseline_method.client_streaming != current_method.client_streaming
+                || baseline_method.server_streaming != current_method.server_streaming
+            {
+                return Err(SchemaCheckError::Incompatible(format!(
+                    "incompatible method signature for {package}.{name}.{method_name}"
+                )));
+            }
+        }
     }
     Ok(())
 }

@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 api-contracts = { path = "../api-contracts" }
+blake3.workspace = true
 domain-types = { path = "../domain-types" }
 prost.workspace = true
+semver.workspace = true
 thiserror.workspace = true
