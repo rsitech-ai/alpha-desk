@@ -64,7 +64,7 @@ while IFS= read -r variable; do
   esac
 done < <(compgen -e)
 
-export RUSTFLAGS="-Dunsafe_code"
+export RUSTFLAGS="-Funsafe_code"
 cargo +1.97.1 check \
   --manifest-path "$manifest_path" \
   --workspace \

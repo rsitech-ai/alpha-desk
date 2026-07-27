@@ -41,10 +41,12 @@ freshness at the time printed in the implementation or CI report.
 
 The normative direction and diagnostic behavior are in
 [`ADR 0001`](../adr/0001-dependency-direction.md). The checker must consume
-`resolve.nodes[].deps`, preserve PackageId identity, include dev edges, and
-fail closed on incomplete or internally inconsistent metadata. Adding a new
-layer, exception, or V1 execution package requires a focused failing fixture
-before the policy is changed.
+`resolve.nodes[].deps`, reconcile its PackageId set with
+`resolve.nodes[].dependencies`, preserve PackageId identity, include dev edges,
+and fail closed on incomplete or internally inconsistent metadata. Dependency
+names and duplicate renamed aliases do not affect that set comparison. Adding
+a new layer, exception, or V1 execution package requires a focused failing
+fixture before the policy is changed.
 
 ## License policy
 
@@ -110,18 +112,19 @@ focused rejection tests in the same change.
 The authoritative Stage 0 gate is:
 
 ```sh
-RUSTFLAGS='-Dunsafe_code' \
+RUSTFLAGS='-Funsafe_code' \
   cargo +1.97.1 check --workspace --all-targets --all-features --locked --offline
 ```
 
 `tools/ci/check-unsafe.sh` runs that compiler gate after validating
 `tools/ci/unsafe-allowlist.toml`. It clears ambient compiler, wrapper, encoded
-flags, build flags, and target-specific Rust flags before setting the deny lint,
-so caller configuration cannot cap or allow the lint. The Stage 0 contract is
-exactly schema version 1 with an empty waiver list. Any non-empty list fails
-before Cargo runs. Raw grep or regular-expression scanning is not an
-unsafe-code authority because it cannot distinguish Rust syntax from comments,
-strings, generated output, or conditional code.
+flags, build flags, and target-specific Rust flags before setting the forbid
+lint. `forbid(unsafe_code)` cannot be lowered by crate-level
+`#![allow(unsafe_code)]`, and caller configuration cannot cap or allow the lint.
+The Stage 0 contract is exactly schema version 1 with an empty waiver list. Any
+non-empty list fails before Cargo runs. Raw grep or regular-expression scanning
+is not an unsafe-code authority because it cannot distinguish Rust syntax from
+comments, strings, generated output, or conditional code.
 
 Residual boundary: the compiler gate covers the host and targets actually
 selected on the configured builder. It does not prove target-specific code

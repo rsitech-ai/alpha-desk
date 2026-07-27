@@ -212,6 +212,31 @@ fn cli_exit_codes_and_trusted_usage_diagnostic_are_stable() {
 }
 
 #[test]
+fn rejects_disagreement_between_structured_and_package_id_dependencies() {
+    let file = std::fs::File::open(fixture("policy-violations.json"))
+        .expect("policy fixture must be readable");
+    let mut document: serde_json::Value =
+        serde_json::from_reader(file).expect("policy fixture must be valid JSON");
+    for node in document["resolve"]["nodes"]
+        .as_array_mut()
+        .expect("resolve nodes must be an array")
+    {
+        node["deps"] = serde_json::Value::Array(Vec::new());
+    }
+
+    let output = check_document(&document);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"metadata-error: resolve node dependency fields disagree: \
+          path+file:///fixture/tools/architecture-fixture#0.1.0; deps-only: []; \
+          dependencies-only: [path+file:///fixture/services/hl-exec#0.1.0]\n"
+    );
+}
+
+#[test]
 fn rejects_shortest_forbidden_path_using_resolved_package_identity() {
     let output = check_fixture("policy-violations.json");
 
