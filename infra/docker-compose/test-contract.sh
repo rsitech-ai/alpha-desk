@@ -176,6 +176,42 @@ jq -e --slurpfile lock "$lock_file" '
   )
 ' "$compose_json" >/dev/null
 
+clickhouse_image="$(
+  jq -er '
+    .images[]
+    | select(.service == "clickhouse")
+    | .compose_ref
+  ' "$lock_file"
+)"
+
+if ! clickhouse_pool_size="$(
+  docker run \
+    --rm \
+    --pull=never \
+    --network none \
+    --read-only \
+    --user 101:101 \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --volume \
+    "$script_dir/clickhouse/config.xml:/etc/clickhouse-server/config.d/alpha-desk.xml:ro" \
+    --entrypoint /usr/bin/clickhouse \
+    "$clickhouse_image" \
+    extract-from-config \
+    --config-file /etc/clickhouse-server/config.xml \
+    --key background_schedule_pool_size 2>&1
+)"; then
+  printf 'dev-stack-contract:error ClickHouse pool extraction failed: %s\n' \
+    "$clickhouse_pool_size" >&2
+  exit 1
+fi
+
+[[ "$clickhouse_pool_size" == "128" ]] || {
+  printf 'dev-stack-contract:error unexpected ClickHouse pool size %q\n' \
+    "$clickhouse_pool_size" >&2
+  exit 1
+}
+
 fake_bin="$tmp_dir/fake-bin"
 mkdir -p "$fake_bin"
 
