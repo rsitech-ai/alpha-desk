@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
+use std::io;
 use std::path::{Path, PathBuf};
-use test_fixtures::{FixtureEntry, FixtureManifest};
+use test_fixtures::{FixtureEntry, FixtureError, FixtureManifest};
 
 const SOURCE_DIGEST: &str = "dbca188380b064253b36c62435221b9ec1c3c35c9eef60b1296f5faa861ec28e";
 const EXPECTED_DIGEST: &str = "0d926e5ff7da1b6248cf88a2bc91c65f848dd1a7ef08dc66a1d0bdbc0cb3d0b2";
@@ -399,4 +400,86 @@ fn paths_with_platform_prefixes_are_rejected() {
     let error = manifest.verify(temporary.path()).unwrap_err();
 
     assert!(error.to_string().contains("unsafe fixture path"));
+}
+
+#[test]
+fn every_untrusted_fixture_error_field_has_a_single_line_display() {
+    let controlled = "untrusted\n\r\t\u{1b}\u{1}\u{7f}\u{85}value";
+    let controlled_path = PathBuf::from(controlled);
+    let io_error = || io::Error::other(controlled);
+    let parse_manifest_source = toml::from_str::<FixtureManifest>("version = [\n").unwrap_err();
+    let parse_json_source = serde_json::from_slice::<serde_json::Value>(b"{\n").unwrap_err();
+    let errors = vec![
+        FixtureError::ReadManifest {
+            path: controlled_path.clone(),
+            source: io_error(),
+        },
+        FixtureError::ParseManifest {
+            path: controlled_path.clone(),
+            source: parse_manifest_source,
+        },
+        FixtureError::InvalidManifestUtf8(controlled_path.clone()),
+        FixtureError::UnsupportedVersion(u32::MAX),
+        FixtureError::DuplicateId(controlled.to_owned()),
+        FixtureError::DuplicatePath(controlled.to_owned()),
+        FixtureError::UnsafeId(controlled.to_owned()),
+        FixtureError::NonCanonicalPath(controlled.to_owned()),
+        FixtureError::UnsafePath(controlled.to_owned()),
+        FixtureError::PathOutsideFixtureTrees(controlled.to_owned()),
+        FixtureError::EntryPairingMismatch {
+            id: controlled.to_owned(),
+            expected_source: controlled.to_owned(),
+            expected_output: controlled.to_owned(),
+        },
+        FixtureError::MissingFile {
+            path: controlled_path.clone(),
+            source: io_error(),
+        },
+        FixtureError::Symlink(controlled_path.clone()),
+        FixtureError::NotRegularFile(controlled_path.clone()),
+        FixtureError::InvalidDigest {
+            field: "source_sha256",
+            digest: controlled.to_owned(),
+        },
+        FixtureError::DigestMismatch {
+            path: controlled.to_owned(),
+            expected: SOURCE_DIGEST.to_owned(),
+            actual: EXPECTED_DIGEST.to_owned(),
+        },
+        FixtureError::UndeclaredFile(controlled.to_owned()),
+        FixtureError::FileChanged(controlled_path.clone()),
+        FixtureError::Filesystem {
+            path: controlled_path.clone(),
+            source: io_error(),
+        },
+        FixtureError::NonUtf8Path(controlled_path.clone()),
+        FixtureError::MissingExpectedPair(controlled.to_owned()),
+        FixtureError::MissingSourcePair(controlled.to_owned()),
+        FixtureError::UnsupportedFilename(controlled.to_owned()),
+        FixtureError::ParseJson {
+            path: controlled_path.clone(),
+            source: parse_json_source,
+        },
+        FixtureError::MissingSchemaField {
+            path: controlled_path.clone(),
+            field: "schema",
+        },
+        FixtureError::SchemaMismatch {
+            path: controlled.to_owned(),
+            declared: controlled.to_owned(),
+            actual: controlled.to_owned(),
+        },
+        FixtureError::WriteManifest {
+            path: controlled_path,
+            source: io_error(),
+        },
+    ];
+
+    for error in errors {
+        let rendered = error.to_string();
+        assert!(
+            rendered.chars().all(|character| !character.is_control()),
+            "{error:?}: {rendered:?}"
+        );
+    }
 }

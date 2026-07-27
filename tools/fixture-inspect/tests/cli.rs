@@ -1,6 +1,8 @@
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Output};
 use test_fixtures::FixtureManifest;
+
+const CONTROL_CHARACTERS: [char; 7] = ['\n', '\r', '\t', '\u{1b}', '\u{1}', '\u{7f}', '\u{85}'];
 
 fn write_pair(root: &std::path::Path, id: &str) {
     fs::write(
@@ -13,6 +15,48 @@ fn write_pair(root: &std::path::Path, id: &str) {
         format!("{{\"schema_version\":\"1.0.0\",\"id\":\"{id}\"}}\n"),
     )
     .unwrap();
+}
+
+fn valid_manifest_root() -> tempfile::TempDir {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temporary.path().join("blocks")).unwrap();
+    fs::create_dir_all(temporary.path().join("expected")).unwrap();
+    write_pair(temporary.path(), "safe");
+    FixtureManifest::generate(temporary.path())
+        .unwrap()
+        .write_atomic(temporary.path())
+        .unwrap();
+    temporary
+}
+
+fn verify(root: &std::path::Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
+        .arg("verify")
+        .arg(root.join("manifest.toml"))
+        .output()
+        .unwrap()
+}
+
+fn assert_safe_cli_rejection(output: &Output, case: &str) {
+    assert!(!output.status.success(), "{case}");
+    assert!(output.stdout.is_empty(), "{case}: {:?}", output.stdout);
+    assert!(
+        output.stderr.ends_with(b"\n"),
+        "{case}: {:?}",
+        output.stderr
+    );
+    assert_eq!(
+        output.stderr.iter().filter(|byte| **byte == b'\n').count(),
+        1,
+        "{case}: {:?}",
+        output.stderr
+    );
+    let diagnostic = std::str::from_utf8(&output.stderr[..output.stderr.len() - 1]).unwrap();
+    assert!(
+        diagnostic.chars().all(|character| !character.is_control()),
+        "{case}: {:?}",
+        output.stderr
+    );
 }
 
 #[test]
@@ -79,32 +123,87 @@ fn invalid_arguments_fail_without_panicking() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
 }
 
+#[cfg(unix)]
 #[test]
-fn unsafe_ids_cannot_inject_cli_status_or_terminal_controls() {
-    for id in ["evil\nmanifest:ok", "evil\rcarriage", "evil\u{1b}escape"] {
-        let temporary = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temporary.path().join("blocks")).unwrap();
-        fs::create_dir_all(temporary.path().join("expected")).unwrap();
-        write_pair(temporary.path(), "safe");
-        let manifest = FixtureManifest::generate(temporary.path()).unwrap();
-        manifest.write_atomic(temporary.path()).unwrap();
-        let mut manifest = FixtureManifest::load(temporary.path().join("manifest.toml")).unwrap();
-        manifest.fixture[0].id = id.to_owned();
-        manifest.write_atomic(temporary.path()).unwrap();
+fn non_utf8_arguments_have_an_escaped_single_line_diagnostic() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
 
+    let argument = OsString::from_vec(vec![b'v', 0xff, b'\n', 0x1b]);
+    let output = Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
+        .arg(argument)
+        .output()
+        .unwrap();
+
+    assert_safe_cli_rejection(&output, "non-UTF-8 CLI argument");
+}
+
+#[test]
+fn rejected_cli_manifest_paths_cannot_inject_diagnostic_controls() {
+    let temporary = tempfile::tempdir().unwrap();
+    for control in CONTROL_CHARACTERS {
         let output = Command::new(env!("CARGO_BIN_EXE_fixture-inspect"))
             .arg("verify")
-            .arg(temporary.path().join("manifest.toml"))
+            .arg(temporary.path().join(format!("missing{control}.toml")))
             .output()
             .unwrap();
 
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        assert_eq!(
-            output.stderr.iter().filter(|byte| **byte == b'\n').count(),
-            1
-        );
-        assert!(!output.stderr.contains(&b'\r'));
-        assert!(!output.stderr.contains(&0x1b));
+        assert_safe_cli_rejection(&output, &format!("CLI manifest path {control:?}"));
+    }
+}
+
+#[test]
+fn unsafe_ids_cannot_inject_cli_status_or_terminal_controls() {
+    for control in CONTROL_CHARACTERS {
+        let temporary = valid_manifest_root();
+        let mut manifest = FixtureManifest::load(temporary.path().join("manifest.toml")).unwrap();
+        manifest.fixture[0].id = format!("evil{control}status");
+        manifest.write_atomic(temporary.path()).unwrap();
+
+        let output = verify(temporary.path());
+
+        assert_safe_cli_rejection(&output, &format!("unsafe id {control:?}"));
+    }
+}
+
+#[test]
+fn rejected_manifest_paths_cannot_inject_diagnostic_controls() {
+    for control in CONTROL_CHARACTERS {
+        let temporary = valid_manifest_root();
+        let mut manifest = FixtureManifest::load(temporary.path().join("manifest.toml")).unwrap();
+        manifest.fixture[0].source_path = format!("blocks/{control}/../safe.json");
+        manifest.write_atomic(temporary.path()).unwrap();
+
+        let output = verify(temporary.path());
+
+        assert_safe_cli_rejection(&output, &format!("path {control:?}"));
+    }
+}
+
+#[test]
+fn rejected_manifest_digests_cannot_inject_diagnostic_controls() {
+    for control in CONTROL_CHARACTERS {
+        let temporary = valid_manifest_root();
+        let mut manifest = FixtureManifest::load(temporary.path().join("manifest.toml")).unwrap();
+        manifest.fixture[0].source_sha256 = format!("bad{control}digest");
+        manifest.write_atomic(temporary.path()).unwrap();
+
+        let output = verify(temporary.path());
+
+        assert_safe_cli_rejection(&output, &format!("digest {control:?}"));
+    }
+}
+
+#[test]
+fn rejected_manifest_schemas_cannot_inject_diagnostic_controls() {
+    for control in CONTROL_CHARACTERS {
+        let temporary = valid_manifest_root();
+        let mut manifest = FixtureManifest::load(temporary.path().join("manifest.toml")).unwrap();
+        manifest.fixture[0].source_schema = format!("wrong{control}schema");
+        manifest.write_atomic(temporary.path()).unwrap();
+
+        let output = verify(temporary.path());
+
+        assert_safe_cli_rejection(&output, &format!("schema {control:?}"));
     }
 }

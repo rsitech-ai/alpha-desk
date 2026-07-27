@@ -27,67 +27,67 @@ pub struct FixtureEntry {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FixtureError {
-    #[error("read fixture manifest {path}: {source}")]
+    #[error("read fixture manifest {path:?}: {source:?}")]
     ReadManifest {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("parse fixture manifest {path}: {source}")]
+    #[error("parse fixture manifest {path:?}: {source:?}")]
     ParseManifest {
         path: PathBuf,
         #[source]
         source: toml::de::Error,
     },
-    #[error("fixture manifest is not valid UTF-8: {0}")]
+    #[error("fixture manifest is not valid UTF-8: {0:?}")]
     InvalidManifestUtf8(PathBuf),
-    #[error("serialize fixture manifest: {0}")]
+    #[error("serialize fixture manifest: {0:?}")]
     SerializeManifest(#[from] toml::ser::Error),
     #[error("unsupported fixture manifest version {0}")]
     UnsupportedVersion(u32),
-    #[error("duplicate fixture id {0}")]
+    #[error("duplicate fixture id {0:?}")]
     DuplicateId(String),
-    #[error("duplicate fixture path {0}")]
+    #[error("duplicate fixture path {0:?}")]
     DuplicatePath(String),
     #[error("unsafe fixture id {0:?}")]
     UnsafeId(String),
-    #[error("non-canonical fixture path {0}")]
+    #[error("non-canonical fixture path {0:?}")]
     NonCanonicalPath(String),
-    #[error("unsafe fixture path {0}")]
+    #[error("unsafe fixture path {0:?}")]
     UnsafePath(String),
-    #[error("fixture path is outside blocks/ or expected/: {0}")]
+    #[error("fixture path is outside blocks/ or expected/: {0:?}")]
     PathOutsideFixtureTrees(String),
     #[error(
-        "fixture entry pairing mismatch for {id}: expected {expected_source} and {expected_output}"
+        "fixture entry pairing mismatch for {id:?}: expected {expected_source:?} and {expected_output:?}"
     )]
     EntryPairingMismatch {
         id: String,
         expected_source: String,
         expected_output: String,
     },
-    #[error("missing fixture file {path}: {source}")]
+    #[error("missing fixture file {path:?}: {source:?}")]
     MissingFile {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("fixture path contains a symlink: {0}")]
+    #[error("fixture path contains a symlink: {0:?}")]
     Symlink(PathBuf),
-    #[error("fixture path is not a regular file: {0}")]
+    #[error("fixture path is not a regular file: {0:?}")]
     NotRegularFile(PathBuf),
-    #[error("invalid lowercase SHA-256 digest for {field}: {digest}")]
+    #[error("invalid lowercase SHA-256 digest for {field}: {digest:?}")]
     InvalidDigest { field: &'static str, digest: String },
-    #[error("fixture digest mismatch for {path}: expected {expected}, found {actual}")]
+    #[error("fixture digest mismatch for {path:?}: expected {expected}, found {actual}")]
     DigestMismatch {
         path: String,
         expected: String,
         actual: String,
     },
-    #[error("undeclared fixture file {0}")]
+    #[error("undeclared fixture file {0:?}")]
     UndeclaredFile(String),
-    #[error("fixture file changed while it was being verified: {0}")]
+    #[error("fixture file changed while it was being verified: {0:?}")]
     FileChanged(PathBuf),
-    #[error("fixture filesystem operation failed for {path}: {source}")]
+    #[error("fixture filesystem operation failed for {path:?}: {source:?}")]
     Filesystem {
         path: PathBuf,
         #[source]
@@ -95,27 +95,27 @@ pub enum FixtureError {
     },
     #[error("fixture path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
-    #[error("fixture source has no deterministic expected pair: {0}")]
+    #[error("fixture source has no deterministic expected pair: {0:?}")]
     MissingExpectedPair(String),
-    #[error("expected fixture has no deterministic source pair: {0}")]
+    #[error("expected fixture has no deterministic source pair: {0:?}")]
     MissingSourcePair(String),
-    #[error("unsupported fixture filename {0}")]
+    #[error("unsupported fixture filename {0:?}")]
     UnsupportedFilename(String),
-    #[error("parse fixture JSON {path}: {source}")]
+    #[error("parse fixture JSON {path:?}: {source:?}")]
     ParseJson {
         path: PathBuf,
         #[source]
         source: serde_json::Error,
     },
-    #[error("fixture JSON {path} is missing non-empty string field {field}")]
+    #[error("fixture JSON {path:?} is missing non-empty string field {field}")]
     MissingSchemaField { path: PathBuf, field: &'static str },
-    #[error("fixture schema mismatch for {path}: expected {declared}, found {actual}")]
+    #[error("fixture schema mismatch for {path:?}: expected {declared:?}, found {actual:?}")]
     SchemaMismatch {
         path: String,
         declared: String,
         actual: String,
     },
-    #[error("write fixture manifest {path}: {source}")]
+    #[error("write fixture manifest {path:?}: {source:?}")]
     WriteManifest {
         path: PathBuf,
         #[source]
