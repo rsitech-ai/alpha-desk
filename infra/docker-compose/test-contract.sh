@@ -192,8 +192,86 @@ clickhouse_image="$(
     | .compose_ref
   ' "$lock_file"
 )"
+if ! clickhouse_config_target="$(
+  jq -er '
+    [
+      .services.clickhouse.volumes[]
+      | select(.type == "bind")
+      | select(
+          .source
+          | endswith("/infra/docker-compose/clickhouse/config.xml")
+        )
+    ] as $mounts
+    | if (
+        ($mounts | length) == 1 and
+        $mounts[0].read_only == true
+      )
+      then $mounts[0].target
+      else error("expected one read-only ClickHouse config bind")
+      end
+  ' "$compose_json"
+)"; then
+  printf 'dev-stack-contract:error invalid ClickHouse config bind\n' >&2
+  exit 1
+fi
 
-if ! clickhouse_pool_size="$(
+[[ "$clickhouse_config_target" == \
+  "/etc/clickhouse-server/config.d/zz-alpha-desk.xml" ]] || {
+  printf 'dev-stack-contract:error unexpected ClickHouse config target %q\n' \
+    "$clickhouse_config_target" >&2
+  exit 1
+}
+
+clickhouse_config_keys=(
+  background_schedule_pool_size
+  listen_host
+  logger.log
+  logger.errorlog
+  logger.level
+  logger.console
+)
+clickhouse_config_expected=(
+  128
+  0.0.0.0
+  ""
+  ""
+  information
+  true
+)
+
+for index in "${!clickhouse_config_keys[@]}"; do
+  key="${clickhouse_config_keys[$index]}"
+  expected="${clickhouse_config_expected[$index]}"
+  if ! actual="$(
+    docker run \
+      --rm \
+      --pull=never \
+      --network none \
+      --read-only \
+      --user 101:101 \
+      --cap-drop ALL \
+      --security-opt no-new-privileges:true \
+      --volume \
+      "$script_dir/clickhouse/config.xml:$clickhouse_config_target:ro" \
+      --entrypoint /usr/bin/clickhouse \
+      "$clickhouse_image" \
+      extract-from-config \
+      --config-file /etc/clickhouse-server/config.xml \
+      --key "$key" 2>&1
+  )"; then
+    printf 'dev-stack-contract:error ClickHouse %s extraction failed: %s\n' \
+      "$key" "$actual" >&2
+    exit 1
+  fi
+
+  [[ "$actual" == "$expected" ]] || {
+    printf 'dev-stack-contract:error unexpected ClickHouse %s %q\n' \
+      "$key" "$actual" >&2
+    exit 1
+  }
+done
+
+if extra_listen_host="$(
   docker run \
     --rm \
     --pull=never \
@@ -203,21 +281,21 @@ if ! clickhouse_pool_size="$(
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
     --volume \
-    "$script_dir/clickhouse/config.xml:/etc/clickhouse-server/config.d/alpha-desk.xml:ro" \
+    "$script_dir/clickhouse/config.xml:$clickhouse_config_target:ro" \
     --entrypoint /usr/bin/clickhouse \
     "$clickhouse_image" \
     extract-from-config \
     --config-file /etc/clickhouse-server/config.xml \
-    --key background_schedule_pool_size 2>&1
+    --key 'listen_host[1]' 2>&1
 )"; then
-  printf 'dev-stack-contract:error ClickHouse pool extraction failed: %s\n' \
-    "$clickhouse_pool_size" >&2
+  printf 'dev-stack-contract:error unexpected additional ClickHouse listen_host %q\n' \
+    "$extra_listen_host" >&2
   exit 1
 fi
 
-[[ "$clickhouse_pool_size" == "128" ]] || {
-  printf 'dev-stack-contract:error unexpected ClickHouse pool size %q\n' \
-    "$clickhouse_pool_size" >&2
+[[ "$extra_listen_host" == *"Not found: listen_host[1]"* ]] || {
+  printf 'dev-stack-contract:error unexpected ClickHouse listener validation %s\n' \
+    "$extra_listen_host" >&2
   exit 1
 }
 
