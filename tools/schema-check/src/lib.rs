@@ -137,22 +137,33 @@ fn validate_descriptor_set(label: &str, set: &FileDescriptorSet) -> Result<(), S
 
     let mut symbols = Symbols::default();
     for file in &set.file {
+        let file_name = required_text(file.name.as_deref(), "file name")?;
         let package = required_text(file.package.as_deref(), "file package")?;
-        collect_symbols(package, &file.message_type, &file.enum_type, &mut symbols)?;
+        collect_symbols(
+            file_name,
+            package,
+            &file.message_type,
+            &file.enum_type,
+            &mut symbols,
+        )?;
     }
+    let files = index_files(set)?;
     for file in &set.file {
-        validate_file(label, file, &names, &symbols)?;
+        validate_file(label, file, &names, &files, &symbols)?;
     }
     Ok(())
 }
 
 #[derive(Default)]
 struct Symbols {
-    messages: BTreeSet<String>,
-    enums: BTreeSet<String>,
+    messages: BTreeMap<String, String>,
+    enums: BTreeMap<String, String>,
+    enum_values: BTreeMap<String, String>,
+    map_entries: BTreeMap<String, String>,
 }
 
 fn collect_symbols(
+    file_name: &str,
     scope: &str,
     messages: &[DescriptorProto],
     enums: &[EnumDescriptorProto],
@@ -167,12 +178,30 @@ fn collect_symbols(
             )));
         }
         let qualified = format!(".{scope}.{name}");
-        if !symbols.messages.insert(qualified.clone()) {
+        if symbols.enum_values.contains_key(&qualified) {
+            return invalid(format!("enum value namespace collision for {qualified}"));
+        }
+        if symbols
+            .messages
+            .insert(qualified.clone(), file_name.to_owned())
+            .is_some()
+        {
             return Err(SchemaCheckError::InvalidDescriptor(format!(
                 "duplicate message symbol {qualified}"
             )));
         }
+        if message
+            .options
+            .as_ref()
+            .and_then(|options| options.map_entry)
+            .unwrap_or(false)
+        {
+            symbols
+                .map_entries
+                .insert(qualified.clone(), format!(".{scope}"));
+        }
         collect_symbols(
+            file_name,
             &format!("{scope}.{name}"),
             &message.nested_type,
             &message.enum_type,
@@ -187,10 +216,37 @@ fn collect_symbols(
             )));
         }
         let qualified = format!(".{scope}.{name}");
-        if !symbols.enums.insert(qualified.clone()) {
+        if symbols.enum_values.contains_key(&qualified) {
+            return invalid(format!("enum value namespace collision for {qualified}"));
+        }
+        if symbols
+            .enums
+            .insert(qualified.clone(), file_name.to_owned())
+            .is_some()
+        {
             return Err(SchemaCheckError::InvalidDescriptor(format!(
                 "duplicate enum symbol {qualified}"
             )));
+        }
+        for value in &enumeration.value {
+            let value_name = required_text(value.name.as_deref(), "enum value name")?;
+            let value_qualified = format!(".{scope}.{value_name}");
+            if symbols.messages.contains_key(&value_qualified)
+                || symbols.enums.contains_key(&value_qualified)
+            {
+                return invalid(format!(
+                    "enum value namespace collision for {value_qualified}"
+                ));
+            }
+            if let Some(owner) = symbols
+                .enum_values
+                .insert(value_qualified.clone(), qualified.clone())
+                && owner != qualified
+            {
+                return invalid(format!(
+                    "enum value namespace collision for {value_qualified}"
+                ));
+            }
         }
     }
     Ok(())
@@ -200,6 +256,7 @@ fn validate_file(
     label: &str,
     file: &FileDescriptorProto,
     file_names: &BTreeSet<&str>,
+    files: &BTreeMap<&str, &FileDescriptorProto>,
     symbols: &Symbols,
 ) -> Result<(), SchemaCheckError> {
     let name = required_text(file.name.as_deref(), "file name")?;
@@ -239,13 +296,58 @@ fn validate_file(
         }
     }
 
+    let visible_files = visible_files(name, file, files)?;
+    validate_enum_value_namespace(package, &file.enum_type)?;
     for message in &file.message_type {
-        validate_message(package, message, syntax, symbols, false)?;
+        validate_message(package, message, syntax, symbols, &visible_files, false)?;
     }
     for enumeration in &file.enum_type {
         validate_enum(package, enumeration, syntax)?;
     }
-    validate_services(package, &file.service, symbols)?;
+    validate_services(package, &file.service, symbols, &visible_files)?;
+    Ok(())
+}
+
+fn visible_files(
+    file_name: &str,
+    file: &FileDescriptorProto,
+    files: &BTreeMap<&str, &FileDescriptorProto>,
+) -> Result<BTreeSet<String>, SchemaCheckError> {
+    let mut visible = BTreeSet::from([file_name.to_owned()]);
+    for dependency in &file.dependency {
+        visible.insert(dependency.clone());
+        add_public_imports(dependency, files, &mut visible, &mut BTreeSet::new())?;
+    }
+    Ok(visible)
+}
+
+fn add_public_imports(
+    file_name: &str,
+    files: &BTreeMap<&str, &FileDescriptorProto>,
+    visible: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+) -> Result<(), SchemaCheckError> {
+    if !visiting.insert(file_name.to_owned()) {
+        return Ok(());
+    }
+    let file = files.get(file_name).copied().ok_or_else(|| {
+        SchemaCheckError::InvalidDescriptor(format!(
+            "public import closure references unknown dependency {file_name}"
+        ))
+    })?;
+    for index in &file.public_dependency {
+        let dependency = usize::try_from(*index)
+            .ok()
+            .and_then(|index| file.dependency.get(index))
+            .ok_or_else(|| {
+                SchemaCheckError::InvalidDescriptor(format!(
+                    "file {file_name} has invalid public dependency index {index}"
+                ))
+            })?;
+        visible.insert(dependency.clone());
+        add_public_imports(dependency, files, visible, visiting)?;
+    }
+    visiting.remove(file_name);
     Ok(())
 }
 
@@ -254,6 +356,7 @@ fn validate_message(
     message: &DescriptorProto,
     syntax: &str,
     symbols: &Symbols,
+    visible_files: &BTreeSet<String>,
     nested: bool,
 ) -> Result<(), SchemaCheckError> {
     let name = required_text(message.name.as_deref(), "message name")?;
@@ -267,11 +370,17 @@ fn validate_message(
         return invalid(format!("map entry {qualified} must be nested"));
     }
 
+    let mut declaration_names = BTreeSet::new();
     let mut oneof_names = BTreeSet::new();
     for oneof in &message.oneof_decl {
         let oneof_name = required_text(oneof.name.as_deref(), "oneof name")?;
         if !oneof_names.insert(oneof_name) {
             return invalid(format!("duplicate oneof name {qualified}.{oneof_name}"));
+        }
+        if !declaration_names.insert(oneof_name) {
+            return invalid(format!(
+                "message namespace collision for {qualified}.{oneof_name}"
+            ));
         }
     }
 
@@ -285,6 +394,11 @@ fn validate_message(
         let number = required_number(field.number, "field number")?;
         if !field_names.insert(field_name) {
             return invalid(format!("duplicate field name {qualified}.{field_name}"));
+        }
+        if !declaration_names.insert(field_name) {
+            return invalid(format!(
+                "message namespace collision for {qualified}.{field_name}"
+            ));
         }
         if !field_numbers.insert(number) {
             return invalid(format!("duplicate field number {number} in {qualified}"));
@@ -300,7 +414,14 @@ fn validate_message(
                 "reserved field number {number} in {qualified} was reused"
             ));
         }
-        validate_field(&qualified, field, syntax, message.oneof_decl.len(), symbols)?;
+        validate_field(
+            &qualified,
+            field,
+            syntax,
+            message.oneof_decl.len(),
+            symbols,
+            visible_files,
+        )?;
     }
 
     let mut nested_names = BTreeSet::new();
@@ -311,6 +432,11 @@ fn validate_message(
                 "duplicate nested type name {qualified}.{child_name}"
             ));
         }
+        if !declaration_names.insert(child_name) {
+            return invalid(format!(
+                "message namespace collision for {qualified}.{child_name}"
+            ));
+        }
     }
     for enumeration in &message.enum_type {
         let enum_name = required_text(enumeration.name.as_deref(), "nested enum name")?;
@@ -319,13 +445,37 @@ fn validate_message(
                 "duplicate nested type name {qualified}.{enum_name}"
             ));
         }
+        if !declaration_names.insert(enum_name) {
+            return invalid(format!(
+                "message namespace collision for {qualified}.{enum_name}"
+            ));
+        }
     }
+    let mut enum_value_owners = BTreeMap::new();
+    for (enum_index, enumeration) in message.enum_type.iter().enumerate() {
+        for value in &enumeration.value {
+            let value_name = required_text(value.name.as_deref(), "enum value name")?;
+            if enum_value_owners.get(value_name) == Some(&enum_index) {
+                continue;
+            }
+            if enum_value_owners.insert(value_name, enum_index).is_some()
+                || !declaration_names.insert(value_name)
+            {
+                return invalid(format!(
+                    "enum value namespace collision for {qualified}.{value_name}"
+                ));
+            }
+        }
+    }
+
+    validate_synthetic_optional_oneofs(&qualified, message)?;
+    validate_parent_map_fields(&qualified, message, symbols)?;
 
     if map_entry {
         validate_map_entry(&qualified, message)?;
     }
     for child in &message.nested_type {
-        validate_message(&qualified, child, syntax, symbols, true)?;
+        validate_message(&qualified, child, syntax, symbols, visible_files, true)?;
     }
     for enumeration in &message.enum_type {
         validate_enum(&qualified, enumeration, syntax)?;
@@ -339,6 +489,7 @@ fn validate_field(
     syntax: &str,
     oneof_count: usize,
     symbols: &Symbols,
+    visible_files: &BTreeSet<String>,
 ) -> Result<(), SchemaCheckError> {
     let name = required_text(field.name.as_deref(), "field name")?;
     let label_value = required_number(field.label, "field label")?;
@@ -372,23 +523,40 @@ fn validate_field(
             "proto3 optional field {message}.{name} is missing synthetic oneof membership"
         ));
     }
+    if field.proto3_optional.unwrap_or(false) && label != Label::Optional {
+        return invalid(format!(
+            "proto3 optional field {message}.{name} must have optional cardinality"
+        ));
+    }
 
     match field_type {
         Type::Message | Type::Group => {
             let reference = required_text(field.type_name.as_deref(), "message type reference")?;
-            if !symbols.messages.contains(reference) {
+            let Some(origin) = symbols.messages.get(reference) else {
                 return invalid(format!(
                     "unknown type reference {reference} for {message}.{name}"
+                ));
+            };
+            validate_reference_visibility(reference, origin, message, name, visible_files)?;
+            if let Some(parent) = symbols.map_entries.get(reference)
+                && (parent != &format!(".{message}")
+                    || label != Label::Repeated
+                    || field.oneof_index.is_some()
+                    || field.proto3_optional.unwrap_or(false))
+            {
+                return invalid(format!(
+                    "map entry {reference} must be used by one legal repeated map field in {parent}"
                 ));
             }
         }
         Type::Enum => {
             let reference = required_text(field.type_name.as_deref(), "enum type reference")?;
-            if !symbols.enums.contains(reference) {
+            let Some(origin) = symbols.enums.get(reference) else {
                 return invalid(format!(
                     "unknown type reference {reference} for {message}.{name}"
                 ));
-            }
+            };
+            validate_reference_visibility(reference, origin, message, name, visible_files)?;
         }
         _ if field
             .type_name
@@ -400,6 +568,77 @@ fn validate_field(
             ));
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_reference_visibility(
+    reference: &str,
+    origin: &str,
+    owner: &str,
+    member: &str,
+    visible_files: &BTreeSet<String>,
+) -> Result<(), SchemaCheckError> {
+    if !visible_files.contains(origin) {
+        return invalid(format!(
+            "missing import for cross-file type reference {reference} used by {owner}.{member}; symbol is defined in {origin}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_synthetic_optional_oneofs(
+    qualified: &str,
+    message: &DescriptorProto,
+) -> Result<(), SchemaCheckError> {
+    for (index, _) in message.oneof_decl.iter().enumerate() {
+        let members = message
+            .field
+            .iter()
+            .filter(|field| field.oneof_index == i32::try_from(index).ok())
+            .collect::<Vec<_>>();
+        if members
+            .iter()
+            .any(|field| field.proto3_optional == Some(true))
+            && (members.len() != 1 || members[0].proto3_optional != Some(true))
+        {
+            return invalid(format!(
+                "synthetic proto3 optional oneof {index} in {qualified} must contain exactly one proto3 optional field"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_parent_map_fields(
+    qualified: &str,
+    message: &DescriptorProto,
+    symbols: &Symbols,
+) -> Result<(), SchemaCheckError> {
+    for child in &message.nested_type {
+        let is_map_entry = child
+            .options
+            .as_ref()
+            .and_then(|options| options.map_entry)
+            .unwrap_or(false);
+        if !is_map_entry {
+            continue;
+        }
+        let child_name = required_text(child.name.as_deref(), "map entry name")?;
+        let reference = format!(".{qualified}.{child_name}");
+        let references = message
+            .field
+            .iter()
+            .filter(|field| field.type_name.as_deref() == Some(reference.as_str()))
+            .count();
+        if references != 1 {
+            return invalid(format!(
+                "map entry {reference} must be referenced by exactly one legal repeated map field; found {references}"
+            ));
+        }
+        if !symbols.map_entries.contains_key(&reference) {
+            return invalid(format!("map entry symbol {reference} was not indexed"));
+        }
     }
     Ok(())
 }
@@ -504,10 +743,30 @@ fn validate_enum(
     Ok(())
 }
 
+fn validate_enum_value_namespace(
+    scope: &str,
+    enums: &[EnumDescriptorProto],
+) -> Result<(), SchemaCheckError> {
+    let mut owners = BTreeMap::new();
+    for (enum_index, enumeration) in enums.iter().enumerate() {
+        for value in &enumeration.value {
+            let name = required_text(value.name.as_deref(), "enum value name")?;
+            if owners.get(name) == Some(&enum_index) {
+                continue;
+            }
+            if owners.insert(name, enum_index).is_some() {
+                return invalid(format!("enum value namespace collision for {scope}.{name}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_services(
     package: &str,
     services: &[ServiceDescriptorProto],
     symbols: &Symbols,
+    visible_files: &BTreeSet<String>,
 ) -> Result<(), SchemaCheckError> {
     let mut names = BTreeSet::new();
     for service in services {
@@ -528,11 +787,23 @@ fn validate_services(
                 ("output", method.output_type.as_deref()),
             ] {
                 let reference = required_text(reference, "method type reference")?;
-                if !symbols.messages.contains(reference) {
+                let Some(origin) = symbols.messages.get(reference) else {
                     return invalid(format!(
                         "unknown type reference {reference} for {direction} of {package}.{name}.{method_name}"
                     ));
+                };
+                if symbols.map_entries.contains_key(reference) {
+                    return invalid(format!(
+                        "map entry {reference} cannot be a service method type"
+                    ));
                 }
+                validate_reference_visibility(
+                    reference,
+                    origin,
+                    &format!("{package}.{name}"),
+                    method_name,
+                    visible_files,
+                )?;
             }
         }
     }
@@ -707,6 +978,7 @@ fn compare_messages(
             SchemaCheckError::Incompatible(format!("removed message {qualified}"))
         })?;
         compare_message_reservations(&qualified, baseline_message, current_message)?;
+        compare_oneofs(&qualified, baseline_message, current_message)?;
         compare_fields(&qualified, &baseline_message.field, &current_message.field)?;
         compare_messages(
             &qualified,
@@ -718,6 +990,31 @@ fn compare_messages(
             &baseline_message.enum_type,
             &current_message.enum_type,
         )?;
+    }
+    Ok(())
+}
+
+fn compare_oneofs(
+    message: &str,
+    baseline: &DescriptorProto,
+    current: &DescriptorProto,
+) -> Result<(), SchemaCheckError> {
+    for (index, baseline_oneof) in baseline.oneof_decl.iter().enumerate() {
+        let baseline_name = required_text(baseline_oneof.name.as_deref(), "baseline oneof name")?;
+        let current_name = current
+            .oneof_decl
+            .get(index)
+            .and_then(|oneof| oneof.name.as_deref())
+            .ok_or_else(|| {
+                SchemaCheckError::Incompatible(format!(
+                    "removed oneof identity {message}.{baseline_name} at index {index}"
+                ))
+            })?;
+        if baseline_name != current_name {
+            return Err(SchemaCheckError::Incompatible(format!(
+                "oneof identity changed for {message} at index {index}: {baseline_name} became {current_name}"
+            )));
+        }
     }
     Ok(())
 }

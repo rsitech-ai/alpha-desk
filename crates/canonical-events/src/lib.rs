@@ -208,6 +208,23 @@ macro_rules! opaque_payloads {
             }
 
             pub fn decode(kind: EventKind, bytes: &[u8]) -> Result<Self, ContractError> {
+                let payload = Self::decode_preserving(kind, bytes)?;
+                if payload.encode_to_vec()? != bytes {
+                    return Err(ContractError::Invalid {
+                        field: "payload",
+                        reason: format!(
+                            "non-canonical {} bytes require an enclosing wire-preserving envelope",
+                            kind.as_wire_name()
+                        ),
+                    });
+                }
+                Ok(payload)
+            }
+
+            fn decode_preserving(
+                kind: EventKind,
+                bytes: &[u8],
+            ) -> Result<Self, ContractError> {
                 required_payload(bytes)?;
                 match kind {
                     $(
@@ -334,6 +351,7 @@ pub struct CanonicalEventEnvelope {
     payload_hash: [u8; HASH_LENGTH],
     parser_version: String,
     payload: EventPayload,
+    encoded_payload: Vec<u8>,
 }
 
 impl CanonicalEventEnvelope {
@@ -417,6 +435,7 @@ impl CanonicalEventEnvelope {
             payload_hash,
             parser_version,
             payload,
+            encoded_payload: payload_bytes,
         })
     }
 
@@ -542,7 +561,15 @@ impl CanonicalEventEnvelope {
     }
 
     fn to_wire(&self) -> Result<WireCanonicalEventEnvelope, ContractError> {
-        let payload = self.payload.encode_to_vec()?;
+        let decoded_payload =
+            EventPayload::decode_preserving(self.payload.kind(), &self.encoded_payload)?;
+        if decoded_payload != self.payload {
+            return Err(ContractError::Invalid {
+                field: "payload",
+                reason: "preserved wire bytes do not match the typed payload".to_owned(),
+            });
+        }
+        let payload = self.encoded_payload.clone();
         let payload_hash = *blake3::hash(&payload).as_bytes();
         if payload_hash != self.payload_hash {
             return Err(ContractError::Invalid {
@@ -589,7 +616,7 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
         }
         let event_kind = EventKind::try_from(required(value.event_kind, "event_kind")?.as_str())?;
         let payload_bytes = required_bytes(value.payload, "payload")?;
-        let payload = EventPayload::decode(event_kind, &payload_bytes)?;
+        let payload = EventPayload::decode_preserving(event_kind, &payload_bytes)?;
         let payload_hash = fixed_hash(value.payload_hash, "payload_hash")?;
         let computed_hash = *blake3::hash(&payload_bytes).as_bytes();
         if computed_hash != payload_hash {
@@ -638,6 +665,7 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
             payload_hash,
             parser_version: required(value.parser_version, "parser_version")?,
             payload,
+            encoded_payload: payload_bytes,
         })
     }
 }

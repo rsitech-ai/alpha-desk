@@ -450,3 +450,252 @@ fn duplicate_services_methods_and_invalid_type_references_are_rejected() {
     });
     assert!(type_reference.contains("unknown type reference"));
 }
+
+#[test]
+fn cross_file_references_require_a_visible_declared_import() {
+    let missing_import = error_for(|current| {
+        let file = current_only_file();
+        current.file[0].message_type[0].field.push(message_field(
+            "added",
+            3,
+            ".hl.extra.v1.Added",
+            Label::Optional,
+        ));
+        current.file.push(file);
+    });
+    assert!(missing_import.contains("missing import"));
+
+    let baseline = descriptor();
+    let mut current = baseline.clone();
+    let file = current_only_file();
+    current.file[0]
+        .dependency
+        .push("extra/v1/current.proto".to_owned());
+    current.file[0].message_type[0].field.push(message_field(
+        "added",
+        3,
+        ".hl.extra.v1.Added",
+        Label::Optional,
+    ));
+    current.file.push(file);
+    check_file_descriptor_sets(&baseline, &current).unwrap();
+
+    let mut through_public_import = baseline.clone();
+    let provider = FileDescriptorProto {
+        name: Some("provider/v1/types.proto".to_owned()),
+        package: Some("hl.provider.v1".to_owned()),
+        syntax: Some("proto3".to_owned()),
+        message_type: vec![DescriptorProto {
+            name: Some("ProviderValue".to_owned()),
+            field: vec![field("value", 1, Type::String, Label::Optional)],
+            ..DescriptorProto::default()
+        }],
+        ..FileDescriptorProto::default()
+    };
+    let reexport = FileDescriptorProto {
+        name: Some("reexport/v1/types.proto".to_owned()),
+        package: Some("hl.reexport.v1".to_owned()),
+        syntax: Some("proto3".to_owned()),
+        dependency: vec!["provider/v1/types.proto".to_owned()],
+        public_dependency: vec![0],
+        ..FileDescriptorProto::default()
+    };
+    through_public_import.file[0]
+        .dependency
+        .push("reexport/v1/types.proto".to_owned());
+    through_public_import.file[0].message_type[0]
+        .field
+        .push(message_field(
+            "provider",
+            3,
+            ".hl.provider.v1.ProviderValue",
+            Label::Optional,
+        ));
+    through_public_import.file.extend([provider, reexport]);
+    check_file_descriptor_sets(&baseline, &through_public_import).unwrap();
+}
+
+#[test]
+fn message_declarations_share_one_namespace() {
+    let collision = error_for(|current| {
+        let mut file = current_only_file();
+        file.message_type[0].oneof_decl = vec![OneofDescriptorProto {
+            name: Some("value".to_owned()),
+            ..OneofDescriptorProto::default()
+        }];
+        current.file.push(file);
+    });
+    assert!(collision.contains("message namespace collision"));
+
+    let baseline = descriptor();
+    let mut current = baseline.clone();
+    let mut file = current_only_file();
+    file.message_type[0].oneof_decl = vec![OneofDescriptorProto {
+        name: Some("choice".to_owned()),
+        ..OneofDescriptorProto::default()
+    }];
+    current.file.push(file);
+    check_file_descriptor_sets(&baseline, &current).unwrap();
+}
+
+#[test]
+fn sibling_enum_values_share_the_enclosing_scope() {
+    let collision = error_for(|current| {
+        let mut file = current_only_file();
+        file.enum_type = vec![
+            enumeration("FirstState", "UNKNOWN"),
+            enumeration("SecondState", "UNKNOWN"),
+        ];
+        current.file.push(file);
+    });
+    assert!(collision.contains("enum value namespace collision"));
+
+    let cross_file_collision = error_for(|current| {
+        let mut first = current_only_file();
+        first.enum_type = vec![enumeration("FirstState", "UNKNOWN")];
+        let mut second = current_only_file();
+        second.name = Some("extra/v1/second.proto".to_owned());
+        second.message_type[0].name = Some("SecondAdded".to_owned());
+        second.enum_type = vec![enumeration("SecondState", "UNKNOWN")];
+        current.file.extend([first, second]);
+    });
+    assert!(cross_file_collision.contains("enum value namespace collision"));
+
+    let baseline = descriptor();
+    let mut current = baseline.clone();
+    let mut file = current_only_file();
+    file.enum_type = vec![
+        enumeration("FirstState", "FIRST_UNKNOWN"),
+        enumeration("SecondState", "SECOND_UNKNOWN"),
+    ];
+    current.file.push(file);
+    check_file_descriptor_sets(&baseline, &current).unwrap();
+}
+
+#[test]
+fn map_entries_require_exactly_one_legal_parent_map_field() {
+    let unlinked = error_for(|current| {
+        let mut file = current_only_file();
+        file.message_type[0]
+            .nested_type
+            .push(string_map_entry("ItemsEntry"));
+        current.file.push(file);
+    });
+    assert!(unlinked.contains("map entry"));
+    assert!(unlinked.contains("exactly one"));
+
+    let optional = error_for(|current| {
+        let mut file = current_only_file();
+        file.message_type[0]
+            .nested_type
+            .push(string_map_entry("ItemsEntry"));
+        file.message_type[0].field.push(message_field(
+            "items",
+            2,
+            ".hl.extra.v1.Added.ItemsEntry",
+            Label::Optional,
+        ));
+        current.file.push(file);
+    });
+    assert!(optional.contains("legal repeated map field"));
+
+    let reused = error_for(|current| {
+        let mut file = current_only_file();
+        file.message_type[0]
+            .nested_type
+            .push(string_map_entry("ItemsEntry"));
+        file.message_type[0].field.extend([
+            message_field("items", 2, ".hl.extra.v1.Added.ItemsEntry", Label::Repeated),
+            message_field(
+                "other_items",
+                3,
+                ".hl.extra.v1.Added.ItemsEntry",
+                Label::Repeated,
+            ),
+        ]);
+        current.file.push(file);
+    });
+    assert!(reused.contains("exactly one"));
+
+    let baseline = descriptor();
+    let mut current = baseline.clone();
+    let mut file = current_only_file();
+    file.message_type[0]
+        .nested_type
+        .push(string_map_entry("ItemsEntry"));
+    file.message_type[0].field.push(message_field(
+        "items",
+        2,
+        ".hl.extra.v1.Added.ItemsEntry",
+        Label::Repeated,
+    ));
+    current.file.push(file);
+    check_file_descriptor_sets(&baseline, &current).unwrap();
+}
+
+#[test]
+fn synthetic_optional_oneofs_and_baseline_oneof_identity_are_enforced() {
+    let malformed_optional = error_for(|current| {
+        let mut file = current_only_file();
+        file.message_type[0].oneof_decl = vec![OneofDescriptorProto {
+            name: Some("_value".to_owned()),
+            ..OneofDescriptorProto::default()
+        }];
+        file.message_type[0].field[0].oneof_index = Some(0);
+        file.message_type[0].field[0].proto3_optional = Some(true);
+        file.message_type[0]
+            .field
+            .push(field("also_value", 2, Type::String, Label::Optional));
+        file.message_type[0].field[1].oneof_index = Some(0);
+        current.file.push(file);
+    });
+    assert!(malformed_optional.contains("synthetic proto3 optional oneof"));
+
+    let mut baseline = descriptor();
+    baseline.file[0].message_type[0].oneof_decl = vec![OneofDescriptorProto {
+        name: Some("identity".to_owned()),
+        ..OneofDescriptorProto::default()
+    }];
+    baseline.file[0].message_type[0].field[0].oneof_index = Some(0);
+    let mut current = baseline.clone();
+    current.file[0].message_type[0].oneof_decl[0].name = Some("renamed".to_owned());
+    assert!(
+        check_file_descriptor_sets(&baseline, &current)
+            .unwrap_err()
+            .to_string()
+            .contains("oneof identity")
+    );
+}
+
+fn message_field(name: &str, number: i32, type_name: &str, label: Label) -> FieldDescriptorProto {
+    let mut field = field(name, number, Type::Message, label);
+    field.type_name = Some(type_name.to_owned());
+    field
+}
+
+fn enumeration(name: &str, zero_name: &str) -> EnumDescriptorProto {
+    EnumDescriptorProto {
+        name: Some(name.to_owned()),
+        value: vec![EnumValueDescriptorProto {
+            name: Some(zero_name.to_owned()),
+            number: Some(0),
+            ..EnumValueDescriptorProto::default()
+        }],
+        ..EnumDescriptorProto::default()
+    }
+}
+
+fn string_map_entry(name: &str) -> DescriptorProto {
+    DescriptorProto {
+        name: Some(name.to_owned()),
+        field: vec![
+            field("key", 1, Type::String, Label::Optional),
+            field("value", 2, Type::String, Label::Optional),
+        ],
+        options: Some(MessageOptions {
+            map_entry: Some(true),
+            ..MessageOptions::default()
+        }),
+        ..DescriptorProto::default()
+    }
+}
