@@ -1,35 +1,14 @@
-use api_contracts::{WireCanonicalEventEnvelope, WireSourceEvidence};
+use api_contracts::WireCanonicalEventEnvelope;
 use canonical_events::{
     CanonicalEventEnvelope, ConfirmationClass, ContractError, EventKind, EventOrderingKey,
 };
 
 fn valid_wire() -> WireCanonicalEventEnvelope {
-    WireCanonicalEventEnvelope {
-        schema_version: "1.0.0".to_owned(),
-        chain_id: "hyperliquid-mainnet".to_owned(),
-        block_height: 42,
-        block_time_micros: 1_700_000_000_000_000,
-        transaction_id: "tx-42".to_owned(),
-        transaction_index: 7,
-        event_index: 9,
-        event_id: "event-42-7-9".to_owned(),
-        event_kind: "TradeMatched".to_owned(),
-        market_ids: vec!["BTC-USD".to_owned()],
-        account_ids: vec!["0xaccount".to_owned()],
-        source_evidence: vec![WireSourceEvidence {
-            source_id: "primary-node".to_owned(),
-            source_version: "2026.07".to_owned(),
-            source_offset: "block:42/event:9".to_owned(),
-            content_hash: vec![0x11; 32],
-        }],
-        confirmation_class: 2,
-        observed_at_micros: 1_700_000_000_000_010,
-        ingested_at_micros: 1_700_000_000_000_020,
-        canonicalized_at_micros: 1_700_000_000_000_030,
-        payload_hash: vec![0x22; 32],
-        parser_version: "parser-v1".to_owned(),
-        payload: vec![0x0a, 0x01, 0x01],
-    }
+    let bytes = CanonicalEventEnvelope::fixture()
+        .unwrap()
+        .encode_to_vec()
+        .unwrap();
+    WireCanonicalEventEnvelope::decode(&bytes).unwrap()
 }
 
 fn decode(wire: WireCanonicalEventEnvelope) -> Result<CanonicalEventEnvelope, ContractError> {

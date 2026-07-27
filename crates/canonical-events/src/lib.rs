@@ -1,9 +1,15 @@
 #![forbid(unsafe_code)]
 
-use api_contracts::{WireCanonicalEventEnvelope, WireSourceEvidence};
-use domain_types::{
-    AccountId, BlockHeight, ChainId, EventId, MarketId, ProtocolTime, SourceId, TransactionId,
+use api_contracts::{
+    WireCanonicalEventEnvelope, WireSourceEvidence, WireTradeMatched, decode_trade_matched,
+    encode_default_event_payload, encode_trade_matched, validate_event_payload,
 };
+use domain_types::{
+    Address, BlockHeight, ChainId, EventId, KnownTime, MarketId, Price, ProtocolTime, Quantity,
+    SourceId, TransactionId,
+};
+use semver::Version;
+use std::str::FromStr;
 
 pub const SCHEMA_MAJOR: u64 = 1;
 const HASH_LENGTH: usize = 32;
@@ -148,6 +154,150 @@ event_kinds!(
     OutcomeResolved,
 );
 
+/// Fully mapped V1 trade payload used by the deterministic Task 4 fixture boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeMatched {
+    pub price: Price,
+    pub quantity: Quantity,
+    pub deterministic_seed: u64,
+}
+
+macro_rules! opaque_payloads {
+    ($($kind:ident),+ $(,)?) => {
+        $(
+            /// Closed, schema-validated V1 payload.
+            ///
+            /// The original encoded message is intentionally retained verbatim so
+            /// fields not yet promoted into domain types cannot be silently lost.
+            #[derive(Debug, Clone, PartialEq, Eq)]
+            pub struct $kind {
+                encoded: Vec<u8>,
+            }
+        )+
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum EventPayload {
+            $($kind($kind),)+
+            TradeMatched(TradeMatched),
+        }
+
+        impl EventPayload {
+            #[must_use]
+            pub const fn kind(&self) -> EventKind {
+                match self {
+                    $(Self::$kind(_) => EventKind::$kind,)+
+                    Self::TradeMatched(_) => EventKind::TradeMatched,
+                }
+            }
+
+            pub fn encode_to_vec(&self) -> Result<Vec<u8>, ContractError> {
+                match self {
+                    $(
+                        Self::$kind(value) => {
+                            validate_payload(EventKind::$kind, &value.encoded)?;
+                            Ok(value.encoded.clone())
+                        }
+                    )+
+                    Self::TradeMatched(value) => encode_trade_matched(&WireTradeMatched {
+                        price: value.price.to_string(),
+                        quantity: value.quantity.to_string(),
+                        deterministic_seed: value.deterministic_seed,
+                    })
+                    .map_err(payload_error),
+                }
+            }
+
+            pub fn decode(kind: EventKind, bytes: &[u8]) -> Result<Self, ContractError> {
+                required_payload(bytes)?;
+                match kind {
+                    $(
+                        EventKind::$kind => {
+                            validate_payload(kind, bytes)?;
+                            Ok(Self::$kind($kind {
+                                encoded: bytes.to_vec(),
+                            }))
+                        }
+                    )+
+                    EventKind::TradeMatched => {
+                        let value = decode_trade_matched(bytes).map_err(payload_error)?;
+                        Ok(Self::TradeMatched(TradeMatched {
+                            price: Price::from_str(&value.price).map_err(|error| {
+                                ContractError::Invalid {
+                                    field: "payload",
+                                    reason: format!("invalid TradeMatched price: {error}"),
+                                }
+                            })?,
+                            quantity: Quantity::from_str(&value.quantity).map_err(|error| {
+                                ContractError::Invalid {
+                                    field: "payload",
+                                    reason: format!("invalid TradeMatched quantity: {error}"),
+                                }
+                            })?,
+                            deterministic_seed: value.deterministic_seed,
+                        }))
+                    }
+                }
+            }
+
+            pub fn fixtures() -> Result<Vec<Self>, ContractError> {
+                EventKind::ALL
+                    .into_iter()
+                    .map(|kind| {
+                        let bytes = encode_default_event_payload(kind.as_wire_name())
+                            .map_err(payload_error)?;
+                        Self::decode(kind, &bytes)
+                    })
+                    .collect()
+            }
+        }
+    };
+}
+
+opaque_payloads!(
+    OrderAccepted,
+    OrderRested,
+    OrderModified,
+    OrderPartiallyFilled,
+    OrderFilled,
+    OrderCancelled,
+    OrderRejected,
+    TriggerOrderActivated,
+    TwapStarted,
+    TwapSliceFilled,
+    TwapCompleted,
+    DepositCredited,
+    WithdrawalDebited,
+    SpotTransfer,
+    PerpTransfer,
+    SubaccountTransfer,
+    VaultDeposit,
+    VaultWithdrawal,
+    FeeCharged,
+    BuilderFeeCharged,
+    FundingPaid,
+    FundingReceived,
+    ReferralReward,
+    AccountModeChanged,
+    MarginModeChanged,
+    LeverageChanged,
+    LiquidationStarted,
+    LiquidationFill,
+    BackstopLiquidation,
+    PositionSettled,
+    MarketHalted,
+    MarketResumed,
+    OpenInterestCapChanged,
+    MarginTableChanged,
+    MarketCreated,
+    MarketMetadataChanged,
+    OracleUpdated,
+    FundingRateUpdated,
+    AssetContextUpdated,
+    DexCreated,
+    OutcomeCreated,
+    OutcomeResolved,
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEvidence {
     source_id: SourceId,
@@ -174,17 +324,16 @@ pub struct CanonicalEventEnvelope {
     transaction_index: u32,
     event_index: u32,
     event_id: EventId,
-    event_kind: EventKind,
     market_ids: Vec<MarketId>,
-    account_ids: Vec<AccountId>,
+    account_ids: Vec<Address>,
     source_evidence: Vec<SourceEvidence>,
     confirmation_class: ConfirmationClass,
-    observed_at: ProtocolTime,
-    ingested_at: ProtocolTime,
-    canonicalized_at: ProtocolTime,
+    observed_at: KnownTime,
+    ingested_at: KnownTime,
+    canonicalized_at: KnownTime,
     payload_hash: [u8; HASH_LENGTH],
     parser_version: String,
-    payload: Vec<u8>,
+    payload: EventPayload,
 }
 
 impl CanonicalEventEnvelope {
@@ -193,37 +342,133 @@ impl CanonicalEventEnvelope {
     }
 
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, ContractError> {
-        Ok(WireCanonicalEventEnvelope::from(self).encode_to_vec())
+        Ok(self.to_wire()?.encode_to_vec())
+    }
+
+    /// Builds a deterministic, fixture-safe envelope.
+    ///
+    /// This convenience constructor deliberately derives lifecycle timestamps
+    /// and source evidence from its stable inputs. Live ingestion must instead
+    /// decode a wire envelope carrying independently observed lifecycle and
+    /// evidence values.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        schema_version: &str,
+        chain_id: &str,
+        block_height: BlockHeight,
+        block_time: ProtocolTime,
+        transaction_id: TransactionId,
+        transaction_index: u32,
+        event_index: u32,
+        event_id: EventId,
+        market_ids: Vec<MarketId>,
+        account_ids: Vec<Address>,
+        confirmation_class: ConfirmationClass,
+        payload: EventPayload,
+        parser_version: &str,
+    ) -> Result<Self, ContractError> {
+        validate_schema_version(schema_version)?;
+        let chain_id = parse_id(chain_id.to_owned(), "chain_id", ChainId::new)?;
+        let parser_version = required(parser_version.to_owned(), "parser_version")?;
+        let payload_bytes = payload.encode_to_vec()?;
+        let payload_hash = *blake3::hash(&payload_bytes).as_bytes();
+        let lifecycle_time =
+            KnownTime::from_unix_micros(block_time.unix_micros()).map_err(|error| {
+                ContractError::Invalid {
+                    field: "block_time_micros",
+                    reason: error.to_string(),
+                }
+            })?;
+        let source_offset = format!(
+            "{}:{}:{}:{}",
+            chain_id.as_str(),
+            block_height.get(),
+            transaction_index,
+            event_index
+        );
+        let source_evidence = vec![SourceEvidence {
+            source_id: SourceId::new("deterministic-fixture-constructor").map_err(|error| {
+                ContractError::Invalid {
+                    field: "source_evidence.source_id",
+                    reason: error.to_string(),
+                }
+            })?,
+            source_version: "v1".to_owned(),
+            source_offset,
+            content_hash: payload_hash,
+        }];
+
+        Ok(Self {
+            schema_version: schema_version.to_owned(),
+            chain_id,
+            block_height,
+            block_time,
+            transaction_id,
+            transaction_index,
+            event_index,
+            event_id,
+            market_ids,
+            account_ids,
+            source_evidence,
+            confirmation_class,
+            observed_at: lifecycle_time,
+            ingested_at: lifecycle_time,
+            canonicalized_at: lifecycle_time,
+            payload_hash,
+            parser_version,
+            payload,
+        })
     }
 
     pub fn fixture() -> Result<Self, ContractError> {
-        WireCanonicalEventEnvelope {
-            schema_version: "1.0.0".to_owned(),
-            chain_id: "hyperliquid-mainnet".to_owned(),
-            block_height: 42,
-            block_time_micros: 1_700_000_000_000_000,
-            transaction_id: "tx-42".to_owned(),
-            transaction_index: 7,
-            event_index: 9,
-            event_id: "event-42-7-9".to_owned(),
-            event_kind: "TradeMatched".to_owned(),
-            market_ids: vec!["BTC-USD".to_owned()],
-            account_ids: vec!["0xaccount".to_owned()],
-            source_evidence: vec![WireSourceEvidence {
-                source_id: "primary-node".to_owned(),
-                source_version: "2026.07".to_owned(),
-                source_offset: "block:42/event:9".to_owned(),
-                content_hash: vec![0x11; HASH_LENGTH],
-            }],
-            confirmation_class: 2,
-            observed_at_micros: 1_700_000_000_000_010,
-            ingested_at_micros: 1_700_000_000_000_020,
-            canonicalized_at_micros: 1_700_000_000_000_030,
-            payload_hash: vec![0x22; HASH_LENGTH],
-            parser_version: "parser-v1".to_owned(),
-            payload: vec![0x0a, 0x01, 0x01],
-        }
-        .try_into()
+        Self::try_new(
+            "1.0.0",
+            "hyperliquid-mainnet",
+            BlockHeight::new(42),
+            ProtocolTime::from_unix_micros(1_700_000_000_000_000).map_err(|error| {
+                ContractError::Invalid {
+                    field: "block_time_micros",
+                    reason: error.to_string(),
+                }
+            })?,
+            TransactionId::new("tx-42").map_err(|error| ContractError::Invalid {
+                field: "transaction_id",
+                reason: error.to_string(),
+            })?,
+            7,
+            9,
+            EventId::new("event-42-7-9").map_err(|error| ContractError::Invalid {
+                field: "event_id",
+                reason: error.to_string(),
+            })?,
+            vec![
+                MarketId::new("BTC-USD").map_err(|error| ContractError::Invalid {
+                    field: "market_ids",
+                    reason: error.to_string(),
+                })?,
+            ],
+            vec![
+                Address::from_bytes([0x11; 20]),
+                Address::from_bytes([0x22; 20]),
+            ],
+            ConfirmationClass::CommittedPrimary,
+            EventPayload::TradeMatched(TradeMatched {
+                price: Price::parse_at_scale("65000", 6).map_err(|error| {
+                    ContractError::Invalid {
+                        field: "payload",
+                        reason: error.to_string(),
+                    }
+                })?,
+                quantity: Quantity::parse_at_scale("0.01", 8).map_err(|error| {
+                    ContractError::Invalid {
+                        field: "payload",
+                        reason: error.to_string(),
+                    }
+                })?,
+                deterministic_seed: 7,
+            }),
+            "parser-v1",
+        )
     }
 
     #[must_use]
@@ -237,13 +482,48 @@ impl CanonicalEventEnvelope {
     }
 
     #[must_use]
+    pub const fn block_time(&self) -> ProtocolTime {
+        self.block_time
+    }
+
+    #[must_use]
+    pub const fn observed_at(&self) -> KnownTime {
+        self.observed_at
+    }
+
+    #[must_use]
+    pub const fn ingested_at(&self) -> KnownTime {
+        self.ingested_at
+    }
+
+    #[must_use]
+    pub const fn canonicalized_at(&self) -> KnownTime {
+        self.canonicalized_at
+    }
+
+    #[must_use]
     pub fn event_id(&self) -> &EventId {
         &self.event_id
     }
 
     #[must_use]
     pub const fn event_kind(&self) -> EventKind {
-        self.event_kind
+        self.payload.kind()
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &EventPayload {
+        &self.payload
+    }
+
+    #[must_use]
+    pub fn payload_hash(&self) -> [u8; HASH_LENGTH] {
+        self.payload_hash
+    }
+
+    #[must_use]
+    pub fn account_addresses(&self) -> &[Address] {
+        &self.account_ids
     }
 
     #[must_use]
@@ -260,6 +540,43 @@ impl CanonicalEventEnvelope {
             event_index: self.event_index,
         }
     }
+
+    fn to_wire(&self) -> Result<WireCanonicalEventEnvelope, ContractError> {
+        let payload = self.payload.encode_to_vec()?;
+        let payload_hash = *blake3::hash(&payload).as_bytes();
+        if payload_hash != self.payload_hash {
+            return Err(ContractError::Invalid {
+                field: "payload_hash",
+                reason: "stored hash no longer matches the typed payload".to_owned(),
+            });
+        }
+        Ok(WireCanonicalEventEnvelope {
+            schema_version: self.schema_version.clone(),
+            chain_id: self.chain_id.to_string(),
+            block_height: self.block_height.get(),
+            block_time_micros: self.block_time.unix_micros(),
+            transaction_id: self.transaction_id.to_string(),
+            transaction_index: self.transaction_index,
+            event_index: self.event_index,
+            event_id: self.event_id.to_string(),
+            event_kind: self.payload.kind().as_wire_name().to_owned(),
+            market_ids: self.market_ids.iter().map(ToString::to_string).collect(),
+            account_ids: self
+                .account_ids
+                .iter()
+                .copied()
+                .map(Address::to_api_string)
+                .collect(),
+            source_evidence: self.source_evidence.iter().map(Into::into).collect(),
+            confirmation_class: self.confirmation_class.wire_value(),
+            observed_at_micros: self.observed_at.unix_micros(),
+            ingested_at_micros: self.ingested_at.unix_micros(),
+            canonicalized_at_micros: self.canonicalized_at.unix_micros(),
+            payload_hash: payload_hash.to_vec(),
+            parser_version: self.parser_version.clone(),
+            payload,
+        })
+    }
 }
 
 impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
@@ -270,17 +587,27 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
         if value.source_evidence.is_empty() {
             return Err(ContractError::Missing("source_evidence"));
         }
+        let event_kind = EventKind::try_from(required(value.event_kind, "event_kind")?.as_str())?;
+        let payload_bytes = required_bytes(value.payload, "payload")?;
+        let payload = EventPayload::decode(event_kind, &payload_bytes)?;
+        let payload_hash = fixed_hash(value.payload_hash, "payload_hash")?;
+        let computed_hash = *blake3::hash(&payload_bytes).as_bytes();
+        if computed_hash != payload_hash {
+            return Err(ContractError::Invalid {
+                field: "payload_hash",
+                reason: "does not match the canonical payload bytes".to_owned(),
+            });
+        }
 
         Ok(Self {
             schema_version: required(value.schema_version, "schema_version")?,
             chain_id: parse_id(value.chain_id, "chain_id", ChainId::new)?,
             block_height: BlockHeight::new(value.block_height),
-            block_time: parse_time(value.block_time_micros, "block_time_micros")?,
+            block_time: parse_protocol_time(value.block_time_micros, "block_time_micros")?,
             transaction_id: parse_id(value.transaction_id, "transaction_id", TransactionId::new)?,
             transaction_index: value.transaction_index,
             event_index: value.event_index,
             event_id: parse_id(value.event_id, "event_id", EventId::new)?,
-            event_kind: EventKind::try_from(required(value.event_kind, "event_kind")?.as_str())?,
             market_ids: value
                 .market_ids
                 .into_iter()
@@ -289,7 +616,12 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
             account_ids: value
                 .account_ids
                 .into_iter()
-                .map(|id| parse_list_id(id, "account_ids", AccountId::new))
+                .map(|id| {
+                    Address::parse_api(&id).map_err(|error| ContractError::Invalid {
+                        field: "account_ids",
+                        reason: error.to_string(),
+                    })
+                })
                 .collect::<Result<_, _>>()?,
             source_evidence: value
                 .source_evidence
@@ -297,12 +629,15 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
                 .map(SourceEvidence::try_from)
                 .collect::<Result<_, _>>()?,
             confirmation_class: value.confirmation_class.try_into()?,
-            observed_at: parse_time(value.observed_at_micros, "observed_at_micros")?,
-            ingested_at: parse_time(value.ingested_at_micros, "ingested_at_micros")?,
-            canonicalized_at: parse_time(value.canonicalized_at_micros, "canonicalized_at_micros")?,
-            payload_hash: fixed_hash(value.payload_hash, "payload_hash")?,
+            observed_at: parse_known_time(value.observed_at_micros, "observed_at_micros")?,
+            ingested_at: parse_known_time(value.ingested_at_micros, "ingested_at_micros")?,
+            canonicalized_at: parse_known_time(
+                value.canonicalized_at_micros,
+                "canonicalized_at_micros",
+            )?,
+            payload_hash,
             parser_version: required(value.parser_version, "parser_version")?,
-            payload: required_bytes(value.payload, "payload")?,
+            payload,
         })
     }
 }
@@ -317,32 +652,6 @@ impl TryFrom<WireSourceEvidence> for SourceEvidence {
             source_offset: required(value.source_offset, "source_evidence.source_offset")?,
             content_hash: fixed_hash(value.content_hash, "source_evidence.content_hash")?,
         })
-    }
-}
-
-impl From<&CanonicalEventEnvelope> for WireCanonicalEventEnvelope {
-    fn from(value: &CanonicalEventEnvelope) -> Self {
-        Self {
-            schema_version: value.schema_version.clone(),
-            chain_id: value.chain_id.to_string(),
-            block_height: value.block_height.get(),
-            block_time_micros: value.block_time.unix_micros(),
-            transaction_id: value.transaction_id.to_string(),
-            transaction_index: value.transaction_index,
-            event_index: value.event_index,
-            event_id: value.event_id.to_string(),
-            event_kind: value.event_kind.as_wire_name().to_owned(),
-            market_ids: value.market_ids.iter().map(ToString::to_string).collect(),
-            account_ids: value.account_ids.iter().map(ToString::to_string).collect(),
-            source_evidence: value.source_evidence.iter().map(Into::into).collect(),
-            confirmation_class: value.confirmation_class.wire_value(),
-            observed_at_micros: value.observed_at.unix_micros(),
-            ingested_at_micros: value.ingested_at.unix_micros(),
-            canonicalized_at_micros: value.canonicalized_at.unix_micros(),
-            payload_hash: value.payload_hash.to_vec(),
-            parser_version: value.parser_version.clone(),
-            payload: value.payload.clone(),
-        }
     }
 }
 
@@ -361,24 +670,17 @@ fn validate_schema_version(value: &str) -> Result<(), ContractError> {
     if value.is_empty() {
         return Err(ContractError::Missing("schema_version"));
     }
-    let components = value.split('.').collect::<Vec<_>>();
-    if components.len() != 3
-        || components
-            .iter()
-            .any(|component| component.is_empty() || component.parse::<u64>().is_err())
-    {
+    let version = Version::parse(value).map_err(|error| ContractError::Invalid {
+        field: "schema_version",
+        reason: format!("expected canonical numeric MAJOR.MINOR.PATCH: {error}"),
+    })?;
+    if !version.pre.is_empty() || !version.build.is_empty() {
         return Err(ContractError::Invalid {
             field: "schema_version",
-            reason: "expected numeric MAJOR.MINOR.PATCH".to_owned(),
+            reason: "pre-release and build metadata are forbidden".to_owned(),
         });
     }
-    let major = components[0]
-        .parse::<u64>()
-        .map_err(|error| ContractError::Invalid {
-            field: "schema_version",
-            reason: error.to_string(),
-        })?;
-    if major != SCHEMA_MAJOR {
+    if version.major != SCHEMA_MAJOR {
         return Err(ContractError::UnsupportedSchema(value.to_owned()));
     }
     Ok(())
@@ -402,6 +704,14 @@ fn required_bytes(value: Vec<u8>, field: &'static str) -> Result<Vec<u8>, Contra
         Err(ContractError::Missing(field))
     } else {
         Ok(value)
+    }
+}
+
+fn required_payload(value: &[u8]) -> Result<(), ContractError> {
+    if value.is_empty() {
+        Err(ContractError::Missing("payload"))
+    } else {
+        Ok(())
     }
 }
 
@@ -430,8 +740,15 @@ fn parse_list_id<T>(
     })
 }
 
-fn parse_time(value: i64, field: &'static str) -> Result<ProtocolTime, ContractError> {
+fn parse_protocol_time(value: i64, field: &'static str) -> Result<ProtocolTime, ContractError> {
     ProtocolTime::from_unix_micros(value).map_err(|error| ContractError::Invalid {
+        field,
+        reason: error.to_string(),
+    })
+}
+
+fn parse_known_time(value: i64, field: &'static str) -> Result<KnownTime, ContractError> {
+    KnownTime::from_unix_micros(value).map_err(|error| ContractError::Invalid {
         field,
         reason: error.to_string(),
     })
@@ -443,4 +760,15 @@ fn fixed_hash(value: Vec<u8>, field: &'static str) -> Result<[u8; HASH_LENGTH], 
         field,
         reason: format!("expected {HASH_LENGTH} bytes, received {actual}"),
     })
+}
+
+fn validate_payload(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
+    validate_event_payload(kind.as_wire_name(), bytes).map_err(payload_error)
+}
+
+fn payload_error(error: api_contracts::PayloadCodecError) -> ContractError {
+    ContractError::Invalid {
+        field: "payload",
+        reason: error.to_string(),
+    }
 }
