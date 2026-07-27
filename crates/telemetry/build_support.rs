@@ -238,10 +238,12 @@ fn load_packaged_inputs(manifest_dir: &Path) -> Result<BuildInputs, BuildSupport
         .get("sha1")
         .and_then(serde_json::Value::as_str)
         .ok_or(BuildSupportError::InvalidMetadata("packaged VCS metadata"))?;
-    let dirty = git
-        .get("dirty")
-        .and_then(serde_json::Value::as_bool)
-        .ok_or(BuildSupportError::InvalidMetadata("packaged VCS metadata"))?;
+    let dirty = match git.get("dirty") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or(BuildSupportError::InvalidMetadata("packaged VCS metadata"))?,
+    };
     let path_in_vcs = vcs
         .get("path_in_vcs")
         .and_then(serde_json::Value::as_str)
