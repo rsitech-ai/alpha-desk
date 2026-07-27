@@ -36,6 +36,19 @@ if "$gate" --manifest-path "$fixture_root/Cargo.toml"; then
   exit 1
 fi
 
+cat >"$fixture_root/src/lib.rs" <<'EOF'
+#![allow(unsafe_code)]
+
+pub fn read(value: &u8) -> u8 {
+    unsafe { core::ptr::read_volatile(value) }
+}
+EOF
+
+if "$gate" --manifest-path "$fixture_root/Cargo.toml"; then
+  echo "crate-level allow(unsafe_code) must not override the compiler gate" >&2
+  exit 1
+fi
+
 if RUSTFLAGS=--cap-lints=allow \
   "$gate" --manifest-path "$fixture_root/Cargo.toml"
 then

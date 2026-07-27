@@ -131,6 +131,22 @@ impl Graph {
                 ));
             }
 
+            let structured_ids: BTreeSet<_> = node
+                .deps
+                .iter()
+                .map(|dependency| dependency.pkg.clone())
+                .collect();
+            let package_ids: BTreeSet<_> = node.dependencies.iter().cloned().collect();
+            if structured_ids != package_ids {
+                return Err(format!(
+                    "resolve node dependency fields disagree: {}; deps-only: {}; \
+                     dependencies-only: {}",
+                    escape_package_id(&node.id),
+                    render_package_ids(structured_ids.difference(&package_ids)),
+                    render_package_ids(package_ids.difference(&structured_ids))
+                ));
+            }
+
             let mut dependencies = Vec::with_capacity(node.deps.len());
             for dependency in &node.deps {
                 if !packages.contains_key(&dependency.pkg) {
@@ -411,6 +427,13 @@ fn reconstruct_path(
 
 fn escape_package_id(id: &PackageId) -> String {
     escape_text(&id.repr)
+}
+
+fn render_package_ids<'a>(ids: impl Iterator<Item = &'a PackageId>) -> String {
+    format!(
+        "[{}]",
+        ids.map(escape_package_id).collect::<Vec<_>>().join(", ")
+    )
 }
 
 fn escape_text(text: &str) -> String {
