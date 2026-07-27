@@ -468,7 +468,7 @@ fn validate_message(
         }
     }
 
-    validate_synthetic_optional_oneofs(&qualified, message)?;
+    validate_oneofs(&qualified, message)?;
     validate_parent_map_fields(&qualified, message, symbols)?;
 
     if map_entry {
@@ -499,6 +499,11 @@ fn validate_field(
     if syntax == "proto3" && label == Label::Required {
         return invalid(format!(
             "required field {message}.{name} is invalid in proto3"
+        ));
+    }
+    if field.proto3_optional.unwrap_or(false) && syntax != "proto3" {
+        return invalid(format!(
+            "proto3 optional field {message}.{name} is invalid in {syntax}"
         ));
     }
     let type_value = required_number(field.r#type, "field type")?;
@@ -587,23 +592,32 @@ fn validate_reference_visibility(
     Ok(())
 }
 
-fn validate_synthetic_optional_oneofs(
-    qualified: &str,
-    message: &DescriptorProto,
-) -> Result<(), SchemaCheckError> {
+fn validate_oneofs(qualified: &str, message: &DescriptorProto) -> Result<(), SchemaCheckError> {
+    let mut first_synthetic = None;
     for (index, _) in message.oneof_decl.iter().enumerate() {
         let members = message
             .field
             .iter()
             .filter(|field| field.oneof_index == i32::try_from(index).ok())
             .collect::<Vec<_>>();
-        if members
-            .iter()
-            .any(|field| field.proto3_optional == Some(true))
-            && (members.len() != 1 || members[0].proto3_optional != Some(true))
-        {
+        if members.is_empty() {
             return invalid(format!(
-                "synthetic proto3 optional oneof {index} in {qualified} must contain exactly one proto3 optional field"
+                "oneof {index} in {qualified} must contain at least one field"
+            ));
+        }
+        let synthetic = members
+            .iter()
+            .any(|field| field.proto3_optional == Some(true));
+        if synthetic {
+            if members.len() != 1 || members[0].proto3_optional != Some(true) {
+                return invalid(format!(
+                    "synthetic proto3 optional oneof {index} in {qualified} must contain exactly one proto3 optional field"
+                ));
+            }
+            first_synthetic.get_or_insert(index);
+        } else if let Some(synthetic_index) = first_synthetic {
+            return invalid(format!(
+                "synthetic proto3 optional oneof {synthetic_index} in {qualified} must appear after all real oneofs"
             ));
         }
     }

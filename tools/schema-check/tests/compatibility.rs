@@ -534,6 +534,7 @@ fn message_declarations_share_one_namespace() {
         name: Some("choice".to_owned()),
         ..OneofDescriptorProto::default()
     }];
+    file.message_type[0].field[0].oneof_index = Some(0);
     current.file.push(file);
     check_file_descriptor_sets(&baseline, &current).unwrap();
 }
@@ -665,6 +666,109 @@ fn synthetic_optional_oneofs_and_baseline_oneof_identity_are_enforced() {
             .to_string()
             .contains("oneof identity")
     );
+}
+
+#[test]
+fn synthetic_proto3_optional_oneof_before_real_oneof_is_rejected() {
+    let error = error_for(|current| {
+        let mut file = current_only_file();
+        let message = &mut file.message_type[0];
+        message.oneof_decl = vec![
+            OneofDescriptorProto {
+                name: Some("_value".to_owned()),
+                ..OneofDescriptorProto::default()
+            },
+            OneofDescriptorProto {
+                name: Some("choice".to_owned()),
+                ..OneofDescriptorProto::default()
+            },
+        ];
+        message.field[0].oneof_index = Some(0);
+        message.field[0].proto3_optional = Some(true);
+        let mut choice = field("choice_value", 2, Type::String, Label::Optional);
+        choice.oneof_index = Some(1);
+        message.field.push(choice);
+        current.file.push(file);
+    });
+
+    assert!(error.contains("synthetic proto3 optional oneof"));
+    assert!(error.contains("after all real oneofs"));
+}
+
+#[test]
+fn proto3_optional_field_in_proto2_file_is_rejected() {
+    let error = error_for(|current| {
+        let mut file = current_only_file();
+        file.syntax = Some("proto2".to_owned());
+        let message = &mut file.message_type[0];
+        message.oneof_decl = vec![OneofDescriptorProto {
+            name: Some("_value".to_owned()),
+            ..OneofDescriptorProto::default()
+        }];
+        message.field[0].oneof_index = Some(0);
+        message.field[0].proto3_optional = Some(true);
+        current.file.push(file);
+    });
+
+    assert!(error.contains("proto3 optional field"));
+    assert!(error.contains("invalid in proto2"));
+}
+
+#[test]
+fn empty_oneof_declaration_is_rejected() {
+    let error = error_for(|current| {
+        let mut file = current_only_file();
+        file.message_type[0].oneof_decl = vec![OneofDescriptorProto {
+            name: Some("choice".to_owned()),
+            ..OneofDescriptorProto::default()
+        }];
+        current.file.push(file);
+    });
+
+    assert!(error.contains("oneof"));
+    assert!(error.contains("must contain at least one field"));
+}
+
+#[test]
+fn real_oneofs_before_synthetic_proto3_optional_oneofs_are_accepted() {
+    let baseline = descriptor();
+    let mut current = baseline.clone();
+    let mut file = current_only_file();
+    let message = &mut file.message_type[0];
+    message.oneof_decl = vec![
+        OneofDescriptorProto {
+            name: Some("choice".to_owned()),
+            ..OneofDescriptorProto::default()
+        },
+        OneofDescriptorProto {
+            name: Some("_value".to_owned()),
+            ..OneofDescriptorProto::default()
+        },
+    ];
+    let mut choice = field("choice_value", 2, Type::String, Label::Optional);
+    choice.oneof_index = Some(0);
+    message.field.push(choice);
+    message.field[0].oneof_index = Some(1);
+    message.field[0].proto3_optional = Some(true);
+    current.file.push(file);
+
+    check_file_descriptor_sets(&baseline, &current).unwrap();
+}
+
+#[test]
+fn populated_real_oneof_is_accepted() {
+    let baseline = descriptor();
+    let mut current = baseline.clone();
+    let mut file = current_only_file();
+    let message = &mut file.message_type[0];
+    message.oneof_decl = vec![OneofDescriptorProto {
+        name: Some("choice".to_owned()),
+        ..OneofDescriptorProto::default()
+    }];
+    message.field[0].oneof_index = Some(0);
+    current.file.push(file);
+
+    check_file_descriptor_sets(&baseline, &current).unwrap();
 }
 
 fn message_field(name: &str, number: i32, type_name: &str, label: Label) -> FieldDescriptorProto {
