@@ -1,5 +1,6 @@
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::fmt::Write;
 use std::fs::File;
 use std::path::Path;
 
@@ -37,10 +38,19 @@ struct Violation {
 
 pub fn load_metadata(path: Option<&Path>) -> Result<Metadata, String> {
     if let Some(path) = path {
-        let file =
-            File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-        return serde_json::from_reader(file)
-            .map_err(|error| format!("cannot parse {}: {error}", path.display()));
+        let escaped_path = escape_path(path);
+        let file = File::open(path).map_err(|error| {
+            format!(
+                "cannot open {escaped_path}: I/O error kind {:?}",
+                error.kind()
+            )
+        })?;
+        return serde_json::from_reader(file).map_err(|error| {
+            format!(
+                "cannot parse {escaped_path}: {}",
+                escape_text(&error.to_string())
+            )
+        });
     }
 
     let mut command = MetadataCommand::new();
@@ -51,7 +61,7 @@ pub fn load_metadata(path: Option<&Path>) -> Result<Metadata, String> {
     ]);
     command
         .exec()
-        .map_err(|error| format!("cargo metadata failed: {error}"))
+        .map_err(|error| format!("cargo metadata failed: {}", escape_text(&error.to_string())))
 }
 
 pub fn check(metadata: &Metadata) -> Result<Vec<String>, String> {
@@ -86,7 +96,10 @@ impl Graph {
                 layer,
             };
             if packages.insert(package.id.clone(), info).is_some() {
-                return Err(format!("duplicate package id: {}", package.id));
+                return Err(format!(
+                    "duplicate package id: {}",
+                    escape_package_id(&package.id)
+                ));
             }
         }
 
@@ -95,7 +108,10 @@ impl Graph {
         let workspace: HashSet<_> = workspace_ids.iter().cloned().collect();
         for id in &workspace_ids {
             if !packages.contains_key(id) {
-                return Err(format!("workspace member is absent from packages: {id}"));
+                return Err(format!(
+                    "workspace member is absent from packages: {}",
+                    escape_package_id(id)
+                ));
             }
         }
 
@@ -103,10 +119,16 @@ impl Graph {
         let mut node_ids = BTreeSet::new();
         for node in &resolve.nodes {
             if !packages.contains_key(&node.id) {
-                return Err(format!("resolve node is absent from packages: {}", node.id));
+                return Err(format!(
+                    "resolve node is absent from packages: {}",
+                    escape_package_id(&node.id)
+                ));
             }
             if !node_ids.insert(node.id.clone()) {
-                return Err(format!("duplicate resolve node: {}", node.id));
+                return Err(format!(
+                    "duplicate resolve node: {}",
+                    escape_package_id(&node.id)
+                ));
             }
 
             let mut dependencies = Vec::with_capacity(node.deps.len());
@@ -114,7 +136,8 @@ impl Graph {
                 if !packages.contains_key(&dependency.pkg) {
                     return Err(format!(
                         "resolved dependency is absent from packages: {} -> {}",
-                        node.id, dependency.pkg
+                        escape_package_id(&node.id),
+                        escape_package_id(&dependency.pkg)
                     ));
                 }
                 dependencies.push(dependency.pkg.clone());
@@ -126,13 +149,7 @@ impl Graph {
             edges.insert(node.id.clone(), dependencies);
         }
 
-        for id in &workspace_ids {
-            if !node_ids.contains(id) {
-                return Err(format!(
-                    "workspace member is absent from resolve nodes: {id}"
-                ));
-            }
-        }
+        validate_reachable_nodes(&packages, &edges, &workspace_ids)?;
 
         Ok(Self {
             packages,
@@ -313,17 +330,48 @@ impl Graph {
 
     fn render_path(&self, path: &[PackageId]) -> String {
         path.iter()
-            .map(|id| self.packages[id].name.as_str())
+            .map(|id| escape_text(&self.packages[id].name))
             .collect::<Vec<_>>()
             .join(" -> ")
     }
 
     fn render_identity_path(&self, path: &[PackageId]) -> String {
         path.iter()
-            .map(|id| format!("{} ({id})", self.packages[id].name))
+            .map(|id| {
+                format!(
+                    "{} ({})",
+                    escape_text(&self.packages[id].name),
+                    escape_package_id(id)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" -> ")
     }
+}
+
+fn validate_reachable_nodes(
+    packages: &HashMap<PackageId, PackageInfo>,
+    edges: &HashMap<PackageId, Vec<PackageId>>,
+    workspace_ids: &[PackageId],
+) -> Result<(), String> {
+    let mut queue: VecDeque<_> = workspace_ids.iter().cloned().collect();
+    let mut visited = HashSet::new();
+
+    while let Some(id) = queue.pop_front() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let dependencies = edges.get(&id).ok_or_else(|| {
+            let package = &packages[&id];
+            format!(
+                "reachable package must have exactly one resolve node: {} ({}); found 0",
+                escape_text(&package.name),
+                escape_package_id(&id)
+            )
+        })?;
+        queue.extend(dependencies.iter().cloned());
+    }
+    Ok(())
 }
 
 fn classify_layer(relative_manifest: &str) -> Layer {
@@ -359,4 +407,55 @@ fn reconstruct_path(
     }
     path.reverse();
     path
+}
+
+fn escape_package_id(id: &PackageId) -> String {
+    escape_text(&id.repr)
+}
+
+fn escape_text(text: &str) -> String {
+    escape_bytes(text.as_bytes())
+}
+
+#[cfg(unix)]
+fn escape_path(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+
+    escape_bytes(path.as_os_str().as_bytes())
+}
+
+#[cfg(windows)]
+fn escape_path(path: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut escaped = String::new();
+    for unit in path.as_os_str().encode_wide() {
+        match unit {
+            0x20..=0x7e if unit != u16::from(b'\\') => {
+                escaped.push(char::from(
+                    u8::try_from(unit).expect("ASCII code unit must fit in u8"),
+                ));
+            }
+            unit if unit == u16::from(b'\\') => escaped.push_str("\\\\"),
+            _ => write!(escaped, "\\u{unit:04x}").expect("writing to a String cannot fail"),
+        }
+    }
+    escaped
+}
+
+#[cfg(not(any(unix, windows)))]
+fn escape_path(path: &Path) -> String {
+    escape_text(&path.as_os_str().to_string_lossy())
+}
+
+fn escape_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::new();
+    for &byte in bytes {
+        match byte {
+            b' '..=b'~' if byte != b'\\' => escaped.push(char::from(byte)),
+            b'\\' => escaped.push_str("\\\\"),
+            _ => write!(escaped, "\\x{byte:02x}").expect("writing to a String cannot fail"),
+        }
+    }
+    escaped
 }

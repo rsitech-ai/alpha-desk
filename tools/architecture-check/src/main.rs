@@ -1,11 +1,14 @@
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::PathBuf;
 
 fn main() {
-    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let metadata_path = match arguments.as_slice() {
-        [command] if command == "check" => None,
-        [command, flag, path] if command == "check" && flag == "--metadata" => {
-            Some(Path::new(path))
+        [command] if command == OsStr::new("check") => None,
+        [command, flag, path]
+            if command == OsStr::new("check") && flag == OsStr::new("--metadata") =>
+        {
+            Some(PathBuf::from(path))
         }
         _ => {
             eprintln!("usage: architecture-check check [--metadata <path>]");
@@ -13,7 +16,7 @@ fn main() {
         }
     };
 
-    let metadata = match architecture_check::load_metadata(metadata_path) {
+    let metadata = match architecture_check::load_metadata(metadata_path.as_deref()) {
         Ok(metadata) => metadata,
         Err(error) => {
             eprintln!("metadata-error: {error}");

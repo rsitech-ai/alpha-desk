@@ -38,7 +38,33 @@ if document != expected:
     )
 PY
 
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Dunsafe_code"
+compiler_environment=(
+  CARGO_BUILD_RUSTC
+  CARGO_BUILD_RUSTC_WRAPPER
+  CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
+  CARGO_BUILD_RUSTFLAGS
+  CARGO_ENCODED_RUSTFLAGS
+  RUSTC
+  RUSTC_WRAPPER
+  RUSTC_WORKSPACE_WRAPPER
+  RUSTFLAGS
+)
+for variable in "${compiler_environment[@]}"; do
+  unset "$variable"
+done
+
+# Cargo also accepts target-specific rustflags via dynamically named
+# CARGO_TARGET_<TRIPLE>_RUSTFLAGS variables. They are part of the same
+# untrusted caller environment and must not participate in this gate.
+while IFS= read -r variable; do
+  case "$variable" in
+    CARGO_TARGET_*_RUSTFLAGS)
+      unset "$variable"
+      ;;
+  esac
+done < <(compgen -e)
+
+export RUSTFLAGS="-Dunsafe_code"
 cargo +1.97.1 check \
   --manifest-path "$manifest_path" \
   --workspace \
