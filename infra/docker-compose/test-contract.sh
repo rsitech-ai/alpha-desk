@@ -206,7 +206,60 @@ cat >"$fake_bin/psql" <<'EOF'
 printf 'alpha|alpha\n'
 EOF
 
-chmod +x "$fake_bin/curl" "$fake_bin/pg_isready" "$fake_bin/psql"
+cat >"$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario="${FAKE_DOCKER_SCENARIO:-success}"
+nats_id="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+minio_id="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+extra_id="1111111111111111111111111111111111111111111111111111111111111111"
+
+case "${1:-}" in
+  compose)
+    service="${*: -1}"
+    case "$scenario:$service" in
+      nats-missing:nats-init|minio-missing:minio-init)
+        :
+        ;;
+      nats-multiple:nats-init)
+        printf '%s\n%s\n' "$nats_id" "$extra_id"
+        ;;
+      nats-unsafe:nats-init)
+        printf '%s\n' 'not-a-container-id'
+        ;;
+      *:nats-init)
+        printf '%s\n' "$nats_id"
+        ;;
+      *:minio-init)
+        printf '%s\n' "$minio_id"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    ;;
+  inspect)
+    container_id="${*: -1}"
+    if [[ "$container_id" == "$nats_id" && "$scenario" == "nats-running" ]]; then
+      printf '%s\n' '{"Status":"running","Running":true,"ExitCode":0}'
+    elif [[ "$container_id" == "$nats_id" && "$scenario" == "nats-nonzero" ]]; then
+      printf '%s\n' '{"Status":"exited","Running":false,"ExitCode":17}'
+    else
+      printf '%s\n' '{"Status":"exited","Running":false,"ExitCode":0}'
+    fi
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+EOF
+
+chmod +x \
+  "$fake_bin/curl" \
+  "$fake_bin/docker" \
+  "$fake_bin/pg_isready" \
+  "$fake_bin/psql"
 
 wait_output="$(
   PATH="$fake_bin:$PATH" \
@@ -230,6 +283,30 @@ expected_wait_output="$(
   exit 1
 }
 
+for scenario in \
+  nats-missing \
+  nats-running \
+  nats-nonzero \
+  nats-multiple \
+  nats-unsafe \
+  minio-missing; do
+  if PATH="$fake_bin:$PATH" \
+    FAKE_DOCKER_SCENARIO="$scenario" \
+    DEV_STACK_WAIT_TIMEOUT_SECONDS=0 \
+    DEV_STACK_WAIT_POLL_SECONDS=0 \
+    "$wait_script" >"$tmp_dir/$scenario.out" 2>"$tmp_dir/$scenario.err"; then
+    printf 'dev-stack-contract:error initializer scenario %s was accepted\n' \
+      "$scenario" >&2
+    exit 1
+  fi
+
+  if [[ "$scenario" == minio-* ]]; then
+    grep -qx 'minio:error timeout' "$tmp_dir/$scenario.err"
+  else
+    grep -qx 'nats:error timeout' "$tmp_dir/$scenario.err"
+  fi
+done
+
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -242,6 +319,7 @@ EOF
 chmod +x "$fake_bin/curl"
 
 if PATH="$fake_bin:$PATH" \
+  FAKE_DOCKER_SCENARIO=success \
   DEV_STACK_WAIT_TIMEOUT_SECONDS=0 \
   DEV_STACK_WAIT_POLL_SECONDS=0 \
   "$wait_script" >"$tmp_dir/false-positive.out" 2>"$tmp_dir/false-positive.err"; then
