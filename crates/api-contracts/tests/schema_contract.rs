@@ -1,0 +1,174 @@
+use api_contracts::FILE_DESCRIPTOR_SET;
+use prost::Message;
+use prost_types::{
+    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+    field_descriptor_proto::Type,
+};
+use std::collections::BTreeSet;
+
+const PAYLOAD_MESSAGES: &[&str] = &[
+    "OrderAccepted",
+    "OrderRested",
+    "OrderModified",
+    "OrderPartiallyFilled",
+    "OrderFilled",
+    "OrderCancelled",
+    "OrderRejected",
+    "TriggerOrderActivated",
+    "TwapStarted",
+    "TwapSliceFilled",
+    "TwapCompleted",
+    "TradeMatched",
+    "DepositCredited",
+    "WithdrawalDebited",
+    "SpotTransfer",
+    "PerpTransfer",
+    "SubaccountTransfer",
+    "VaultDeposit",
+    "VaultWithdrawal",
+    "FeeCharged",
+    "BuilderFeeCharged",
+    "FundingPaid",
+    "FundingReceived",
+    "ReferralReward",
+    "AccountModeChanged",
+    "MarginModeChanged",
+    "LeverageChanged",
+    "LiquidationStarted",
+    "LiquidationFill",
+    "BackstopLiquidation",
+    "PositionSettled",
+    "MarketHalted",
+    "MarketResumed",
+    "OpenInterestCapChanged",
+    "MarginTableChanged",
+    "MarketCreated",
+    "MarketMetadataChanged",
+    "OracleUpdated",
+    "FundingRateUpdated",
+    "AssetContextUpdated",
+    "DexCreated",
+    "OutcomeCreated",
+    "OutcomeResolved",
+];
+
+fn descriptor_set() -> FileDescriptorSet {
+    FileDescriptorSet::decode(FILE_DESCRIPTOR_SET)
+        .expect("the build-generated descriptor set must decode")
+}
+
+fn file<'a>(set: &'a FileDescriptorSet, name: &str) -> &'a FileDescriptorProto {
+    set.file
+        .iter()
+        .find(|file| file.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("missing descriptor for {name}"))
+}
+
+fn message<'a>(file: &'a FileDescriptorProto, name: &str) -> &'a DescriptorProto {
+    file.message_type
+        .iter()
+        .find(|message| message.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("missing message {name}"))
+}
+
+fn field_signature(field: &FieldDescriptorProto) -> (&str, i32) {
+    (
+        field.name.as_deref().expect("field names are required"),
+        field.number.expect("field numbers are required"),
+    )
+}
+
+#[test]
+fn canonical_envelope_keeps_the_exact_v1_field_numbers() {
+    let set = descriptor_set();
+    let envelope = message(
+        file(&set, "canonical/v1/events.proto"),
+        "CanonicalEventEnvelope",
+    );
+    let actual = envelope
+        .field
+        .iter()
+        .map(field_signature)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            ("schema_version", 1),
+            ("chain_id", 2),
+            ("block_height", 3),
+            ("block_time_micros", 4),
+            ("transaction_id", 5),
+            ("transaction_index", 6),
+            ("event_index", 7),
+            ("event_id", 8),
+            ("event_kind", 9),
+            ("market_ids", 10),
+            ("account_ids", 11),
+            ("source_evidence", 12),
+            ("confirmation_class", 13),
+            ("observed_at_micros", 14),
+            ("ingested_at_micros", 15),
+            ("canonicalized_at_micros", 16),
+            ("payload_hash", 17),
+            ("parser_version", 18),
+            ("payload", 19),
+        ]
+    );
+}
+
+#[test]
+fn every_v1_event_family_has_a_distinct_payload_message() {
+    let set = descriptor_set();
+    let canonical = file(&set, "canonical/v1/events.proto");
+    let actual = canonical
+        .message_type
+        .iter()
+        .filter_map(|message| message.name.as_deref())
+        .filter(|name| PAYLOAD_MESSAGES.contains(name))
+        .collect::<BTreeSet<_>>();
+    let expected = PAYLOAD_MESSAGES.iter().copied().collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 43);
+    for name in PAYLOAD_MESSAGES {
+        assert!(
+            !message(canonical, name).field.is_empty(),
+            "{name} must be a real payload contract"
+        );
+    }
+}
+
+#[test]
+fn contract_descriptors_never_use_floating_point_wire_fields() {
+    let set = descriptor_set();
+    for file in &set.file {
+        for message in &file.message_type {
+            for field in &message.field {
+                assert_ne!(field.r#type(), Type::Float);
+                assert_ne!(field.r#type(), Type::Double);
+            }
+        }
+    }
+}
+
+#[test]
+fn common_and_stream_contracts_are_versioned_and_nonempty() {
+    let set = descriptor_set();
+    let common = file(&set, "common/v1/types.proto");
+    let stream = file(&set, "stream/v1/envelope.proto");
+    assert_eq!(common.package.as_deref(), Some("hl.common.v1"));
+    assert_eq!(stream.package.as_deref(), Some("hl.stream.v1"));
+    assert!(
+        common
+            .message_type
+            .iter()
+            .any(|message| !message.field.is_empty()),
+        "common/v1/types.proto must define real types"
+    );
+    assert!(
+        stream
+            .message_type
+            .iter()
+            .any(|message| !message.field.is_empty()),
+        "stream/v1/envelope.proto must define a real stream contract"
+    );
+}

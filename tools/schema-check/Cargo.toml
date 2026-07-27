@@ -1,12 +1,12 @@
 [package]
-name = "canonical-events"
+name = "schema-check"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
-api-contracts = { path = "../api-contracts" }
-domain-types = { path = "../domain-types" }
 prost.workspace = true
+prost-types.workspace = true
 thiserror.workspace = true

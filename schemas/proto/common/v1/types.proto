@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package hl.common.v1;
+
+// Decimal values cross API boundaries as canonical base-10 strings. Producers
+// must never substitute binary floating-point fields for this contract.
+message DecimalValue {
+  string value = 1;
+}
+
+message Identifier {
+  string value = 1;
+}
+
+message ProtocolTimeRange {
+  int64 start_micros = 1;
+  int64 end_micros = 2;
+}
+
+message PageCursor {
+  bytes opaque_value = 1;
+}
