@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(
+  CDPATH='' builtin cd -- "$(command dirname -- "${BASH_SOURCE[0]}")" &&
+    builtin pwd -P
+)"
+repo_root="$(
+  CDPATH='' builtin cd -- "$script_dir/../.." &&
+    builtin pwd -P
+)"
+compose_file="$repo_root/infra/docker-compose/compose.yaml"
+compose_project="alpha-desk-dev"
+
 timeout_seconds="${DEV_STACK_WAIT_TIMEOUT_SECONDS:-120}"
 poll_seconds="${DEV_STACK_WAIT_POLL_SECONDS:-2}"
 
+[[ -f "$compose_file" ]] || {
+  printf 'dev-stack-wait:error missing Compose file %s\n' "$compose_file" >&2
+  exit 2
+}
 [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || {
   printf 'dev-stack-wait:error invalid timeout %q\n' "$timeout_seconds" >&2
   exit 2
@@ -13,7 +28,7 @@ poll_seconds="${DEV_STACK_WAIT_POLL_SECONDS:-2}"
   exit 2
 }
 
-for command_name in curl jq pg_isready psql; do
+for command_name in curl docker jq pg_isready psql; do
   command -v "$command_name" >/dev/null 2>&1 || {
     printf 'dev-stack-wait:error missing command %s\n' "$command_name" >&2
     exit 2
@@ -22,10 +37,48 @@ done
 
 deadline=$((SECONDS + timeout_seconds))
 
+check_initializer() {
+  local service="$1"
+  local container_output state_json
+  local -a container_ids=()
+
+  container_output="$(
+    docker compose \
+      --project-name "$compose_project" \
+      -f "$compose_file" \
+      ps --all --quiet "$service" 2>/dev/null
+  )" || return 1
+
+  [[ -n "$container_output" ]] || return 1
+
+  while IFS= read -r container_id; do
+    [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+    container_ids+=("$container_id")
+  done <<<"$container_output"
+
+  [[ "${#container_ids[@]}" -eq 1 ]] || return 1
+
+  state_json="$(
+    docker inspect \
+      --type container \
+      --format '{{json .State}}' \
+      "${container_ids[0]}" 2>/dev/null
+  )" || return 1
+
+  printf '%s\n' "$state_json" |
+    jq -s -e '
+      length == 1 and
+      .[0].Status == "exited" and
+      .[0].Running == false and
+      .[0].ExitCode == 0
+    ' >/dev/null
+}
+
 check_nats() {
-  curl --fail --silent --show-error --max-time 2 \
-    'http://127.0.0.1:8222/healthz?js-enabled-only=true' 2>/dev/null |
-    jq -e '.status == "ok" and ((.error? // null) == null)' >/dev/null
+  check_initializer nats-init &&
+    curl --fail --silent --show-error --max-time 2 \
+      'http://127.0.0.1:8222/healthz?js-enabled-only=true' 2>/dev/null |
+      jq -e '.status == "ok" and ((.error? // null) == null)' >/dev/null
 }
 
 check_clickhouse() {
@@ -46,8 +99,9 @@ check_postgres() {
 }
 
 check_minio() {
-  curl --fail --silent --show-error --max-time 2 --output /dev/null \
-    http://127.0.0.1:9000/minio/health/live 2>/dev/null
+  check_initializer minio-init &&
+    curl --fail --silent --show-error --max-time 2 --output /dev/null \
+      http://127.0.0.1:9000/minio/health/live 2>/dev/null
 }
 
 check_otel() {

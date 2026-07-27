@@ -29,9 +29,12 @@ source build remains the stronger long-term path.
 
 ## Lifecycle
 
-`just dev-up` starts the stack and waits for NATS JetStream, ClickHouse,
-PostgreSQL, MinIO, OpenTelemetry, and VictoriaMetrics. `just dev-down` stops it
-without deleting data.
+`just dev-up` requires the Docker CLI, `curl`, `jq`, `pg_isready`, and `psql`.
+It starts the stack and waits for NATS JetStream, ClickHouse, PostgreSQL,
+MinIO, OpenTelemetry, and VictoriaMetrics. NATS and MinIO are reported ready
+only after their fixed-project initializer resolves to exactly one container
+whose final state is `exited` with exit code zero. `just dev-down` stops the
+stack without deleting data.
 
 `just dev-reset` is intentionally destructive: it removes all five
 `alpha-desk-dev` named data volumes. The recipe prints this boundary before it
