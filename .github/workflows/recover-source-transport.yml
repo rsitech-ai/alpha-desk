@@ -6,29 +6,30 @@ on:
     paths:
       - .github/workflows/recover-source-transport.yml
       - bootstrap/source.part.*
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/recover-source-transport.yml
-      - bootstrap/source.part.*
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  TARGET_BRANCH: agent/complete-spec-v1
 
 jobs:
   recover:
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out transport branch
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-
-      - name: Reassemble and verify source archive
+      - name: Restore source tree and publish it to the implementation branch
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          umask 077
+
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git clone --no-tags --single-branch --branch "$TARGET_BRANCH" "$remote" /tmp/transport
+          cd /tmp/transport
+
           parts=(
             bootstrap/source.part.00
             bootstrap/source.part.01
@@ -41,28 +42,35 @@ jobs:
           for part in "${parts[@]}"; do
             test -s "$part"
           done
+
           cat "${parts[@]}" > /tmp/alpha-desk-source.tar.xz.b64
           base64 --decode /tmp/alpha-desk-source.tar.xz.b64 > /tmp/alpha-desk-source.tar.xz
           xz --test /tmp/alpha-desk-source.tar.xz
-          tar --list --xz --file /tmp/alpha-desk-source.tar.xz > /tmp/archive-files.txt
-          test -s /tmp/archive-files.txt
-          sha256sum /tmp/alpha-desk-source.tar.xz > /tmp/alpha-desk-source.tar.xz.sha256
-          {
-            printf 'archive_bytes='; stat -c '%s' /tmp/alpha-desk-source.tar.xz
-            printf 'archive_files='; wc -l < /tmp/archive-files.txt
-            printf 'archive_sha256='; cut -d' ' -f1 /tmp/alpha-desk-source.tar.xz.sha256
-          } > /tmp/archive-info.txt
-          cat /tmp/archive-info.txt
 
-      - name: Upload reconstructed source archive
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: alpha-desk-source-transport
-          path: |
-            /tmp/alpha-desk-source.tar.xz
-            /tmp/alpha-desk-source.tar.xz.sha256
-            /tmp/archive-info.txt
-            /tmp/archive-files.txt
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
+          mkdir /tmp/extracted
+          tar --extract --xz --file /tmp/alpha-desk-source.tar.xz --directory /tmp/extracted
+
+          source_root=/tmp/extracted
+          if [[ ! -f "$source_root/Cargo.toml" ]]; then
+            mapfile -t candidates < <(find /tmp/extracted -mindepth 1 -maxdepth 2 -type f -name Cargo.toml -printf '%h\n' | sort -u)
+            test "${#candidates[@]}" -eq 1
+            source_root="${candidates[0]}"
+          fi
+
+          test -f "$source_root/Cargo.toml"
+          test -f "$source_root/rust-toolchain.toml"
+          test -d "$source_root/crates"
+          test -d "$source_root/services"
+          test -d "$source_root/tools"
+
+          find "$source_root" -name .git -type d -prune -exec rm -rf {} +
+          rsync --archive --delete --exclude .git/ "$source_root"/ /tmp/transport/
+
+          cd /tmp/transport
+          git config user.name 'Alpha Desk Recovery'
+          git config user.email 'alpha-desk-recovery@users.noreply.github.com'
+          git add --all
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m 'feat: restore complete Alpha Desk source tree'
+          git push origin "HEAD:${TARGET_BRANCH}"
