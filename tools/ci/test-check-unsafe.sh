@@ -52,25 +52,52 @@ if ((relocated_cache_status != 0)); then
 fi
 
 relative_probe_root="$fixture_root/relative-probe"
-relative_cargo_home="relative-cargo-home"
-mkdir -p "$relative_probe_root/$relative_cargo_home/registry"
-for cache_input in registry/index registry/cache; do
-  ln -s \
-    "$caller_cargo_home/$cache_input" \
-    "$relative_probe_root/$relative_cargo_home/$cache_input"
+hostile_cdpath_root="$fixture_root/hostile-cdpath"
+relative_cargo_homes=("relative-cargo-home" "-alt-cargo" "alt-cargo")
+relative_cdpaths=("" "" "$hostile_cdpath_root")
+relative_labels=("ordinary relative" "leading-dash relative" "hostile CDPATH")
+mkdir -p "$relative_probe_root" "$hostile_cdpath_root/alt-cargo"
+for relative_cargo_home in "${relative_cargo_homes[@]}"; do
+  mkdir -p "$relative_probe_root/$relative_cargo_home/registry"
+  for cache_input in registry/index registry/cache; do
+    ln -s \
+      "$caller_cargo_home/$cache_input" \
+      "$relative_probe_root/$relative_cargo_home/$cache_input"
+  done
 done
+for index in "${!relative_cargo_homes[@]}"; do
+  set +e
+  (
+    builtin cd -- "$relative_probe_root"
+    HOME="" \
+      RUSTUP_HOME="$caller_rustup_home" \
+      CARGO_HOME="${relative_cargo_homes[$index]}" \
+      CDPATH="${relative_cdpaths[$index]}" \
+      "$gate" --manifest-path "$fixture_root/Cargo.toml"
+  )
+  relative_safe_status=$?
+  set -e
+  if ((relative_safe_status != 0)); then
+    echo "${relative_labels[$index]} Cargo home must pass for safe code" >&2
+    exit 1
+  fi
+done
+
+manifest_probe_root="$fixture_root/manifest-probe"
+mkdir -p "$manifest_probe_root"
+ln -s "$fixture_root" "$manifest_probe_root/-manifest"
 set +e
 (
-  cd "$relative_probe_root"
+  builtin cd -- "$manifest_probe_root"
   HOME="" \
     RUSTUP_HOME="$caller_rustup_home" \
-    CARGO_HOME="$relative_cargo_home" \
-    "$gate" --manifest-path "$fixture_root/Cargo.toml"
+    CARGO_HOME="$relocated_cargo_home" \
+    "$gate" --manifest-path "-manifest/Cargo.toml"
 )
-relative_safe_status=$?
+leading_dash_manifest_status=$?
 set -e
-if ((relative_safe_status != 0)); then
-  echo "a relative Cargo home must resolve from the caller working directory" >&2
+if ((leading_dash_manifest_status != 0)); then
+  echo "a leading-dash relative manifest directory must be accepted" >&2
   exit 1
 fi
 
@@ -80,26 +107,29 @@ pub fn read(value: &u8) -> u8 {
 }
 EOF
 
-relative_unsafe_stderr="$fixture_root/relative-unsafe.stderr"
-set +e
-(
-  cd "$relative_probe_root"
-  HOME="" \
-    RUSTUP_HOME="$caller_rustup_home" \
-    CARGO_HOME="$relative_cargo_home" \
-    "$gate" --manifest-path "$fixture_root/Cargo.toml"
-) 2>"$relative_unsafe_stderr"
-relative_unsafe_status=$?
-set -e
-if ((relative_unsafe_status == 0)); then
-  echo "real unsafe code must fail with a relative Cargo home" >&2
-  exit 1
-fi
-if ! grep -Fq 'usage of an `unsafe` block' "$relative_unsafe_stderr"; then
-  cat "$relative_unsafe_stderr" >&2
-  echo "relative Cargo-home rejection must come from the unsafe lint" >&2
-  exit 1
-fi
+for index in "${!relative_cargo_homes[@]}"; do
+  relative_unsafe_stderr="$fixture_root/relative-unsafe-$index.stderr"
+  set +e
+  (
+    builtin cd -- "$relative_probe_root"
+    HOME="" \
+      RUSTUP_HOME="$caller_rustup_home" \
+      CARGO_HOME="${relative_cargo_homes[$index]}" \
+      CDPATH="${relative_cdpaths[$index]}" \
+      "$gate" --manifest-path "$fixture_root/Cargo.toml"
+  ) 2>"$relative_unsafe_stderr"
+  relative_unsafe_status=$?
+  set -e
+  if ((relative_unsafe_status == 0)); then
+    echo "real unsafe code must fail for ${relative_labels[$index]} Cargo home" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'usage of an `unsafe` block' "$relative_unsafe_stderr"; then
+    cat "$relative_unsafe_stderr" >&2
+    echo "${relative_labels[$index]} rejection must come from the unsafe lint" >&2
+    exit 1
+  fi
+done
 
 if "$gate" --manifest-path "$fixture_root/Cargo.toml"; then
   echo "a real unsafe block must fail the compiler gate" >&2
