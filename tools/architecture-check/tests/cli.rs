@@ -205,10 +205,22 @@ fn cli_exit_codes_and_trusted_usage_diagnostic_are_stable() {
     assert_eq!(violation.status.code(), Some(1));
     assert!(violation.stdout.is_empty());
 
-    let clean = check_fixture("valid-empty.json");
+    let clean = check_fixture("valid-minimal-workspace.json");
     assert_eq!(clean.status.code(), Some(0));
     assert!(clean.stdout.is_empty());
     assert!(clean.stderr.is_empty());
+}
+
+#[test]
+fn fails_closed_when_workspace_has_no_members() {
+    let output = check_fixture("zero-workspace.json");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"metadata-error: cargo metadata workspace has no members\n"
+    );
 }
 
 #[test]

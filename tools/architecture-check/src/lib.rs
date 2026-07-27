@@ -105,6 +105,9 @@ impl Graph {
 
         let mut workspace_ids = metadata.workspace_members.clone();
         workspace_ids.sort();
+        if workspace_ids.is_empty() {
+            return Err("cargo metadata workspace has no members".to_owned());
+        }
         let workspace: HashSet<_> = workspace_ids.iter().cloned().collect();
         for id in &workspace_ids {
             if !packages.contains_key(id) {
