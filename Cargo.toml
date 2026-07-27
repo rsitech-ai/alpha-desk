@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/domain-types",
+  "crates/hl-protocol",
+  "crates/canonical-events",
+  "crates/canonical-ledger",
+  "crates/orderbook",
+  "crates/margin-models",
+  "crates/entity-graph",
+  "crates/feature-core",
+  "crates/wallet-intelligence",
+  "crates/market-intelligence",
+  "crates/signal-core",
+  "crates/execution-sim",
+  "crates/replay-engine",
+  "crates/model-runtime",
+  "crates/storage-ports",
+  "crates/api-contracts",
+  "crates/telemetry",
+  "crates/test-fixtures",
+  "services/hl-capture",
+  "services/hl-core",
+  "services/hl-analytics",
+  "services/hl-research",
+  "services/hl-api",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97.1"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+blake3 = "1.8"
+bytes = "1.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+hex = "0.4"
+proptest = "1.7"
+prost = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+tonic = { version = "0.14", features = ["transport"] }
+tracing = "0.1"
+uuid = { version = "1.18", features = ["serde", "v7"] }

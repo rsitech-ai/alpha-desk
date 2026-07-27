@@ -3,3 +3,6 @@
 *.tmp
 .idea/
 .vscode/
+target/
+.build/
+.swiftpm/

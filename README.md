@@ -23,6 +23,10 @@ The design defines the production architecture, canonical data model, determinis
 
 ## Status
 
-Design version 1.0.0 was approved for implementation on 2026-07-24. The implementation-plan set is complete. Production code has not yet been implemented; execution begins with Stage 0 Foundations and proceeds only through evidence-based stage gates.
+Design version 1.0.0 was approved for implementation on 2026-07-24. The implementation-plan set is complete. The Stage 0 workspace bootstrap is in place; production domain behavior proceeds only through evidence-based stage gates.
 
 The future execution enclave is outside V1 and requires a separate threat model, approved design, and implementation plan after shadow-live and paper evidence satisfy the admission policy.
+
+## V1 safety boundary
+
+The current V1 is read-only. It contains no execution service, trading signer, exchange private-key handling, order-placement path, or signing capability. Any future execution enclave is explicitly outside this workspace boundary until separately designed, reviewed, and approved.

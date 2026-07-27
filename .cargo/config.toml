@@ -1,0 +1,8 @@
+[build]
+rustflags = ["-Dwarnings"]
+
+[term]
+color = "always"
+
+[env]
+RUST_BACKTRACE = "1"
