@@ -1,0 +1,347 @@
+syntax = "proto3";
+
+package hl.canonical.v1;
+
+import "common/v1/types.proto";
+
+message CanonicalEventEnvelope {
+  string schema_version = 1;
+  string chain_id = 2;
+  uint64 block_height = 3;
+  int64 block_time_micros = 4;
+  string transaction_id = 5;
+  uint32 transaction_index = 6;
+  uint32 event_index = 7;
+  string event_id = 8;
+  string event_kind = 9;
+  repeated string market_ids = 10;
+  repeated string account_ids = 11;
+  repeated SourceEvidence source_evidence = 12;
+  ConfirmationClass confirmation_class = 13;
+  int64 observed_at_micros = 14;
+  int64 ingested_at_micros = 15;
+  int64 canonicalized_at_micros = 16;
+  bytes payload_hash = 17;
+  string parser_version = 18;
+  bytes payload = 19;
+}
+
+message SourceEvidence {
+  string source_id = 1;
+  string source_version = 2;
+  string source_offset = 3;
+  bytes content_hash = 4;
+}
+
+enum ConfirmationClass {
+  CONFIRMATION_CLASS_UNSPECIFIED = 0;
+  PROVISIONAL_SOURCE = 1;
+  COMMITTED_PRIMARY = 2;
+  COMMITTED_INDEPENDENT = 3;
+  RECONCILED_SNAPSHOT = 4;
+  CORRECTED = 5;
+  EXPIRED = 6;
+}
+
+// Trading payloads.
+message OrderAccepted {
+  string order_id = 1;
+  string account_id = 2;
+  string market_id = 3;
+  string side = 4;
+  string limit_price = 5;
+  string quantity = 6;
+}
+
+message OrderRested {
+  string order_id = 1;
+  string market_id = 2;
+  string remaining_quantity = 3;
+  string limit_price = 4;
+}
+
+message OrderModified {
+  string order_id = 1;
+  string previous_price = 2;
+  string new_price = 3;
+  string previous_quantity = 4;
+  string new_quantity = 5;
+}
+
+message OrderPartiallyFilled {
+  string order_id = 1;
+  string trade_id = 2;
+  string fill_price = 3;
+  string fill_quantity = 4;
+  string remaining_quantity = 5;
+}
+
+message OrderFilled {
+  string order_id = 1;
+  string trade_id = 2;
+  string fill_price = 3;
+  string fill_quantity = 4;
+}
+
+message OrderCancelled {
+  string order_id = 1;
+  string reason = 2;
+  string remaining_quantity = 3;
+}
+
+message OrderRejected {
+  string client_order_id = 1;
+  string account_id = 2;
+  string reason_code = 3;
+  string reason = 4;
+}
+
+message TriggerOrderActivated {
+  string order_id = 1;
+  string trigger_price = 2;
+  string oracle_price = 3;
+}
+
+message TwapStarted {
+  string order_id = 1;
+  string account_id = 2;
+  string market_id = 3;
+  string total_quantity = 4;
+  int64 end_time_micros = 5;
+}
+
+message TwapSliceFilled {
+  string order_id = 1;
+  uint32 slice_index = 2;
+  string fill_price = 3;
+  string fill_quantity = 4;
+}
+
+message TwapCompleted {
+  string order_id = 1;
+  string filled_quantity = 2;
+  string average_price = 3;
+}
+
+message TradeMatched {
+  string trade_id = 1;
+  string market_id = 2;
+  string maker_order_id = 3;
+  string taker_order_id = 4;
+  hl.common.v1.DecimalValue price = 5;
+  hl.common.v1.DecimalValue quantity = 6;
+}
+
+// Account and ledger payloads.
+message DepositCredited {
+  string account_id = 1;
+  string asset_id = 2;
+  string amount = 3;
+  string deposit_reference = 4;
+}
+
+message WithdrawalDebited {
+  string account_id = 1;
+  string asset_id = 2;
+  string amount = 3;
+  string withdrawal_reference = 4;
+}
+
+message SpotTransfer {
+  string from_account_id = 1;
+  string to_account_id = 2;
+  string asset_id = 3;
+  string amount = 4;
+}
+
+message PerpTransfer {
+  string from_account_id = 1;
+  string to_account_id = 2;
+  string quote_amount = 3;
+}
+
+message SubaccountTransfer {
+  string master_account_id = 1;
+  string from_account_id = 2;
+  string to_account_id = 3;
+  string asset_id = 4;
+  string amount = 5;
+}
+
+message VaultDeposit {
+  string vault_id = 1;
+  string account_id = 2;
+  string amount = 3;
+  string shares_issued = 4;
+}
+
+message VaultWithdrawal {
+  string vault_id = 1;
+  string account_id = 2;
+  string amount = 3;
+  string shares_redeemed = 4;
+}
+
+message FeeCharged {
+  string account_id = 1;
+  string asset_id = 2;
+  string amount = 3;
+  string fee_rate = 4;
+  string fee_type = 5;
+}
+
+message BuilderFeeCharged {
+  string account_id = 1;
+  string builder_account_id = 2;
+  string asset_id = 3;
+  string amount = 4;
+}
+
+message FundingPaid {
+  string account_id = 1;
+  string market_id = 2;
+  string amount = 3;
+  string funding_rate = 4;
+}
+
+message FundingReceived {
+  string account_id = 1;
+  string market_id = 2;
+  string amount = 3;
+  string funding_rate = 4;
+}
+
+message ReferralReward {
+  string account_id = 1;
+  string referrer_account_id = 2;
+  string asset_id = 3;
+  string amount = 4;
+}
+
+message AccountModeChanged {
+  string account_id = 1;
+  string previous_mode = 2;
+  string new_mode = 3;
+}
+
+message MarginModeChanged {
+  string account_id = 1;
+  string market_id = 2;
+  string previous_mode = 3;
+  string new_mode = 4;
+}
+
+message LeverageChanged {
+  string account_id = 1;
+  string market_id = 2;
+  string previous_leverage = 3;
+  string new_leverage = 4;
+}
+
+// Risk and liquidation payloads.
+message LiquidationStarted {
+  string account_id = 1;
+  string liquidation_id = 2;
+  string margin_value = 3;
+  string maintenance_requirement = 4;
+}
+
+message LiquidationFill {
+  string liquidation_id = 1;
+  string account_id = 2;
+  string market_id = 3;
+  string price = 4;
+  string quantity = 5;
+}
+
+message BackstopLiquidation {
+  string liquidation_id = 1;
+  string account_id = 2;
+  string backstop_account_id = 3;
+  string market_id = 4;
+  string quantity = 5;
+}
+
+message PositionSettled {
+  string account_id = 1;
+  string market_id = 2;
+  string settlement_price = 3;
+  string settled_quantity = 4;
+  string realized_pnl = 5;
+}
+
+message MarketHalted {
+  string market_id = 1;
+  string reason = 2;
+}
+
+message MarketResumed {
+  string market_id = 1;
+  string reason = 2;
+}
+
+message OpenInterestCapChanged {
+  string market_id = 1;
+  string previous_cap = 2;
+  string new_cap = 3;
+}
+
+message MarginTableChanged {
+  string market_id = 1;
+  string previous_table_hash = 2;
+  string new_table_hash = 3;
+}
+
+// Market metadata payloads.
+message MarketCreated {
+  string market_id = 1;
+  string dex_id = 2;
+  string base_asset_id = 3;
+  string quote_asset_id = 4;
+  string tick_size = 5;
+  string lot_size = 6;
+}
+
+message MarketMetadataChanged {
+  string market_id = 1;
+  string metadata_version = 2;
+  bytes metadata_hash = 3;
+}
+
+message OracleUpdated {
+  string market_id = 1;
+  string oracle_price = 2;
+  string source = 3;
+  int64 effective_at_micros = 4;
+}
+
+message FundingRateUpdated {
+  string market_id = 1;
+  string funding_rate = 2;
+  int64 effective_at_micros = 3;
+}
+
+message AssetContextUpdated {
+  string asset_id = 1;
+  string context_version = 2;
+  bytes context_hash = 3;
+}
+
+message DexCreated {
+  string dex_id = 1;
+  string name = 2;
+  string operator_account_id = 3;
+}
+
+message OutcomeCreated {
+  string market_id = 1;
+  string outcome_id = 2;
+  string description = 3;
+}
+
+message OutcomeResolved {
+  string market_id = 1;
+  string outcome_id = 2;
+  string settlement_value = 3;
+  int64 resolved_at_micros = 4;
+}
