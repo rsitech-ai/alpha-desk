@@ -24,3 +24,14 @@ deny:
 quality: fmt clippy architecture deny
 
 verify: check-workspace quality test
+
+dev-up:
+    docker compose -f infra/docker-compose/compose.yaml up -d --wait
+    ./tools/ci/wait-for-dev-stack.sh
+
+dev-down:
+    docker compose -f infra/docker-compose/compose.yaml down --timeout 60 --remove-orphans
+
+dev-reset:
+    printf '%s\n' 'WARNING: dev-reset destroys all alpha-desk-dev local data volumes.' >&2
+    docker compose -f infra/docker-compose/compose.yaml down --timeout 60 --volumes --remove-orphans
