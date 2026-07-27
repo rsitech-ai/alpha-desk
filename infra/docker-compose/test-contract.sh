@@ -20,7 +20,7 @@ for path in "$compose_file" "$lock_file" "$wait_script"; do
   }
 done
 
-for command_name in docker jq; do
+for command_name in docker jq just; do
   command -v "$command_name" >/dev/null 2>&1 || {
     printf 'dev-stack-contract:error missing command %s\n' "$command_name" >&2
     exit 1
@@ -120,13 +120,29 @@ jq -e '
     )
 ' "$compose_json" >/dev/null
 
-jq -e '
+if ! jq -e '
   (.services["nats-init"].restart == "no") and
   (.services["minio-init"].restart == "no") and
   (.services["nats-init"].depends_on.nats.condition == "service_healthy") and
   (.services["minio-init"].depends_on.minio.condition == "service_healthy") and
-  (.services.victoriametrics.depends_on["otel-collector"].condition == "service_healthy")
-' "$compose_json" >/dev/null
+  (.services.victoriametrics.depends_on["otel-collector"].condition == "service_healthy") and
+  (.services.victoriametrics.depends_on["nats-init"].condition == "service_completed_successfully") and
+  (.services.victoriametrics.depends_on["minio-init"].condition == "service_completed_successfully")
+' "$compose_json" >/dev/null; then
+  printf 'dev-stack-contract:error initializer dependency gate is incomplete\n' >&2
+  exit 1
+fi
+
+dev_up_dry_run="$(
+  just --justfile "$repo_root/justfile" \
+    --working-directory "$repo_root" \
+    --dry-run dev-up 2>&1
+)"
+
+[[ "$dev_up_dry_run" == *"up -d --wait --wait-timeout 120"* ]] || {
+  printf 'dev-stack-contract:error dev-up has no bounded Compose wait\n' >&2
+  exit 1
+}
 
 jq -e '
   (.volumes | keys | sort) == (

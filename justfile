@@ -26,7 +26,7 @@ quality: fmt clippy architecture deny
 verify: check-workspace quality test
 
 dev-up:
-    docker compose -f infra/docker-compose/compose.yaml up -d --wait
+    docker compose -f infra/docker-compose/compose.yaml up -d --wait --wait-timeout 120
     ./tools/ci/wait-for-dev-stack.sh
 
 dev-down:
