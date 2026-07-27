@@ -6,7 +6,8 @@ use std::fs;
 use std::process::Command;
 
 use build_support::{
-    BuildProfile, BuildSupportError, fingerprint_schema_tree, parse_source_date_epoch, source_dirty,
+    BuildProfile, BuildSourceMode, BuildSupportError, fingerprint_schema_tree, load_build_inputs,
+    parse_source_date_epoch, source_dirty,
 };
 
 #[test]
@@ -123,6 +124,84 @@ fn dirty_detection_tracks_only_relevant_tracked_and_untracked_source_state() {
     fs::write(repository.path().join("target/noise"), "ignored")
         .expect("ignored output must be written");
     assert!(!source_dirty(repository.path()).expect("ignored output must be ignored"));
+}
+
+#[test]
+fn packaged_mode_uses_only_validated_package_local_provenance_inputs() {
+    let package = tempfile::tempdir().expect("temporary package must be available");
+    fs::write(
+        package.path().join("Cargo.toml"),
+        "[package]\nname='probe'\n",
+    )
+    .expect("package manifest must be written");
+    fs::write(package.path().join("Cargo.lock"), b"packaged-lock\n")
+        .expect("package lock must be written");
+    fs::write(
+        package.path().join(".cargo_vcs_info.json"),
+        r#"{"git":{"sha1":"0123456789abcdef0123456789abcdef01234567","dirty":true},"path_in_vcs":"crates/telemetry"}"#,
+    )
+    .expect("Cargo VCS metadata must be written");
+    fs::write(
+        package.path().join("schema-fingerprint-v1.material"),
+        concat!(
+            "alpha-desk-schema-material-v1\n",
+            "0000000000000007612e70726f746f0000000000000003616263\n",
+        ),
+    )
+    .expect("schema material must be written");
+
+    let inputs = load_build_inputs(package.path()).expect("packaged inputs must validate");
+
+    assert_eq!(inputs.mode, BuildSourceMode::Packaged);
+    assert_eq!(inputs.git_sha, "0123456789abcdef0123456789abcdef01234567");
+    assert!(inputs.dirty);
+    assert_eq!(
+        inputs.schema_fingerprint,
+        "8e374603024ed8febb912642bcb7a620532e98b71881fb43af45cce9d4f9dc72"
+    );
+    assert_eq!(
+        inputs.cargo_lock_sha256,
+        "bcdb69944feb1e40a395c27bad24352daab52dbe834140705ca57dbab5805e58"
+    );
+}
+
+#[test]
+fn packaged_mode_rejects_unverifiable_vcs_and_schema_material() {
+    let package = tempfile::tempdir().expect("temporary package must be available");
+    fs::write(
+        package.path().join("Cargo.toml"),
+        "[package]\nname='probe'\n",
+    )
+    .expect("package manifest must be written");
+    fs::write(package.path().join("Cargo.lock"), b"packaged-lock\n")
+        .expect("package lock must be written");
+    fs::write(
+        package.path().join(".cargo_vcs_info.json"),
+        r#"{"git":{"sha1":"UPPERCASE","dirty":false},"path_in_vcs":""}"#,
+    )
+    .expect("invalid Cargo VCS metadata must be written");
+    fs::write(
+        package.path().join("schema-fingerprint-v1.material"),
+        "alpha-desk-schema-material-v1\n00\n",
+    )
+    .expect("invalid schema material must be written");
+
+    assert!(matches!(
+        load_build_inputs(package.path()),
+        Err(BuildSupportError::InvalidMetadata("packaged VCS metadata"))
+    ));
+
+    fs::write(
+        package.path().join(".cargo_vcs_info.json"),
+        r#"{"git":{"sha1":"0123456789abcdef0123456789abcdef01234567","dirty":false},"path_in_vcs":""}"#,
+    )
+    .expect("valid Cargo VCS metadata must be written");
+    assert!(matches!(
+        load_build_inputs(package.path()),
+        Err(BuildSupportError::InvalidMetadata(
+            "packaged schema material"
+        ))
+    ));
 }
 
 fn run_git(repository: &std::path::Path, arguments: &[&str]) {

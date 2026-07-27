@@ -84,3 +84,25 @@ fn infallible_sample_constructors_fail_closed_for_invalid_literals() {
     assert_eq!(invalid.reason_code, "invalid_scope");
     assert!(invalid.suppresses.is_empty());
 }
+
+#[test]
+fn suppression_membership_is_independent_of_public_vector_order_and_duplicates() {
+    let deserialized: HealthAssessment = serde_json::from_str(
+        r#"{"scope":"book:BTC","state":"RED","reason_code":"gap","observed_at_micros":1,"suppresses":["z","a","a"]}"#,
+    )
+    .expect("public health JSON must deserialize");
+    assert!(deserialized.suppresses("z"));
+    assert!(deserialized.suppresses("a"));
+    assert!(!deserialized.suppresses("missing"));
+
+    let direct = HealthAssessment {
+        scope: "book:ETH".to_owned(),
+        state: HealthState::Red,
+        reason_code: "gap".to_owned(),
+        observed_at_micros: 2,
+        suppresses: vec!["z".to_owned(), "a".to_owned(), "a".to_owned()],
+    };
+    assert!(direct.suppresses("z"));
+    assert!(direct.suppresses("a"));
+    assert!(!direct.suppresses("missing"));
+}

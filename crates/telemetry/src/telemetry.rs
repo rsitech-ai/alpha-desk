@@ -392,8 +392,17 @@ fn validate_otlp_endpoint(endpoint: &str) -> Result<(), TelemetryError> {
     let path_and_query = parsed
         .path_and_query()
         .ok_or(TelemetryError::InvalidOtlpEndpoint)?;
+    let explicit_port_is_invalid = match authority.as_str().strip_prefix(authority.host()) {
+        Some("") => false,
+        Some(suffix) if suffix.starts_with(':') => {
+            authority.port_u16().is_none_or(|port| port == 0)
+        }
+        _ => true,
+    };
     if !matches!(scheme, "http" | "https")
         || authority.as_str().contains('@')
+        || authority.host().is_empty()
+        || explicit_port_is_invalid
         || !matches!(path_and_query.path(), "" | "/")
         || path_and_query.query().is_some()
         || endpoint.contains('#')

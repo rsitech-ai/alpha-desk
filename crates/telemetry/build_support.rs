@@ -6,6 +6,10 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+const PACKAGED_VCS_INFO: &str = ".cargo_vcs_info.json";
+const SCHEMA_MATERIAL: &str = "schema-fingerprint-v1.material";
+const SCHEMA_MATERIAL_HEADER: &str = "alpha-desk-schema-material-v1\n";
+
 const SOURCE_INPUTS: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
@@ -24,6 +28,22 @@ const SOURCE_INPUTS: &[&str] = &[
 pub enum BuildProfile {
     Development,
     Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildSourceMode {
+    Checkout,
+    Packaged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildInputs {
+    pub mode: BuildSourceMode,
+    pub git_sha: String,
+    pub dirty: bool,
+    pub schema_fingerprint: String,
+    pub cargo_lock_sha256: String,
+    workspace_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,19 +89,39 @@ pub fn parse_source_date_epoch(
 }
 
 pub fn fingerprint_schema_tree(root: &Path) -> Result<String, BuildSupportError> {
+    Ok(hex_encode(&Sha256::digest(schema_material_from_tree(
+        root,
+    )?)))
+}
+
+pub fn fingerprint_schema_material(path: &Path) -> Result<String, BuildSupportError> {
+    let encoded = fs::read_to_string(path)
+        .map_err(|_| BuildSupportError::Io("read packaged schema material".to_owned()))?;
+    let payload =
+        encoded
+            .strip_prefix(SCHEMA_MATERIAL_HEADER)
+            .ok_or(BuildSupportError::InvalidMetadata(
+                "packaged schema material",
+            ))?;
+    let material = decode_schema_material(payload)?;
+    validate_schema_material(&material)?;
+    Ok(hex_encode(&Sha256::digest(material)))
+}
+
+fn schema_material_from_tree(root: &Path) -> Result<Vec<u8>, BuildSupportError> {
     let mut files = Vec::new();
     collect_regular_files(root, root, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let mut hasher = Sha256::new();
+    let mut material = Vec::new();
     for (relative, path) in files {
         let relative_bytes = relative.as_bytes();
         let bytes =
             fs::read(&path).map_err(|_| BuildSupportError::Io("read schema file".into()))?;
-        hash_len_prefixed(&mut hasher, relative_bytes);
-        hash_len_prefixed(&mut hasher, &bytes);
+        append_len_prefixed(&mut material, relative_bytes);
+        append_len_prefixed(&mut material, &bytes);
     }
-    Ok(hex_encode(&hasher.finalize()))
+    Ok(material)
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, BuildSupportError> {
@@ -89,25 +129,21 @@ pub fn sha256_file(path: &Path) -> Result<String, BuildSupportError> {
     Ok(hex_encode(&Sha256::digest(bytes)))
 }
 
+pub fn load_build_inputs(manifest_dir: &Path) -> Result<BuildInputs, BuildSupportError> {
+    if manifest_dir.join(PACKAGED_VCS_INFO).is_file() {
+        return load_packaged_inputs(manifest_dir);
+    }
+    load_checkout_inputs(manifest_dir)
+}
+
 pub fn emit_build_metadata(manifest_dir: &Path) -> Result<(), BuildSupportError> {
-    let workspace = find_workspace_root(manifest_dir)?;
     let profile = match env::var("PROFILE").as_deref() {
         Ok("release") => BuildProfile::Release,
         _ => BuildProfile::Development,
     };
     let source_date_epoch =
         parse_source_date_epoch(env::var("SOURCE_DATE_EPOCH").ok().as_deref(), profile)?;
-    let git_sha = command_stdout(
-        Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args(["rev-parse", "HEAD"]),
-        "git rev-parse",
-    )?;
-    if git_sha.len() != 40 || !git_sha.bytes().all(is_lower_hex) {
-        return Err(BuildSupportError::InvalidMetadata("git SHA"));
-    }
-    let dirty = source_dirty(&workspace)?;
+    let inputs = load_build_inputs(manifest_dir)?;
     let rustc_version = rustc_version::version_meta()
         .map_err(|_| BuildSupportError::CommandFailed("rustc version"))?
         .short_version_string;
@@ -116,20 +152,30 @@ pub fn emit_build_metadata(manifest_dir: &Path) -> Result<(), BuildSupportError>
     validate_directive_value(&rustc_version, "rustc version")?;
     validate_directive_value(&target_triple, "target triple")?;
 
-    let schema_root = workspace.join("schemas/proto");
-    let schema_fingerprint = fingerprint_schema_tree(&schema_root)?;
-    let cargo_lock = workspace.join("Cargo.lock");
-    let cargo_lock_sha256 = sha256_file(&cargo_lock)?;
-
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
-    emit_source_rerun_inputs(&workspace);
-    for (_, schema) in sorted_schema_files(&schema_root)? {
-        println!("cargo:rerun-if-changed={}", schema.display());
+    match &inputs.workspace_root {
+        Some(workspace) => {
+            emit_source_rerun_inputs(workspace);
+            for (_, schema) in sorted_schema_files(&workspace.join("schemas/proto"))? {
+                println!("cargo:rerun-if-changed={}", schema.display());
+            }
+            emit_git_rerun_inputs(workspace)?;
+        }
+        None => {
+            for input in [PACKAGED_VCS_INFO, "Cargo.lock", SCHEMA_MATERIAL] {
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    manifest_dir.join(input).display()
+                );
+            }
+        }
     }
-    emit_git_rerun_inputs(&workspace)?;
 
-    emit_env("ALPHA_DESK_GIT_SHA", &git_sha)?;
-    emit_env("ALPHA_DESK_GIT_DIRTY", if dirty { "true" } else { "false" })?;
+    emit_env("ALPHA_DESK_GIT_SHA", &inputs.git_sha)?;
+    emit_env(
+        "ALPHA_DESK_GIT_DIRTY",
+        if inputs.dirty { "true" } else { "false" },
+    )?;
     emit_env("ALPHA_DESK_RUSTC_VERSION", &rustc_version)?;
     emit_env("ALPHA_DESK_TARGET_TRIPLE", &target_triple)?;
     emit_env(
@@ -144,9 +190,73 @@ pub fn emit_build_metadata(manifest_dir: &Path) -> Result<(), BuildSupportError>
             "false"
         },
     )?;
-    emit_env("ALPHA_DESK_SCHEMA_FINGERPRINT", &schema_fingerprint)?;
-    emit_env("ALPHA_DESK_CARGO_LOCK_SHA256", &cargo_lock_sha256)?;
+    emit_env("ALPHA_DESK_SCHEMA_FINGERPRINT", &inputs.schema_fingerprint)?;
+    emit_env("ALPHA_DESK_CARGO_LOCK_SHA256", &inputs.cargo_lock_sha256)?;
     Ok(())
+}
+
+fn load_checkout_inputs(manifest_dir: &Path) -> Result<BuildInputs, BuildSupportError> {
+    let workspace = find_workspace_root(manifest_dir)?;
+    let git_sha = command_stdout(
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["rev-parse", "HEAD"]),
+        "git rev-parse",
+    )?;
+    validate_git_sha(&git_sha, "git SHA")?;
+    let dirty = source_dirty(&workspace)?;
+    let schema_fingerprint = fingerprint_schema_tree(&workspace.join("schemas/proto"))?;
+    let packaged_schema_fingerprint =
+        fingerprint_schema_material(&workspace.join("crates/telemetry").join(SCHEMA_MATERIAL))?;
+    if packaged_schema_fingerprint != schema_fingerprint {
+        return Err(BuildSupportError::InvalidMetadata(
+            "packaged schema material",
+        ));
+    }
+    let cargo_lock_sha256 = sha256_file(&workspace.join("Cargo.lock"))?;
+    Ok(BuildInputs {
+        mode: BuildSourceMode::Checkout,
+        git_sha,
+        dirty,
+        schema_fingerprint,
+        cargo_lock_sha256,
+        workspace_root: Some(workspace),
+    })
+}
+
+fn load_packaged_inputs(manifest_dir: &Path) -> Result<BuildInputs, BuildSupportError> {
+    let vcs_bytes = fs::read(manifest_dir.join(PACKAGED_VCS_INFO))
+        .map_err(|_| BuildSupportError::Io("read packaged VCS metadata".to_owned()))?;
+    let vcs: serde_json::Value = serde_json::from_slice(&vcs_bytes)
+        .map_err(|_| BuildSupportError::InvalidMetadata("packaged VCS metadata"))?;
+    let git = vcs
+        .get("git")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(BuildSupportError::InvalidMetadata("packaged VCS metadata"))?;
+    let git_sha = git
+        .get("sha1")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(BuildSupportError::InvalidMetadata("packaged VCS metadata"))?;
+    let dirty = git
+        .get("dirty")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(BuildSupportError::InvalidMetadata("packaged VCS metadata"))?;
+    let path_in_vcs = vcs
+        .get("path_in_vcs")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(BuildSupportError::InvalidMetadata("packaged VCS metadata"))?;
+    validate_git_sha(git_sha, "packaged VCS metadata")?;
+    validate_vcs_path(path_in_vcs)?;
+
+    Ok(BuildInputs {
+        mode: BuildSourceMode::Packaged,
+        git_sha: git_sha.to_owned(),
+        dirty,
+        schema_fingerprint: fingerprint_schema_material(&manifest_dir.join(SCHEMA_MATERIAL))?,
+        cargo_lock_sha256: sha256_file(&manifest_dir.join("Cargo.lock"))?,
+        workspace_root: None,
+    })
 }
 
 pub fn source_dirty(workspace: &Path) -> Result<bool, BuildSupportError> {
@@ -222,13 +332,121 @@ fn sorted_schema_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BuildSuppo
     Ok(files)
 }
 
-fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update(
-        u64::try_from(bytes.len())
+fn append_len_prefixed(material: &mut Vec<u8>, bytes: &[u8]) {
+    material.extend_from_slice(
+        &u64::try_from(bytes.len())
             .map_or(u64::MAX, |length| length)
             .to_be_bytes(),
     );
-    hasher.update(bytes);
+    material.extend_from_slice(bytes);
+}
+
+fn decode_schema_material(encoded: &str) -> Result<Vec<u8>, BuildSupportError> {
+    let mut digits = Vec::new();
+    for byte in encoded.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if !is_lower_hex(byte) {
+            return Err(BuildSupportError::InvalidMetadata(
+                "packaged schema material",
+            ));
+        }
+        digits.push(byte);
+    }
+    if digits.is_empty() || !digits.len().is_multiple_of(2) {
+        return Err(BuildSupportError::InvalidMetadata(
+            "packaged schema material",
+        ));
+    }
+    let mut material = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.chunks_exact(2) {
+        let high = decode_hex_digit(pair[0]);
+        let low = decode_hex_digit(pair[1]);
+        material.push((high << 4) | low);
+    }
+    Ok(material)
+}
+
+fn decode_hex_digit(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => 0,
+    }
+}
+
+fn validate_schema_material(material: &[u8]) -> Result<(), BuildSupportError> {
+    let mut offset = 0;
+    let mut previous_path: Option<&str> = None;
+    let mut entry_count = 0usize;
+    while offset < material.len() {
+        let path_length = read_material_length(material, &mut offset)?;
+        if path_length == 0 || path_length > material.len().saturating_sub(offset) {
+            return Err(BuildSupportError::InvalidMetadata(
+                "packaged schema material",
+            ));
+        }
+        let path_bytes = &material[offset..offset + path_length];
+        offset += path_length;
+        let path = std::str::from_utf8(path_bytes)
+            .map_err(|_| BuildSupportError::InvalidMetadata("packaged schema material"))?;
+        validate_schema_path(path)?;
+        if previous_path.is_some_and(|previous| previous >= path) {
+            return Err(BuildSupportError::InvalidMetadata(
+                "packaged schema material",
+            ));
+        }
+        previous_path = Some(path);
+
+        let content_length = read_material_length(material, &mut offset)?;
+        if content_length > material.len().saturating_sub(offset) {
+            return Err(BuildSupportError::InvalidMetadata(
+                "packaged schema material",
+            ));
+        }
+        offset += content_length;
+        entry_count = entry_count.saturating_add(1);
+    }
+    if entry_count == 0 {
+        return Err(BuildSupportError::InvalidMetadata(
+            "packaged schema material",
+        ));
+    }
+    Ok(())
+}
+
+fn read_material_length(material: &[u8], offset: &mut usize) -> Result<usize, BuildSupportError> {
+    let end = offset
+        .checked_add(8)
+        .ok_or(BuildSupportError::InvalidMetadata(
+            "packaged schema material",
+        ))?;
+    let bytes: [u8; 8] = material
+        .get(*offset..end)
+        .ok_or(BuildSupportError::InvalidMetadata(
+            "packaged schema material",
+        ))?
+        .try_into()
+        .map_err(|_| BuildSupportError::InvalidMetadata("packaged schema material"))?;
+    *offset = end;
+    usize::try_from(u64::from_be_bytes(bytes))
+        .map_err(|_| BuildSupportError::InvalidMetadata("packaged schema material"))
+}
+
+fn validate_schema_path(path: &str) -> Result<(), BuildSupportError> {
+    if path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+    {
+        return Err(BuildSupportError::InvalidMetadata(
+            "packaged schema material",
+        ));
+    }
+    Ok(())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -243,6 +461,24 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn is_lower_hex(byte: u8) -> bool {
     byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+fn validate_git_sha(value: &str, field: &'static str) -> Result<(), BuildSupportError> {
+    if value.len() != 40 || !value.bytes().all(is_lower_hex) {
+        return Err(BuildSupportError::InvalidMetadata(field));
+    }
+    Ok(())
+}
+
+fn validate_vcs_path(path: &str) -> Result<(), BuildSupportError> {
+    if path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(BuildSupportError::InvalidMetadata("packaged VCS metadata"));
+    }
+    Ok(())
 }
 
 fn command_stdout(command: &mut Command, name: &'static str) -> Result<String, BuildSupportError> {

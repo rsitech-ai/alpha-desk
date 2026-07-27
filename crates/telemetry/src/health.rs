@@ -279,8 +279,8 @@ impl HealthAssessment {
     #[must_use]
     pub fn suppresses(&self, scope: &str) -> bool {
         self.suppresses
-            .binary_search_by(|candidate| candidate.as_str().cmp(scope))
-            .is_ok()
+            .iter()
+            .any(|candidate| candidate.as_str() == scope)
     }
 }
 

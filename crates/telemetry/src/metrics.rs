@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use prometheus::{Encoder, IntCounterVec, IntGauge, Opts, Registry, TextEncoder};
+use prometheus::{Encoder, IntCounterVec, IntGauge, Opts, Registry, TextEncoder, core::Collector};
 
 use crate::{BuildProvenance, HealthState, TelemetryError};
 
@@ -20,19 +20,11 @@ impl FoundationMetrics {
             "Whether the foundation telemetry pipeline initialized successfully.",
         )
         .map_err(|_| TelemetryError::MetricRegistration)?;
-        registry
-            .register(Box::new(initialized.clone()))
-            .map_err(|_| TelemetryError::MetricRegistration)?;
-        initialized.set(1);
-
         let otlp = IntGauge::new(
             "alpha_desk_otlp_export_enabled",
             "Whether OTLP trace export is explicitly configured.",
         )
         .map_err(|_| TelemetryError::MetricRegistration)?;
-        registry
-            .register(Box::new(otlp.clone()))
-            .map_err(|_| TelemetryError::MetricRegistration)?;
         otlp.set(i64::from(otlp_enabled));
 
         let health_assessments = IntCounterVec::new(
@@ -43,10 +35,6 @@ impl FoundationMetrics {
             &["state"],
         )
         .map_err(|_| TelemetryError::MetricRegistration)?;
-        registry
-            .register(Box::new(health_assessments.clone()))
-            .map_err(|_| TelemetryError::MetricRegistration)?;
-
         let mut build_labels = HashMap::new();
         build_labels.insert("git_sha".to_owned(), build.git_sha.clone());
         build_labels.insert("rustc_version".to_owned(), build.rustc_version.clone());
@@ -59,10 +47,31 @@ impl FoundationMetrics {
             .const_labels(build_labels),
         )
         .map_err(|_| TelemetryError::MetricRegistration)?;
-        registry
-            .register(Box::new(build_info.clone()))
-            .map_err(|_| TelemetryError::MetricRegistration)?;
         build_info.set(1);
+
+        let registrations: Vec<Box<dyn Collector>> = vec![
+            Box::new(otlp.clone()),
+            Box::new(health_assessments.clone()),
+            Box::new(build_info.clone()),
+            Box::new(initialized.clone()),
+        ];
+        let rollback_collectors: Vec<Box<dyn Collector>> = vec![
+            Box::new(otlp),
+            Box::new(health_assessments.clone()),
+            Box::new(build_info),
+            Box::new(initialized.clone()),
+        ];
+        for (registered_count, collector) in registrations.into_iter().enumerate() {
+            if registry.register(collector).is_err() {
+                for owned in rollback_collectors.into_iter().take(registered_count).rev() {
+                    registry
+                        .unregister(owned)
+                        .map_err(|_| TelemetryError::MetricRegistration)?;
+                }
+                return Err(TelemetryError::MetricRegistration);
+            }
+        }
+        initialized.set(1);
 
         Ok(Self { health_assessments })
     }
