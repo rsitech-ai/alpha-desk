@@ -5,6 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 gate="$repo_root/tools/ci/check-unsafe.sh"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/alpha-desk-unsafe.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT
+caller_cargo_home="${CARGO_HOME:-${HOME:?HOME must identify the caller cache}/.cargo}"
+caller_rustup_home="${RUSTUP_HOME:-${HOME:?HOME must identify rustup}/.rustup}"
 
 mkdir -p "$fixture_root/src"
 cat >"$fixture_root/Cargo.toml" <<'EOF'
@@ -22,6 +24,23 @@ EOF
 cargo +1.97.1 generate-lockfile --manifest-path "$fixture_root/Cargo.toml" --offline
 if ! "$gate" --manifest-path "$fixture_root/Cargo.toml"; then
   echo "safe comments and strings must pass the compiler gate" >&2
+  exit 1
+fi
+
+relocated_cargo_home="$fixture_root/relocated-cargo-home"
+mkdir -p "$relocated_cargo_home/registry"
+for cache_input in registry/index registry/cache; do
+  ln -s "$caller_cargo_home/$cache_input" "$relocated_cargo_home/$cache_input"
+done
+set +e
+HOME="" \
+  RUSTUP_HOME="$caller_rustup_home" \
+  CARGO_HOME="$relocated_cargo_home" \
+  "$gate" --manifest-path "$fixture_root/Cargo.toml"
+relocated_cache_status=$?
+set -e
+if ((relocated_cache_status != 0)); then
+  echo "a legitimate relocated Cargo cache must satisfy the offline gate" >&2
   exit 1
 fi
 
@@ -53,7 +72,10 @@ hostile_cargo_home="$fixture_root/hostile-cargo-home"
 hostile_wrapper="$fixture_root/strip-forbid-wrapper.sh"
 hostile_wrapper_marker="$fixture_root/hostile-wrapper-ran"
 poisoned_target="$fixture_root/poisoned-target"
-mkdir -p "$hostile_cargo_home"
+mkdir -p "$hostile_cargo_home/registry"
+for cache_input in registry/index registry/cache; do
+  ln -s "$caller_cargo_home/$cache_input" "$hostile_cargo_home/$cache_input"
+done
 
 cat >"$hostile_wrapper" <<'EOF'
 #!/usr/bin/env bash

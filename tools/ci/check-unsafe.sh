@@ -74,7 +74,7 @@ trap cleanup EXIT
 isolated_cargo_home="$gate_root/cargo-home"
 gate_target_dir="$gate_root/target"
 gate_build_dir="$gate_root/build"
-caller_cache_home="${HOME:?HOME must identify the caller cache}/.cargo"
+caller_cache_home="${CARGO_HOME:-${HOME:?HOME must identify the caller cache}/.cargo}"
 mkdir -p "$isolated_cargo_home/registry" "$gate_target_dir" "$gate_build_dir"
 
 # Preserve only registry index and packaged-crate cache inputs. Cargo verifies
