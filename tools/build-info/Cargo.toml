@@ -1,0 +1,20 @@
+[package]
+name = "build-info"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+telemetry = { path = "../../crates/telemetry" }
+
+[build-dependencies]
+rustc_version.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rustc_version.workspace = true
+sha2.workspace = true
+tempfile.workspace = true

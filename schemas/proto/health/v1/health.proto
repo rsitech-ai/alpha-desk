@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package hl.health.v1;
+
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_GREEN = 1;
+  HEALTH_STATE_AMBER = 2;
+  HEALTH_STATE_RED = 3;
+}
+
+message HealthAssessment {
+  string scope = 1;
+  HealthState state = 2;
+  string reason_code = 3;
+  int64 observed_at_micros = 4;
+  repeated string suppresses = 5;
+}
