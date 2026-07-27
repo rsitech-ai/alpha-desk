@@ -1,0 +1,60 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CDLA-Permissive-1.0",
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+include-dev = true
+unused-allowed-license = "allow"
+exceptions = [
+  # Build-only path: api-contracts -> tonic-prost-build -> prost-build ->
+  # petgraph -> hashbrown. Remove when that path no longer resolves foldhash.
+  { crate = "foldhash@0.1.5", allow = ["Zlib"] },
+]
+
+[licenses.private]
+ignore = false
+registries = []
+
+[bans]
+multiple-versions = "deny"
+multiple-versions-include-dev = true
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+# Exact transition exceptions only. Each is one side of a verified two-version
+# line; skip-tree is intentionally empty so no transitive crate is hidden.
+skip = [
+  { crate = "getrandom@0.4.3", reason = "tempfile 3.27.0 and prost-build 0.14.4 require getrandom 0.4 while rand_core 0.9.5 still requires 0.3" },
+  { crate = "hashbrown@0.15.5", reason = "prost-build 0.14.4 reaches hashbrown 0.15 through petgraph 0.8.3 while indexmap 2.14.0 uses 0.17" },
+  { crate = "r-efi@6.0.0", reason = "getrandom 0.4.3 requires r-efi 6 while the retained getrandom 0.3.4 branch requires r-efi 5" },
+  { crate = "syn@2.0.119", reason = "prost, futures, tokio, tracing, and wasm macro paths remain on syn 2 while serde, thiserror 2, and async-trait have moved to syn 3" },
+  { crate = "thiserror@1.0.69", reason = "prometheus 0.14.0 reaches thiserror 1 through protobuf 3.7.2 while workspace and telemetry APIs use thiserror 2" },
+  { crate = "thiserror-impl@1.0.69", reason = "proc-macro companion of the protobuf 3.7.2 thiserror 1 transition; workspace error derives use thiserror-impl 2" },
+]
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+required-git-spec = "rev"

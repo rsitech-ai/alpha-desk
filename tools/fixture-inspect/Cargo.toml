@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-test-fixtures = { path = "../../crates/test-fixtures" }
+test-fixtures = { path = "../../crates/test-fixtures", version = "=0.1.0" }
 thiserror.workspace = true
 
 [dev-dependencies]

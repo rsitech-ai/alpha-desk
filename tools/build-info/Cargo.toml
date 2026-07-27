@@ -8,7 +8,7 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
-telemetry = { path = "../../crates/telemetry" }
+telemetry = { path = "../../crates/telemetry", version = "=0.1.0" }
 
 [build-dependencies]
 rustc_version.workspace = true
