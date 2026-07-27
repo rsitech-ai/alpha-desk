@@ -1,0 +1,17 @@
+---
+- name: Confirm the Molecule target is an unprivileged non-systemd container
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Read PID 1 identity
+      ansible.builtin.command:
+        cmd: cat /proc/1/comm
+      register: alpha_pid_one
+      changed_when: false
+
+    - name: Reject a systemd or privileged-host assumption
+      ansible.builtin.assert:
+        that:
+          - alpha_pid_one.stdout | trim != 'systemd'
+        fail_msg: The Stage 0 Molecule lane must not boot systemd.
+        quiet: true

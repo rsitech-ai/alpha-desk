@@ -1,0 +1,9 @@
+---
+- name: Converge inactive Stage 0 scaffolding
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - ../../group_vars/all.yml
+  roles:
+    - role: common
+    - role: alpha_service

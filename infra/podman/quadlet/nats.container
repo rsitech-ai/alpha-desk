@@ -1,0 +1,13 @@
+[Unit]
+Description=Inactive Alpha Desk NATS dependency scaffold
+
+[Container]
+Image=docker.io/library/nats:2.14.3-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
+Pull=never
+ContainerName=alpha-desk-nats
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+Volume=alpha-desk-nats-data:/data
+PublishPort=127.0.0.1:4222:4222
+PublishPort=127.0.0.1:8222:8222

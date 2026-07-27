@@ -1,0 +1,12 @@
+[Unit]
+Description=Inactive Alpha Desk PostgreSQL dependency scaffold
+
+[Container]
+Image=docker.io/library/postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+Pull=never
+ContainerName=alpha-desk-postgresql
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+Volume=alpha-desk-postgresql-data:/var/lib/postgresql
+PublishPort=127.0.0.1:5432:5432

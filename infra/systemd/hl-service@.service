@@ -1,0 +1,28 @@
+[Unit]
+Description=Hyperliquid Alpha Desk service %i
+Documentation=file:///usr/share/doc/hyperliquid-alpha-desk/service-lifecycle.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hl-%i
+Group=hl-%i
+EnvironmentFile=-/etc/hyperliquid-alpha-desk/%i.env
+ExecStart=/opt/hyperliquid-alpha-desk/bin/%i --config /etc/hyperliquid-alpha-desk/%i.toml
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/hyperliquid-alpha-desk/%i /var/log/hyperliquid-alpha-desk/%i
+LimitNOFILE=1048576

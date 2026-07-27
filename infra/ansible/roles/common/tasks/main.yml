@@ -1,0 +1,205 @@
+---
+- name: Reject any non-scaffold inventory
+  ansible.builtin.assert:
+    that:
+      - alpha_stage0_scaffold | default(false) | bool
+      - alpha_inventory_kind | default('') in ['example', 'molecule']
+      - >-
+        alpha_v1_services | sort ==
+        ['hl-analytics', 'hl-api', 'hl-capture', 'hl-core', 'hl-research']
+    fail_msg: >-
+      Stage 0 accepts only the explicit example or Molecule scaffold inventory.
+    quiet: true
+
+- name: Require non-routable names in the example inventory
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname is match('^[a-z0-9.-]+[.]invalid$')
+    fail_msg: Every example inventory host must end in .invalid.
+    quiet: true
+  when: alpha_inventory_kind == 'example'
+
+- name: Install the minimal Noble host-preparation packages without activation
+  ansible.builtin.apt:
+    name: "{{ alpha_stage0_packages }}"
+    state: present
+    update_cache: true
+    install_recommends: false
+    policy_rc_d: 101
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Create the shared service group
+  ansible.builtin.group:
+    name: hl-services
+    system: true
+    state: present
+
+- name: Create the inactive configuration root
+  ansible.builtin.file:
+    path: /etc/hyperliquid-alpha-desk
+    state: directory
+    owner: root
+    group: hl-services
+    mode: "0750"
+
+- name: Record the UTC timezone label without changing the running clock
+  ansible.builtin.copy:
+    content: "Etc/UTC\n"
+    dest: /etc/timezone
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Point local time configuration at UTC
+  ansible.builtin.file:
+    src: /usr/share/zoneinfo/Etc/UTC
+    dest: /etc/localtime
+    owner: root
+    group: root
+    state: link
+    force: true
+
+- name: Declare trusted chrony sources without starting chrony
+  ansible.builtin.copy:
+    content: |
+      # Managed Stage 0 scaffold. Runtime synchronization remains unproven.
+      {% for source in alpha_chrony_sources %}
+      server {{ source }} iburst
+      {% endfor %}
+    dest: /etc/chrony/sources.d/alpha-desk.sources
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the inactive OpenSSH hardening drop-in
+  ansible.builtin.copy:
+    content: |
+      # Validate key access in a disposable VM before any later reload.
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      X11Forwarding no
+      AllowTcpForwarding no
+    dest: /etc/ssh/sshd_config.d/99-alpha-desk-stage0.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the SSH runtime directory for syntax validation
+  ansible.builtin.file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write inactive firewall defaults for later operator review
+  ansible.builtin.copy:
+    content: |
+      # Policy scaffold only. Task 9 does not apply or reload UFW.
+      DEFAULT_INPUT_POLICY=DROP
+      DEFAULT_OUTPUT_POLICY=ACCEPT
+      DEFAULT_FORWARD_POLICY=DROP
+      # Exact zone allowlists belong to the production-hardening stage.
+    dest: /etc/hyperliquid-alpha-desk/ufw-policy.stage0
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the Alpha Desk log rotation policy
+  ansible.builtin.copy:
+    content: |
+      /var/log/hyperliquid-alpha-desk/*/*.log {
+          daily
+          rotate 14
+          missingok
+          notifempty
+          compress
+          delaycompress
+          copytruncate
+      }
+    dest: /etc/logrotate.d/hyperliquid-alpha-desk
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install file descriptor limits for the exact V1 accounts
+  ansible.builtin.copy:
+    content: |
+      # Runtime suitability remains a disposable-VM and load-test gate.
+      @hl-services soft nofile 1048576
+      @hl-services hard nofile 1048576
+    dest: /etc/security/limits.d/90-alpha-desk.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create one system group per allowed V1 service
+  ansible.builtin.group:
+    name: "hl-{{ item }}"
+    system: true
+    state: present
+  loop: "{{ alpha_v1_services }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Create one locked system account per allowed V1 service
+  ansible.builtin.user:
+    name: "hl-{{ item }}"
+    group: "hl-{{ item }}"
+    groups:
+      - hl-services
+    append: true
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+    password_lock: true
+    state: present
+  loop: "{{ alpha_v1_services }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Create shared inactive configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: hl-services
+    mode: "0750"
+  loop:
+    - /var/lib/hyperliquid-alpha-desk
+    - /var/log/hyperliquid-alpha-desk
+
+- name: Create private state and log directories for allowed services
+  ansible.builtin.file:
+    path: "{{ item.1 }}/{{ item.0 }}"
+    state: directory
+    owner: "hl-{{ item.0 }}"
+    group: "hl-{{ item.0 }}"
+    mode: "0750"
+  loop: >-
+    {{
+      alpha_v1_services
+      | product(
+        [
+          '/var/lib/hyperliquid-alpha-desk',
+          '/var/log/hyperliquid-alpha-desk'
+        ]
+      )
+      | list
+    }}
+  loop_control:
+    label: "{{ item.1 }}/{{ item.0 }}"
+
+- name: Record the staged security-update policy without package holds
+  ansible.builtin.copy:
+    content: |
+      Stage 0 does not freeze security-critical packages.
+      Resolve Noble updates in a disposable environment, record versions,
+      then validate SSH, chrony, UFW, systemd, and reboot behavior in a VM.
+    dest: /etc/hyperliquid-alpha-desk/security-updates.policy
+    owner: root
+    group: hl-services
+    mode: "0640"

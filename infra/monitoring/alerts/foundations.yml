@@ -1,0 +1,45 @@
+---
+groups:
+  - name: alpha-desk-foundations
+    rules:
+      - alert: AlphaDeskFoundationTargetDown
+        expr: up{job=~"otel-collector-internal|alpha-desk-otlp-metrics|victoriametrics"} == 0
+        for: 5m
+        labels:
+          severity: high
+          team: sre
+          zone: analytics-core
+        annotations:
+          summary: Alpha Desk foundation target is down
+          description: >-
+            {{ $labels.job }} has reported up=0 for more than five minutes.
+            This is target reachability only, not application correctness.
+          runbook_url: https://runbooks.alpha-desk.invalid/service-lifecycle#foundation-target-down
+
+      - alert: AlphaDeskTelemetrySeriesMissing
+        expr: absent(alpha_desk_telemetry_initialized)
+        for: 10m
+        labels:
+          severity: high
+          team: sre
+          zone: analytics-core
+        annotations:
+          summary: Alpha Desk telemetry initialization series is missing
+          description: >-
+            No alpha_desk_telemetry_initialized series has been observed for
+            ten minutes. Confirm scrape discovery before inferring service health.
+          runbook_url: https://runbooks.alpha-desk.invalid/service-lifecycle#telemetry-series-missing
+
+      - alert: AlphaDeskRecentRedHealthAssessment
+        expr: increase(alpha_desk_health_assessments_total{state="red"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: sre
+          zone: analytics-core
+        annotations:
+          summary: Alpha Desk recorded a recent RED health assessment
+          description: >-
+            A RED health assessment was recorded within the last five minutes.
+            This counter increment does not prove the system is currently RED.
+          runbook_url: https://runbooks.alpha-desk.invalid/service-lifecycle#recent-red-assessment
