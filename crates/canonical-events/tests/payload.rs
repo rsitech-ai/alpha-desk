@@ -171,3 +171,178 @@ fn schema_version_is_strict_numeric_core_semver_with_major_one() {
         Err(ContractError::UnsupportedSchema(version)) if version == "2.0.0"
     ));
 }
+
+#[test]
+fn trade_envelope_preserves_valid_forward_compatible_payload_encodings() {
+    let canonical = task_4_envelope("1.0.0").unwrap();
+    let canonical_wire =
+        WireCanonicalEventEnvelope::decode(&canonical.encode_to_vec().unwrap()).unwrap();
+
+    let cases = [
+        (
+            "unknown outer field",
+            append_varint_field(canonical_wire.payload.clone(), 100, 1),
+            7,
+        ),
+        (
+            "unknown inner field",
+            mutate_typed_payload(&canonical_wire.payload, |message| {
+                append_varint_field(message.to_vec(), 100, 1)
+            }),
+            7,
+        ),
+        (
+            "duplicate singular field",
+            mutate_typed_payload(&canonical_wire.payload, |message| {
+                append_varint_field(message.to_vec(), 7, 99)
+            }),
+            99,
+        ),
+        (
+            "noncanonical outer and inner field order",
+            reorder_typed_payload_fields(&canonical_wire.payload),
+            7,
+        ),
+    ];
+
+    for (case, payload, expected_seed) in cases {
+        assert!(
+            EventPayload::decode(EventKind::TradeMatched, &payload).is_err(),
+            "standalone typed decode must reject {case} because it cannot reproduce those bytes"
+        );
+
+        let mut wire = canonical_wire.clone();
+        wire.payload_hash = blake3::hash(&payload).as_bytes().to_vec();
+        wire.payload = payload.clone();
+
+        let decoded = CanonicalEventEnvelope::decode(&wire.encode_to_vec())
+            .unwrap_or_else(|error| panic!("{case} must decode: {error}"));
+        assert!(matches!(
+            decoded.payload(),
+            EventPayload::TradeMatched(TradeMatched {
+                deterministic_seed,
+                ..
+            }) if *deterministic_seed == expected_seed
+        ));
+
+        let reencoded = WireCanonicalEventEnvelope::decode(
+            &decoded
+                .encode_to_vec()
+                .unwrap_or_else(|error| panic!("{case} must re-encode: {error}")),
+        )
+        .unwrap();
+        assert_eq!(reencoded.payload, payload, "{case} lost wire data");
+        assert_eq!(
+            reencoded.payload_hash,
+            blake3::hash(&reencoded.payload).as_bytes(),
+            "{case} changed the stored payload hash"
+        );
+    }
+}
+
+fn mutate_typed_payload(encoded: &[u8], mutate_message: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    let fields = split_protobuf_fields(encoded);
+    let mut result = Vec::new();
+    for field in fields {
+        if field.number == 2 {
+            let message = length_delimited_body(&field.encoded);
+            append_length_delimited_field(&mut result, 2, &mutate_message(message));
+        } else {
+            result.extend_from_slice(&field.encoded);
+        }
+    }
+    result
+}
+
+fn reorder_typed_payload_fields(encoded: &[u8]) -> Vec<u8> {
+    let fields = split_protobuf_fields(encoded);
+    let mut result = Vec::new();
+    for field in fields.into_iter().rev() {
+        if field.number == 2 {
+            let mut message_fields = split_protobuf_fields(length_delimited_body(&field.encoded));
+            message_fields.reverse();
+            let message = message_fields
+                .into_iter()
+                .flat_map(|field| field.encoded)
+                .collect::<Vec<_>>();
+            append_length_delimited_field(&mut result, 2, &message);
+        } else {
+            result.extend_from_slice(&field.encoded);
+        }
+    }
+    result
+}
+
+fn append_varint_field(mut encoded: Vec<u8>, number: u64, value: u64) -> Vec<u8> {
+    append_varint(&mut encoded, number << 3);
+    append_varint(&mut encoded, value);
+    encoded
+}
+
+fn append_length_delimited_field(encoded: &mut Vec<u8>, number: u64, body: &[u8]) {
+    append_varint(encoded, (number << 3) | 2);
+    append_varint(encoded, u64::try_from(body.len()).unwrap());
+    encoded.extend_from_slice(body);
+}
+
+fn append_varint(encoded: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        encoded.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    encoded.push(value as u8);
+}
+
+#[derive(Debug)]
+struct EncodedField {
+    number: u64,
+    encoded: Vec<u8>,
+}
+
+fn split_protobuf_fields(encoded: &[u8]) -> Vec<EncodedField> {
+    let mut fields = Vec::new();
+    let mut position = 0;
+    while position < encoded.len() {
+        let start = position;
+        let key = read_varint(encoded, &mut position);
+        match key & 7 {
+            0 => {
+                read_varint(encoded, &mut position);
+            }
+            1 => position += 8,
+            2 => {
+                let length = usize::try_from(read_varint(encoded, &mut position)).unwrap();
+                position += length;
+            }
+            5 => position += 4,
+            wire_type => panic!("unsupported test wire type {wire_type}"),
+        }
+        fields.push(EncodedField {
+            number: key >> 3,
+            encoded: encoded[start..position].to_vec(),
+        });
+    }
+    fields
+}
+
+fn length_delimited_body(field: &[u8]) -> &[u8] {
+    let mut position = 0;
+    let key = read_varint(field, &mut position);
+    assert_eq!(key & 7, 2);
+    let length = usize::try_from(read_varint(field, &mut position)).unwrap();
+    &field[position..position + length]
+}
+
+fn read_varint(encoded: &[u8], position: &mut usize) -> u64 {
+    let mut value = 0_u64;
+    let mut shift = 0;
+    loop {
+        let byte = encoded[*position];
+        *position += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+        shift += 7;
+    }
+}
