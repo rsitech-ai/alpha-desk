@@ -49,10 +49,22 @@ pub enum FixtureError {
     DuplicateId(String),
     #[error("duplicate fixture path {0}")]
     DuplicatePath(String),
+    #[error("unsafe fixture id {0:?}")]
+    UnsafeId(String),
+    #[error("non-canonical fixture path {0}")]
+    NonCanonicalPath(String),
     #[error("unsafe fixture path {0}")]
     UnsafePath(String),
     #[error("fixture path is outside blocks/ or expected/: {0}")]
     PathOutsideFixtureTrees(String),
+    #[error(
+        "fixture entry pairing mismatch for {id}: expected {expected_source} and {expected_output}"
+    )]
+    EntryPairingMismatch {
+        id: String,
+        expected_source: String,
+        expected_output: String,
+    },
     #[error("missing fixture file {path}: {source}")]
     MissingFile {
         path: PathBuf,
@@ -97,6 +109,12 @@ pub enum FixtureError {
     },
     #[error("fixture JSON {path} is missing non-empty string field {field}")]
     MissingSchemaField { path: PathBuf, field: &'static str },
+    #[error("fixture schema mismatch for {path}: expected {declared}, found {actual}")]
+    SchemaMismatch {
+        path: String,
+        declared: String,
+        actual: String,
+    },
     #[error("write fixture manifest {path}: {source}")]
     WriteManifest {
         path: PathBuf,
@@ -140,24 +158,49 @@ impl FixtureManifest {
         let mut ids = HashSet::new();
         let mut declared_paths = HashSet::new();
         for entry in &self.fixture {
+            validate_fixture_id(&entry.id)?;
             if !ids.insert(entry.id.as_str()) {
                 return Err(FixtureError::DuplicateId(entry.id.clone()));
             }
             validate_digest("source_sha256", &entry.source_sha256)?;
             validate_digest("expected_sha256", &entry.expected_sha256)?;
-            verify_declared_file(
+            validate_manifest_path(&entry.source_path, "blocks")?;
+            validate_manifest_path(&entry.expected_path, "expected")?;
+            if !declared_paths.insert(entry.source_path.as_str()) {
+                return Err(FixtureError::DuplicatePath(entry.source_path.clone()));
+            }
+            if !declared_paths.insert(entry.expected_path.as_str()) {
+                return Err(FixtureError::DuplicatePath(entry.expected_path.clone()));
+            }
+            let (expected_source, expected_output) = paths_for_id(&entry.id);
+            if entry.source_path != expected_source || entry.expected_path != expected_output {
+                return Err(FixtureError::EntryPairingMismatch {
+                    id: entry.id.clone(),
+                    expected_source,
+                    expected_output,
+                });
+            }
+            let source_bytes =
+                verify_declared_file(root, &entry.source_path, "blocks", &entry.source_sha256)?;
+            verify_schema(
                 root,
                 &entry.source_path,
-                "blocks",
-                &entry.source_sha256,
-                &mut declared_paths,
+                &source_bytes,
+                "schema",
+                &entry.source_schema,
             )?;
-            verify_declared_file(
+            let expected_bytes = verify_declared_file(
                 root,
                 &entry.expected_path,
                 "expected",
                 &entry.expected_sha256,
-                &mut declared_paths,
+            )?;
+            verify_schema(
+                root,
+                &entry.expected_path,
+                &expected_bytes,
+                "schema_version",
+                &entry.expected_schema,
             )?;
         }
 
@@ -190,7 +233,8 @@ impl FixtureManifest {
             if id.is_empty() || id.ends_with(".canonical") {
                 return Err(FixtureError::UnsupportedFilename(source_path));
             }
-            let expected_path = format!("expected/{id}.canonical.json");
+            validate_fixture_id(id)?;
+            let (_, expected_path) = paths_for_id(id);
             if !expected_files.contains(&expected_path) {
                 return Err(FixtureError::MissingExpectedPair(source_path));
             }
@@ -278,22 +322,59 @@ fn validate_root(root: &Path) -> Result<(), FixtureError> {
     Ok(())
 }
 
-fn verify_declared_file<'a>(
+fn verify_declared_file(
     root: &Path,
-    relative: &'a str,
+    relative: &str,
     expected_tree: &str,
     expected_digest: &str,
-    declared_paths: &mut HashSet<&'a str>,
-) -> Result<(), FixtureError> {
-    if !declared_paths.insert(relative) {
-        return Err(FixtureError::DuplicatePath(relative.to_owned()));
-    }
+) -> Result<Vec<u8>, FixtureError> {
     let bytes = read_verified_file(root, relative, expected_tree)?;
     let actual = sha256_hex(&bytes);
     if actual != expected_digest {
         return Err(FixtureError::DigestMismatch {
             path: relative.to_owned(),
             expected: expected_digest.to_owned(),
+            actual,
+        });
+    }
+    Ok(bytes)
+}
+
+fn validate_fixture_id(id: &str) -> Result<(), FixtureError> {
+    let is_valid_segment = |segment: &str| {
+        let mut bytes = segment.bytes();
+        bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && bytes.all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+    };
+    if id.is_empty() || !id.split('/').all(is_valid_segment) {
+        return Err(FixtureError::UnsafeId(id.to_owned()));
+    }
+    Ok(())
+}
+
+fn paths_for_id(id: &str) -> (String, String) {
+    (
+        format!("blocks/{id}.json"),
+        format!("expected/{id}.canonical.json"),
+    )
+}
+
+fn verify_schema(
+    root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    field: &'static str,
+    declared: &str,
+) -> Result<(), FixtureError> {
+    let actual = json_string_field(root.join(relative), bytes, field)?;
+    if actual != declared {
+        return Err(FixtureError::SchemaMismatch {
+            path: relative.to_owned(),
+            declared: declared.to_owned(),
             actual,
         });
     }
@@ -386,13 +467,7 @@ fn validate_relative_path(
     relative: &str,
     expected_tree: &str,
 ) -> Result<PathBuf, FixtureError> {
-    if relative.is_empty()
-        || relative.contains('\\')
-        || relative.starts_with("//")
-        || looks_like_windows_prefix(relative)
-    {
-        return Err(FixtureError::UnsafePath(relative.to_owned()));
-    }
+    validate_manifest_path(relative, expected_tree)?;
     let path = Path::new(relative);
     let mut components = path.components();
     match components.next() {
@@ -408,6 +483,34 @@ fn validate_relative_path(
         return Err(FixtureError::UnsafePath(relative.to_owned()));
     }
     Ok(root.join(path))
+}
+
+fn validate_manifest_path(relative: &str, expected_tree: &str) -> Result<(), FixtureError> {
+    if relative.is_empty()
+        || relative.contains('\\')
+        || relative.starts_with('/')
+        || looks_like_windows_prefix(relative)
+    {
+        return Err(FixtureError::UnsafePath(relative.to_owned()));
+    }
+    let mut segments = relative.split('/');
+    match segments.next() {
+        Some(first) if first == expected_tree => {}
+        Some("." | "..") => return Err(FixtureError::UnsafePath(relative.to_owned())),
+        Some(first) if !first.is_empty() => {
+            return Err(FixtureError::PathOutsideFixtureTrees(relative.to_owned()));
+        }
+        _ => return Err(FixtureError::NonCanonicalPath(relative.to_owned())),
+    }
+    let remaining = segments.collect::<Vec<_>>();
+    if remaining.is_empty()
+        || remaining
+            .iter()
+            .any(|segment| segment.is_empty() || matches!(*segment, "." | ".."))
+    {
+        return Err(FixtureError::NonCanonicalPath(relative.to_owned()));
+    }
+    Ok(())
 }
 
 fn looks_like_windows_prefix(path: &str) -> bool {
@@ -453,6 +556,8 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
         && left.len() == right.len()
         && left.mtime() == right.mtime()
         && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
 }
 
 #[cfg(not(unix))]
@@ -603,5 +708,48 @@ impl Drop for TemporaryCleanup {
             // a secondary cleanup failure.
             drop(fs::remove_file(&self.path));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::same_file;
+    use std::fs::{self, File, FileTimes};
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn same_inode_same_length_mutation_with_restored_mtime_is_not_stable() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("fixture.json");
+        fs::write(&path, b"first\n").unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let original_mtime = before.modified().unwrap();
+
+        let after = (0..32)
+            .find_map(|_| {
+                fs::write(&path, b"other\n").unwrap();
+                File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_times(FileTimes::new().set_modified(original_mtime))
+                    .unwrap();
+                let metadata = fs::metadata(&path).unwrap();
+                (metadata.ctime(), metadata.ctime_nsec())
+                    .ne(&(before.ctime(), before.ctime_nsec()))
+                    .then_some(metadata)
+            })
+            .expect("metadata ctime must change after a same-inode mutation");
+
+        assert_eq!(before.dev(), after.dev());
+        assert_eq!(before.ino(), after.ino());
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.mtime(), after.mtime());
+        assert_eq!(before.mtime_nsec(), after.mtime_nsec());
+        assert_ne!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec())
+        );
+        assert!(!same_file(&before, &after));
     }
 }

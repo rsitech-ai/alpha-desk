@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use test_fixtures::{FixtureError, FixtureManifest};
 
@@ -14,8 +14,6 @@ enum CliError {
     Usage,
     #[error("argument is not valid UTF-8: {0:?}")]
     NonUtf8Argument(OsString),
-    #[error("manifest path has no parent directory: {0}")]
-    ManifestWithoutParent(PathBuf),
     #[error(transparent)]
     Fixture(#[from] FixtureError),
 }
@@ -53,7 +51,7 @@ fn verify(manifest_path: impl AsRef<Path>) -> Result<(), CliError> {
     let root = manifest_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| CliError::ManifestWithoutParent(manifest_path.to_path_buf()))?;
+        .unwrap_or_else(|| Path::new("."));
     let manifest = FixtureManifest::load(manifest_path)?;
     manifest.verify(root)?;
     for id in manifest.fixture_ids_sorted() {

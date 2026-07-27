@@ -4,8 +4,12 @@ use test_fixtures::FixtureManifest;
 fn write_pair(root: &std::path::Path, id: &str) {
     let source = format!("{{\"schema\":\"hl.source.fixture.v1\",\"id\":\"{id}\"}}\n");
     let expected = format!("{{\"schema_version\":\"1.0.0\",\"id\":\"{id}\"}}\n");
-    fs::write(root.join(format!("blocks/{id}.json")), source).unwrap();
-    fs::write(root.join(format!("expected/{id}.canonical.json")), expected).unwrap();
+    let source_path = root.join(format!("blocks/{id}.json"));
+    let expected_path = root.join(format!("expected/{id}.canonical.json"));
+    fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(expected_path.parent().unwrap()).unwrap();
+    fs::write(source_path, source).unwrap();
+    fs::write(expected_path, expected).unwrap();
 }
 
 #[test]
@@ -74,4 +78,43 @@ fn generator_rejects_unpaired_source_and_expected_files() {
     .unwrap();
     let error = FixtureManifest::generate(temporary.path()).unwrap_err();
     assert!(error.to_string().contains("no deterministic source pair"));
+}
+
+#[test]
+fn nested_canonical_ids_generate_and_verify_in_bytewise_order() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temporary.path().join("blocks")).unwrap();
+    fs::create_dir_all(temporary.path().join("expected")).unwrap();
+    write_pair(temporary.path(), "z/last");
+    write_pair(temporary.path(), "a/deep/first");
+
+    let manifest = FixtureManifest::generate(temporary.path()).unwrap();
+
+    assert_eq!(manifest.fixture_ids_sorted(), ["a/deep/first", "z/last"]);
+    manifest.verify(temporary.path()).unwrap();
+}
+
+#[test]
+fn generator_rejects_control_and_nonportable_ids() {
+    for id in [
+        "evil\nmanifest-ok",
+        "evil\rcarriage",
+        "evil\u{1b}escape",
+        "evil\ttab",
+        "evil:colon",
+        "Uppercase",
+        ".hidden",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("blocks")).unwrap();
+        fs::create_dir_all(temporary.path().join("expected")).unwrap();
+        write_pair(temporary.path(), id);
+
+        let error = FixtureManifest::generate(temporary.path()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unsafe fixture id"),
+            "{id:?}: {error}"
+        );
+    }
 }
