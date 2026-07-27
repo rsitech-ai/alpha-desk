@@ -15,6 +15,7 @@ cargo +1.97.1 metadata --format-version 1 --locked --offline
 cargo +1.97.1 test -p architecture-check --locked --offline
 cargo +1.97.1 run -p architecture-check --locked --offline -- check
 ./tools/ci/check-unsafe.sh
+cargo +1.97.1 deny --version # must print exactly: cargo-deny 0.20.2
 cargo +1.97.1 deny --locked --offline check bans licenses sources
 cargo +1.97.1 deny --locked --offline check advisories
 just quality
@@ -22,8 +23,9 @@ just quality
 
 `just quality` runs formatting, clippy for all targets and features, the
 architecture and unsafe gates, and all cargo-deny checks without network
-access. `just verify` includes `quality` plus the workspace Rust and Swift test
-suites.
+access. Before evaluating policy, the recipe fails closed unless the executable
+reports exactly `cargo-deny 0.20.2`. `just verify` includes `quality` plus the
+workspace Rust and Swift test suites.
 
 Refresh the RustSec evidence separately when network access is authorized:
 
@@ -113,11 +115,17 @@ RUSTFLAGS='-Dunsafe_code' \
 ```
 
 `tools/ci/check-unsafe.sh` runs that compiler gate after validating
-`tools/ci/unsafe-allowlist.toml`. The Stage 0 contract is exactly schema version
-1 with an empty waiver list. Any non-empty list fails before Cargo runs. Raw
-grep or regular-expression scanning is not an unsafe-code authority because it
-cannot distinguish Rust syntax from comments, strings, generated output, or
-conditional code.
+`tools/ci/unsafe-allowlist.toml`. It clears ambient compiler, wrapper, encoded
+flags, build flags, and target-specific Rust flags before setting the deny lint,
+so caller configuration cannot cap or allow the lint. The Stage 0 contract is
+exactly schema version 1 with an empty waiver list. Any non-empty list fails
+before Cargo runs. Raw grep or regular-expression scanning is not an
+unsafe-code authority because it cannot distinguish Rust syntax from comments,
+strings, generated output, or conditional code.
+
+Residual boundary: the compiler gate covers the host and targets actually
+selected on the configured builder. It does not prove target-specific code
+behind `cfg` branches for targets that are neither installed nor built.
 
 A later waiver design must not weaken the compiler gate silently. It requires a
 syntax-aware deterministic implementation and tests for real unsafe syntax

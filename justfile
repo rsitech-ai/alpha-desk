@@ -18,6 +18,7 @@ architecture:
     ./tools/ci/check-unsafe.sh
 
 deny:
+    version="$(cargo +1.97.1 deny --version)"; if [[ "$version" != "cargo-deny 0.20.2" ]]; then printf 'cargo-deny-version-error: expected cargo-deny 0.20.2, got %q\n' "$version" >&2; exit 1; fi
     cargo +1.97.1 deny --locked --offline check
 
 quality: fmt clippy architecture deny

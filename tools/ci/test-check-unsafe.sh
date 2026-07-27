@@ -36,6 +36,41 @@ if "$gate" --manifest-path "$fixture_root/Cargo.toml"; then
   exit 1
 fi
 
+if RUSTFLAGS=--cap-lints=allow \
+  "$gate" --manifest-path "$fixture_root/Cargo.toml"
+then
+  echo "ambient RUSTFLAGS must not cap the unsafe-code lint" >&2
+  exit 1
+fi
+
+if CARGO_ENCODED_RUSTFLAGS=-Aunsafe_code \
+  "$gate" --manifest-path "$fixture_root/Cargo.toml"
+then
+  echo "ambient CARGO_ENCODED_RUSTFLAGS must not allow unsafe code" >&2
+  exit 1
+fi
+
+cat >"$fixture_root/rustc-wrapper.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+touch "$UNSAFE_GATE_WRAPPER_MARKER"
+exec "$@"
+EOF
+chmod +x "$fixture_root/rustc-wrapper.sh"
+wrapper_marker="$fixture_root/wrapper-ran"
+
+if RUSTC_WRAPPER="$fixture_root/rustc-wrapper.sh" \
+  UNSAFE_GATE_WRAPPER_MARKER="$wrapper_marker" \
+  "$gate" --manifest-path "$fixture_root/Cargo.toml"
+then
+  echo "real unsafe code must fail when an ambient wrapper is configured" >&2
+  exit 1
+fi
+if [[ -e "$wrapper_marker" ]]; then
+  echo "ambient RUSTC_WRAPPER must not participate in the unsafe gate" >&2
+  exit 1
+fi
+
 cat >"$fixture_root/non-empty-allowlist.toml" <<'EOF'
 schema-version = 1
 
