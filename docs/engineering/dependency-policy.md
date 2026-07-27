@@ -43,10 +43,11 @@ The normative direction and diagnostic behavior are in
 [`ADR 0001`](../adr/0001-dependency-direction.md). The checker must consume
 `resolve.nodes[].deps`, reconcile its PackageId set with
 `resolve.nodes[].dependencies`, preserve PackageId identity, include dev edges,
-and fail closed on incomplete or internally inconsistent metadata. Dependency
-names and duplicate renamed aliases do not affect that set comparison. Adding
-a new layer, exception, or V1 execution package requires a focused failing
-fixture before the policy is changed.
+and fail closed on incomplete or internally inconsistent metadata. A valid
+workspace has at least one member, and every reachable package has exactly one
+resolve node. Dependency names and duplicate renamed aliases do not affect the
+dependency-set comparison. Adding a new layer, exception, or V1 execution
+package requires a focused failing fixture before the policy is changed.
 
 ## License policy
 
@@ -117,14 +118,23 @@ RUSTFLAGS='-Funsafe_code' \
 ```
 
 `tools/ci/check-unsafe.sh` runs that compiler gate after validating
-`tools/ci/unsafe-allowlist.toml`. It clears ambient compiler, wrapper, encoded
-flags, build flags, and target-specific Rust flags before setting the forbid
-lint. `forbid(unsafe_code)` cannot be lowered by crate-level
-`#![allow(unsafe_code)]`, and caller configuration cannot cap or allow the lint.
-The Stage 0 contract is exactly schema version 1 with an empty waiver list. Any
-non-empty list fails before Cargo runs. Raw grep or regular-expression scanning
-is not an unsafe-code authority because it cannot distinguish Rust syntax from
-comments, strings, generated output, or conditional code.
+`tools/ci/unsafe-allowlist.toml`. It resolves and validates the Rust 1.97.1
+Cargo and compiler, then overrides both direct and `CARGO_BUILD_*` compiler and
+wrapper settings. Empty wrapper values explicitly reset Cargo configuration
+wrappers, as specified by the
+[Cargo environment-variable contract](https://doc.rust-lang.org/cargo/reference/environment-variables.html).
+The gate uses a temporary Cargo home containing only linked registry index and
+packaged-crate cache inputs; configuration, credentials, extracted sources, and
+artifacts are excluded. Every run also uses fresh private target and build
+directories removed on exit. Ambient compiler flags, encoded flags, and
+target-specific Rust flags are cleared before setting the forbid lint.
+`forbid(unsafe_code)` cannot be lowered by crate-level
+`#![allow(unsafe_code)]`, and caller configuration or cached artifacts cannot
+cap or allow the lint. The Stage 0 contract is exactly schema version 1 with an
+empty waiver list. Any non-empty list fails before Cargo runs. Raw grep or
+regular-expression scanning is not an unsafe-code authority because it cannot
+distinguish Rust syntax from comments, strings, generated output, or
+conditional code.
 
 Residual boundary: the compiler gate covers the host and targets actually
 selected on the configured builder. It does not prove target-specific code

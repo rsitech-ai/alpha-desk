@@ -49,6 +49,95 @@ if "$gate" --manifest-path "$fixture_root/Cargo.toml"; then
   exit 1
 fi
 
+hostile_cargo_home="$fixture_root/hostile-cargo-home"
+hostile_wrapper="$fixture_root/strip-forbid-wrapper.sh"
+hostile_wrapper_marker="$fixture_root/hostile-wrapper-ran"
+poisoned_target="$fixture_root/poisoned-target"
+mkdir -p "$hostile_cargo_home"
+
+cat >"$hostile_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+touch "$HOSTILE_WRAPPER_MARKER"
+filtered=()
+while (($# > 0)); do
+  case "$1" in
+    -Funsafe_code|-Funsafe-code)
+      shift
+      ;;
+    -F)
+      if (($# > 1)) && [[ "$2" == "unsafe_code" || "$2" == "unsafe-code" ]]; then
+        shift 2
+      else
+        filtered+=("$1")
+        shift
+      fi
+      ;;
+    *)
+      filtered+=("$1")
+      shift
+      ;;
+  esac
+done
+exec "${filtered[@]}"
+EOF
+chmod +x "$hostile_wrapper"
+
+cat >"$hostile_cargo_home/config.toml" <<EOF
+[build]
+rustc-wrapper = "$hostile_wrapper"
+EOF
+
+cargo_isolation_failures=0
+if CARGO_HOME="$hostile_cargo_home" \
+  CARGO_TARGET_DIR="$fixture_root/hostile-gate-target" \
+  HOSTILE_WRAPPER_MARKER="$hostile_wrapper_marker" \
+  "$gate" --manifest-path "$fixture_root/Cargo.toml"
+then
+  echo "Cargo-home rustc-wrapper must not strip the forbid lint" >&2
+  cargo_isolation_failures=1
+fi
+if [[ -e "$hostile_wrapper_marker" ]]; then
+  echo "Cargo-home rustc-wrapper must not execute in the unsafe gate" >&2
+  cargo_isolation_failures=1
+fi
+
+rm -f "$hostile_wrapper_marker"
+if ! CARGO_HOME="$hostile_cargo_home" \
+  CARGO_TARGET_DIR="$poisoned_target" \
+  HOSTILE_WRAPPER_MARKER="$hostile_wrapper_marker" \
+  RUSTFLAGS=-Funsafe_code \
+  cargo +1.97.1 check \
+    --manifest-path "$fixture_root/Cargo.toml" \
+    --all-targets \
+    --all-features \
+    --locked \
+    --offline
+then
+  echo "the hostile wrapper must create the poisoned-target control artifact" >&2
+  exit 1
+fi
+if [[ ! -e "$hostile_wrapper_marker" ]]; then
+  echo "the poisoned-target control must prove the hostile wrapper executed" >&2
+  exit 1
+fi
+rm -f "$hostile_wrapper_marker"
+
+if CARGO_TARGET_DIR="$poisoned_target" \
+  "$gate" --manifest-path "$fixture_root/Cargo.toml"
+then
+  echo "a caller-supplied poisoned target must not satisfy the unsafe gate" >&2
+  cargo_isolation_failures=1
+fi
+if [[ -e "$hostile_wrapper_marker" ]]; then
+  echo "the clean poisoned-target probe must not execute the hostile wrapper" >&2
+  cargo_isolation_failures=1
+fi
+if ((cargo_isolation_failures != 0)); then
+  exit 1
+fi
+
 if RUSTFLAGS=--cap-lints=allow \
   "$gate" --manifest-path "$fixture_root/Cargo.toml"
 then
