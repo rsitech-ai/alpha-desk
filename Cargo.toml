@@ -27,6 +27,7 @@ members = [
   "tools/fixture-inspect",
   "tools/schema-check",
   "tools/build-info",
+  "tools/architecture-check",
 ]
 
 [workspace.package]
@@ -39,6 +40,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 blake3 = "1.8"
 bytes = "1.10"
+cargo_metadata = "=0.23.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 hex = "0.4"
 http = "=1.4.2"

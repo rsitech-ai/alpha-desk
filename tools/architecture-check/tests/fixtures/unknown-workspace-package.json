@@ -1,0 +1,10 @@
+{
+  "packages": [],
+  "workspace_members": ["path+file:///fixture/crates/missing#0.1.0"],
+  "workspace_default_members": ["path+file:///fixture/crates/missing#0.1.0"],
+  "resolve": {"nodes":[],"root":null},
+  "target_directory": "/fixture/target",
+  "version": 1,
+  "workspace_root": "/fixture",
+  "metadata": null
+}

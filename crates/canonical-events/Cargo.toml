@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-api-contracts = { path = "../api-contracts" }
+api-contracts = { path = "../api-contracts", version = "=0.1.0" }
 blake3.workspace = true
-domain-types = { path = "../domain-types" }
+domain-types = { path = "../domain-types", version = "=0.1.0" }
 prost.workspace = true
 semver.workspace = true
 thiserror.workspace = true
