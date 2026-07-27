@@ -1,0 +1,68 @@
+name: Recover Alpha Desk Source Transport
+
+on:
+  push:
+    branches: [agent/complete-spec-v1]
+    paths:
+      - .github/workflows/recover-source-transport.yml
+      - bootstrap/source.part.*
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/recover-source-transport.yml
+      - bootstrap/source.part.*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out transport branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Reassemble and verify source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          parts=(
+            bootstrap/source.part.00
+            bootstrap/source.part.01
+            bootstrap/source.part.02.000
+            bootstrap/source.part.02.001
+            bootstrap/source.part.03
+            bootstrap/source.part.04
+            bootstrap/source.part.05
+          )
+          for part in "${parts[@]}"; do
+            test -s "$part"
+          done
+          cat "${parts[@]}" > /tmp/alpha-desk-source.tar.xz.b64
+          base64 --decode /tmp/alpha-desk-source.tar.xz.b64 > /tmp/alpha-desk-source.tar.xz
+          xz --test /tmp/alpha-desk-source.tar.xz
+          tar --list --xz --file /tmp/alpha-desk-source.tar.xz > /tmp/archive-files.txt
+          test -s /tmp/archive-files.txt
+          sha256sum /tmp/alpha-desk-source.tar.xz > /tmp/alpha-desk-source.tar.xz.sha256
+          {
+            printf 'archive_bytes='; stat -c '%s' /tmp/alpha-desk-source.tar.xz
+            printf 'archive_files='; wc -l < /tmp/archive-files.txt
+            printf 'archive_sha256='; cut -d' ' -f1 /tmp/alpha-desk-source.tar.xz.sha256
+          } > /tmp/archive-info.txt
+          cat /tmp/archive-info.txt
+
+      - name: Upload reconstructed source archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: alpha-desk-source-transport
+          path: |
+            /tmp/alpha-desk-source.tar.xz
+            /tmp/alpha-desk-source.tar.xz.sha256
+            /tmp/archive-info.txt
+            /tmp/archive-files.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
