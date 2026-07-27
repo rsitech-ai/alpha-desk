@@ -12,9 +12,11 @@ telemetry = { path = "../../crates/telemetry" }
 
 [build-dependencies]
 rustc_version.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
 rustc_version.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

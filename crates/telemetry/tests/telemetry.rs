@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use prometheus::Registry;
+use prometheus::{IntCounterVec, IntGauge, Opts, Registry};
 use serde_json::Value;
 use telemetry::{
     BuildProvenance, FoundationMetrics, HealthState, TelemetryConfig, TelemetryError,
@@ -44,6 +44,37 @@ fn foundation_metrics_are_private_bounded_and_duplicate_safe() {
 }
 
 #[test]
+fn foundation_metric_collisions_roll_back_every_owned_collector() {
+    const METRIC_NAMES: [&str; 4] = [
+        "alpha_desk_otlp_export_enabled",
+        "alpha_desk_health_assessments_total",
+        "alpha_desk_build_info",
+        "alpha_desk_telemetry_initialized",
+    ];
+
+    for collided_name in METRIC_NAMES {
+        let registry = Registry::new();
+        register_collision(&registry, collided_name);
+
+        assert!(matches!(
+            FoundationMetrics::register(&registry, &build(), false),
+            Err(TelemetryError::MetricRegistration)
+        ));
+
+        let families = registry.gather();
+        assert_eq!(
+            families.len(),
+            1,
+            "collision at {collided_name} left a partial foundation registry"
+        );
+        assert_eq!(families[0].name(), collided_name);
+        if collided_name == "alpha_desk_telemetry_initialized" {
+            assert_eq!(families[0].get_metric()[0].get_gauge().value(), 7.0);
+        }
+    }
+}
+
+#[test]
 fn telemetry_config_rejects_empty_control_bearing_and_invalid_otlp_endpoints() {
     assert!(matches!(
         TelemetryConfig::try_new("", "0.1.0", None),
@@ -62,11 +93,26 @@ fn telemetry_config_rejects_empty_control_bearing_and_invalid_otlp_endpoints() {
         "http://collector.invalid:4317?token=secret",
         "http://collector.invalid:4317#fragment",
         "http://collector.invalid:\n4317",
+        "http://collector.invalid:99999",
+        "http://[::1]:99999",
+        "http://collector.invalid:0",
+        "http://[::1]:0",
     ] {
         assert!(matches!(
             TelemetryConfig::try_new("hl-core", "0.1.0", Some(endpoint)),
             Err(TelemetryError::InvalidOtlpEndpoint)
         ));
+    }
+    for endpoint in [
+        "http://collector.invalid",
+        "https://collector.invalid:65535",
+        "http://[::1]",
+        "http://[::1]:4317",
+    ] {
+        assert!(
+            TelemetryConfig::try_new("hl-core", "0.1.0", Some(endpoint)).is_ok(),
+            "valid endpoint was rejected: {endpoint}"
+        );
     }
 }
 
@@ -164,4 +210,47 @@ fn subprocess_initializes_once_and_emits_correlated_json() {
     assert_eq!(span_id.len(), 16);
     assert!(trace_id.bytes().any(|byte| byte != b'0'));
     assert!(span_id.bytes().any(|byte| byte != b'0'));
+}
+
+fn register_collision(registry: &Registry, name: &str) {
+    match name {
+        "alpha_desk_health_assessments_total" => {
+            let collision = IntCounterVec::new(
+                Opts::new(name, "Health assessments observed by severity."),
+                &["state"],
+            )
+            .expect("collision collector must be valid");
+            collision.with_label_values(&["green"]).inc();
+            registry
+                .register(Box::new(collision))
+                .expect("collision collector must register");
+        }
+        "alpha_desk_telemetry_initialized" => {
+            let collision = IntGauge::new(
+                name,
+                "Whether the foundation telemetry pipeline initialized successfully.",
+            )
+            .expect("collision collector must be valid");
+            collision.set(7);
+            registry
+                .register(Box::new(collision))
+                .expect("collision collector must register");
+        }
+        "alpha_desk_otlp_export_enabled" => {
+            let collision =
+                IntGauge::new(name, "Whether OTLP trace export is explicitly configured.")
+                    .expect("collision collector must be valid");
+            registry
+                .register(Box::new(collision))
+                .expect("collision collector must register");
+        }
+        "alpha_desk_build_info" => {
+            let collision = IntGauge::new(name, "Immutable build identity for this process.")
+                .expect("collision collector must be valid");
+            registry
+                .register(Box::new(collision))
+                .expect("collision collector must register");
+        }
+        _ => unreachable!("test controls collision names"),
+    }
 }
