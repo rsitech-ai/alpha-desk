@@ -238,6 +238,10 @@ services:
     depends_on:
       otel-collector:
         condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
 
 volumes:
   nats-data:
