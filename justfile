@@ -6,6 +6,11 @@ fmt:
 clippy:
     cargo +1.97.1 clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
 
+ci-test:
+    version="$(cargo +1.97.1 nextest --version)"; if [[ "$version" != cargo-nextest\ 0.9.140\ * ]]; then printf 'cargo-nextest-version-error: expected cargo-nextest 0.9.140, got %q\n' "$version" >&2; exit 1; fi
+    cargo +1.97.1 nextest run --workspace --all-features --locked --offline
+    cargo +1.97.1 test --workspace --all-features --doc --locked --offline
+
 test:
     cargo +1.97.1 test --workspace --all-features --locked --offline
     swift test --package-path apps/AlphaDesk
@@ -22,6 +27,17 @@ deny:
     cargo +1.97.1 deny --locked --offline check
 
 quality: fmt clippy architecture deny
+
+generated:
+    ./tools/ci/check-generated.sh
+
+reproducible:
+    ./tools/ci/verify-reproducible-build.sh
+
+reproducible-environment:
+    CC=/tmp/ambient-cc-must-not-run CFLAGS=-Dambient_cflags_must_not_apply CARGO_PROFILE_RELEASE_LTO=false RUSTC_WRAPPER=/tmp/ambient-rustc-wrapper-must-not-run ./tools/ci/verify-reproducible-build.sh --check-environment-seal
+
+ci-verify: check-workspace quality ci-test
 
 verify: check-workspace quality test
 

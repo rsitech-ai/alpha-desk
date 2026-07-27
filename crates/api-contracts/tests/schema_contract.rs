@@ -172,3 +172,64 @@ fn common_and_stream_contracts_are_versioned_and_nonempty() {
         "stream/v1/envelope.proto must define a real stream contract"
     );
 }
+
+#[test]
+fn health_contract_is_versioned_and_nonempty() {
+    let set = descriptor_set();
+    let health = file(&set, "health/v1/health.proto");
+    assert_eq!(health.package.as_deref(), Some("hl.health.v1"));
+    assert!(
+        health
+            .message_type
+            .iter()
+            .any(|message| !message.field.is_empty()),
+        "health/v1/health.proto must define a real health contract"
+    );
+    assert!(
+        health
+            .enum_type
+            .iter()
+            .any(|enumeration| !enumeration.value.is_empty()),
+        "health/v1/health.proto must define a real health state enum"
+    );
+}
+
+#[test]
+fn generated_artifact_export_is_complete_and_refuses_overwrite() {
+    let temporary = tempfile::tempdir().expect("temporary directory must be available");
+    let descriptor = temporary.path().join("current.pb");
+    let rust_output = temporary.path().join("generated");
+    api_contracts::export_contract_artifacts(&descriptor, &rust_output)
+        .expect("fresh generated output must be exported");
+
+    let mut names = std::fs::read_dir(&rust_output)
+        .expect("generated output must be readable")
+        .map(|entry| {
+            entry
+                .expect("generated entry must be readable")
+                .file_name()
+                .into_string()
+                .expect("generated names must be UTF-8")
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "hl.canonical.v1.rs",
+            "hl.common.v1.rs",
+            "hl.health.v1.rs",
+            "hl.stream.v1.rs",
+        ]
+    );
+    assert_eq!(
+        std::fs::read(&descriptor).expect("exported descriptor must be readable"),
+        FILE_DESCRIPTOR_SET
+    );
+
+    let second_descriptor = temporary.path().join("second.pb");
+    let error = api_contracts::export_contract_artifacts(&second_descriptor, &rust_output)
+        .expect_err("an existing output directory must not be overwritten");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!second_descriptor.exists());
+}
