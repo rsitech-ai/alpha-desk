@@ -17,8 +17,11 @@ if [[ ! -f "$manifest_path" ]]; then
   echo "unsafe-gate-error: Cargo manifest not found: $manifest_path" >&2
   exit 1
 fi
-manifest_directory="$(cd "$(dirname "$manifest_path")" && pwd -P)"
-manifest_path="$manifest_directory/$(basename "$manifest_path")"
+manifest_directory="$(
+  CDPATH= builtin cd -- "$(command dirname -- "$manifest_path")" &&
+    builtin pwd -P
+)"
+manifest_path="$manifest_directory/$(command basename -- "$manifest_path")"
 
 python3 - "$allowlist_path" <<'PY'
 import pathlib
@@ -67,7 +70,8 @@ fi
 
 caller_cache_home_input="${CARGO_HOME:-${HOME:?HOME must identify the caller cache}/.cargo}"
 if ! caller_cache_home="$(
-  cd "$caller_cache_home_input" 2>/dev/null && pwd -P
+  CDPATH= builtin cd -- "$caller_cache_home_input" 2>/dev/null &&
+    builtin pwd -P
 )" || [[ -z "$caller_cache_home" ]]; then
   printf \
     'unsafe-gate-error: caller Cargo home is missing or not a directory: %q\n' \
