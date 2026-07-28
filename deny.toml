@@ -24,9 +24,16 @@ confidence-threshold = 0.8
 include-dev = true
 unused-allowed-license = "allow"
 exceptions = [
+  # Stage-gate structural validation path: jsonschema -> referencing ->
+  # fluent-uri -> borrow-or-share. MIT-0 is OSI-approved and applies only to
+  # this exact reviewed crate version.
+  { crate = "borrow-or-share@0.2.4", allow = ["MIT-0"] },
   # Build-only path: api-contracts -> tonic-prost-build -> prost-build ->
   # petgraph -> hashbrown. Remove when that path no longer resolves foldhash.
   { crate = "foldhash@0.1.5", allow = ["Zlib"] },
+  # Stage-gate structural validation path: jsonschema -> referencing ->
+  # hashbrown. Remove when referencing no longer resolves this foldhash line.
+  { crate = "foldhash@0.2.0", allow = ["Zlib"] },
 ]
 
 [licenses.private]
@@ -44,6 +51,7 @@ deny = []
 # line; skip-tree is intentionally empty so no transitive crate is hidden.
 skip = [
   { crate = "getrandom@0.4.3", reason = "tempfile 3.27.0 and prost-build 0.14.4 require getrandom 0.4 while rand_core 0.9.5 still requires 0.3" },
+  { crate = "foldhash@0.2.0", reason = "jsonschema 0.48.5 reaches foldhash 0.2 through referencing 0.48.5 while prost-build 0.14.4 retains foldhash 0.1 through petgraph 0.8.3" },
   { crate = "hashbrown@0.15.5", reason = "prost-build 0.14.4 reaches hashbrown 0.15 through petgraph 0.8.3 while indexmap 2.14.0 uses 0.17" },
   { crate = "r-efi@6.0.0", reason = "getrandom 0.4.3 requires r-efi 6 while the retained getrandom 0.3.4 branch requires r-efi 5" },
   { crate = "syn@2.0.119", reason = "prost, futures, tokio, tracing, and wasm macro paths remain on syn 2 while serde, thiserror 2, and async-trait have moved to syn 3" },
