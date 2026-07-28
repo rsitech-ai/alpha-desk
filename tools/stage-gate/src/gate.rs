@@ -609,7 +609,7 @@ fn publish_lifecycle_report(
 
 fn random_invocation_id() -> Result<String, GateRunError> {
     let mut random = [0_u8; 16];
-    getrandom::getrandom(&mut random).map_err(|error| GateRunError::Output(error.to_string()))?;
+    getrandom::fill(&mut random).map_err(|error| GateRunError::Output(error.to_string()))?;
     Ok(hex::encode(random))
 }
 
