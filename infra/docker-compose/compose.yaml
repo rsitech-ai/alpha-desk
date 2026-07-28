@@ -65,7 +65,6 @@ services:
     image: docker.io/clickhouse/clickhouse-server:26.3.17.56-alpine@sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd
     user: "101:101"
     environment:
-      CLICKHOUSE_DB: alpha
       CLICKHOUSE_USER: alpha
       CLICKHOUSE_PASSWORD: alpha_dev_only
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
@@ -92,6 +91,29 @@ services:
       retries: 36
       start_period: 20s
 
+  clickhouse-init:
+    <<: *service-security
+    image: docker.io/clickhouse/clickhouse-server:26.3.17.56-alpine@sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd
+    user: "101:101"
+    entrypoint:
+      - /usr/bin/clickhouse-client
+    command:
+      - --host
+      - clickhouse
+      - --user
+      - alpha
+      - --password
+      - alpha_dev_only
+      - --query
+      - CREATE DATABASE IF NOT EXISTS alpha
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 64
+    restart: "no"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
   postgres:
     <<: *service-security
     image: docker.io/library/postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
@@ -101,6 +123,7 @@ services:
       POSTGRES_PASSWORD: alpha_dev_only
       POSTGRES_DB: alpha
       PGDATA: /var/lib/postgresql/18/docker
+      POSTGRES_INITDB_ARGS: --no-locale --auth-local=scram-sha-256
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -239,6 +262,8 @@ services:
       otel-collector:
         condition: service_healthy
       nats-init:
+        condition: service_completed_successfully
+      clickhouse-init:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
