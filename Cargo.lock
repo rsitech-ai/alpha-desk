@@ -631,6 +631,7 @@ name = "hl-capture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "bytes",
  "crc32c",
@@ -643,6 +644,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
 ]
@@ -664,10 +666,14 @@ dependencies = [
  "blake3",
  "bytes",
  "domain-types",
+ "hex",
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
+ "toml",
 ]
 
 [[package]]

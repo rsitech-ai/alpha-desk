@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 crc32c.workspace = true
@@ -23,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
 

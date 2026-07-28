@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use hl_capture::{CaptureConfig, ConfigError};
+use hl_capture::{CaptureConfig, ConfigError, SourceAdapterConfig};
 use hl_protocol::ObservationClass;
 
 fn valid_config() -> String {
@@ -27,6 +27,13 @@ fn example_configuration_is_strict_valid_and_complete() {
             .observation_class(),
         ObservationClass::CommittedBlock
     );
+    assert!(matches!(
+        config
+            .source("primary-node")
+            .expect("primary source")
+            .adapter(),
+        Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+    ));
     assert_eq!(
         config
             .payload_limit("public-market")
@@ -197,4 +204,66 @@ fn error_type_is_stable_and_does_not_echo_configuration_text() {
     assert!(matches!(error, ConfigError::InvalidToml));
     assert_eq!(error.reason_code(), "capture_config.invalid_toml");
     assert!(!error.to_string().contains(secret));
+}
+
+#[test]
+fn node_adapter_path_poll_interval_and_class_are_validated() {
+    for (from, to) in [
+        (
+            "path = \"/var/lib/hyperliquid/hl/data/replica_cmds\"",
+            "path = \"relative/replica_cmds\"",
+        ),
+        ("poll_interval_millis = 25", "poll_interval_millis = 0"),
+        (
+            "class = \"committed-block\"",
+            "class = \"auxiliary-ledger\"",
+        ),
+    ] {
+        let error = CaptureConfig::from_toml(&replace_once(&valid_config(), from, to))
+            .expect_err("invalid adapter configuration");
+        assert_eq!(error.reason_code(), "capture_config.invalid_source_adapter");
+    }
+}
+
+#[test]
+fn unknown_node_adapter_keys_and_streams_fail_strict_deserialization() {
+    for (from, to) in [
+        (
+            "poll_interval_millis = 25",
+            "poll_interval_millis = 25, unknown_adapter = true",
+        ),
+        (
+            "kind = \"node-block-directory\"",
+            "kind = \"unknown-node-source\"",
+        ),
+    ] {
+        let error = CaptureConfig::from_toml(&replace_once(&valid_config(), from, to))
+            .expect_err("unknown adapter field");
+        assert_eq!(error.reason_code(), "capture_config.invalid_toml");
+    }
+}
+
+#[test]
+fn node_line_stream_class_must_match_the_configured_output() {
+    let source = replace_once(
+        &replace_once(
+            &valid_config(),
+            "class = \"committed-block\"",
+            "class = \"auxiliary-ledger\"",
+        ),
+        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25 }",
+        "adapter = { kind = \"node-line\", path = \"/var/lib/hyperliquid/hl/data/node_fills/hourly/20260728/12\", stream_name = \"node-fills\", stream = \"fills\", poll_interval_millis = 25 }",
+    );
+    let config = CaptureConfig::from_toml(&source).expect("valid node line source");
+
+    assert!(matches!(
+        config
+            .source("primary-node")
+            .expect("node line source")
+            .adapter(),
+        Some(SourceAdapterConfig::NodeLine {
+            stream: hl_protocol::node::v1::NodeStreamKind::Fills,
+            ..
+        })
+    ));
 }

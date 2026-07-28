@@ -1,0 +1,1 @@
+{"time":"2026-07-28T12:00:01.000","hash":"0x1111111111111111111111111111111111111111111111111111111111111111","inner":{"LedgerUpdate":{"users":["0x2222222222222222222222222222222222222222"],"delta":{"Liquidation":{"liquidatedNtlPos":"12500.25","accountValue":"-5.10","leverageType":"Cross","liquidatedPositions":[{"coin":"BTC","szi":"-0.125"}]}}}}}

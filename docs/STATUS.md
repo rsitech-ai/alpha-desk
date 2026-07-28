@@ -17,7 +17,7 @@ This is the evidence ledger for the current working repository. The approved des
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
-| 1 — Truth layer | Tasks 1–2 implemented on the hardening branch; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, offline inspection, deterministic fixture, and parser fuzz target | Real source adapters, canonicalization, continuity/quarantine, archive, JetStream publication, long-running capture service, runtime evidence, and signed gate |
+| 1 — Truth layer | Tasks 1–3 implemented on the hardening branch; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, offline inspection, primary-node per-height and line-file adapters, fail-closed quarantine, deterministic fixtures, and parser fuzz target | Real-node/operator-corpus qualification, independent and recovery sources, canonicalization, continuity, archive, JetStream publication, long-running capture service, runtime evidence, and signed gate |
 | 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
@@ -37,11 +37,13 @@ The currently useful runnable components are engineering tools:
 - `build-info`
 
 The five service packages compile but their binaries exit immediately. `hl-capture` now exports
-Stage 1 Task 1 observation/configuration contracts and the Task 2 durable spool library, but its
-binary does not open a source or remain running. `spool-inspect` can verify retained segments,
-manifests, and one complete open tail; it is an operator tool, not a capture service. `just dev-up`
-starts dependencies only. The Swift package exports foundation libraries and has no application
-executable. Therefore there is not yet a product E2E or long-running soak path to claim.
+Stage 1 observation/configuration contracts, the durable spool, and primary-node file adapters,
+but its binary does not construct an adapter, open a source, or remain running. The adapters are
+focused-test proven against normalized official examples, not qualified against operator node
+recordings. `spool-inspect` can verify retained segments, manifests, and one complete open tail; it
+is an operator tool, not a capture service. `just dev-up` starts dependencies only. The Swift
+package exports foundation libraries and has no application executable. Therefore there is not
+yet a product E2E or long-running soak path to claim.
 
 ## Current release blockers
 
@@ -66,6 +68,8 @@ prove a running Alpha Desk product:
 - `gitleaks detect --source . --no-banner --redact --exit-code 1`
 - `cargo +1.97.1 test -p hl-capture --test spool_recovery --locked --offline`
 - `cargo +1.97.1 test -p spool-inspect --locked --offline`
+- `cargo +1.97.1 test -p hl-protocol --test node_golden --locked --offline`
+- `cargo +1.97.1 test -p hl-capture --test node_adapter --locked --offline`
 - `just spool-verify`
 - `cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time=60`
 

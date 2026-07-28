@@ -16,8 +16,12 @@ blake3.workspace = true
 bytes.workspace = true
 domain-types = { path = "../domain-types", version = "=0.1.0" }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+hex.workspace = true
+sha2.workspace = true
 tokio.workspace = true
+toml.workspace = true

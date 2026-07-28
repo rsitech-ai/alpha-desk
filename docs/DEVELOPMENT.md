@@ -52,6 +52,18 @@ just spool-fuzz
 source completeness. The normative framing and recovery contract is
 [`formats/spool-v1.md`](formats/spool-v1.md).
 
+The focused primary-node boundary checks are:
+
+```sh
+cargo +1.97.1 test -p hl-protocol --test node_golden --locked --offline
+cargo +1.97.1 test -p hl-capture --test node_adapter --locked --offline
+```
+
+The checked node corpus is made from normalized official documentation
+examples, not operator recordings. Read the exact cursor, quarantine, and
+qualification boundary in
+[`adapters/hyperliquid-node.md`](adapters/hyperliquid-node.md).
+
 ## Engineering rules
 
 - Write a focused failing test before behavior changes.

@@ -5,11 +5,9 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 ## Current focus
 
 1. Keep hosted CI, trust identities, reviewer signatures, evidence commits, and signed tags explicitly blocked until their external prerequisites exist.
-2. Review the implemented Stage 1 source-observation contracts, strict capture configuration, and
-   crash-safe append-only spool.
-3. Add primary-node adapters behind the typed source ports.
-4. Add independent and recovery sources without exposing proprietary operator-feed material.
-5. Build continuity, quarantine, archive, replay, and publication before claiming a meaningful
+2. Qualify the implemented primary-node adapters against non-secret operator node recordings.
+3. Add independent and recovery sources without exposing proprietary operator-feed material.
+4. Build continuity, quarantine, archive, replay, and publication before claiming a meaningful
    long-running product test.
 
 ## Required order
@@ -27,8 +25,9 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 
 ## Near-term contributor slices
 
-- Primary-node file/stream adapters with byte-exact public fixtures and restart/rotation tests.
-- Primary and independent source adapters, with proprietary operator-feed material kept outside the public repository.
+- Qualify primary-node file/stream adapters with redistribution-reviewed byte-exact recordings from
+  the deployed node version; checked fixtures currently remain normalized official examples.
+- Independent and recovery source adapters, with proprietary operator-feed material kept outside the public repository.
 - Deterministic canonicalization, continuity/quarantine, immutable archive, and replayable publication.
 - Only after those foundations: a long-running capture service and meaningful restart/replay/soak evidence.
 

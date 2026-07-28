@@ -1,0 +1,55 @@
+schema_version = 1
+corpus_kind = "normalized-official-documentation-examples"
+production_recording = false
+node_repository = "https://github.com/hyperliquid-dex/node"
+l1_schema_documentation = "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/nodes/l1-data-schemas"
+info_schema_documentation = "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
+captured_at = "2026-07-28"
+note = "Values are normalized public documentation examples, not operator node recordings. Exact payload bytes are retained once read."
+
+[[fixture]]
+file = "transaction-block.json"
+stream = "transaction-blocks"
+kind = "transaction-block"
+sha256 = "c6382f6e4814a2497793e8934505b2132ee2a285f9bd998eeb61be67e75347e0"
+
+[[fixture]]
+file = "fill.json"
+stream = "fills"
+kind = "fill"
+sha256 = "4fe33e453e688acbbfa6d278beacfb43bd2d70f5e81388a4f2d20e1d793f0c78"
+
+[[fixture]]
+file = "order-status.json"
+stream = "order-statuses"
+kind = "order-status"
+sha256 = "25e36f5d56f70fb7b02a85021c0eccf888918b6360a75148da43c1a8df025d5f"
+
+[[fixture]]
+file = "raw-book-diff.json"
+stream = "raw-book-diffs"
+kind = "raw-book-diff"
+sha256 = "07a9a593abcaf1681db2177e42c42312346ac53322d80a86bed4b616c32ff000"
+
+[[fixture]]
+file = "liquidation.json"
+stream = "misc-events"
+kind = "liquidation"
+sha256 = "95ff610c90fe8c42d0b2fb377fb1b6580849335a0b8784f4aa191278cf78bb15"
+
+[[fixture]]
+file = "transfer.json"
+stream = "misc-events"
+kind = "transfer"
+sha256 = "7d06c641fe92eea241c4aabab1e93c27665f8a2f74f46cb4dd9c1fde995bb358"
+
+[[fixture]]
+file = "market-metadata.json"
+stream = "market-metadata"
+kind = "market-metadata"
+sha256 = "3411153f277ec8f54dfe58b1fb6795f549fb6083a58958650a5ad74b18c3626d"
+
+[[fixture]]
+file = "unknown-variant.json"
+stream = "misc-events"
+sha256 = "bff89f1520e59a0628b262d0f0e3964a75bdbc7415f296a69aa85415cfe04b0b"
