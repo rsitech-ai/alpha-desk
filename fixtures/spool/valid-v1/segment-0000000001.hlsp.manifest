@@ -1,0 +1,22 @@
+{
+  "schema_version": "hl-spool-manifest-v1",
+  "segment_sequence": 1,
+  "segment_file": "segment-0000000001.hlsp",
+  "source_id": "primary-node",
+  "source_version": "node-v1.2.3",
+  "spool_schema_version": "spool-v1",
+  "producer_build_hash": "4242424242424242424242424242424242424242424242424242424242424242",
+  "file_size_bytes": 404,
+  "record_count": 3,
+  "min_cursor": {
+    "epoch": "node-session-17",
+    "offset": 40
+  },
+  "max_cursor": {
+    "epoch": "node-session-17",
+    "offset": 42
+  },
+  "segment_blake3": "bc69fef71a00cdea583194cefa25151f4fa0f9bd5d4fa5b395380b5bf77707b5",
+  "previous_manifest_blake3": null,
+  "closed_at_micros": 1721000000000200
+}

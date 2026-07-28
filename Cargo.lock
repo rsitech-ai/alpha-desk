@@ -291,6 +291,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32c"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -622,9 +631,15 @@ name = "hl-capture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "bytes",
+ "crc32c",
  "domain-types",
+ "hex",
  "hl-protocol",
+ "rustix",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -1860,6 +1875,20 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "spool-inspect"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "domain-types",
+ "hl-capture",
+ "hl-protocol",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

@@ -52,6 +52,7 @@ worktree_added=true
 cd -- "$CHECKOUT"
 
 readonly TARGET_FIXTURES="$TEMP_ROOT/target-fixtures"
+readonly TARGET_SPOOL="$TEMP_ROOT/target-spool"
 readonly TARGET_MATERIAL="$TEMP_ROOT/target-material"
 readonly TARGET_CONTRACT_A="$TEMP_ROOT/target-contract-a"
 readonly TARGET_CONTRACT_B="$TEMP_ROOT/target-contract-b"
@@ -60,12 +61,23 @@ readonly TARGET_BUILD_A="$TEMP_ROOT/target-build-a"
 readonly TARGET_BUILD_B="$TEMP_ROOT/target-build-b"
 readonly CONTRACT_A="$TEMP_ROOT/contracts-a"
 readonly CONTRACT_B="$TEMP_ROOT/contracts-b"
-mkdir -p "$CONTRACT_A/rust" "$CONTRACT_B/rust"
+readonly GENERATED_SPOOL="$TEMP_ROOT/generated-spool"
+mkdir -p "$CONTRACT_A/rust" "$CONTRACT_B/rust" "$GENERATED_SPOOL"
 
 CARGO_TARGET_DIR="$TARGET_FIXTURES" \
   cargo +1.97.1 run -p fixture-inspect --frozen --offline -- \
   generate-manifest --root fixtures/golden
 git diff --exit-code -- fixtures/golden/manifest.toml
+
+CARGO_TARGET_DIR="$TARGET_SPOOL" \
+  cargo +1.97.1 run -p spool-inspect --example generate-fixture --frozen --offline -- \
+  "$GENERATED_SPOOL"
+cmp \
+  fixtures/spool/valid-v1/segment-0000000001.hlsp \
+  "$GENERATED_SPOOL/segment-0000000001.hlsp"
+cmp \
+  fixtures/spool/valid-v1/segment-0000000001.hlsp.manifest \
+  "$GENERATED_SPOOL/segment-0000000001.hlsp.manifest"
 
 CARGO_TARGET_DIR="$TARGET_MATERIAL" \
   cargo +1.97.1 run -p api-contracts --bin schema-generate --frozen --offline -- \

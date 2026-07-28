@@ -44,6 +44,12 @@ verify: check-workspace quality test
 oss-audit:
     cargo +1.97.1 run -p open-source-audit --locked --offline -- check --policy config/open-source-policy.toml --root .
 
+spool-verify path="fixtures/spool/valid-v1":
+    cargo +1.97.1 run -p spool-inspect --locked --offline -- verify {{quote(path)}}
+
+spool-fuzz seconds="60":
+    cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time={{quote(seconds)}}
+
 stage-0-validate-config:
     cargo +1.97.1 run -p stage-gate --locked --offline -- validate-config config/stage-gates/stage-0.toml --schema config/stage-gates/schema-v1.json
 
