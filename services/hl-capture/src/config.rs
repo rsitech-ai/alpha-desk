@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use domain_types::SourceId;
-use hl_protocol::ObservationClass;
 use hl_protocol::node::v1::NodeStreamKind;
+use hl_protocol::{ObservationClass, SourceAdmission, SourceTrust};
 use serde::{Deserialize, Serialize};
 
 const MAX_IDENTITY_BYTES: usize = 256;
@@ -166,6 +166,7 @@ impl DurabilityPolicy {
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     id: String,
+    trust: SourceTrust,
     #[serde(rename = "class")]
     observation_class: ObservationClass,
     queue_capacity: usize,
@@ -188,6 +189,8 @@ impl SourceConfig {
         if !(1..=MAX_PAYLOAD_BYTES).contains(&self.max_payload_bytes) {
             return Err(ConfigError::InvalidPayloadLimit);
         }
+        SourceAdmission::new(self.trust, self.observation_class)
+            .map_err(|_| ConfigError::InvalidSourceTrust)?;
         if let Some(path) = &self.credential_path {
             validate_credential_path(path)?;
         }
@@ -205,6 +208,16 @@ impl SourceConfig {
     #[must_use]
     pub const fn observation_class(&self) -> ObservationClass {
         self.observation_class
+    }
+
+    #[must_use]
+    pub const fn trust(&self) -> SourceTrust {
+        self.trust
+    }
+
+    pub fn admission(&self) -> Result<SourceAdmission, ConfigError> {
+        SourceAdmission::new(self.trust, self.observation_class)
+            .map_err(|_| ConfigError::InvalidSourceTrust)
     }
 
     #[must_use]
@@ -304,6 +317,8 @@ pub enum ConfigError {
     InvalidQueueCapacity,
     #[error("capture payload limit is outside the supported range")]
     InvalidPayloadLimit,
+    #[error("capture source trust is incompatible with its observation class")]
+    InvalidSourceTrust,
     #[error("capture source adapter is invalid")]
     InvalidSourceAdapter,
     #[error("capture credential reference is not an absolute protected path")]
@@ -328,6 +343,7 @@ impl ConfigError {
             Self::DuplicateSource => "capture_config.duplicate_source",
             Self::InvalidQueueCapacity => "capture_config.invalid_queue_capacity",
             Self::InvalidPayloadLimit => "capture_config.invalid_payload_limit",
+            Self::InvalidSourceTrust => "capture_config.invalid_source_trust",
             Self::InvalidSourceAdapter => "capture_config.invalid_source_adapter",
             Self::InvalidCredentialPath => "capture_config.invalid_credential_path",
             Self::MissingSources => "capture_config.missing_sources",

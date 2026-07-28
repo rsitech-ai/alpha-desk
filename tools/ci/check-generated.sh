@@ -54,6 +54,7 @@ cd -- "$CHECKOUT"
 readonly TARGET_FIXTURES="$TEMP_ROOT/target-fixtures"
 readonly TARGET_SPOOL="$TEMP_ROOT/target-spool"
 readonly TARGET_NODE="$TEMP_ROOT/target-node"
+readonly TARGET_TRUST="$TEMP_ROOT/target-trust"
 readonly TARGET_MATERIAL="$TEMP_ROOT/target-material"
 readonly TARGET_CONTRACT_A="$TEMP_ROOT/target-contract-a"
 readonly TARGET_CONTRACT_B="$TEMP_ROOT/target-contract-b"
@@ -82,6 +83,9 @@ cmp \
 
 CARGO_TARGET_DIR="$TARGET_NODE" \
   cargo +1.97.1 test -p hl-protocol --test node_golden --frozen --offline
+
+CARGO_TARGET_DIR="$TARGET_TRUST" \
+  cargo +1.97.1 test -p hl-protocol --test source_trust --frozen --offline
 
 CARGO_TARGET_DIR="$TARGET_MATERIAL" \
   cargo +1.97.1 run -p api-contracts --bin schema-generate --frozen --offline -- \

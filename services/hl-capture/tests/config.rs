@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use hl_capture::{CaptureConfig, ConfigError, SourceAdapterConfig};
-use hl_protocol::ObservationClass;
+use hl_protocol::{ObservationClass, SourceTrust};
 
 fn valid_config() -> String {
     include_str!("../../../config/capture.example.toml").to_owned()
@@ -26,6 +26,29 @@ fn example_configuration_is_strict_valid_and_complete() {
             .expect("primary source")
             .observation_class(),
         ObservationClass::CommittedBlock
+    );
+    assert_eq!(
+        config
+            .source("primary-node")
+            .expect("primary source")
+            .trust(),
+        SourceTrust::LocallyVerifiedCommitted
+    );
+    assert!(
+        config
+            .source("primary-node")
+            .expect("primary source")
+            .admission()
+            .expect("validated admission")
+            .can_advance_committed_watermark()
+    );
+    assert!(
+        !config
+            .source("public-market")
+            .expect("public source")
+            .admission()
+            .expect("validated admission")
+            .can_advance_committed_watermark()
     );
     assert!(matches!(
         config
@@ -168,6 +191,29 @@ fn duplicate_source_ids_and_unknown_classes_fail() {
     );
     let error = CaptureConfig::from_toml(&invalid_class).expect_err("unknown class");
     assert_eq!(error.reason_code(), "capture_config.invalid_toml");
+}
+
+#[test]
+fn source_trust_is_required_and_must_match_the_observation_class() {
+    let missing = valid_config().replace("trust = \"locally-verified-committed\"\n", "");
+    let error = CaptureConfig::from_toml(&missing).expect_err("source trust is required");
+    assert_eq!(error.reason_code(), "capture_config.invalid_toml");
+
+    let unknown = replace_once(
+        &valid_config(),
+        "trust = \"locally-verified-committed\"",
+        "trust = \"complete-because-i-said-so\"",
+    );
+    let error = CaptureConfig::from_toml(&unknown).expect_err("unknown trust");
+    assert_eq!(error.reason_code(), "capture_config.invalid_toml");
+
+    let incompatible = replace_once(
+        &valid_config(),
+        "trust = \"locally-verified-committed\"",
+        "trust = \"third-party-provisional\"",
+    );
+    let error = CaptureConfig::from_toml(&incompatible).expect_err("incompatible trust and class");
+    assert_eq!(error.reason_code(), "capture_config.invalid_source_trust");
 }
 
 #[test]

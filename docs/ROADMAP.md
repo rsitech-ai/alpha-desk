@@ -6,7 +6,8 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 
 1. Keep hosted CI, trust identities, reviewer signatures, evidence commits, and signed tags explicitly blocked until their external prerequisites exist.
 2. Qualify the implemented primary-node adapters against non-secret operator node recordings.
-3. Add independent and recovery sources without exposing proprietary operator-feed material.
+3. Bind independent and recovery transports to the implemented fail-closed
+   source-trust policy without exposing proprietary operator-feed material.
 4. Build continuity, quarantine, archive, replay, and publication before claiming a meaningful
    long-running product test.
 
@@ -27,7 +28,9 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 
 - Qualify primary-node file/stream adapters with redistribution-reviewed byte-exact recordings from
   the deployed node version; checked fixtures currently remain normalized official examples.
-- Independent and recovery source adapters, with proprietary operator-feed material kept outside the public repository.
+- Independent and recovery source transports behind the implemented
+  trust/admission boundary, with proprietary operator-feed material kept
+  outside the public repository.
 - Deterministic canonicalization, continuity/quarantine, immutable archive, and replayable publication.
 - Only after those foundations: a long-running capture service and meaningful restart/replay/soak evidence.
 

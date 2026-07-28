@@ -64,6 +64,18 @@ examples, not operator recordings. Read the exact cursor, quarantine, and
 qualification boundary in
 [`adapters/hyperliquid-node.md`](adapters/hyperliquid-node.md).
 
+The focused source-trust boundary checks are:
+
+```sh
+cargo +1.97.1 test -p hl-protocol --test source_trust --locked --offline
+cargo +1.97.1 test -p hl-capture --test config --locked --offline
+```
+
+Every configured source must declare a trust class compatible with its
+observation class. Watermark eligibility and publication lane are derived from
+that validated pair. See
+[`adapters/source-priority.md`](adapters/source-priority.md).
+
 ## Engineering rules
 
 - Write a focused failing test before behavior changes.
