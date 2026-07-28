@@ -1210,11 +1210,11 @@ impl TradeScenarioBuilder {
             vec![MarketId::new("perp:BTC").unwrap()],
             vec![buyer, seller],
             ConfirmationClass::CommittedPrimary,
-            EventPayload::TradeMatched(TradeMatched {
-                price: Price::parse_at_scale("65000", 6).unwrap(),
-                quantity: Quantity::parse_at_scale("0.01", 8).unwrap(),
-                deterministic_seed: self.seed,
-            }),
+            EventPayload::TradeMatched(TradeMatched::without_identities(
+                Price::parse_at_scale("65000", 6).unwrap(),
+                Quantity::parse_at_scale("0.01", 8).unwrap(),
+                self.seed,
+            )),
             "fixture-parser-v1",
         ).unwrap()
     }
