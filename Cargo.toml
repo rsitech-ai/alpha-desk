@@ -29,12 +29,16 @@ members = [
   "tools/build-info",
   "tools/architecture-check",
   "tools/stage-gate",
+  "tools/open-source-audit",
 ]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.97.1"
 license = "Apache-2.0"
+homepage = "https://rsitech.ai"
+repository = "https://github.com/rsitech-ai/alpha-desk"
+readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -54,7 +58,7 @@ prost-types = "0.14"
 prometheus = "=0.14.0"
 rustc_version = "=0.4.1"
 getrandom = "=0.3.4"
-rustix = { version = "=1.1.4", features = ["fs"] }
+rustix = { version = "=1.1.4", features = ["event", "fs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
@@ -62,6 +66,7 @@ sha2 = "0.11"
 tempfile = "3.20"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 toml = "1.0"
 tonic = { version = "0.14", features = ["transport"] }
 tonic-prost-build = "=0.14.6"

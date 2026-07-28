@@ -8,7 +8,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 
@@ -173,14 +173,6 @@ where
             ));
         }
     };
-    if let Err(error) = set_nonblocking(&stdout, "stdout") {
-        terminate_process_group(&mut child, spec.termination_grace)?;
-        return Err(error);
-    }
-    if let Err(error) = set_nonblocking(&stderr, "stderr") {
-        terminate_process_group(&mut child, spec.termination_grace)?;
-        return Err(error);
-    }
     let deadline = started + spec.timeout;
     let mut stdout_output = RawOutput::new(output_policy.max_bytes_per_stream);
     let mut stderr_output = RawOutput::new(output_policy.max_bytes_per_stream);
@@ -188,22 +180,29 @@ where
     let mut stderr_eof = false;
     let mut status = None;
     loop {
-        let stdout_progress =
-            match drain_once(&mut stdout, &mut stdout_output, "stdout", &mut stdout_eof) {
-                Ok(progress) => progress,
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (stdout_ready, stderr_ready) =
+            match wait_for_output(&stdout, &stderr, remaining.min(WAIT_POLL_INTERVAL)) {
+                Ok(readiness) => readiness,
                 Err(error) => {
                     terminate_process_group(&mut child, spec.termination_grace)?;
                     return Err(error);
                 }
             };
-        let stderr_progress =
-            match drain_once(&mut stderr, &mut stderr_output, "stderr", &mut stderr_eof) {
-                Ok(progress) => progress,
-                Err(error) => {
-                    terminate_process_group(&mut child, spec.termination_grace)?;
-                    return Err(error);
-                }
-            };
+        if stdout_ready
+            && let Err(error) =
+                drain_once(&mut stdout, &mut stdout_output, "stdout", &mut stdout_eof)
+        {
+            terminate_process_group(&mut child, spec.termination_grace)?;
+            return Err(error);
+        }
+        if stderr_ready
+            && let Err(error) =
+                drain_once(&mut stderr, &mut stderr_output, "stderr", &mut stderr_eof)
+        {
+            terminate_process_group(&mut child, spec.termination_grace)?;
+            return Err(error);
+        }
         if status.is_none() {
             status = match child.try_wait() {
                 Ok(status) => status,
@@ -236,11 +235,6 @@ where
             return Err(ProcessError::TimedOut {
                 timeout: spec.timeout,
             });
-        }
-        if !stdout_progress && !stderr_progress {
-            thread::sleep(
-                WAIT_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-            );
         }
     }
 }
@@ -337,22 +331,45 @@ fn signal_process_group(process_group: u32, signal: &str) -> Result<(), ProcessE
 }
 
 #[cfg(unix)]
-fn set_nonblocking(
-    stream: &impl std::os::fd::AsFd,
-    name: &'static str,
-) -> Result<(), ProcessError> {
-    let flags = fcntl_getfl(stream).map_err(|source| ProcessError::OutputReadFailed {
-        stream: name,
-        source: io::Error::from(source),
+fn wait_for_output(
+    stdout: &impl std::os::fd::AsFd,
+    stderr: &impl std::os::fd::AsFd,
+    timeout: Duration,
+) -> Result<(bool, bool), ProcessError> {
+    let mut descriptors = [
+        PollFd::new(stdout, PollFlags::IN),
+        PollFd::new(stderr, PollFlags::IN),
+    ];
+    let timeout = Timespec::try_from(timeout).map_err(|source| ProcessError::OutputReadFailed {
+        stream: "stdout/stderr readiness",
+        source: io::Error::new(io::ErrorKind::InvalidInput, source),
     })?;
-    fcntl_setfl(stream, flags | OFlags::NONBLOCK).map_err(|source| ProcessError::OutputReadFailed {
-        stream: name,
-        source: io::Error::from(source),
-    })
+    loop {
+        match poll(&mut descriptors, Some(&timeout)) {
+            Ok(_) => break,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(source) => {
+                return Err(ProcessError::OutputReadFailed {
+                    stream: "stdout/stderr readiness",
+                    source: io::Error::from(source),
+                });
+            }
+        }
+    }
+    let ready = |descriptor: &PollFd<'_>| {
+        descriptor
+            .revents()
+            .intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
+    };
+    Ok((ready(&descriptors[0]), ready(&descriptors[1])))
 }
 
 #[cfg(not(unix))]
-fn set_nonblocking(_stream: &impl Sized, _name: &'static str) -> Result<(), ProcessError> {
+fn wait_for_output(
+    _stdout: &impl Sized,
+    _stderr: &impl Sized,
+    _timeout: Duration,
+) -> Result<(bool, bool), ProcessError> {
     Err(ProcessError::UnsupportedPlatform)
 }
 
@@ -379,7 +396,6 @@ fn drain_once(
                 .extend_from_slice(&buffer[..count.min(remaining)]);
             Ok(true)
         }
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
         Err(source) => Err(ProcessError::OutputReadFailed {
             stream: name,
             source,

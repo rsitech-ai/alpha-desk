@@ -4,9 +4,21 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Source capture and truth-layer service boundary for Hyperliquid Alpha Desk."
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
 publish = false
 
 [dependencies]
 anyhow.workspace = true
+domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
+hl-protocol = { path = "../../crates/hl-protocol", version = "=0.1.0" }
+serde.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+toml.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

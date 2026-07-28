@@ -1,0 +1,10 @@
+# Default ownership until dedicated RSI Tech teams are configured.
+* @s1korrrr
+
+# Contracts, safety policy, and release boundaries require maintainer review.
+/schemas/ @s1korrrr
+/config/stage-gates/ @s1korrrr
+/docs/superpowers/ @s1korrrr
+/docs/open-source/ @s1korrrr
+/infra/ @s1korrrr
+/.github/ @s1korrrr
