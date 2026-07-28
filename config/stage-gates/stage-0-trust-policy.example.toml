@@ -1,0 +1,12 @@
+schema_version = 1
+keyring_path = "target/stage-gates/inputs/stage-0-reviewers.gpg"
+
+# Copy the real, distinct reviewer fingerprints into the committed
+# stage-0-trust-policy.toml registry. The gate hashes the committed bytes.
+[[reviewers]]
+role = "platform-data"
+fingerprint = "replace-with-full-platform-data-fingerprint"
+
+[[reviewers]]
+role = "independent"
+fingerprint = "replace-with-full-independent-fingerprint"

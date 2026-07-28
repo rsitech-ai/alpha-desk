@@ -27,6 +27,40 @@ Design version 1.0.0 was approved for implementation on 2026-07-24. The implemen
 
 The future execution enclave is outside V1 and requires a separate threat model, approved design, and implementation plan after shadow-live and paper evidence satisfy the admission policy.
 
+## Stage 0 gate
+
+The committed Stage 0 contract is
+[`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml). Run it
+only from the clean, frozen implementation commit:
+
+```sh
+just stage-0-gate
+```
+
+The command writes transient canonical JSON only to the Git-ignored
+`target/stage-gates/stage-0.json` and writes the exact canonical local builder
+evidence to `target/stage-gates/stage-0.builder.json`. Copy Builder B's
+`stage-0.builder.json` byte-for-byte to Builder A's configured
+`target/stage-gates/inputs/stage-0.builder-b.json`; no JSON extraction or
+rewriting is required. Exit status `0` means `PASS`, `1` means a local
+verification `FAIL`, and `2` means `BLOCKED`. A local builder remains
+`BLOCKED` until a second independent builder report, the exact required GitHub
+check proof, two distinct detached reviewer approvals, a configured reviewer
+keyring, and usable OpenPGP verification tooling are supplied. Any non-PASS
+result has the explicit stage outcome `HOLD`. External reports, proofs,
+signatures, and the keyring stay under the ignored input paths named by the
+configuration. The gate never creates an approval record, signature, evidence
+commit, or tag.
+
+The tracked operational trust registry is
+[`stage-0-trust-policy.toml`](config/stage-gates/stage-0-trust-policy.toml).
+Its current placeholder fingerprints intentionally keep Stage 0 blocked. They
+must be replaced by distinct, reviewed, full fingerprints in a committed
+change; the gate hashes the exact committed registry bytes. The separate
+[`stage-0-trust-policy.example.toml`](config/stage-gates/stage-0-trust-policy.example.toml)
+remains a non-operational template for the `platform-data` and `independent`
+roles.
+
 ## V1 safety boundary
 
 The current V1 is read-only. It contains no execution service, trading signer, exchange private-key handling, order-placement path, or signing capability. Any future execution enclave is explicitly outside this workspace boundary until separately designed, reviewed, and approved.
