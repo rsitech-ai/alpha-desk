@@ -12,6 +12,8 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Telemetry, build provenance, architecture, dependency, generated-artifact, reproducibility, and Stage 0 gate tooling.
 - Local dependency and inactive deployment scaffolding.
 - Strict source-observation, cursor, source-error, async source-port, and capture-configuration contracts for Stage 1.
+- Crash-safe capture spool with durability receipts, recovery scanning, hash-chained close
+  manifests, offline inspection, deterministic fixtures, and parser fuzzing.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 
@@ -22,5 +24,6 @@ All notable changes will be documented in this file. The format follows [Keep a 
 ### Known limitations
 
 - Stage 0 gate remains on `HOLD`.
-- Capture, canonical truth-layer runtime, APIs, research workflows, and native applications are not yet implemented.
+- Source adapters, the long-running capture runtime, canonicalization, APIs, research workflows,
+  and native applications are not yet implemented.
 - No public release, supported version, production deployment, or performance qualification exists.

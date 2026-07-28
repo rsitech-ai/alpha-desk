@@ -1,30 +1,27 @@
 [package]
-name = "hl-capture"
+name = "spool-inspect"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Source capture and truth-layer service boundary for Hyperliquid Alpha Desk."
+description = "Offline integrity and recovery inspector for Alpha Desk capture spools."
 homepage.workspace = true
 repository.workspace = true
 readme.workspace = true
 publish = false
 
 [dependencies]
-anyhow.workspace = true
-blake3.workspace = true
-bytes.workspace = true
-crc32c.workspace = true
-domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
-hl-protocol = { path = "../../crates/hl-protocol", version = "=0.1.0" }
-hex.workspace = true
-rustix.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+hl-capture = { path = "../../services/hl-capture", version = "=0.1.0" }
 thiserror.workspace = true
-tokio.workspace = true
-toml.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
+bytes.workspace = true
+domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
+hl-protocol = { path = "../../crates/hl-protocol", version = "=0.1.0" }
+serde_json.workspace = true
 tempfile.workspace = true
+
+[[bin]]
+name = "spool-inspect"
+path = "src/main.rs"

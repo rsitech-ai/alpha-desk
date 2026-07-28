@@ -20,6 +20,7 @@ public = [
   "deny.toml",
   "docs",
   "fixtures",
+  "fuzz",
   "justfile",
   "rust-toolchain.toml",
   "schemas",
@@ -46,7 +47,10 @@ forbidden_path_prefixes = [
   "target/stage-gates/inputs/",
 ]
 
-allowed_binary_paths = ["schemas/proto/baseline/v1.pb"]
+allowed_binary_paths = [
+  "fixtures/spool/valid-v1/segment-0000000001.hlsp",
+  "schemas/proto/baseline/v1.pb",
+]
 
 # The audit implementation and its canary tests must contain detector strings.
 # Each exception is exact by rule and path; directory-wide exceptions are not

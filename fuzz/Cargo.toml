@@ -1,0 +1,22 @@
+[package]
+name = "alpha-desk-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+hl-capture = { path = "../services/hl-capture" }
+libfuzzer-sys = "=0.4.10"
+
+[[bin]]
+name = "spool_segment"
+path = "fuzz_targets/spool_segment.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

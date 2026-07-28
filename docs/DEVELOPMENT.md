@@ -6,6 +6,7 @@
 - Rust edition: 2024
 - Swift: 6.3
 - Docker Compose: required only for dependency-stack and integration smokes
+- Parser fuzzing: `nightly-2026-07-16` plus `cargo-fuzz 0.13.2`
 
 Use the committed lockfiles. Normal verification is offline after dependencies have been fetched.
 
@@ -15,6 +16,7 @@ Use the committed lockfiles. Normal verification is offline after dependencies h
 just --list
 just verify
 just generated
+just spool-verify
 SOURCE_DATE_EPOCH=1784894400 just reproducible
 ```
 
@@ -36,6 +38,19 @@ just stage-0-compose-smoke
 ```
 
 `just dev-up` starts PostgreSQL, NATS, ClickHouse, MinIO, and related development dependencies. It does not start Alpha Desk services or a UI.
+
+The focused durable-spool checks are:
+
+```sh
+cargo +1.97.1 test -p hl-capture --test spool_recovery --locked --offline
+cargo +1.97.1 test -p spool-inspect --locked --offline
+just spool-verify
+just spool-fuzz
+```
+
+`just spool-fuzz` runs for 60 seconds by default. It validates parser safety, not service uptime or
+source completeness. The normative framing and recovery contract is
+[`formats/spool-v1.md`](formats/spool-v1.md).
 
 ## Engineering rules
 

@@ -2,7 +2,7 @@
 
 Hyperliquid Alpha Desk is a local-first, read-only market-intelligence and research workstation under active development by RSI Tech. Its production design centers on byte-preserving source capture, a deterministic canonical ledger, reproducible research, evidence-linked signals, and native Apple clients.
 
-This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation and the approved staged design. The Stage 0 release gate remains on `HOLD`; the capture runtime, APIs, research workflows, and native UI are planned work.
+This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation, the first two unreleased Stage 1 truth-layer slices, and the approved staged design. The Stage 0 release gate remains on `HOLD`; source adapters, a long-running capture service, APIs, research workflows, and native UI are planned work.
 
 ## Current state
 
@@ -12,8 +12,8 @@ This repository is not yet a runnable desk application. It currently contains a 
 | Rust workspace, exact domain types, schemas, fixtures, telemetry, and provenance | Implemented and locally tested | [`docs/STATUS.md`](docs/STATUS.md) |
 | Stage 0 gate tooling | Implemented; gate outcome `HOLD` | [`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml) |
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
-| Source-observation and capture configuration contracts | Implemented on the hardening branch; no source adapter or runtime yet | [`docs/STATUS.md`](docs/STATUS.md) |
-| Durable capture and canonical truth-layer runtime | Not implemented | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Source-observation, capture configuration, and crash-safe spool | Implemented and locally tested; no source adapter or service runtime yet | [`docs/STATUS.md`](docs/STATUS.md) |
+| Complete durable capture and canonical truth-layer runtime | Partially implemented; adapters, continuity, archive, replay, and publication remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |
 
@@ -56,9 +56,14 @@ Run the normal local verification:
 ```sh
 just verify
 just generated
+just spool-verify
 ```
 
 `just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
+
+The committed synthetic spool fixture can be inspected independently with `just spool-verify`.
+Parser fuzzing additionally requires the pinned `nightly-2026-07-16` toolchain and
+`cargo-fuzz`; run `just spool-fuzz`.
 
 To validate the local dependency stack separately:
 
@@ -71,12 +76,12 @@ For focused commands and development conventions, read [docs/DEVELOPMENT.md](doc
 ## Repository map
 
 - `crates/` — domain contracts, canonical types, storage ports, telemetry, and research foundations
-- `services/` — future long-running service boundaries; currently bootstrap-only
+- `services/` — service boundaries; `hl-capture` contains observation and spool libraries, while service binaries remain bootstrap-only
 - `apps/AlphaDesk/` — Swift package foundations; currently no application target
 - `schemas/` — versioned Protobuf and JSON contracts
 - `fixtures/` — synthetic, redistributable deterministic fixtures
 - `infra/` — local dependency and future deployment scaffolding
-- `tools/` — schema, architecture, provenance, fixture, and stage-gate tooling
+- `tools/` — schema, architecture, provenance, fixture, spool inspection, and stage-gate tooling
 - `docs/superpowers/` — approved design, stage plans, traceability, and reviews
 
 ## Safety boundary
