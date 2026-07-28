@@ -1,0 +1,137 @@
+name: Stage 0 evidence
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+
+jobs:
+  sign:
+    name: Stage 0 evidence signing
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build canonical proof and sign it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          SIGNING_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SIGNING_RUN_ID: ${{ github.run_id }}
+          STAGE0_GITHUB_CI_PRIVATE_KEY: ${{ secrets.STAGE0_GITHUB_CI_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$STAGE0_GITHUB_CI_PRIVATE_KEY"
+          test "$HEAD_SHA" = "$(git rev-parse HEAD)"
+          workflow_sha="$(git log -1 --format=%H -- .github/workflows/stage-0-evidence.yml)"
+          test "${#workflow_sha}" -eq 40
+          repository_json="$(curl --fail --silent --show-error \
+            --retry 3 --connect-timeout 10 --max-time 60 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$REPOSITORY")"
+          checks_json="$(curl --fail --silent --show-error \
+            --retry 3 --connect-timeout 10 --max-time 60 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100")"
+          signing_check="$(
+            jq -ce --arg run "$GITHUB_RUN_ID" '
+              [.check_runs[] |
+                select(.name == "Stage 0 evidence signing") |
+                select(.status == "in_progress") |
+                select(.details_url | contains("/actions/runs/" + $run + "/"))] |
+              if length == 1 then .[0] else error("signing check identity is ambiguous") end
+            ' <<<"$checks_json"
+          )"
+          required='["Rust quality","Rust tests","Swift 6.3","Static Compose policy","Trusted integration smoke","Reproducible service binaries"]'
+          proof="$(jq -cSe \
+            --arg repository "$REPOSITORY" \
+            --arg workflow_sha "$workflow_sha" \
+            --arg head_sha "$HEAD_SHA" \
+            --argjson repository_json "$repository_json" \
+            --argjson checks_json "$checks_json" \
+            --argjson signing_check "$signing_check" \
+            --argjson required "$required" \
+            --argjson run_id "$RUN_ID" \
+            --argjson run_attempt "$RUN_ATTEMPT" '
+              ($checks_json.check_runs |
+                map(select(.name as $name | $required | index($name))) |
+                map(select(.details_url | contains("/actions/runs/" + ($run_id | tostring) + "/"))) |
+                map({
+                  check_run_id: .id,
+                  conclusion,
+                  head_sha: .head_sha,
+                  name,
+                  run_attempt: $run_attempt,
+                  run_id: $run_id
+                }) |
+                sort_by(.name)) as $checks |
+              if ($checks | map(.name) | sort) != ($required | sort) or
+                 ($checks | map(.check_run_id) | unique | length) != ($required | length) or
+                 ($checks | any(.conclusion != "success" or .head_sha != $head_sha))
+              then error("required checks are missing, duplicated, or unsuccessful")
+              else {
+                checks: $checks,
+                event_name: "push",
+                git_ref: "refs/heads/main",
+                head_sha: $head_sha,
+                repository: $repository,
+                repository_id: $repository_json.id,
+                repository_owner_id: $repository_json.owner.id,
+                run_attempt: $run_attempt,
+                run_id: $run_id,
+                schema_version: 1,
+                signing_check: {
+                  check_run_id: $signing_check.id,
+                  head_sha: $signing_check.head_sha,
+                  name: $signing_check.name,
+                  run_attempt: (env.SIGNING_RUN_ATTEMPT | tonumber),
+                  run_id: (env.SIGNING_RUN_ID | tonumber),
+                  status: $signing_check.status
+                },
+                signing_check_run_id: $signing_check.id,
+                workflow: ".github/workflows/stage-0-evidence.yml",
+                workflow_ref: ($repository + "/.github/workflows/stage-0-evidence.yml@refs/heads/main"),
+                workflow_sha: $workflow_sha
+              } end
+            ')"
+          printf '%s' "$proof" >stage-0.github-proof.json
+          export GNUPGHOME="$RUNNER_TEMP/stage0-gnupg"
+          install -d -m 0700 "$GNUPGHOME"
+          printf '%s' "$STAGE0_GITHUB_CI_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --yes --armor --detach-sign \
+            --output stage-0.github-proof.json.asc stage-0.github-proof.json
+          gpg --batch --export >stage-0.github-ci.gpg
+
+      - name: Upload signed evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stage-0-github-proof-${{ github.event.workflow_run.head_sha }}
+          path: |
+            stage-0.github-proof.json
+            stage-0.github-proof.json.asc
+            stage-0.github-ci.gpg
+          if-no-files-found: error
+          retention-days: 30
