@@ -34,15 +34,33 @@ The committed Stage 0 contract is
 only from the clean, frozen implementation commit:
 
 ```sh
-just stage-0-gate
+just stage-0-validate-config
+just stage-0-gate <builder-id>
 ```
+
+`stage-0-validate-config` is the published configuration validator. It first
+applies the Draft 2020-12 JSON Schema and then runs the same Rust semantic
+validator used by the gate. The JSON Schema is the structural contract only:
+cross-item uniqueness by `id` or `path`, absolute/tokenized program-root
+policy, and `builder.target_tool` membership in `builder.tools` are semantic
+invariants. JSON Schema validation alone is therefore not claimed to establish
+runtime-valid configuration.
+
+The local builder ID is mandatory and explicit. It must be 3–128 ASCII
+alphanumeric characters or `-`, `_`, `.`, `:`, or `@`, and it must not contain
+`unknown`, `placeholder`, or `unidentified` in any letter case. There is no
+implicit local identity or environment fallback in the CLI.
 
 The command writes transient canonical JSON only to the Git-ignored
 `target/stage-gates/stage-0.json` and writes the exact canonical local builder
 evidence to `target/stage-gates/stage-0.builder.json`; nested/custom output
 roots and filenames are rejected. Bootstrap/configuration failure invalidates
 both advertised outputs (and the historical builder filename) without deleting
-anything under `target/stage-gates/inputs/`. Copy Builder B's
+anything under `target/stage-gates/inputs/`. Any CLI invocation that names the
+fixed Stage 0 config first invalidates those three fixed outputs, including
+when output or Builder B arguments are missing or malformed. This early cleanup
+is limited to the explicitly selected Git repository and never derives a
+cleanup path from a caller-supplied output. Copy Builder B's
 canonical `stage-0.builder.json` and its detached OpenPGP signature byte-for-byte
 to Builder A's configured input paths; no JSON extraction or rewriting is
 permitted. Builder B's report identity must be
@@ -66,7 +84,10 @@ free-form, uppercase, or non-`builder-b` identities are rejected. Exit status
 `0` means `PASS`, `1` means verification `FAIL`, and `2` means `BLOCKED`.
 Missing external evidence is `BLOCKED`; evidence that is present but has an
 invalid signature, identity, version, workflow binding, or comparison
-projection is `FAIL`. A local builder remains
+projection is `FAIL`. Each present reviewer approval is verified independently:
+if one approval is malformed and its peer is absent, the report retains both
+the invalid-evidence and missing-evidence reasons and the overall result is
+`FAIL`. A local builder remains
 `BLOCKED` until a signed second-builder report, the signed exact GitHub run
 proof, two distinct detached reviewer approvals, a four-role trust registry,
 and usable OpenPGP verification tooling are supplied. Any non-PASS

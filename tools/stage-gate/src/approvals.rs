@@ -199,92 +199,123 @@ pub fn verify_approvals(
         .map(|reviewer| (reviewer.role.as_str(), reviewer.fingerprint.as_str()))
         .collect::<BTreeMap<_, _>>();
 
+    let mut status = GateStatus::Pass;
+    let mut reasons = Vec::new();
     for role in &requirements.required_roles {
-        let Some(item) = evidence.iter().find(|item| &item.role == role) else {
-            return blocked(ApprovalReasonCode::RequiredApprovalMissing);
+        let outcome = verify_single_approval(
+            role,
+            binding,
+            policy,
+            &policy_by_role,
+            evidence,
+            &gpgv_program,
+        );
+        status = match (status, outcome.status) {
+            (GateStatus::Fail, _) | (_, GateStatus::Fail) => GateStatus::Fail,
+            (GateStatus::Blocked, _) | (_, GateStatus::Blocked) => GateStatus::Blocked,
+            _ => GateStatus::Pass,
         };
-        let Some(expected_fingerprint) = policy_by_role.get(role.as_str()) else {
-            return blocked(ApprovalReasonCode::RequiredApprovalMissing);
-        };
-        if item.claimed_fingerprint != *expected_fingerprint {
-            return failed(ApprovalReasonCode::UntrustedReviewer);
-        }
-        let statement_bytes = match read_regular_nofollow(&item.statement_path, 4 * 1024 * 1024) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return blocked(ApprovalReasonCode::RequiredApprovalMissing);
+        for reason in outcome.reasons {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
             }
-            Err(_) => return failed(ApprovalReasonCode::ApprovalStatementMismatch),
-        };
-        let signature_bytes = match read_regular_nofollow(&item.signature_path, 4 * 1024 * 1024) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return blocked(ApprovalReasonCode::RequiredApprovalMissing);
-            }
-            Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
-        };
-        let canonical = match std::str::from_utf8(&statement_bytes)
-            .ok()
-            .and_then(|source| canonicalize_json_str(source).ok())
-        {
-            Some(canonical) if canonical == statement_bytes => canonical,
-            _ => return failed(ApprovalReasonCode::ApprovalStatementMismatch),
-        };
-        let statement: ApprovalStatement = match serde_json::from_slice(&canonical) {
-            Ok(statement) => statement,
-            Err(_) => return failed(ApprovalReasonCode::ApprovalStatementInvalid),
-        };
-        if let Err(reason) = statement.validate() {
-            return failed(reason);
         }
-        if statement.stage_id != binding.stage_id
-            || statement.implementation_commit != binding.implementation_commit
-            || statement.design_tag_object != binding.design_tag_object
-            || statement.design_commit != binding.design_commit
-            || statement.aggregate_evidence_sha256 != binding.aggregate_evidence_sha256
-            || statement.comparison_manifest_sha256 != binding.comparison_manifest_sha256
-            || statement.known_limitations != binding.known_limitations
-            || statement.known_limitations_sha256 != binding.known_limitations_sha256
-            || statement.role != item.role
-            || statement.signer_fingerprint != *expected_fingerprint
-        {
-            return failed(ApprovalReasonCode::ApprovalBindingMismatch);
-        }
-        let mut statement_snapshot = match NamedTempFile::new() {
-            Ok(file) => file,
-            Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
-        };
-        let mut signature_snapshot = match NamedTempFile::new() {
-            Ok(file) => file,
-            Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
-        };
-        if statement_snapshot
-            .write_all(&statement_bytes)
-            .and_then(|()| statement_snapshot.as_file().sync_all())
-            .is_err()
-            || signature_snapshot
-                .write_all(&signature_bytes)
-                .and_then(|()| signature_snapshot.as_file().sync_all())
-                .is_err()
-        {
-            return failed(ApprovalReasonCode::InvalidDetachedSignature);
-        }
+    }
+    ApprovalOutcome { status, reasons }
+}
 
-        let output = match run_openpgp_verifier(
-            gpgv_program.clone(),
-            &policy.keyring_path,
-            signature_snapshot.path(),
-            statement_snapshot.path(),
-        ) {
-            Ok(output) => output,
-            Err(error) if error.contains("No such file") => {
-                return blocked(ApprovalReasonCode::OpenPgpToolingUnavailable);
-            }
-            Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
-        };
-        if !output.success || !clean_validsig(output.status.as_bytes(), expected_fingerprint) {
-            return failed(ApprovalReasonCode::InvalidDetachedSignature);
+fn verify_single_approval(
+    role: &str,
+    binding: &ApprovalBinding,
+    policy: &TrustPolicy,
+    policy_by_role: &BTreeMap<&str, &str>,
+    evidence: &[ApprovalEvidence],
+    gpgv_program: &std::path::Path,
+) -> ApprovalOutcome {
+    let Some(item) = evidence.iter().find(|item| item.role == role) else {
+        return blocked(ApprovalReasonCode::RequiredApprovalMissing);
+    };
+    let Some(expected_fingerprint) = policy_by_role.get(role) else {
+        return blocked(ApprovalReasonCode::RequiredApprovalMissing);
+    };
+    if item.claimed_fingerprint != *expected_fingerprint {
+        return failed(ApprovalReasonCode::UntrustedReviewer);
+    }
+    let statement_bytes = match read_regular_nofollow(&item.statement_path, 4 * 1024 * 1024) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return blocked(ApprovalReasonCode::RequiredApprovalMissing);
         }
+        Err(_) => return failed(ApprovalReasonCode::ApprovalStatementMismatch),
+    };
+    let signature_bytes = match read_regular_nofollow(&item.signature_path, 4 * 1024 * 1024) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return blocked(ApprovalReasonCode::RequiredApprovalMissing);
+        }
+        Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
+    };
+    let canonical = match std::str::from_utf8(&statement_bytes)
+        .ok()
+        .and_then(|source| canonicalize_json_str(source).ok())
+    {
+        Some(canonical) if canonical == statement_bytes => canonical,
+        _ => return failed(ApprovalReasonCode::ApprovalStatementMismatch),
+    };
+    let statement: ApprovalStatement = match serde_json::from_slice(&canonical) {
+        Ok(statement) => statement,
+        Err(_) => return failed(ApprovalReasonCode::ApprovalStatementInvalid),
+    };
+    if let Err(reason) = statement.validate() {
+        return failed(reason);
+    }
+    if statement.stage_id != binding.stage_id
+        || statement.implementation_commit != binding.implementation_commit
+        || statement.design_tag_object != binding.design_tag_object
+        || statement.design_commit != binding.design_commit
+        || statement.aggregate_evidence_sha256 != binding.aggregate_evidence_sha256
+        || statement.comparison_manifest_sha256 != binding.comparison_manifest_sha256
+        || statement.known_limitations != binding.known_limitations
+        || statement.known_limitations_sha256 != binding.known_limitations_sha256
+        || statement.role != item.role
+        || statement.signer_fingerprint != *expected_fingerprint
+    {
+        return failed(ApprovalReasonCode::ApprovalBindingMismatch);
+    }
+    let mut statement_snapshot = match NamedTempFile::new() {
+        Ok(file) => file,
+        Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
+    };
+    let mut signature_snapshot = match NamedTempFile::new() {
+        Ok(file) => file,
+        Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
+    };
+    if statement_snapshot
+        .write_all(&statement_bytes)
+        .and_then(|()| statement_snapshot.as_file().sync_all())
+        .is_err()
+        || signature_snapshot
+            .write_all(&signature_bytes)
+            .and_then(|()| signature_snapshot.as_file().sync_all())
+            .is_err()
+    {
+        return failed(ApprovalReasonCode::InvalidDetachedSignature);
+    }
+
+    let output = match run_openpgp_verifier(
+        gpgv_program.to_path_buf(),
+        &policy.keyring_path,
+        signature_snapshot.path(),
+        statement_snapshot.path(),
+    ) {
+        Ok(output) => output,
+        Err(error) if error.contains("No such file") => {
+            return blocked(ApprovalReasonCode::OpenPgpToolingUnavailable);
+        }
+        Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
+    };
+    if !output.success || !clean_validsig(output.status.as_bytes(), expected_fingerprint) {
+        return failed(ApprovalReasonCode::InvalidDetachedSignature);
     }
     ApprovalOutcome {
         status: GateStatus::Pass,

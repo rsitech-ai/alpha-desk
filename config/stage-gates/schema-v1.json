@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://rsitech.ai/schemas/alpha-desk/stage-gate-v1.json",
+  "$comment": "Structural validation only. Use `just stage-0-validate-config` to apply this schema plus the required Rust semantic invariants.",
   "title": "Alpha Desk stage gate configuration",
   "type": "object",
   "additionalProperties": false,

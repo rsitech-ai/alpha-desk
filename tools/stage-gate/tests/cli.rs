@@ -47,8 +47,8 @@ fn fixture_run_writes_only_ignored_output_and_stays_blocked_without_external_evi
         .arg(fixture.repository.path())
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
 
@@ -142,12 +142,19 @@ fn fixture_run_writes_only_ignored_output_and_stays_blocked_without_external_evi
 }
 
 #[test]
-fn missing_explicit_local_builder_id_is_a_stable_blocking_reason() {
+fn missing_explicit_local_builder_id_fails_before_reusing_stale_evidence() {
     let fixture = CliFixture::new();
     let output_path = fixture
         .repository
         .path()
         .join("target/stage-gates/stage-0.json");
+    let builder_path = fixture
+        .repository
+        .path()
+        .join("target/stage-gates/stage-0.builder.json");
+    fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    fs::write(&output_path, br#"{"overall_result":"PASS"}"#).unwrap();
+    fs::write(&builder_path, br#"{"overall_result":"PASS"}"#).unwrap();
 
     let output = Command::new(stage_gate_binary())
         .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
@@ -158,16 +165,9 @@ fn missing_explicit_local_builder_id_is_a_stable_blocking_reason() {
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    let report: serde_json::Value =
-        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
-    assert!(
-        report["reason_codes"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("builder_identity_unavailable"))
-    );
-    assert_eq!(report["stage_outcome"], "HOLD");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!output_path.exists());
+    assert!(!builder_path.exists());
 }
 
 #[test]
@@ -182,8 +182,8 @@ fn explicit_builder_b_role_and_fingerprint_emit_a_signable_bound_identity() {
         .arg(fixture.repository.path())
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
     assert_eq!(local_output.status.code(), Some(2), "{local_output:?}");
@@ -346,6 +346,135 @@ fn builder_b_role_and_full_lowercase_fingerprint_are_an_exact_argument_pair() {
 }
 
 #[test]
+fn invalid_stage_zero_invocations_invalidate_only_fixed_outputs_and_preserve_inputs() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+    let builder_path = repository.join("target/stage-gates/stage-0.builder.json");
+    let historical_path = repository.join("target/stage-gates/stage-0-builder-report.json");
+    let input_path = repository.join("target/stage-gates/inputs/builder-b.json");
+    fs::create_dir_all(input_path.parent().unwrap()).unwrap();
+    fs::write(&input_path, br#"{"external":"must survive"}"#).unwrap();
+
+    let scenarios = [
+        ("role-only", vec!["--builder-role", "builder-b"]),
+        (
+            "wrong-role",
+            vec![
+                "--builder-role",
+                "builder-c",
+                "--builder-fingerprint",
+                BUILDER_B_FINGERPRINT,
+            ],
+        ),
+        (
+            "uppercase-fingerprint",
+            vec![
+                "--builder-role",
+                "builder-b",
+                "--builder-fingerprint",
+                "FEDCBA9876543210FEDCBA9876543210FEDCBA98",
+            ],
+        ),
+        ("missing-output-value", vec!["--output"]),
+        (
+            "malformed-output",
+            vec!["--output", "target/stage-gates/nested/stage-0.json"],
+        ),
+    ];
+
+    for (scenario, extra) in scenarios {
+        for stale in [&output_path, &builder_path, &historical_path] {
+            fs::write(
+                stale,
+                br#"{"overall_result":"PASS","stage_outcome":"ACCEPTED"}"#,
+            )
+            .unwrap();
+        }
+        let output = Command::new(stage_gate_binary())
+            .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+            .arg(repository)
+            .args(extra)
+            .env_clear()
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{scenario} must fail closed: {output:?}"
+        );
+        for stale in [&output_path, &builder_path, &historical_path] {
+            assert!(
+                !stale.exists(),
+                "{scenario} left stale output {}",
+                stale.display()
+            );
+        }
+        assert_eq!(
+            fs::read(&input_path).unwrap(),
+            br#"{"external":"must survive"}"#,
+            "{scenario} must preserve external inputs"
+        );
+    }
+}
+
+#[test]
+fn explicit_validated_local_builder_id_is_published_without_an_environment_fallback() {
+    let fixture = CliFixture::new();
+    let output_path = fixture
+        .repository
+        .path()
+        .join("target/stage-gates/stage-0.json");
+
+    let output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(fixture.repository.path())
+        .arg("--output")
+        .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
+        .env_clear()
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(
+        report["builder_report"]["builder_identity"]["builder_id"],
+        "fixture-builder-a"
+    );
+    assert!(
+        !report["reason_codes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("builder_identity_unavailable"))
+    );
+}
+
+#[test]
+fn stage_zero_just_recipe_forwards_the_required_local_builder_id() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("just")
+        .args(["--dry-run", "stage-0-gate", "fixture-builder-a"])
+        .current_dir(repository)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let rendered = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        rendered.contains(
+            "run config/stage-gates/stage-0.toml --output \
+             target/stage-gates/stage-0.json --builder-id 'fixture-builder-a'"
+        ),
+        "unexpected recipe expansion: {rendered}"
+    );
+}
+
+#[test]
 fn builder_version_mismatch_is_a_stable_blocking_reason() {
     let fixture = CliFixture::new();
     let config_path = fixture
@@ -371,8 +500,8 @@ fn builder_version_mismatch_is_a_stable_blocking_reason() {
         .arg(fixture.repository.path())
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
 
@@ -411,8 +540,8 @@ fn committed_invalid_utf8_trust_registry_is_a_stable_blocking_reason() {
         .arg(fixture.repository.path())
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
 
@@ -455,8 +584,8 @@ fn resolved_approval_verifier_path_and_hash_are_bound_into_builder_report() {
         .arg(fixture.repository.path())
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
 
@@ -508,8 +637,8 @@ fn approval_verifier_mutating_a_tracked_file_fails_final_snapshot_check() {
         .arg(repository)
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
     assert_eq!(preliminary.status.code(), Some(2), "{preliminary:?}");
@@ -569,8 +698,8 @@ fn approval_verifier_mutating_a_tracked_file_fails_final_snapshot_check() {
         .arg(repository)
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
 
@@ -591,18 +720,24 @@ fn approval_verifier_mutating_a_tracked_file_fails_final_snapshot_check() {
 fn output_path_outside_configured_ignored_root_is_rejected() {
     let fixture = CliFixture::new();
     let escaped = fixture.repository.path().join("stage-0.json");
+    fs::write(&escaped, b"unrelated file must survive\n").unwrap();
 
     let output = Command::new(stage_gate_binary())
         .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
         .arg(fixture.repository.path())
         .arg("--output")
         .arg(&escaped)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(!escaped.exists());
+    assert_eq!(
+        fs::read(&escaped).unwrap(),
+        b"unrelated file must survive\n",
+        "cleanup must never be derived from the rejected output path"
+    );
 }
 
 #[test]
@@ -617,8 +752,8 @@ fn custom_output_name_inside_gate_root_is_rejected() {
         .arg(fixture.repository.path())
         .arg("--output")
         .arg(&custom)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
 
@@ -679,8 +814,8 @@ STAGE_GATE_FIXTURE_ORDER = {}
         .arg(repository)
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .output()
         .unwrap();
 
@@ -728,6 +863,7 @@ fn malformed_config_replaces_stale_pass_with_bootstrap_failure_report() {
         .arg(repository)
         .arg("--output")
         .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
         .output()
         .unwrap();
@@ -1458,8 +1594,8 @@ fn spawn_gate(repository: &Path, output_path: &Path) -> std::process::Child {
         .arg(repository)
         .arg("--output")
         .arg(output_path)
+        .args(["--builder-id", "fixture-builder-a"])
         .env_clear()
-        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

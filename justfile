@@ -41,8 +41,11 @@ ci-verify: check-workspace quality ci-test
 
 verify: check-workspace quality test
 
-stage-0-gate:
-    cargo +1.97.1 run -p stage-gate --locked --offline -- run config/stage-gates/stage-0.toml --output target/stage-gates/stage-0.json
+stage-0-validate-config:
+    cargo +1.97.1 run -p stage-gate --locked --offline -- validate-config config/stage-gates/stage-0.toml --schema config/stage-gates/schema-v1.json
+
+stage-0-gate builder_id:
+    cargo +1.97.1 run -p stage-gate --locked --offline -- run config/stage-gates/stage-0.toml --output target/stage-gates/stage-0.json --builder-id {{quote(builder_id)}}
 
 stage-0-compose-smoke:
     ./tools/ci/stage-0-compose-smoke.sh

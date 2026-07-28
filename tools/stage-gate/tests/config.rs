@@ -1,3 +1,5 @@
+use std::{fs, path::Path, process::Command};
+
 use stage_gate::config::{ConfigErrorCode, GateConfig};
 
 #[test]
@@ -101,6 +103,132 @@ fn published_schema_covers_signed_provenance_and_check_termination_fields() {
             .unwrap()
             .ends_with("@refs/heads/main$")
     );
+}
+
+#[test]
+fn published_combined_validator_rejects_schema_valid_semantic_violations() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema_path = manifest_dir.join("../../config/stage-gates/schema-v1.json");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&fs::read(&schema_path).unwrap()).unwrap();
+    let structural = jsonschema::draft202012::new(&schema).unwrap();
+    let fixture = tempfile::TempDir::new().unwrap();
+
+    let fixtures = [
+        (
+            "relative-program-root",
+            VALID_CONFIG.replace(
+                "program_roots = [\"/usr/bin\", \"/bin\"]",
+                "program_roots = [\"relative/bin\"]",
+            ),
+        ),
+        (
+            "duplicate-builder-tool-id",
+            VALID_CONFIG.replace(
+                "[approvals]",
+                concat!(
+                    "[[builder.tools]]\n",
+                    "id = \"just\"\n",
+                    "program = \"just\"\n\n",
+                    "[approvals]"
+                ),
+            ),
+        ),
+        (
+            "duplicate-artifact-path",
+            VALID_CONFIG.replace(
+                "[[checks]]",
+                concat!(
+                    "[[artifacts]]\n",
+                    "id = \"cargo-lock-copy\"\n",
+                    "path = \"Cargo.lock\"\n",
+                    "kind = \"input\"\n",
+                    "producer = \"repository\"\n",
+                    "target_triple = \"platform-independent\"\n",
+                    "profile = \"source\"\n\n",
+                    "[[checks]]"
+                ),
+            ),
+        ),
+        (
+            "missing-target-tool",
+            VALID_CONFIG.replace("target_tool = \"just\"", "target_tool = \"cargo\""),
+        ),
+    ];
+
+    for (scenario, source) in fixtures {
+        let toml_value: toml::Value = toml::from_str(&source).unwrap();
+        let instance = serde_json::to_value(toml_value).unwrap();
+        assert!(
+            structural.is_valid(&instance),
+            "{scenario} must demonstrate a JSON-Schema-valid semantic violation"
+        );
+        let config_path = fixture.path().join(format!("{scenario}.toml"));
+        fs::write(&config_path, source).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_stage-gate"))
+            .arg("validate-config")
+            .arg(&config_path)
+            .arg("--schema")
+            .arg(&schema_path)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{scenario} must fail the published combined validator: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("semantic"),
+            "{scenario} must identify the semantic validation layer: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn published_combined_validator_accepts_the_committed_stage_zero_config() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new(env!("CARGO_BIN_EXE_stage-gate"))
+        .args([
+            "validate-config",
+            "config/stage-gates/stage-0.toml",
+            "--schema",
+            "config/stage-gates/schema-v1.json",
+        ])
+        .current_dir(repository)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "stage-gate:config-valid:structure+semantics\n"
+    );
+}
+
+#[test]
+fn runtime_rejects_repository_identity_outside_the_published_workflow_ref_regex() {
+    let source = VALID_CONFIG
+        .replace(
+            "repository = \"s1korrrr/alpha-desk\"",
+            "repository = \"s1korrrr/group/alpha-desk\"",
+        )
+        .replace(
+            "workflow_ref = \"s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main\"",
+            "workflow_ref = \"s1korrrr/group/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main\"",
+        );
+    let schema_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/stage-gates/schema-v1.json");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&fs::read(schema_path).unwrap()).unwrap();
+    let structural = jsonschema::draft202012::new(&schema).unwrap();
+    let instance = serde_json::to_value(toml::from_str::<toml::Value>(&source).unwrap()).unwrap();
+
+    assert!(
+        !structural.is_valid(&instance),
+        "the published workflow_ref regex accepts exactly owner/repository"
+    );
+    let error = GateConfig::parse(&source)
+        .expect_err("runtime must reject identities the published regex rejects");
+    assert_eq!(error.code(), ConfigErrorCode::InvalidValue);
 }
 
 const VALID_CONFIG: &str = r#"
