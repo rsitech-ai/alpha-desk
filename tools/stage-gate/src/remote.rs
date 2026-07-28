@@ -14,6 +14,10 @@ pub struct RemoteRequirement {
     pub workflow: String,
     pub workflow_ref: String,
     pub workflow_sha: String,
+    pub trigger_workflow_id: u64,
+    pub trigger_workflow_name: String,
+    pub trigger_workflow_path: String,
+    pub trigger_workflow_sha: String,
     pub event_name: String,
     pub git_ref: String,
     pub signing_check_name: String,
@@ -46,12 +50,20 @@ pub struct RemoteProof {
     pub workflow: String,
     pub workflow_ref: String,
     pub workflow_sha: String,
+    pub job_workflow_file_path: String,
+    pub job_workflow_ref: String,
+    pub job_workflow_repository: String,
+    pub job_workflow_sha: String,
     pub event_name: String,
     pub git_ref: String,
     pub head_sha: String,
     pub run_id: u64,
     pub run_attempt: u64,
     pub signing_check_run_id: u64,
+    pub trigger_workflow_id: u64,
+    pub trigger_workflow_name: String,
+    pub trigger_workflow_path: String,
+    pub trigger_workflow_sha: String,
     pub signing_check: SigningCheck,
     pub checks: Vec<RemoteCheck>,
 }
@@ -87,14 +99,14 @@ pub fn verify_remote_proof(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return blocked(vec![RemoteProofReasonCode::RemoteProofMissing]);
         }
-        Err(_) => return blocked(vec![RemoteProofReasonCode::RemoteProofMalformed]),
+        Err(_) => return failed(vec![RemoteProofReasonCode::RemoteProofMalformed]),
     };
     match parse_and_validate(&bytes, requirement) {
         Ok(_) => RemoteProofOutcome {
             status: GateStatus::Pass,
             reasons: Vec::new(),
         },
-        Err(reasons) => blocked(reasons),
+        Err(reasons) => failed(reasons),
     }
 }
 
@@ -115,6 +127,7 @@ pub(crate) fn parse_and_validate(
         || proof.run_id == 0
         || proof.run_attempt == 0
         || proof.signing_check_run_id == 0
+        || proof.trigger_workflow_id == 0
     {
         return Err(vec![RemoteProofReasonCode::RemoteProofMalformed]);
     }
@@ -129,6 +142,14 @@ pub(crate) fn parse_and_validate(
         || proof.workflow != requirement.workflow
         || proof.workflow_ref != requirement.workflow_ref
         || proof.workflow_sha != requirement.workflow_sha
+        || proof.job_workflow_file_path != requirement.workflow
+        || proof.job_workflow_ref != requirement.workflow_ref
+        || proof.job_workflow_repository != requirement.repository
+        || proof.job_workflow_sha != requirement.workflow_sha
+        || proof.trigger_workflow_id != requirement.trigger_workflow_id
+        || proof.trigger_workflow_name != requirement.trigger_workflow_name
+        || proof.trigger_workflow_path != requirement.trigger_workflow_path
+        || proof.trigger_workflow_sha != requirement.trigger_workflow_sha
         || proof.event_name != requirement.event_name
         || proof.git_ref != requirement.git_ref
     {
@@ -209,6 +230,13 @@ fn read_regular_nofollow(path: &Path, max_bytes: usize) -> std::io::Result<Vec<u
 fn blocked(reasons: Vec<RemoteProofReasonCode>) -> RemoteProofOutcome {
     RemoteProofOutcome {
         status: GateStatus::Blocked,
+        reasons,
+    }
+}
+
+fn failed(reasons: Vec<RemoteProofReasonCode>) -> RemoteProofOutcome {
+    RemoteProofOutcome {
+        status: GateStatus::Fail,
         reasons,
     }
 }

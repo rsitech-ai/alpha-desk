@@ -35,21 +35,48 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+          SIGNING_WORKFLOW_REF: ${{ github.workflow_ref }}
+          SIGNING_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          JOB_CONTEXT_JSON: ${{ toJson(job) }}
           SIGNING_RUN_ATTEMPT: ${{ github.run_attempt }}
           SIGNING_RUN_ID: ${{ github.run_id }}
+          TRIGGER_WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+          TRIGGER_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
           STAGE0_GITHUB_CI_PRIVATE_KEY: ${{ secrets.STAGE0_GITHUB_CI_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           test -n "$STAGE0_GITHUB_CI_PRIVATE_KEY"
           test "$HEAD_SHA" = "$(git rev-parse HEAD)"
-          workflow_sha="$(git log -1 --format=%H -- .github/workflows/stage-0-evidence.yml)"
-          test "${#workflow_sha}" -eq 40
+          JOB_WORKFLOW_FILE_PATH="$(jq -er '.workflow_file_path' <<<"$JOB_CONTEXT_JSON")"
+          JOB_WORKFLOW_REF="$(jq -er '.workflow_ref' <<<"$JOB_CONTEXT_JSON")"
+          JOB_WORKFLOW_REPOSITORY="$(jq -er '.workflow_repository' <<<"$JOB_CONTEXT_JSON")"
+          JOB_WORKFLOW_SHA="$(jq -er '.workflow_sha' <<<"$JOB_CONTEXT_JSON")"
+          expected_workflow=".github/workflows/stage-0-evidence.yml"
+          expected_workflow_ref="$REPOSITORY/$expected_workflow@refs/heads/main"
+          test "$SIGNING_WORKFLOW_SHA" = "$HEAD_SHA"
+          test "$JOB_WORKFLOW_SHA" = "$HEAD_SHA"
+          test "$SIGNING_WORKFLOW_REF" = "$expected_workflow_ref"
+          test "$JOB_WORKFLOW_REF" = "$expected_workflow_ref"
+          test "$JOB_WORKFLOW_REPOSITORY" = "$REPOSITORY"
+          test "$JOB_WORKFLOW_FILE_PATH" = "$expected_workflow"
+          test "$TRIGGER_WORKFLOW_NAME" = "CI"
+          test "$TRIGGER_WORKFLOW_ID" -gt 0
           repository_json="$(curl --fail --silent --show-error \
             --retry 3 --connect-timeout 10 --max-time 60 \
             -H 'Accept: application/vnd.github+json' \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             "https://api.github.com/repos/$REPOSITORY")"
+          trigger_workflow_json="$(curl --fail --silent --show-error \
+            --retry 3 --connect-timeout 10 --max-time 60 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$REPOSITORY/actions/workflows/$TRIGGER_WORKFLOW_ID")"
+          jq -e \
+            --argjson id "$TRIGGER_WORKFLOW_ID" \
+            '.id == $id and .name == "CI" and .path == ".github/workflows/ci.yml" and .state == "active"' \
+            <<<"$trigger_workflow_json" >/dev/null
           checks_json="$(curl --fail --silent --show-error \
             --retry 3 --connect-timeout 10 --max-time 60 \
             -H 'Accept: application/vnd.github+json' \
@@ -68,9 +95,15 @@ jobs:
           required='["Rust quality","Rust tests","Swift 6.3","Static Compose policy","Trusted integration smoke","Reproducible service binaries"]'
           proof="$(jq -cSe \
             --arg repository "$REPOSITORY" \
-            --arg workflow_sha "$workflow_sha" \
+            --arg workflow_ref "$SIGNING_WORKFLOW_REF" \
+            --arg workflow_sha "$SIGNING_WORKFLOW_SHA" \
+            --arg job_workflow_file_path "$JOB_WORKFLOW_FILE_PATH" \
+            --arg job_workflow_ref "$JOB_WORKFLOW_REF" \
+            --arg job_workflow_repository "$JOB_WORKFLOW_REPOSITORY" \
+            --arg job_workflow_sha "$JOB_WORKFLOW_SHA" \
             --arg head_sha "$HEAD_SHA" \
             --argjson repository_json "$repository_json" \
+            --argjson trigger_workflow_json "$trigger_workflow_json" \
             --argjson checks_json "$checks_json" \
             --argjson signing_check "$signing_check" \
             --argjson required "$required" \
@@ -97,6 +130,10 @@ jobs:
                 event_name: "push",
                 git_ref: "refs/heads/main",
                 head_sha: $head_sha,
+                job_workflow_file_path: $job_workflow_file_path,
+                job_workflow_ref: $job_workflow_ref,
+                job_workflow_repository: $job_workflow_repository,
+                job_workflow_sha: $job_workflow_sha,
                 repository: $repository,
                 repository_id: $repository_json.id,
                 repository_owner_id: $repository_json.owner.id,
@@ -112,8 +149,12 @@ jobs:
                   status: $signing_check.status
                 },
                 signing_check_run_id: $signing_check.id,
+                trigger_workflow_id: $trigger_workflow_json.id,
+                trigger_workflow_name: $trigger_workflow_json.name,
+                trigger_workflow_path: $trigger_workflow_json.path,
+                trigger_workflow_sha: $head_sha,
                 workflow: ".github/workflows/stage-0-evidence.yml",
-                workflow_ref: ($repository + "/.github/workflows/stage-0-evidence.yml@refs/heads/main"),
+                workflow_ref: $workflow_ref,
                 workflow_sha: $workflow_sha
               } end
             ')"

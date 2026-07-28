@@ -36,7 +36,6 @@ pub struct GateConfig {
     pub comparison: ComparisonConfig,
     pub approvals: ApprovalConfig,
     pub remote: RemoteConfig,
-    #[serde(default)]
     pub artifacts: Vec<ArtifactConfig>,
     pub checks: Vec<CheckConfig>,
 }
@@ -70,9 +69,7 @@ pub struct DesignConfig {
 #[serde(deny_unknown_fields)]
 pub struct ComparisonConfig {
     pub second_builder_report_path: String,
-    #[serde(default)]
     pub second_builder_signature_path: String,
-    #[serde(default)]
     pub signer_role: String,
 }
 
@@ -98,41 +95,20 @@ pub struct ApprovalEvidenceConfig {
 #[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
     pub proof_path: String,
-    #[serde(default)]
     pub signature_path: String,
-    #[serde(default)]
     pub signer_role: String,
-    #[serde(default)]
     pub repository: String,
-    #[serde(default)]
     pub repository_id: u64,
-    #[serde(default)]
     pub repository_owner_id: u64,
-    #[serde(default)]
     pub workflow: String,
-    #[serde(default)]
     pub workflow_ref: String,
-    #[serde(default)]
-    pub workflow_sha: String,
-    #[serde(default = "default_event_name")]
+    pub trigger_workflow_id: u64,
+    pub trigger_workflow_name: String,
+    pub trigger_workflow_path: String,
     pub event_name: String,
-    #[serde(default = "default_git_ref")]
     pub git_ref: String,
-    #[serde(default = "default_signing_check_name")]
     pub signing_check_name: String,
     pub required_checks: Vec<String>,
-}
-
-fn default_event_name() -> String {
-    "push".to_owned()
-}
-
-fn default_git_ref() -> String {
-    "refs/heads/main".to_owned()
-}
-
-fn default_signing_check_name() -> String {
-    "Stage 0 evidence signing".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -207,7 +183,7 @@ pub enum ConfigError {
     UnsafeArgument { check_id: String },
     #[error("unsafe repository-relative path for {field}: {path}")]
     UnsafePath { field: &'static str, path: String },
-    #[error("output root must be target/stage-gates or its descendant")]
+    #[error("output paths must use the fixed Stage 0 publication contract")]
     UnsafeOutput,
     #[error("required reviewer role is missing: {0}")]
     MissingReviewerRole(String),
@@ -283,15 +259,40 @@ impl GateConfig {
         require_token("remote repository", &self.remote.repository)?;
         require_token("remote workflow", &self.remote.workflow)?;
         require_token("remote workflow ref", &self.remote.workflow_ref)?;
+        require_token(
+            "remote trigger workflow name",
+            &self.remote.trigger_workflow_name,
+        )?;
+        validate_relative_path(
+            "remote trigger workflow path",
+            &self.remote.trigger_workflow_path,
+        )?;
         require_token("remote event", &self.remote.event_name)?;
         require_token("remote git ref", &self.remote.git_ref)?;
         require_token("remote signing check name", &self.remote.signing_check_name)?;
+        let expected_workflow = ".github/workflows/stage-0-evidence.yml";
+        let expected_workflow_ref = format!(
+            "{}/{expected_workflow}@refs/heads/main",
+            self.remote.repository
+        );
+        if self.remote.workflow != expected_workflow
+            || self.remote.workflow_ref != expected_workflow_ref
+            || self.remote.trigger_workflow_name != "CI"
+            || self.remote.trigger_workflow_path != ".github/workflows/ci.yml"
+            || self.remote.event_name != "push"
+            || self.remote.git_ref != "refs/heads/main"
+            || self.remote.signing_check_name != "Stage 0 evidence signing"
+        {
+            return Err(ConfigError::InvalidValue(
+                "remote workflow identity must match the fixed Stage 0 main-branch contract"
+                    .to_owned(),
+            ));
+        }
         if self.remote.repository_id == 0 || self.remote.repository_owner_id == 0 {
             return Err(ConfigError::InvalidValue(
                 "remote repository numeric identities must be non-zero".to_owned(),
             ));
         }
-        require_sha1_object("remote workflow source commit", &self.remote.workflow_sha)?;
         if self.remote.required_checks.is_empty() {
             return Err(ConfigError::InvalidValue(
                 "remote.required_checks must not be empty".to_owned(),
@@ -334,7 +335,7 @@ impl GateConfig {
         let mut evidence_roles = BTreeSet::new();
         for evidence in &self.approvals.evidence {
             require_token("approval evidence role", &evidence.role)?;
-            if !evidence_roles.insert(&evidence.role) {
+            if !evidence_roles.insert(evidence.role.clone()) {
                 return Err(ConfigError::InvalidValue(format!(
                     "duplicate approval evidence role {}",
                     evidence.role
@@ -342,6 +343,27 @@ impl GateConfig {
             }
             validate_relative_path("approval statement path", &evidence.statement_path)?;
             validate_relative_path("approval signature path", &evidence.signature_path)?;
+        }
+        let required_roles = self
+            .approvals
+            .required_roles
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected_roles = REQUIRED_REVIEWER_ROLES.into_iter().collect::<BTreeSet<_>>();
+        if self.approvals.required_roles.len() != REQUIRED_REVIEWER_ROLES.len()
+            || required_roles != expected_roles
+            || self.approvals.evidence.len() != REQUIRED_REVIEWER_ROLES.len()
+            || evidence_roles
+                != REQUIRED_REVIEWER_ROLES
+                    .iter()
+                    .map(|role| (*role).to_owned())
+                    .collect::<BTreeSet<_>>()
+        {
+            return Err(ConfigError::InvalidValue(
+                "approvals must declare exactly one platform-data and one independent role"
+                    .to_owned(),
+            ));
         }
         for role in REQUIRED_REVIEWER_ROLES {
             if !self
@@ -352,19 +374,17 @@ impl GateConfig {
             {
                 return Err(ConfigError::MissingReviewerRole(role.to_owned()));
             }
-            if !evidence_roles.iter().any(|candidate| *candidate == role) {
+            if !evidence_roles.contains(role) {
                 return Err(ConfigError::MissingReviewerRole(role.to_owned()));
             }
         }
         let output_root = Path::new(&self.output_root);
         validate_relative_path("output root", &self.output_root)?;
-        if output_root != Path::new("target/stage-gates")
-            && !output_root.starts_with("target/stage-gates")
-        {
+        if output_root != Path::new("target/stage-gates") {
             return Err(ConfigError::UnsafeOutput);
         }
         let builder_output = Path::new(&self.builder_report_output_path);
-        if !builder_output.starts_with(output_root) || builder_output == output_root {
+        if builder_output != Path::new("target/stage-gates/stage-0.builder.json") {
             return Err(ConfigError::UnsafeOutput);
         }
 

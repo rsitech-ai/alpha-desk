@@ -17,7 +17,7 @@ use crate::{
     config::BuilderConfig,
     process::{CommandSpec, OutputPolicy, run_command},
     remote::{RemoteProof, RemoteRequirement, parse_and_validate},
-    reports::{BuilderEvidenceValidation, BuilderReport, validate_builder_evidence},
+    reports::BuilderReport,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,7 +64,7 @@ impl SignedEvidenceError {
 pub fn verify_signed_builder_report(
     evidence: &SignedEvidence,
     local: &BuilderReport,
-    builder_config: &BuilderConfig,
+    _builder_config: &BuilderConfig,
     policy: &TrustPolicy,
     verifier: PathBuf,
     max_bytes: usize,
@@ -85,12 +85,10 @@ pub fn verify_signed_builder_report(
         || report.builder_identity.signer_role != evidence.role
         || report.builder_identity.signer_fingerprint != signer_fingerprint
         || report.builder_identity.builder_id == local.builder_identity.builder_id
-        || validate_builder_evidence(builder_config, &report) != BuilderEvidenceValidation::Valid
-        || report.comparison_projection().ok() != local.comparison_projection().ok()
     {
         return Err(error(
             SignedEvidenceErrorCode::IdentityMismatch,
-            "Builder B report is not bound to its distinct signer and deterministic evidence",
+            "Builder B report is not bound to its distinct signer identity",
         ));
     }
     Ok(verified(

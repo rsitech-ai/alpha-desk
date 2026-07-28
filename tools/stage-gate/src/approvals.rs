@@ -207,29 +207,35 @@ pub fn verify_approvals(
             return blocked(ApprovalReasonCode::RequiredApprovalMissing);
         };
         if item.claimed_fingerprint != *expected_fingerprint {
-            return blocked(ApprovalReasonCode::UntrustedReviewer);
+            return failed(ApprovalReasonCode::UntrustedReviewer);
         }
         let statement_bytes = match read_regular_nofollow(&item.statement_path, 4 * 1024 * 1024) {
             Ok(bytes) => bytes,
-            Err(_) => return blocked(ApprovalReasonCode::ApprovalStatementMismatch),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return blocked(ApprovalReasonCode::RequiredApprovalMissing);
+            }
+            Err(_) => return failed(ApprovalReasonCode::ApprovalStatementMismatch),
         };
         let signature_bytes = match read_regular_nofollow(&item.signature_path, 4 * 1024 * 1024) {
             Ok(bytes) => bytes,
-            Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return blocked(ApprovalReasonCode::RequiredApprovalMissing);
+            }
+            Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
         };
         let canonical = match std::str::from_utf8(&statement_bytes)
             .ok()
             .and_then(|source| canonicalize_json_str(source).ok())
         {
             Some(canonical) if canonical == statement_bytes => canonical,
-            _ => return blocked(ApprovalReasonCode::ApprovalStatementMismatch),
+            _ => return failed(ApprovalReasonCode::ApprovalStatementMismatch),
         };
         let statement: ApprovalStatement = match serde_json::from_slice(&canonical) {
             Ok(statement) => statement,
-            Err(_) => return blocked(ApprovalReasonCode::ApprovalStatementInvalid),
+            Err(_) => return failed(ApprovalReasonCode::ApprovalStatementInvalid),
         };
         if let Err(reason) = statement.validate() {
-            return blocked(reason);
+            return failed(reason);
         }
         if statement.stage_id != binding.stage_id
             || statement.implementation_commit != binding.implementation_commit
@@ -242,11 +248,11 @@ pub fn verify_approvals(
             || statement.role != item.role
             || statement.signer_fingerprint != *expected_fingerprint
         {
-            return blocked(ApprovalReasonCode::ApprovalBindingMismatch);
+            return failed(ApprovalReasonCode::ApprovalBindingMismatch);
         }
         let mut statement_snapshot = match NamedTempFile::new() {
             Ok(file) => file,
-            Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
+            Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
         };
         let mut signature_snapshot = match NamedTempFile::new() {
             Ok(file) => file,
@@ -261,7 +267,7 @@ pub fn verify_approvals(
                 .and_then(|()| signature_snapshot.as_file().sync_all())
                 .is_err()
         {
-            return blocked(ApprovalReasonCode::InvalidDetachedSignature);
+            return failed(ApprovalReasonCode::InvalidDetachedSignature);
         }
 
         let output = match run_openpgp_verifier(
@@ -274,10 +280,10 @@ pub fn verify_approvals(
             Err(error) if error.contains("No such file") => {
                 return blocked(ApprovalReasonCode::OpenPgpToolingUnavailable);
             }
-            Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
+            Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),
         };
         if !output.success || !clean_validsig(output.status.as_bytes(), expected_fingerprint) {
-            return blocked(ApprovalReasonCode::InvalidDetachedSignature);
+            return failed(ApprovalReasonCode::InvalidDetachedSignature);
         }
     }
     ApprovalOutcome {
@@ -289,6 +295,13 @@ pub fn verify_approvals(
 fn blocked(reason: ApprovalReasonCode) -> ApprovalOutcome {
     ApprovalOutcome {
         status: GateStatus::Blocked,
+        reasons: vec![reason],
+    }
+}
+
+fn failed(reason: ApprovalReasonCode) -> ApprovalOutcome {
+    ApprovalOutcome {
+        status: GateStatus::Fail,
         reasons: vec![reason],
     }
 }

@@ -75,6 +75,66 @@ fn signed_builder_report_binds_exact_canonical_bytes_role_fingerprint_and_identi
 }
 
 #[test]
+fn signed_builder_authentication_defers_version_and_projection_comparison_to_gate_policy() {
+    let fixture = SignedFixture::new();
+    let local = builder_report("builder-a", "local", "");
+    for (scenario, mut builder_b) in [
+        (
+            "version-mismatch",
+            builder_report(
+                &format!("builder-b:{BUILDER_B_FINGERPRINT}"),
+                "builder-b",
+                BUILDER_B_FINGERPRINT,
+            ),
+        ),
+        (
+            "projection-mismatch",
+            builder_report(
+                &format!("builder-b:{BUILDER_B_FINGERPRINT}"),
+                "builder-b",
+                BUILDER_B_FINGERPRINT,
+            ),
+        ),
+    ] {
+        if scenario == "version-mismatch" {
+            builder_b
+                .environment
+                .toolchains
+                .get_mut("swift")
+                .unwrap()
+                .version_output = "Swift version 6.2".to_owned();
+            builder_b.environment.toolchain_fingerprint = hex::encode(sha2::Sha256::digest(
+                canonicalize(&builder_b.environment.toolchains).unwrap(),
+            ));
+        } else {
+            builder_b
+                .check_evidence_hashes
+                .insert("quality".to_owned(), "f".repeat(64));
+        }
+        let report_path = fixture.temp.path().join(format!("{scenario}.json"));
+        let signature_path = fixture.temp.path().join(format!("{scenario}.json.asc"));
+        fs::write(&report_path, canonicalize(&builder_b).unwrap()).unwrap();
+        fs::write(&signature_path, b"detached-signature").unwrap();
+
+        let verified = verify_signed_builder_report(
+            &SignedEvidence {
+                role: "builder-b".to_owned(),
+                payload_path: report_path,
+                signature_path,
+            },
+            &local,
+            &builder_config(),
+            &fixture.policy,
+            fixture.verifier.clone(),
+            1024 * 1024,
+        )
+        .unwrap_or_else(|error| panic!("{scenario} must authenticate before gate policy: {error}"));
+
+        assert_eq!(verified.value, builder_b);
+    }
+}
+
+#[test]
 fn copied_builder_a_or_free_form_builder_b_identity_fails_closed() {
     let fixture = SignedFixture::new();
     let local = builder_report("builder-a", "local", "");
@@ -251,6 +311,7 @@ fn builder_report(builder_id: &str, signer_role: &str, signer_fingerprint: &str)
         design_commit: "412c380054d16f22549c46a59a5fe0617bc60138".to_owned(),
         config_sha256: "1".repeat(64),
         schema_sha256: "2".repeat(64),
+        check_evidence_normalization: "stage-gate-semantic-v1".to_owned(),
         builder_identity: BuilderIdentity {
             builder_id: builder_id.to_owned(),
             signer_role: signer_role.to_owned(),
@@ -304,6 +365,10 @@ fn remote_requirement() -> RemoteRequirement {
         workflow_ref: "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main"
             .to_owned(),
         workflow_sha: "95c4cd709bee9d11e2f7fc591d2861427a36cc3a".to_owned(),
+        trigger_workflow_id: 321_251_517,
+        trigger_workflow_name: "CI".to_owned(),
+        trigger_workflow_path: ".github/workflows/ci.yml".to_owned(),
+        trigger_workflow_sha: "95c4cd709bee9d11e2f7fc591d2861427a36cc3a".to_owned(),
         event_name: "push".to_owned(),
         git_ref: "refs/heads/main".to_owned(),
         signing_check_name: "Stage 0 evidence signing".to_owned(),
@@ -331,6 +396,11 @@ fn remote_proof_bytes() -> Vec<u8> {
         "event_name": "push",
         "git_ref": "refs/heads/main",
         "head_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+        "job_workflow_file_path": ".github/workflows/stage-0-evidence.yml",
+        "job_workflow_ref":
+            "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main",
+        "job_workflow_repository": "s1korrrr/alpha-desk",
+        "job_workflow_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
         "repository": "s1korrrr/alpha-desk",
         "repository_id": 1_311_268_858_u64,
         "repository_owner_id": 24_563_931_u64,
@@ -346,6 +416,10 @@ fn remote_proof_bytes() -> Vec<u8> {
             "status": "in_progress",
         },
         "signing_check_run_id": 9_900_000_009_u64,
+        "trigger_workflow_id": 321_251_517_u64,
+        "trigger_workflow_name": "CI",
+        "trigger_workflow_path": ".github/workflows/ci.yml",
+        "trigger_workflow_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
         "workflow": ".github/workflows/stage-0-evidence.yml",
         "workflow_ref":
             "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main",

@@ -7,8 +7,9 @@ readonly compose_file="${repository_root}/infra/docker-compose/compose.yaml"
 readonly override_file="${repository_root}/infra/docker-compose/stage-0.override.yaml"
 nonce_directory="$(mktemp -d "${TMPDIR:-/tmp}/alpha-desk-stage0.XXXXXXXX")"
 readonly nonce_directory
-nonce="${nonce_directory##*.}"
-[[ "${nonce}" =~ ^[A-Za-z0-9]{8}$ ]] || {
+raw_nonce="${nonce_directory##*.}"
+nonce="$(printf '%s' "${raw_nonce}" | tr '[:upper:]' '[:lower:]')"
+[[ "${nonce}" =~ ^[a-z0-9]{8}$ ]] || {
   printf '%s\n' 'stage-0-compose:error invalid gate nonce' >&2
   exit 2
 }
@@ -77,14 +78,22 @@ fi
 "${compose[@]}" config --format json >"${merged_config}"
 jq -e --arg project "${project}" '
   .name == $project and
-  .volumes == {
-    "clickhouse-data": {"name": ($project + "_clickhouse-data")},
-    "minio-data": {"name": ($project + "_minio-data")},
-    "nats-data": {"name": ($project + "_nats-data")},
-    "postgres-data": {"name": ($project + "_postgres-data")},
-    "victoriametrics-data": {"name": ($project + "_victoriametrics-data")}
-  } and
-  .networks == {"default": {"name": ($project + "_network")}} and
+  (.volumes | keys | sort) == [
+    "clickhouse-data",
+    "minio-data",
+    "nats-data",
+    "postgres-data",
+    "victoriametrics-data"
+  ] and
+  .volumes["clickhouse-data"].name == ($project + "_clickhouse-data") and
+  .volumes["minio-data"].name == ($project + "_minio-data") and
+  .volumes["nats-data"].name == ($project + "_nats-data") and
+  .volumes["postgres-data"].name == ($project + "_postgres-data") and
+  .volumes["victoriametrics-data"].name == ($project + "_victoriametrics-data") and
+  all(.volumes[]; (.external // false) == false) and
+  (.networks | keys) == ["default"] and
+  .networks.default.name == ($project + "_network") and
+  ((.networks.default.external // false) == false) and
   ([.services.nats.ports[].published] | sort) == ["14222", "18222"] and
   [.services.clickhouse.ports[].published] == ["18123"] and
   [.services.postgres.ports[].published] == ["15432"] and

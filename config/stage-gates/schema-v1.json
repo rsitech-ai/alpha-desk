@@ -28,11 +28,11 @@
     "schema_path": { "$ref": "#/$defs/repositoryPath" },
     "output_root": {
       "type": "string",
-      "pattern": "^target/stage-gates(?:/.*)?$"
+      "const": "target/stage-gates"
     },
     "builder_report_output_path": {
       "type": "string",
-      "pattern": "^target/stage-gates/.+"
+      "const": "target/stage-gates/stage-0.builder.json"
     },
     "whole_gate_timeout_seconds": { "type": "integer", "minimum": 1 },
     "max_output_bytes": { "type": "integer", "minimum": 24 },
@@ -97,8 +97,22 @@
         "policy_path": { "$ref": "#/$defs/repositoryPath" },
         "required_roles": {
           "type": "array",
-          "contains": { "const": "platform-data" },
-          "minContains": 1
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["platform-data", "independent"] },
+          "allOf": [
+            {
+              "contains": { "const": "platform-data" },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": { "const": "independent" },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
         },
         "gpgv_program": { "type": "string", "minLength": 1 },
         "known_limitations": {
@@ -108,7 +122,28 @@
         "evidence": {
           "type": "array",
           "minItems": 2,
-          "items": { "$ref": "#/$defs/approvalEvidence" }
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/approvalEvidence" },
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "required": ["role"],
+                "properties": { "role": { "const": "platform-data" } }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": ["role"],
+                "properties": { "role": { "const": "independent" } }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
         }
       }
     },
@@ -124,7 +159,9 @@
         "repository_owner_id",
         "workflow",
         "workflow_ref",
-        "workflow_sha",
+        "trigger_workflow_id",
+        "trigger_workflow_name",
+        "trigger_workflow_path",
         "event_name",
         "git_ref",
         "signing_check_name",
@@ -137,9 +174,14 @@
         "repository": { "type": "string", "minLength": 1 },
         "repository_id": { "type": "integer", "minimum": 1 },
         "repository_owner_id": { "type": "integer", "minimum": 1 },
-        "workflow": { "$ref": "#/$defs/repositoryPath" },
-        "workflow_ref": { "type": "string", "minLength": 1 },
-        "workflow_sha": { "$ref": "#/$defs/gitObject" },
+        "workflow": { "const": ".github/workflows/stage-0-evidence.yml" },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+/\\.github/workflows/stage-0-evidence\\.yml@refs/heads/main$"
+        },
+        "trigger_workflow_id": { "type": "integer", "minimum": 0 },
+        "trigger_workflow_name": { "const": "CI" },
+        "trigger_workflow_path": { "const": ".github/workflows/ci.yml" },
         "event_name": { "const": "push" },
         "git_ref": { "const": "refs/heads/main" },
         "signing_check_name": { "const": "Stage 0 evidence signing" },
