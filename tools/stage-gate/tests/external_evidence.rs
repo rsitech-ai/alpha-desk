@@ -143,7 +143,7 @@ fn approval_statement_must_match_the_expected_known_limitations() {
         &fixture.binding,
         &fixture.policy,
         &fixture.evidence,
-        PathBuf::from("/definitely/missing/gpgv"),
+        None::<PathBuf>,
     );
 
     assert_eq!(

@@ -934,7 +934,6 @@ fn verify_external_approvals(
     let Some(policy) = policy else {
         return;
     };
-    let gpgv = resolved_gpgv.unwrap_or_else(|| PathBuf::from(&config.approvals.gpgv_program));
     let evidence = config
         .approvals
         .evidence
@@ -951,7 +950,7 @@ fn verify_external_approvals(
             signature_path: repository.join(&item.signature_path),
         })
         .collect::<Vec<_>>();
-    let approval = verify_approvals(&binding, policy, &evidence, gpgv);
+    let approval = verify_approvals(&binding, policy, &evidence, resolved_gpgv);
     if approval.status == GateStatus::Fail {
         reasons.push(GateReasonCode::ApprovalEvidenceInvalid);
     } else if approval.status != GateStatus::Pass {
