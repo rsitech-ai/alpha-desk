@@ -52,6 +52,39 @@ fn workflow_jq_command_substitution_emits_exact_canonical_fixture_bytes() {
 }
 
 #[test]
+fn signing_workflow_binds_actual_github_and_job_execution_identity() {
+    let workflow = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github/workflows/stage-0-evidence.yml"),
+    )
+    .unwrap();
+
+    for contract in [
+        "SIGNING_WORKFLOW_SHA: ${{ github.workflow_sha }}",
+        "SIGNING_WORKFLOW_REF: ${{ github.workflow_ref }}",
+        "JOB_CONTEXT_JSON: ${{ toJson(job) }}",
+        "JOB_WORKFLOW_SHA=\"$(jq -er '.workflow_sha' <<<\"$JOB_CONTEXT_JSON\")\"",
+        "JOB_WORKFLOW_REF=\"$(jq -er '.workflow_ref' <<<\"$JOB_CONTEXT_JSON\")\"",
+        "JOB_WORKFLOW_REPOSITORY=\"$(jq -er '.workflow_repository' <<<\"$JOB_CONTEXT_JSON\")\"",
+        "JOB_WORKFLOW_FILE_PATH=\"$(jq -er '.workflow_file_path' <<<\"$JOB_CONTEXT_JSON\")\"",
+        "test \"$SIGNING_WORKFLOW_SHA\" = \"$HEAD_SHA\"",
+        "test \"$JOB_WORKFLOW_SHA\" = \"$HEAD_SHA\"",
+        "/actions/workflows/$TRIGGER_WORKFLOW_ID",
+        ".state == \"active\"",
+        "trigger_workflow_sha: $head_sha",
+    ] {
+        assert!(
+            workflow.contains(contract),
+            "missing workflow contract: {contract}"
+        );
+    }
+    assert!(
+        !workflow.contains("git log -1 --format=%H -- .github/workflows/stage-0-evidence.yml"),
+        "the signer must not substitute a last-modified commit for its actual execution SHA"
+    );
+}
+
+#[test]
 fn approval_statement_bytes_are_canonical_and_exact() {
     let statement = statement();
     let bytes = canonical_statement_bytes(&statement).unwrap();
@@ -178,7 +211,7 @@ fn missing_openpgp_tooling_is_blocked() {
 }
 
 #[test]
-fn invalid_detached_signature_is_blocked() {
+fn present_invalid_detached_signature_fails() {
     let fixture = ApprovalFixture::new();
     let outcome = verify_approvals(
         &fixture.binding,
@@ -187,7 +220,7 @@ fn invalid_detached_signature_is_blocked() {
         PathBuf::from("/usr/bin/false"),
     );
 
-    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(
         outcome.reasons,
         vec![ApprovalReasonCode::InvalidDetachedSignature]
@@ -275,7 +308,7 @@ fn verifier_requires_one_clean_validsig_for_the_exact_expected_fingerprint() {
 
         assert_eq!(
             outcome.status,
-            GateStatus::Blocked,
+            GateStatus::Fail,
             "scenario {scenario} must fail closed: {outcome:?}"
         );
         assert_eq!(
@@ -287,7 +320,7 @@ fn verifier_requires_one_clean_validsig_for_the_exact_expected_fingerprint() {
 }
 
 #[test]
-fn approval_for_different_statement_bytes_is_blocked_before_gpg() {
+fn approval_for_different_statement_bytes_fails_before_gpg() {
     let fixture = ApprovalFixture::new();
     fs::write(&fixture.evidence[0].statement_path, b"different bytes").unwrap();
 
@@ -298,7 +331,7 @@ fn approval_for_different_statement_bytes_is_blocked_before_gpg() {
         PathBuf::from("/definitely/missing/gpgv"),
     );
 
-    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(
         outcome.reasons,
         vec![ApprovalReasonCode::ApprovalStatementMismatch]
@@ -378,7 +411,7 @@ fn remote_proof_must_be_a_regular_non_symlink_file() {
 
     let outcome = verify_remote_proof(&proof, &remote_requirement());
 
-    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(
         outcome.reasons,
         vec![RemoteProofReasonCode::RemoteProofMalformed]
@@ -397,7 +430,7 @@ fn remote_proof_must_be_the_exact_canonical_json_bytes() {
 
     let outcome = verify_remote_proof(&proof, &remote_requirement());
 
-    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(
         outcome.reasons,
         vec![RemoteProofReasonCode::RemoteProofMalformed]
@@ -405,14 +438,14 @@ fn remote_proof_must_be_the_exact_canonical_json_bytes() {
 }
 
 #[test]
-fn malformed_remote_proof_is_blocked() {
+fn present_malformed_remote_proof_fails() {
     let temp = TempDir::new().unwrap();
     let proof = temp.path().join("proof.json");
     fs::write(&proof, b"{not-json").unwrap();
 
     let outcome = verify_remote_proof(&proof, &remote_requirement());
 
-    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(
         outcome.reasons,
         vec![RemoteProofReasonCode::RemoteProofMalformed]
@@ -439,7 +472,7 @@ fn remote_proof_must_match_commit_source_and_exact_check_names() {
 
     let outcome = verify_remote_proof(&proof, &remote_requirement());
 
-    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(
         outcome.reasons,
         vec![RemoteProofReasonCode::RemoteProofMalformed]
@@ -477,6 +510,34 @@ fn remote_proof_rejects_duplicate_extra_and_cross_run_check_identity() {
     value["workflow_ref"] =
         serde_json::json!("rsitech-ai/alpha-desk/.github/workflows/other.yml@refs/heads/main");
     invalid.push(("workflow-ref", value));
+    let mut value = baseline.clone();
+    value["job_workflow_sha"] = serde_json::json!("0".repeat(40));
+    invalid.push(("job-workflow-sha", value));
+    let mut value = baseline.clone();
+    value["job_workflow_ref"] =
+        serde_json::json!("s1korrrr/alpha-desk/.github/workflows/other.yml@refs/heads/main");
+    invalid.push(("job-workflow-ref", value));
+    let mut value = baseline.clone();
+    value["job_workflow_repository"] = serde_json::json!("other/alpha-desk");
+    invalid.push(("job-workflow-repository", value));
+    let mut value = baseline.clone();
+    value["job_workflow_file_path"] = serde_json::json!(".github/workflows/other.yml");
+    invalid.push(("job-workflow-file-path", value));
+    let mut value = baseline.clone();
+    value["trigger_workflow_id"] = serde_json::json!(0_u64);
+    invalid.push(("zero-trigger-workflow-id", value));
+    let mut value = baseline.clone();
+    value["trigger_workflow_id"] = serde_json::json!(321_251_518_u64);
+    invalid.push(("trigger-workflow-id", value));
+    let mut value = baseline.clone();
+    value["trigger_workflow_name"] = serde_json::json!("Renamed CI");
+    invalid.push(("trigger-workflow-name", value));
+    let mut value = baseline.clone();
+    value["trigger_workflow_path"] = serde_json::json!(".github/workflows/other.yml");
+    invalid.push(("trigger-workflow-path", value));
+    let mut value = baseline.clone();
+    value["trigger_workflow_sha"] = serde_json::json!("0".repeat(40));
+    invalid.push(("trigger-workflow-sha", value));
     let mut value = baseline.clone();
     value["event_name"] = serde_json::json!("pull_request_target");
     invalid.push(("event", value));
@@ -542,7 +603,7 @@ fn remote_proof_rejects_duplicate_extra_and_cross_run_check_identity() {
 
         assert_eq!(
             outcome.status,
-            GateStatus::Blocked,
+            GateStatus::Fail,
             "scenario {scenario} must fail closed: {outcome:?}"
         );
     }
@@ -584,6 +645,10 @@ fn remote_requirement() -> RemoteRequirement {
         workflow_ref: "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main"
             .to_owned(),
         workflow_sha: "95c4cd709bee9d11e2f7fc591d2861427a36cc3a".to_owned(),
+        trigger_workflow_id: 321_251_517,
+        trigger_workflow_name: "CI".to_owned(),
+        trigger_workflow_path: ".github/workflows/ci.yml".to_owned(),
+        trigger_workflow_sha: "95c4cd709bee9d11e2f7fc591d2861427a36cc3a".to_owned(),
         event_name: "push".to_owned(),
         git_ref: "refs/heads/main".to_owned(),
         signing_check_name: "Stage 0 evidence signing".to_owned(),
@@ -627,6 +692,11 @@ fn authenticated_remote_proof() -> Vec<u8> {
         "event_name": "push",
         "git_ref": "refs/heads/main",
         "head_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+        "job_workflow_file_path": ".github/workflows/stage-0-evidence.yml",
+        "job_workflow_ref":
+            "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main",
+        "job_workflow_repository": "s1korrrr/alpha-desk",
+        "job_workflow_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
         "repository": "s1korrrr/alpha-desk",
         "repository_id": 1_311_268_858_u64,
         "repository_owner_id": 24_563_931_u64,
@@ -642,6 +712,10 @@ fn authenticated_remote_proof() -> Vec<u8> {
             "status": "in_progress",
         },
         "signing_check_run_id": 9_900_000_009_u64,
+        "trigger_workflow_id": 321_251_517_u64,
+        "trigger_workflow_name": "CI",
+        "trigger_workflow_path": ".github/workflows/ci.yml",
+        "trigger_workflow_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
         "workflow": ".github/workflows/stage-0-evidence.yml",
         "workflow_ref":
             "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main",

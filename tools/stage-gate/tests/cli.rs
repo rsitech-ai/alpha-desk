@@ -10,8 +10,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-use stage_gate::approvals::{ApprovalDecision, ApprovalStatement, canonical_statement_bytes};
+use sha2::Digest as _;
+use stage_gate::{
+    approvals::{
+        ApprovalDecision, ApprovalStatement, TrustPolicy, TrustedReviewer,
+        canonical_statement_bytes,
+    },
+    config::GateConfig,
+    provenance::{SignedEvidence, verify_signed_builder_report},
+};
 use tempfile::TempDir;
+
+const BUILDER_B_FINGERPRINT: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+fn trusted_reviewer(role: &str, fingerprint: &str) -> TrustedReviewer {
+    TrustedReviewer {
+        role: role.to_owned(),
+        fingerprint: fingerprint.to_owned(),
+    }
+}
 
 #[test]
 fn fixture_run_writes_only_ignored_output_and_stays_blocked_without_external_evidence() {
@@ -151,6 +168,181 @@ fn missing_explicit_local_builder_id_is_a_stable_blocking_reason() {
             .contains(&serde_json::json!("builder_identity_unavailable"))
     );
     assert_eq!(report["stage_outcome"], "HOLD");
+}
+
+#[test]
+fn explicit_builder_b_role_and_fingerprint_emit_a_signable_bound_identity() {
+    let fixture = CliFixture::new();
+    let output_path = fixture
+        .repository
+        .path()
+        .join("target/stage-gates/stage-0.json");
+    let local_output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(fixture.repository.path())
+        .arg("--output")
+        .arg(&output_path)
+        .env_clear()
+        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
+        .output()
+        .unwrap();
+    assert_eq!(local_output.status.code(), Some(2), "{local_output:?}");
+    let local: stage_gate::reports::BuilderReport = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .repository
+                .path()
+                .join("target/stage-gates/stage-0.builder.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(fixture.repository.path())
+        .arg("--output")
+        .arg(&output_path)
+        .args([
+            "--builder-role",
+            "builder-b",
+            "--builder-fingerprint",
+            BUILDER_B_FINGERPRINT,
+        ])
+        .env_clear()
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let builder: stage_gate::reports::BuilderReport = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .repository
+                .path()
+                .join("target/stage-gates/stage-0.builder.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        builder.builder_identity.builder_id,
+        format!("builder-b:{BUILDER_B_FINGERPRINT}")
+    );
+    assert_eq!(builder.builder_identity.signer_role, "builder-b");
+    assert_eq!(
+        builder.builder_identity.signer_fingerprint,
+        BUILDER_B_FINGERPRINT
+    );
+
+    let signed = TempDir::new().unwrap();
+    let payload_path = signed.path().join("builder-b.json");
+    let signature_path = signed.path().join("builder-b.json.asc");
+    let keyring_path = signed.path().join("trusted.gpg");
+    let verifier_path = signed.path().join("fake-gpgv");
+    let payload = stage_gate::canonical::canonicalize(&builder).unwrap();
+    fs::write(&payload_path, &payload).unwrap();
+    fs::write(&signature_path, hex::encode(sha2::Sha256::digest(&payload))).unwrap();
+    fs::write(&keyring_path, b"fixture keyring").unwrap();
+    fs::write(
+        &verifier_path,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "expected=\"$(/usr/bin/shasum -a 256 \"$6\" | /usr/bin/awk '{{print $1}}')\"\n",
+                "actual=\"$(/bin/cat \"$5\")\"\n",
+                "[ \"$actual\" = \"$expected\" ]\n",
+                "printf '[GNUPG:] VALIDSIG {}\\n'\n",
+            ),
+            BUILDER_B_FINGERPRINT
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&verifier_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&verifier_path, permissions).unwrap();
+    let policy = TrustPolicy {
+        schema_version: 1,
+        keyring_path,
+        reviewers: vec![
+            trusted_reviewer("platform-data", "0123456789abcdef0123456789abcdef01234567"),
+            trusted_reviewer("independent", "89abcdef0123456789abcdef0123456789abcdef"),
+            trusted_reviewer("builder-b", BUILDER_B_FINGERPRINT),
+            trusted_reviewer("github-ci", "76543210fedcba9876543210fedcba9876543210"),
+        ],
+    };
+    let config = GateConfig::parse(
+        &fs::read_to_string(
+            fixture
+                .repository
+                .path()
+                .join("config/stage-gates/stage-0.toml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let verified = verify_signed_builder_report(
+        &SignedEvidence {
+            role: "builder-b".to_owned(),
+            payload_path,
+            signature_path,
+        },
+        &local,
+        &config.builder,
+        &policy,
+        verifier_path,
+        1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(verified.canonical_bytes, payload);
+    assert_eq!(verified.value, builder);
+}
+
+#[test]
+fn builder_b_role_and_full_lowercase_fingerprint_are_an_exact_argument_pair() {
+    let fixture = CliFixture::new();
+    let output_path = fixture
+        .repository
+        .path()
+        .join("target/stage-gates/stage-0.json");
+    for (scenario, extra) in [
+        ("role-only", vec!["--builder-role", "builder-b"]),
+        (
+            "wrong-role",
+            vec![
+                "--builder-role",
+                "builder-c",
+                "--builder-fingerprint",
+                BUILDER_B_FINGERPRINT,
+            ],
+        ),
+        (
+            "uppercase-fingerprint",
+            vec![
+                "--builder-role",
+                "builder-b",
+                "--builder-fingerprint",
+                "FEDCBA9876543210FEDCBA9876543210FEDCBA98",
+            ],
+        ),
+    ] {
+        let output = Command::new(stage_gate_binary())
+            .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+            .arg(fixture.repository.path())
+            .arg("--output")
+            .arg(&output_path)
+            .args(extra)
+            .env_clear()
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{scenario} must fail before producing evidence: {output:?}"
+        );
+    }
 }
 
 #[test]
@@ -414,6 +606,27 @@ fn output_path_outside_configured_ignored_root_is_rejected() {
 }
 
 #[test]
+fn custom_output_name_inside_gate_root_is_rejected() {
+    let fixture = CliFixture::new();
+    let custom = fixture
+        .repository
+        .path()
+        .join("target/stage-gates/custom.json");
+    let output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(fixture.repository.path())
+        .arg("--output")
+        .arg(&custom)
+        .env_clear()
+        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!custom.exists());
+}
+
+#[test]
 fn post_preflight_check_failure_replaces_stale_pass_with_canonical_hold_report() {
     let fixture = CliFixture::new();
     let repository = fixture.repository.path();
@@ -497,10 +710,13 @@ fn malformed_config_replaces_stale_pass_with_bootstrap_failure_report() {
     let output_path = repository.join("target/stage-gates/stage-0.json");
     let builder_path = repository.join("target/stage-gates/stage-0.builder.json");
     let historical_builder_path = repository.join("target/stage-gates/stage-0-builder-report.json");
+    let input_path = repository.join("target/stage-gates/inputs/builder-b.json");
     fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(input_path.parent().unwrap()).unwrap();
     fs::write(&output_path, br#"{"overall_result":"PASS"}"#).unwrap();
     fs::write(&builder_path, br#"{"overall_result":"PASS"}"#).unwrap();
     fs::write(&historical_builder_path, br#"{"overall_result":"PASS"}"#).unwrap();
+    fs::write(&input_path, br#"{"external":"must survive"}"#).unwrap();
     fs::write(
         repository.join("config/stage-gates/stage-0.toml"),
         b"this is not valid = [toml\n",
@@ -531,6 +747,11 @@ fn malformed_config_replaces_stale_pass_with_bootstrap_failure_report() {
     assert!(
         !historical_builder_path.exists(),
         "malformed config must invalidate the previously advertised builder report"
+    );
+    assert_eq!(
+        fs::read(&input_path).unwrap(),
+        br#"{"external":"must survive"}"#,
+        "bootstrap cleanup must never delete external inputs"
     );
 }
 
@@ -879,12 +1100,32 @@ fn compose_rejects_merged_config_that_retains_occupied_base_ports() {
 }
 
 #[test]
+fn compose_rejects_external_resources_even_when_their_names_match() {
+    let fixture = ComposeSmokeFixture::new();
+
+    let output = fixture.run("external-resource");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        !fixture.calls().lines().any(|line| line.contains(" up ")),
+        "external resources must be rejected before startup"
+    );
+}
+
+#[test]
 fn compose_success_parameterizes_wait_consumer_with_exact_gate_ports() {
     let fixture = ComposeSmokeFixture::new();
 
     let output = fixture.run("success");
 
     assert!(output.status.success(), "{output:?}");
+    let calls = fixture.calls();
+    let project = calls
+        .lines()
+        .find(|line| line.contains(" config --format json"))
+        .map(compose_project_from_call)
+        .unwrap();
+    assert_eq!(project, project.to_ascii_lowercase());
     let wait = fs::read_to_string(&fixture.wait_log).unwrap();
     let fields = wait.trim().split('|').collect::<Vec<_>>();
     assert_eq!(fields.len(), 8, "{wait}");
@@ -1144,7 +1385,9 @@ repository_id = 1311268858
 repository_owner_id = 24563931
 workflow = ".github/workflows/stage-0-evidence.yml"
 workflow_ref = "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main"
-workflow_sha = "95c4cd709bee9d11e2f7fc591d2861427a36cc3a"
+trigger_workflow_id = 321251517
+trigger_workflow_name = "CI"
+trigger_workflow_path = ".github/workflows/ci.yml"
 event_name = "push"
 git_ref = "refs/heads/main"
 signing_check_name = "Stage 0 evidence signing"
@@ -1315,6 +1558,11 @@ impl ComposeSmokeFixture {
                 "      postgres_port=15432\n",
                 "      minio_port=19000\n",
                 "    fi\n",
+                "    if [ \"$STAGE_GATE_FAKE_SCENARIO\" = 'external-resource' ]; then\n",
+                "      external=',\"external\":true'\n",
+                "    else\n",
+                "      external=''\n",
+                "    fi\n",
                 "    printf '%s\\n' ",
                 "'{\"name\":\"'\"$project\"'\",\"services\":{",
                 "\"nats\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"14222\",\"target\":4222},{\"host_ip\":\"127.0.0.1\",\"published\":\"18222\",\"target\":8222}]},",
@@ -1323,12 +1571,13 @@ impl ComposeSmokeFixture {
                 "\"minio\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"'\"$minio_port\"'\",\"target\":9000}]},",
                 "\"otel-collector\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"14317\",\"target\":4317},{\"host_ip\":\"127.0.0.1\",\"published\":\"14318\",\"target\":4318},{\"host_ip\":\"127.0.0.1\",\"published\":\"13134\",\"target\":13133}]},",
                 "\"victoriametrics\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"18428\",\"target\":8428}]}},",
-                "\"volumes\":{\"nats-data\":{\"name\":\"'\"$project\"'_nats-data\"},",
-                "\"clickhouse-data\":{\"name\":\"'\"$project\"'_clickhouse-data\"},",
-                "\"postgres-data\":{\"name\":\"'\"$project\"'_postgres-data\"},",
-                "\"minio-data\":{\"name\":\"'\"$project\"'_minio-data\"},",
-                "\"victoriametrics-data\":{\"name\":\"'\"$project\"'_victoriametrics-data\"}},",
-                "\"networks\":{\"default\":{\"name\":\"'\"$project\"'_network\"}}}'\n",
+                "\"volumes\":{\"nats-data\":{\"name\":\"'\"$project\"'_nats-data\",\"driver\":\"local\"'\"$external\"'},",
+                "\"clickhouse-data\":{\"name\":\"'\"$project\"'_clickhouse-data\",\"driver\":\"local\"},",
+                "\"postgres-data\":{\"name\":\"'\"$project\"'_postgres-data\",\"driver\":\"local\"},",
+                "\"minio-data\":{\"name\":\"'\"$project\"'_minio-data\",\"driver\":\"local\"},",
+                "\"victoriametrics-data\":{\"name\":\"'\"$project\"'_victoriametrics-data\",\"driver\":\"local\"}},",
+                "\"networks\":{\"default\":{\"name\":\"'\"$project\"'_network\",\"driver\":\"bridge\",",
+                "\"ipam\":{\"config\":[{\"subnet\":\"172.31.0.0/16\"}]}'\"$external\"'}}}'\n",
                 "    ;;\n",
                 "  *' up '*)\n",
                 "    case \"$STAGE_GATE_FAKE_SCENARIO\" in\n",

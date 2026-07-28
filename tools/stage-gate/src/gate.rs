@@ -27,10 +27,11 @@ use crate::{
     remote::RemoteRequirement,
     reports::{
         AggregateManifest, BuilderEnvironment, BuilderEvidenceValidation, BuilderIdentity,
-        BuilderReport, ComparisonResult, ExecutableEvidence, GateResult, aggregate_reports,
-        builder_ids_are_independent, comparison_satisfies_reproducibility,
-        hash_committed_file_sha256, hash_committed_inputs, read_committed_file_bytes,
-        single_builder_aggregate, valid_builder_id, validate_builder_evidence,
+        BuilderReport, CHECK_EVIDENCE_NORMALIZATION, ComparisonResult, ExecutableEvidence,
+        GateResult, aggregate_reports, builder_ids_are_independent, check_evidence_hash,
+        comparison_satisfies_reproducibility, hash_committed_file_sha256, hash_committed_inputs,
+        read_committed_file_bytes, single_builder_aggregate, valid_builder_id,
+        validate_builder_evidence,
     },
     runner::{CheckProgress, DesignExpectation, RepositorySnapshot, run_guarded_checks_observed},
 };
@@ -41,6 +42,7 @@ pub enum GateReasonCode {
     BuilderIdentityUnavailable,
     BuilderVersionMismatch,
     SecondBuilderUnavailable,
+    SecondBuilderEvidenceInvalid,
     SecondBuilderIdentityInvalid,
     SecondBuilderVersionMismatch,
     SecondBuilderNotIdentical,
@@ -50,7 +52,9 @@ pub enum GateReasonCode {
     IndependentReviewMissing,
     OpenpgpToolingUnavailable,
     ApprovalVerificationUnavailable,
+    ApprovalEvidenceInvalid,
     RequiredGithubChecksUnavailable,
+    RequiredGithubChecksInvalid,
 }
 
 #[must_use]
@@ -60,6 +64,29 @@ pub const fn comparison_gate_reason(comparison: ComparisonResult) -> Option<Gate
         ComparisonResult::Compatible => Some(GateReasonCode::SecondBuilderNotIdentical),
         ComparisonResult::Different => Some(GateReasonCode::SecondBuilderMismatch),
         ComparisonResult::NotRun => Some(GateReasonCode::SecondBuilderUnavailable),
+    }
+}
+
+#[must_use]
+pub fn gate_status_for_reasons(reasons: &[GateReasonCode]) -> GateStatus {
+    if reasons.is_empty() {
+        return GateStatus::Pass;
+    }
+    if reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            GateReasonCode::SecondBuilderEvidenceInvalid
+                | GateReasonCode::SecondBuilderIdentityInvalid
+                | GateReasonCode::SecondBuilderVersionMismatch
+                | GateReasonCode::SecondBuilderNotIdentical
+                | GateReasonCode::SecondBuilderMismatch
+                | GateReasonCode::ApprovalEvidenceInvalid
+                | GateReasonCode::RequiredGithubChecksInvalid
+        )
+    }) {
+        GateStatus::Fail
+    } else {
+        GateStatus::Blocked
     }
 }
 
@@ -83,6 +110,42 @@ pub struct GateRunReport {
     pub aggregate_manifest: AggregateManifest,
     pub aggregate_evidence_sha256: String,
     pub comparison_manifest_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuilderProducer {
+    builder_id: String,
+    signer_role: String,
+    signer_fingerprint: String,
+}
+
+impl BuilderProducer {
+    #[must_use]
+    pub fn local(builder_id: String) -> Self {
+        Self {
+            builder_id,
+            signer_role: "local".to_owned(),
+            signer_fingerprint: String::new(),
+        }
+    }
+
+    pub fn builder_b(role: &str, fingerprint: &str) -> Result<Self, GateRunError> {
+        if role != "builder-b"
+            || fingerprint.len() != 40
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(GateRunError::ConfigInvalid(
+                "Builder B requires role builder-b and a lowercase 40-hex fingerprint".to_owned(),
+            ));
+        }
+        Ok(Self {
+            builder_id: format!("builder-b:{fingerprint}"),
+            signer_role: role.to_owned(),
+            signer_fingerprint: fingerprint.to_owned(),
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +176,18 @@ pub fn run_gate(
     repository: &Path,
     config_path: &Path,
     requested_output: &Path,
+) -> Result<GateRunReport, GateRunError> {
+    let producer = BuilderProducer::local(
+        env::var("STAGE_GATE_BUILDER_ID").unwrap_or_else(|_| "local-unidentified".to_owned()),
+    );
+    run_gate_with_producer(repository, config_path, requested_output, producer)
+}
+
+pub fn run_gate_with_producer(
+    repository: &Path,
+    config_path: &Path,
+    requested_output: &Path,
+    producer: BuilderProducer,
 ) -> Result<GateRunReport, GateRunError> {
     let requested_output = if requested_output.is_absolute() {
         requested_output
@@ -276,6 +351,14 @@ pub fn run_gate(
             },
         )
         .map_err(|error| GateRunError::Check(error.to_string()))?;
+        if outcomes
+            .iter()
+            .any(|outcome| outcome.stdout.truncated || outcome.stderr.truncated)
+        {
+            return Err(GateRunError::Check(
+                "check output exceeded the bounded evidence limit".to_owned(),
+            ));
+        }
 
         let mut reasons = Vec::new();
         let (environment, tool_paths, identity_complete, versions_match) =
@@ -315,18 +398,29 @@ pub fn run_gate(
         let check_evidence_hashes = config
             .checks
             .iter()
+            .zip(&commands)
             .zip(&outcomes)
-            .map(|(check, outcome)| {
-                let stable = serde_json::json!({
-                    "check_id": check.id,
-                    "executable_sha256": resolved_programs
-                        .get(&check.id)
-                        .map(|evidence| evidence.sha256.as_str()),
-                    "exit_code": outcome.exit_code,
-                });
-                let bytes =
-                    canonicalize(&stable).expect("stable check evidence is canonicalizable");
-                (check.id.clone(), sha256(&bytes))
+            .map(|((check, command), outcome)| {
+                let executable_sha256 = resolved_programs
+                    .get(&check.id)
+                    .map(|evidence| evidence.sha256.as_str())
+                    .unwrap_or_default();
+                let mut executed = command.clone();
+                executed.cwd = repository
+                    .join(&command.cwd)
+                    .canonicalize()
+                    .unwrap_or_else(|_| repository.join(&command.cwd));
+                (
+                    check.id.clone(),
+                    check_evidence_hash(
+                        &check.id,
+                        &executed,
+                        executable_sha256,
+                        &repository,
+                        outcome,
+                    )
+                    .expect("stable check evidence is canonicalizable"),
+                )
             })
             .collect();
         let check_results = config
@@ -334,9 +428,7 @@ pub fn run_gate(
             .iter()
             .map(|check| (check.id.clone(), GateResult::Pass))
             .collect();
-        let builder_id =
-            env::var("STAGE_GATE_BUILDER_ID").unwrap_or_else(|_| "local-unidentified".to_owned());
-        if !valid_builder_id(&builder_id) {
+        if !valid_builder_id(&producer.builder_id) {
             reasons.push(GateReasonCode::BuilderIdentityUnavailable);
         }
         let builder_report = BuilderReport {
@@ -347,10 +439,11 @@ pub fn run_gate(
             design_commit: config.design.commit.clone(),
             config_sha256: input_hashes.config_sha256,
             schema_sha256: input_hashes.schema_sha256,
+            check_evidence_normalization: CHECK_EVIDENCE_NORMALIZATION.to_owned(),
             builder_identity: BuilderIdentity {
-                builder_id,
-                signer_role: "local".to_owned(),
-                signer_fingerprint: String::new(),
+                builder_id: producer.builder_id.clone(),
+                signer_role: producer.signer_role.clone(),
+                signer_fingerprint: producer.signer_fingerprint.clone(),
                 resolved_paths,
             },
             environment,
@@ -382,31 +475,44 @@ pub fn run_gate(
             repository_owner_id: config.remote.repository_owner_id,
             workflow: config.remote.workflow.clone(),
             workflow_ref: config.remote.workflow_ref.clone(),
-            workflow_sha: config.remote.workflow_sha.clone(),
+            workflow_sha: builder_report.implementation_commit.clone(),
+            trigger_workflow_id: config.remote.trigger_workflow_id,
+            trigger_workflow_name: config.remote.trigger_workflow_name.clone(),
+            trigger_workflow_path: config.remote.trigger_workflow_path.clone(),
+            trigger_workflow_sha: builder_report.implementation_commit.clone(),
             event_name: config.remote.event_name.clone(),
             git_ref: config.remote.git_ref.clone(),
             signing_check_name: config.remote.signing_check_name.clone(),
             required_checks: config.remote.required_checks.clone(),
         };
-        let remote = policy
-            .as_ref()
-            .zip(resolved_gpgv.clone())
-            .and_then(|(policy, verifier)| {
-                verify_signed_remote_proof(
-                    &SignedEvidence {
-                        role: config.remote.signer_role.clone(),
-                        payload_path: repository.join(&config.remote.proof_path),
-                        signature_path: repository.join(&config.remote.signature_path),
-                    },
-                    &remote_requirement,
-                    policy,
-                    verifier,
-                    config.max_output_bytes,
-                )
-                .ok()
-            });
+        let remote_payload = repository.join(&config.remote.proof_path);
+        let remote_signature = repository.join(&config.remote.signature_path);
+        let remote = if !remote_payload.is_file() || !remote_signature.is_file() {
+            None
+        } else if let Some((policy, verifier)) = policy.as_ref().zip(resolved_gpgv.clone()) {
+            match verify_signed_remote_proof(
+                &SignedEvidence {
+                    role: config.remote.signer_role.clone(),
+                    payload_path: remote_payload,
+                    signature_path: remote_signature,
+                },
+                &remote_requirement,
+                policy,
+                verifier,
+                config.max_output_bytes,
+            ) {
+                Ok(verified) => Some(Ok(verified)),
+                Err(_) => Some(Err(())),
+            }
+        } else {
+            None
+        };
         let (remote_hash, remote_result) = match remote {
-            Some(verified) => (Some(verified.sha256), GateResult::Pass),
+            Some(Ok(verified)) => (Some(verified.sha256), GateResult::Pass),
+            Some(Err(())) => {
+                reasons.push(GateReasonCode::RequiredGithubChecksInvalid);
+                (None, GateResult::Fail)
+            }
             None => {
                 reasons.push(GateReasonCode::RequiredGithubChecksUnavailable);
                 (None, GateResult::Blocked)
@@ -451,13 +557,7 @@ pub fn run_gate(
 
         reasons.sort_by_key(reason_order);
         reasons.dedup();
-        let overall_result = if reasons.is_empty() {
-            GateStatus::Pass
-        } else if reasons.contains(&GateReasonCode::SecondBuilderMismatch) {
-            GateStatus::Fail
-        } else {
-            GateStatus::Blocked
-        };
+        let overall_result = gate_status_for_reasons(&reasons);
         let report = GateRunReport {
             schema_version: 1,
             stage_id: config.stage_id.clone(),
@@ -529,12 +629,11 @@ fn bootstrap_output(repository: &Path, requested: &Path) -> Option<(OutputRoot, 
     } else {
         requested.to_path_buf()
     };
-    if relative.parent()? != Path::new("target/stage-gates") {
+    if relative != Path::new("target/stage-gates/stage-0.json") {
         return None;
     }
-    let name = PathBuf::from(relative.file_name()?);
     let root = OutputRoot::open(repository, Path::new("target/stage-gates")).ok()?;
-    Some((root, name))
+    Some((root, PathBuf::from("stage-0.json")))
 }
 
 fn publish_bootstrap_failure(
@@ -703,52 +802,61 @@ fn aggregate_builder_reports(
     verifier: Option<PathBuf>,
     reasons: &mut Vec<GateReasonCode>,
 ) -> Result<AggregateManifest, GateRunError> {
-    let second = policy.zip(verifier).and_then(|(policy, verifier)| {
-        verify_signed_builder_report(
-            &SignedEvidence {
-                role: config.comparison.signer_role.clone(),
-                payload_path: repository.join(&config.comparison.second_builder_report_path),
-                signature_path: repository.join(&config.comparison.second_builder_signature_path),
-            },
-            builder_report,
-            &config.builder,
-            policy,
-            verifier,
-            config.max_output_bytes,
-        )
-        .ok()
-    });
-    let aggregate = match second {
-        None => {
-            reasons.push(GateReasonCode::SecondBuilderUnavailable);
-            single_builder_aggregate(builder_report)
+    let payload_path = repository.join(&config.comparison.second_builder_report_path);
+    let signature_path = repository.join(&config.comparison.second_builder_signature_path);
+    let Some((policy, verifier)) = policy.zip(verifier) else {
+        reasons.push(GateReasonCode::SecondBuilderUnavailable);
+        return single_builder_aggregate(builder_report)
+            .map_err(|error| GateRunError::Report(error.to_string()));
+    };
+    if !payload_path.is_file() || !signature_path.is_file() {
+        reasons.push(GateReasonCode::SecondBuilderUnavailable);
+        return single_builder_aggregate(builder_report)
+            .map_err(|error| GateRunError::Report(error.to_string()));
+    }
+    let second = match verify_signed_builder_report(
+        &SignedEvidence {
+            role: config.comparison.signer_role.clone(),
+            payload_path,
+            signature_path,
+        },
+        builder_report,
+        &config.builder,
+        policy,
+        verifier,
+        config.max_output_bytes,
+    ) {
+        Ok(verified) => verified.value,
+        Err(_) => {
+            reasons.push(GateReasonCode::SecondBuilderEvidenceInvalid);
+            return single_builder_aggregate(builder_report)
+                .map_err(|error| GateRunError::Report(error.to_string()));
         }
-        Some(verified) => {
-            let second = verified.value;
-            let aggregate = aggregate_reports(builder_report, &second);
-            if !builder_ids_are_independent(
-                &builder_report.builder_identity.builder_id,
-                &second.builder_identity.builder_id,
-            ) {
+    };
+    let aggregate = {
+        let aggregate = aggregate_reports(builder_report, &second);
+        if !builder_ids_are_independent(
+            &builder_report.builder_identity.builder_id,
+            &second.builder_identity.builder_id,
+        ) {
+            reasons.push(GateReasonCode::SecondBuilderIdentityInvalid);
+        }
+        match validate_builder_evidence(&config.builder, &second) {
+            BuilderEvidenceValidation::Valid => {}
+            BuilderEvidenceValidation::IdentityInvalid => {
                 reasons.push(GateReasonCode::SecondBuilderIdentityInvalid);
             }
-            match validate_builder_evidence(&config.builder, &second) {
-                BuilderEvidenceValidation::Valid => {}
-                BuilderEvidenceValidation::IdentityInvalid => {
-                    reasons.push(GateReasonCode::SecondBuilderIdentityInvalid);
-                }
-                BuilderEvidenceValidation::VersionMismatch => {
-                    reasons.push(GateReasonCode::SecondBuilderVersionMismatch);
-                }
+            BuilderEvidenceValidation::VersionMismatch => {
+                reasons.push(GateReasonCode::SecondBuilderVersionMismatch);
             }
-            if let Ok(value) = &aggregate
-                && !comparison_satisfies_reproducibility(value.comparison)
-                && let Some(reason) = comparison_gate_reason(value.comparison)
-            {
-                reasons.push(reason);
-            }
-            aggregate
         }
+        if let Ok(value) = &aggregate
+            && !comparison_satisfies_reproducibility(value.comparison)
+            && let Some(reason) = comparison_gate_reason(value.comparison)
+        {
+            reasons.push(reason);
+        }
+        aggregate
     };
     aggregate.map_err(|error| GateRunError::Report(error.to_string()))
 }
@@ -844,7 +952,9 @@ fn verify_external_approvals(
         })
         .collect::<Vec<_>>();
     let approval = verify_approvals(&binding, policy, &evidence, gpgv);
-    if approval.status != GateStatus::Pass {
+    if approval.status == GateStatus::Fail {
+        reasons.push(GateReasonCode::ApprovalEvidenceInvalid);
+    } else if approval.status != GateStatus::Pass {
         if approval
             .reasons
             .contains(&ApprovalReasonCode::OpenPgpToolingUnavailable)
@@ -882,7 +992,12 @@ fn prepare_output_name(
     } else {
         requested.to_path_buf()
     };
-    if relative.parent() != Some(Path::new(&config.output_root)) {
+    if !matches!(
+        relative.as_path(),
+        path if path == Path::new("target/stage-gates/stage-0.json")
+            || path == Path::new("target/stage-gates/stage-0.builder.json")
+    ) || config.output_root != "target/stage-gates"
+    {
         return Err(GateRunError::UnsafeOutput);
     }
     let name = relative
@@ -938,15 +1053,18 @@ const fn reason_order(reason: &GateReasonCode) -> u8 {
         GateReasonCode::BuilderIdentityUnavailable => 0,
         GateReasonCode::BuilderVersionMismatch => 1,
         GateReasonCode::SecondBuilderUnavailable => 2,
-        GateReasonCode::SecondBuilderIdentityInvalid => 3,
-        GateReasonCode::SecondBuilderVersionMismatch => 4,
-        GateReasonCode::SecondBuilderNotIdentical => 5,
-        GateReasonCode::SecondBuilderMismatch => 6,
-        GateReasonCode::TrustRegistryUnconfigured => 7,
-        GateReasonCode::PlatformDataApprovalMissing => 8,
-        GateReasonCode::IndependentReviewMissing => 9,
-        GateReasonCode::OpenpgpToolingUnavailable => 10,
-        GateReasonCode::ApprovalVerificationUnavailable => 11,
-        GateReasonCode::RequiredGithubChecksUnavailable => 12,
+        GateReasonCode::SecondBuilderEvidenceInvalid => 3,
+        GateReasonCode::SecondBuilderIdentityInvalid => 4,
+        GateReasonCode::SecondBuilderVersionMismatch => 5,
+        GateReasonCode::SecondBuilderNotIdentical => 6,
+        GateReasonCode::SecondBuilderMismatch => 7,
+        GateReasonCode::TrustRegistryUnconfigured => 8,
+        GateReasonCode::PlatformDataApprovalMissing => 9,
+        GateReasonCode::IndependentReviewMissing => 10,
+        GateReasonCode::OpenpgpToolingUnavailable => 11,
+        GateReasonCode::ApprovalVerificationUnavailable => 12,
+        GateReasonCode::ApprovalEvidenceInvalid => 13,
+        GateReasonCode::RequiredGithubChecksUnavailable => 14,
+        GateReasonCode::RequiredGithubChecksInvalid => 15,
     }
 }

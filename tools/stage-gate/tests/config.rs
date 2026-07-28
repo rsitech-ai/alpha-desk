@@ -29,7 +29,9 @@ fn published_schema_covers_signed_provenance_and_check_termination_fields() {
         "repository_owner_id",
         "workflow",
         "workflow_ref",
-        "workflow_sha",
+        "trigger_workflow_id",
+        "trigger_workflow_name",
+        "trigger_workflow_path",
         "event_name",
         "git_ref",
         "signing_check_name",
@@ -46,6 +48,58 @@ fn published_schema_covers_signed_provenance_and_check_termination_fields() {
     assert_eq!(
         schema["$defs"]["check"]["properties"]["termination_grace_seconds"]["minimum"],
         1
+    );
+    assert_eq!(
+        schema["properties"]["output_root"]["const"],
+        "target/stage-gates"
+    );
+    assert_eq!(
+        schema["properties"]["builder_report_output_path"]["const"],
+        "target/stage-gates/stage-0.builder.json"
+    );
+    assert_eq!(
+        schema["properties"]["approvals"]["properties"]["required_roles"]["minItems"],
+        2
+    );
+    assert_eq!(
+        schema["properties"]["approvals"]["properties"]["required_roles"]["maxItems"],
+        2
+    );
+    assert_eq!(
+        schema["properties"]["approvals"]["properties"]["required_roles"]["uniqueItems"],
+        true
+    );
+    assert_eq!(
+        schema["properties"]["approvals"]["properties"]["evidence"]["maxItems"],
+        2
+    );
+    assert!(
+        schema["properties"]["remote"]["properties"]
+            .get("workflow_sha")
+            .is_none()
+    );
+    assert!(
+        schema["properties"]["remote"]["properties"]
+            .get("trigger_workflow_sha")
+            .is_none()
+    );
+    assert_eq!(
+        schema["properties"]["remote"]["properties"]["workflow"]["const"],
+        ".github/workflows/stage-0-evidence.yml"
+    );
+    assert_eq!(
+        schema["properties"]["remote"]["properties"]["trigger_workflow_name"]["const"],
+        "CI"
+    );
+    assert_eq!(
+        schema["properties"]["remote"]["properties"]["trigger_workflow_path"]["const"],
+        ".github/workflows/ci.yml"
+    );
+    assert!(
+        schema["properties"]["remote"]["properties"]["workflow_ref"]["pattern"]
+            .as_str()
+            .unwrap()
+            .ends_with("@refs/heads/main$")
     );
 }
 
@@ -103,8 +157,13 @@ repository = "s1korrrr/alpha-desk"
 repository_id = 1311268858
 repository_owner_id = 24563931
 workflow = ".github/workflows/stage-0-evidence.yml"
-workflow_ref = "refs/heads/main"
-workflow_sha = "95c4cd709bee9d11e2f7fc591d2861427a36cc3a"
+workflow_ref = "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main"
+trigger_workflow_id = 321251517
+trigger_workflow_name = "CI"
+trigger_workflow_path = ".github/workflows/ci.yml"
+event_name = "push"
+git_ref = "refs/heads/main"
+signing_check_name = "Stage 0 evidence signing"
 required_checks = ["CI / Rust quality"]
 
 [[artifacts]]
@@ -149,6 +208,23 @@ fn signed_provenance_configuration_is_accepted() {
 }
 
 #[test]
+fn approval_roles_and_evidence_are_exactly_the_two_independent_stage_zero_roles() {
+    for source in [
+        VALID_CONFIG.replace(
+            "required_roles = [\"platform-data\", \"independent\"]",
+            "required_roles = [\"platform-data\", \"independent\", \"observer\"]",
+        ),
+        VALID_CONFIG.replace(
+            "role = \"independent\"\nstatement_path",
+            "role = \"observer\"\nstatement_path",
+        ),
+    ] {
+        let error = GateConfig::parse(&source).expect_err("extra approval roles must fail closed");
+        assert_eq!(error.code(), ConfigErrorCode::InvalidValue);
+    }
+}
+
+#[test]
 fn unsigned_external_provenance_configuration_is_rejected() {
     let source = VALID_CONFIG
         .replace(
@@ -168,8 +244,11 @@ fn unsigned_external_provenance_configuration_is_rejected() {
                 "repository_id = 1311268858\n",
                 "repository_owner_id = 24563931\n",
                 "workflow = \".github/workflows/stage-0-evidence.yml\"\n",
-                "workflow_ref = \"refs/heads/main\"\n",
-                "workflow_sha = \"95c4cd709bee9d11e2f7fc591d2861427a36cc3a\"\n",
+                concat!(
+                    "workflow_ref = ",
+                    "\"s1korrrr/alpha-desk/.github/workflows/",
+                    "stage-0-evidence.yml@refs/heads/main\"\n",
+                ),
             ),
             "",
         );
@@ -177,7 +256,46 @@ fn unsigned_external_provenance_configuration_is_rejected() {
     let error =
         GateConfig::parse(&source).expect_err("unsigned Builder B and GitHub proof must fail");
 
-    assert_eq!(error.code(), ConfigErrorCode::InvalidValue);
+    assert_eq!(error.code(), ConfigErrorCode::InvalidToml);
+}
+
+#[test]
+fn static_signing_workflow_sha_is_rejected_because_runtime_sha_binds_the_implementation() {
+    let source = VALID_CONFIG.replace(
+        "trigger_workflow_id = 321251517",
+        concat!(
+            "workflow_sha = \"95c4cd709bee9d11e2f7fc591d2861427a36cc3a\"\n",
+            "trigger_workflow_id = 321251517"
+        ),
+    );
+
+    assert!(
+        GateConfig::parse(&source).is_err(),
+        "a static source SHA can drift from the workflow_run execution context"
+    );
+}
+
+#[test]
+fn remote_workflow_names_paths_and_refs_are_the_fixed_stage_zero_contract() {
+    for source in [
+        VALID_CONFIG.replace(
+            "workflow = \".github/workflows/stage-0-evidence.yml\"",
+            "workflow = \".github/workflows/other.yml\"",
+        ),
+        VALID_CONFIG.replace(
+            "trigger_workflow_name = \"CI\"",
+            "trigger_workflow_name = \"Other\"",
+        ),
+        VALID_CONFIG.replace(
+            "trigger_workflow_path = \".github/workflows/ci.yml\"",
+            "trigger_workflow_path = \".github/workflows/other.yml\"",
+        ),
+        VALID_CONFIG.replace("@refs/heads/main\"", "@refs/heads/release\""),
+    ] {
+        let error =
+            GateConfig::parse(&source).expect_err("workflow identity drift must fail closed");
+        assert_eq!(error.code(), ConfigErrorCode::InvalidValue);
+    }
 }
 
 #[test]
@@ -194,18 +312,20 @@ fn an_empty_command_is_rejected() {
 
 #[test]
 fn an_empty_artifact_list_is_rejected() {
-    let source = VALID_CONFIG.replace(
-        concat!(
-            "[[artifacts]]\n",
-            "id = \"cargo-lock\"\n",
-            "path = \"Cargo.lock\"\n",
-            "kind = \"input\"\n",
-            "producer = \"repository\"\n",
-            "target_triple = \"platform-independent\"\n",
-            "profile = \"source\"\n",
-        ),
-        "",
-    );
+    let source = VALID_CONFIG
+        .replace(
+            concat!(
+                "[[artifacts]]\n",
+                "id = \"cargo-lock\"\n",
+                "path = \"Cargo.lock\"\n",
+                "kind = \"input\"\n",
+                "producer = \"repository\"\n",
+                "target_triple = \"platform-independent\"\n",
+                "profile = \"source\"\n",
+            ),
+            "",
+        )
+        .replace("[design]", "artifacts = []\n\n[design]");
 
     let error = GateConfig::parse(&source).expect_err("missing artifacts must fail closed");
 
@@ -281,14 +401,25 @@ fn output_roots_outside_target_stage_gates_are_rejected() {
 }
 
 #[test]
-fn builder_report_output_must_stay_under_the_ignored_gate_root() {
+fn output_root_is_the_single_fixed_stage_gate_root() {
     let source = VALID_CONFIG.replace(
-        "builder_report_output_path = \"target/stage-gates/stage-0.builder.json\"",
-        "builder_report_output_path = \"stage-0.builder.json\"",
+        "output_root = \"target/stage-gates\"",
+        "output_root = \"target/stage-gates/custom\"",
     );
 
-    let error =
-        GateConfig::parse(&source).expect_err("builder report output must remain contained");
+    let error = GateConfig::parse(&source).expect_err("nested output roots must fail closed");
+
+    assert_eq!(error.code(), ConfigErrorCode::UnsafeOutput);
+}
+
+#[test]
+fn builder_report_output_is_the_single_fixed_builder_path() {
+    let source = VALID_CONFIG.replace(
+        "builder_report_output_path = \"target/stage-gates/stage-0.builder.json\"",
+        "builder_report_output_path = \"target/stage-gates/custom-builder.json\"",
+    );
+
+    let error = GateConfig::parse(&source).expect_err("custom builder outputs must fail closed");
 
     assert_eq!(error.code(), ConfigErrorCode::UnsafeOutput);
 }

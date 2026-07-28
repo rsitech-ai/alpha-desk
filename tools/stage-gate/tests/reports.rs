@@ -1,15 +1,22 @@
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use sha2::Digest as _;
 use stage_gate::{
+    approvals::GateStatus,
     artifacts::{ArtifactManifest, ArtifactRecord},
     config::{BuilderConfig, BuilderToolConfig},
-    gate::{GateReasonCode, comparison_gate_reason},
+    gate::{GateReasonCode, comparison_gate_reason, gate_status_for_reasons},
+    process::{CapturedOutput, CommandOutcome, CommandSpec},
     reports::{
         BuilderEnvironment, BuilderEvidenceValidation, BuilderIdentity, BuilderReport,
         ComparisonResult, ExecutableEvidence, GateResult, InputHashErrorCode, aggregate_reports,
-        builder_ids_are_independent, comparison_satisfies_reproducibility, hash_committed_inputs,
-        validate_builder_evidence,
+        builder_ids_are_independent, check_evidence_hash, comparison_satisfies_reproducibility,
+        hash_committed_inputs, validate_builder_evidence,
     },
 };
 use tempfile::TempDir;
@@ -63,6 +70,7 @@ fn comparison_projection_excludes_exactly_the_builder_identity_envelope() {
         vec![
             "artifacts",
             "check_evidence_hashes",
+            "check_evidence_normalization",
             "check_results",
             "config_sha256",
             "design_commit",
@@ -105,6 +113,9 @@ fn every_deterministic_builder_report_field_remains_in_the_projection() {
     mutated.schema_sha256 = "0".repeat(64);
     mutations.push(mutated);
     let mut mutated = baseline.clone();
+    mutated.check_evidence_normalization = "different-normalizer".to_owned();
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
     mutated.environment.os_version = "normalized-linux-6.8".to_owned();
     mutations.push(mutated);
     let mut mutated = baseline.clone();
@@ -130,6 +141,330 @@ fn every_deterministic_builder_report_field_remains_in_the_projection() {
 
     for mutation in mutations {
         assert_ne!(mutation.projection_hash().unwrap(), baseline_projection);
+    }
+}
+
+#[test]
+fn semantic_check_evidence_normalizes_only_benign_builder_volatility() {
+    let warm_spec = semantic_spec("/builder-a/repository", "/builder-a/home");
+    let cold_spec = semantic_spec("/builder-b/repository", "/builder-b/home");
+    let warm = outcome(
+        concat!(
+            "    Finished `test` profile [unoptimized] target(s) in 0.12s\n",
+            "     Running unittests /builder-a/repository/target/debug/deps/core-a1\n",
+            "compose project alpha-desk-stage0-ab12cd34 ready\n",
+            "test tests::orders_are_sorted ... ok\n",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "Executed 1 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds\n",
+        ),
+        "",
+    );
+    let cold = outcome(
+        concat!(
+            "   Compiling serde v1.0.0\n",
+            "    Checking alpha-core v0.1.0 (/builder-b/repository/crates/core)\n",
+            "[1/4] Compiling AlphaCore Source.swift\n",
+            "    Finished `test` profile [unoptimized] target(s) in 9.87s\n",
+            "     Running unittests /builder-b/repository/target/debug/deps/core-a1\n",
+            "compose project alpha-desk-stage0-ef56gh78 ready\n",
+            "test tests::orders_are_sorted ... ok\n",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.44s\n",
+            "Executed 1 tests, with 0 failures (0 unexpected) in 0.777 (0.888) seconds\n",
+        ),
+        "",
+    );
+
+    assert_eq!(
+        check_evidence_hash(
+            "quality",
+            &warm_spec,
+            &"a".repeat(64),
+            Path::new("/builder-a/repository"),
+            &warm,
+        )
+        .unwrap(),
+        check_evidence_hash(
+            "quality",
+            &cold_spec,
+            &"a".repeat(64),
+            Path::new("/builder-b/repository"),
+            &cold,
+        )
+        .unwrap(),
+        "cold-cache build progress, builder paths, and elapsed timings are non-semantic"
+    );
+}
+
+#[test]
+fn semantic_check_evidence_binds_results_diagnostics_command_and_truncation() {
+    let check = semantic_spec("/repo", "/home/builder");
+    let baseline = outcome(
+        concat!(
+            "test tests::orders_are_sorted ... ok\n",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+        ),
+        "",
+    );
+    let expected = check_evidence_hash(
+        "quality",
+        &check,
+        &"a".repeat(64),
+        Path::new("/repo"),
+        &baseline,
+    )
+    .unwrap();
+
+    for (scenario, stdout, stderr) in [
+        (
+            "test-name",
+            "test tests::orders_are_filtered ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "test-count",
+            "test tests::orders_are_sorted ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "test-result",
+            "test tests::orders_are_sorted ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "warning",
+            "test tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "warning: fallback parser was used in 0.30s at /repo/src/lib.rs\n",
+        ),
+        (
+            "skip",
+            "test tests::orders_are_sorted ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "semantic-running-near-miss",
+            "Running invariant suite phase A\ntest tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "cargo-progress-near-miss",
+            "Compiling cache v1.0.0 extra semantic\ntest tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "cargo-parenthetical-near-miss",
+            "Compiling cache v1.0.0 (semantic)\ntest tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "swift-progress-near-miss",
+            "Build complete! (not-a-duration)\ntest tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "summary-grammar-near-miss",
+            "test tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished after 0.01s\n",
+            "",
+        ),
+        (
+            "retained-whitespace",
+            "test  tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+        (
+            "embedded-project-prefix-near-miss",
+            "xalpha-desk-stage0-ab12cd34\ntest tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s\n",
+            "",
+        ),
+    ] {
+        assert_ne!(
+            check_evidence_hash(
+                "quality",
+                &check,
+                &"a".repeat(64),
+                Path::new("/repo"),
+                &outcome(stdout, stderr),
+            )
+            .unwrap(),
+            expected,
+            "{scenario} must change semantic evidence"
+        );
+    }
+    let no_trailing_newline = outcome(
+        "test tests::orders_are_sorted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.01s",
+        "",
+    );
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &check,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &no_trailing_newline,
+        )
+        .unwrap(),
+        expected,
+        "line framing is semantic"
+    );
+
+    let mut changed_exit = baseline.clone();
+    changed_exit.success = false;
+    changed_exit.exit_code = Some(9);
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &check,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &changed_exit,
+        )
+        .unwrap(),
+        expected
+    );
+    assert_ne!(
+        check_evidence_hash(
+            "different-check",
+            &check,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &check,
+            &"b".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    let mut changed_program = check.clone();
+    changed_program.program = PathBuf::from("/different/toolchain/bin/cargo");
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &changed_program,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    let mut changed_cwd = check.clone();
+    changed_cwd.cwd = PathBuf::from("/repo/crates/core");
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &changed_cwd,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    let mut changed_args = check.clone();
+    changed_args.args.push("--ignored".into());
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &changed_args,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    let mut changed_env = check.clone();
+    changed_env
+        .env
+        .push(("RUSTFLAGS".to_owned(), "-Dwarnings".to_owned()));
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &changed_env,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    let mut changed_timeout = check.clone();
+    changed_timeout.timeout += std::time::Duration::from_secs(1);
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &changed_timeout,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    let mut changed_grace = check.clone();
+    changed_grace.termination_grace += std::time::Duration::from_secs(1);
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &changed_grace,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &baseline,
+        )
+        .unwrap(),
+        expected
+    );
+    let mut truncated = baseline;
+    truncated.stdout.truncated = true;
+    assert_ne!(
+        check_evidence_hash(
+            "quality",
+            &check,
+            &"a".repeat(64),
+            Path::new("/repo"),
+            &truncated,
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn present_invalid_external_evidence_is_failure_while_missing_evidence_is_blocked() {
+    for reason in [
+        GateReasonCode::SecondBuilderEvidenceInvalid,
+        GateReasonCode::SecondBuilderIdentityInvalid,
+        GateReasonCode::SecondBuilderVersionMismatch,
+        GateReasonCode::SecondBuilderNotIdentical,
+        GateReasonCode::SecondBuilderMismatch,
+        GateReasonCode::ApprovalEvidenceInvalid,
+        GateReasonCode::RequiredGithubChecksInvalid,
+    ] {
+        assert_eq!(
+            gate_status_for_reasons(&[reason]),
+            GateStatus::Fail,
+            "{reason:?}"
+        );
+    }
+    for reason in [
+        GateReasonCode::SecondBuilderUnavailable,
+        GateReasonCode::PlatformDataApprovalMissing,
+        GateReasonCode::IndependentReviewMissing,
+        GateReasonCode::RequiredGithubChecksUnavailable,
+    ] {
+        assert_eq!(
+            gate_status_for_reasons(&[reason]),
+            GateStatus::Blocked,
+            "{reason:?}"
+        );
     }
 }
 
@@ -389,6 +724,42 @@ fn untracked_config_or_schema_is_rejected() {
     assert_eq!(error.code(), InputHashErrorCode::NotCommitted);
 }
 
+fn semantic_spec(repository: &str, home: &str) -> CommandSpec {
+    CommandSpec {
+        program: Path::new(home).join(".cargo/bin/cargo"),
+        args: vec!["+1.97.1".into(), "test".into()],
+        cwd: PathBuf::from(repository),
+        env: vec![
+            ("HOME".to_owned(), home.to_owned()),
+            ("CARGO_HOME".to_owned(), format!("{home}/.cargo")),
+            (
+                "PATH".to_owned(),
+                format!("{home}/.cargo/bin:/usr/bin:/bin"),
+            ),
+        ],
+        timeout: std::time::Duration::from_secs(60),
+        termination_grace: std::time::Duration::from_secs(2),
+    }
+}
+
+fn outcome(stdout: &str, stderr: &str) -> CommandOutcome {
+    CommandOutcome {
+        success: true,
+        exit_code: Some(0),
+        stdout: CapturedOutput {
+            text: stdout.to_owned(),
+            total_bytes: stdout.len(),
+            truncated: false,
+        },
+        stderr: CapturedOutput {
+            text: stderr.to_owned(),
+            total_bytes: stderr.len(),
+            truncated: false,
+        },
+        elapsed: std::time::Duration::from_secs(1),
+    }
+}
+
 fn report(
     builder_id: &str,
     os_version: &str,
@@ -403,6 +774,7 @@ fn report(
         design_commit: "412c380054d16f22549c46a59a5fe0617bc60138".to_owned(),
         config_sha256: "1".repeat(64),
         schema_sha256: "2".repeat(64),
+        check_evidence_normalization: "stage-gate-semantic-v1".to_owned(),
         builder_identity: BuilderIdentity {
             builder_id: builder_id.to_owned(),
             signer_role: "local".to_owned(),
