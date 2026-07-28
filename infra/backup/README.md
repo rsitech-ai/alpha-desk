@@ -25,6 +25,12 @@ Protected sets are:
 - infrastructure Git mirrors and immutable release manifests;
 - ClickHouse schemas and rebuild inputs; ClickHouse is rebuilt from Parquet
   rather than treated as the sole truth.
+- Recent compatible RocksDB checkpoints, each with a manifest containing
+  block height, canonical archive manifest hash, schema versions, and state hash.
+  At least one recent compatible checkpoint is replicated independently to the
+  secondary operator-controlled site. Retention is current plus checkpoints;
+  the production-hardening policy must set a measured checkpoint interval and
+  minimum recent-generation count before automation.
 
 MinIO's archived upstream image remains on HOLD. A one-way `mc mirror` does not
 preserve complete version history or metadata and is not accepted as a backup.
@@ -62,6 +68,11 @@ Acceptance is dataset-specific:
   `mc mirror --remove`.
 - ClickHouse: rebuild from immutable Parquet followed by deterministic query
   and checkpoint evidence.
+- RocksDB: restore the nearest compatible checkpoint into a new empty state
+  directory, verify every manifest/file hash and the recorded state hash, then
+  replay subsequent events from the referenced canonical archive manifest.
+  Acceptance requires the reconstructed deterministic state hash to equal the
+  known checkpoint and a second independently computed post-replay hash.
 
 Recovery is successful only after all manifests and integrity checks pass and
 the repository's deterministic state hashes equal known checkpoints.
@@ -74,5 +85,7 @@ the repository's deterministic state hashes equal known checkpoints.
 - NATS snapshot and namespace restore.
 - Version-aware object recovery.
 - ClickHouse reconstruction from Parquet.
+- RocksDB checkpoint replication recency, compatible restore, subsequent-event
+  replay, and deterministic state-hash equality.
 - Corruption detection, measured RPO/RTO, and quarterly drill execution.
 - End-to-end backup failure metrics and operator alert delivery.

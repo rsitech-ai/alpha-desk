@@ -26,6 +26,9 @@ The example inventory uses only `.invalid` names and is never an operational
 target. Before any later operation, an approved environment plan must name the
 host, owner, change window, rollback, evidence path, and exact allowed service.
 Validate the service name with `infra/systemd/validate-instance.sh`.
+The installed unit repeats that gate through
+`ExecCondition=/usr/libexec/hyperliquid-alpha-desk/validate-instance %i`;
+unknown or execution-like instances cannot reach `ExecStart`.
 
 ## Stage 0 read-only inspection
 
@@ -88,6 +91,7 @@ The following remain BLOCKED on a disposable Ubuntu 24.04 VM or later isolated
 restore drill:
 
 - package resolution/upgrades and OpenSSH socket-activation rollback;
+- refresh of the exact reviewed Noble package versions and APT pin policy;
 - key access plus denied root/password login;
 - external default-deny firewall testing and exact zone flows;
 - chrony sources, offset, failover, and reboot persistence;

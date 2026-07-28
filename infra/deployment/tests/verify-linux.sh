@@ -10,6 +10,13 @@ readonly REPO_ROOT=/workspace
 readonly UNIT="$REPO_ROOT/infra/systemd/hl-service@.service"
 readonly QUADLETS="$REPO_ROOT/infra/podman/quadlet"
 readonly GENERATOR=/usr/lib/systemd/system-generators/podman-system-generator
+readonly ALLOWED_INSTANCES=(
+  hl-analytics
+  hl-api
+  hl-capture
+  hl-core
+  hl-research
+)
 
 fail() {
   printf 'FAIL %s\n' "$1" >&2
@@ -32,18 +39,42 @@ readonly tmp_root
 trap 'rm -rf -- "$tmp_root"' EXIT
 
 mkdir -p /opt/hyperliquid-alpha-desk/bin
+mkdir -p /usr/libexec/hyperliquid-alpha-desk
 printf '#!/bin/sh\nexit 0\n' >/opt/hyperliquid-alpha-desk/bin/i
-printf '#!/bin/sh\nexit 0\n' >/opt/hyperliquid-alpha-desk/bin/hl-api
-chmod 0755 \
-  /opt/hyperliquid-alpha-desk/bin/i \
-  /opt/hyperliquid-alpha-desk/bin/hl-api
+install -m 0755 \
+  "$REPO_ROOT/infra/systemd/validate-instance.sh" \
+  /usr/libexec/hyperliquid-alpha-desk/validate-instance
+chmod 0755 /opt/hyperliquid-alpha-desk/bin/i
 
-materialized="$tmp_root/hl-service@hl-api.service"
-sed 's/%i/hl-api/g' "$UNIT" >"$materialized"
+materialized_units=("$UNIT")
+for instance in "${ALLOWED_INSTANCES[@]}"; do
+  printf '#!/bin/sh\nexit 0\n' \
+    >"/opt/hyperliquid-alpha-desk/bin/$instance"
+  chmod 0755 "/opt/hyperliquid-alpha-desk/bin/$instance"
+  materialized="$tmp_root/hl-service@$instance.service"
+  sed "s/%i/$instance/g" "$UNIT" >"$materialized"
+  materialized_units[${#materialized_units[@]}]="$materialized"
+done
+printf '#!/bin/sh\nexit 0\n' >/opt/hyperliquid-alpha-desk/bin/hl-exec
+chmod 0755 /opt/hyperliquid-alpha-desk/bin/hl-exec
+forbidden_materialized="$tmp_root/hl-service@hl-exec.service"
+sed 's/%i/hl-exec/g' "$UNIT" >"$forbidden_materialized"
+materialized_units[${#materialized_units[@]}]="$forbidden_materialized"
 
-systemd-analyze verify --recursive-errors=yes "$UNIT" "$materialized" ||
+systemd-analyze verify \
+  --recursive-errors=yes \
+  "${materialized_units[@]}" ||
   fail "systemd-verify"
-printf 'PASS systemd-verify:template-and-hl-api\n'
+printf 'PASS systemd-verify:template-five-allowed-and-forbidden\n'
+
+for instance in "${ALLOWED_INSTANCES[@]}"; do
+  /usr/libexec/hyperliquid-alpha-desk/validate-instance "$instance" >/dev/null ||
+    fail "systemd-validator:allowed-$instance"
+done
+if /usr/libexec/hyperliquid-alpha-desk/validate-instance hl-exec >/dev/null 2>&1; then
+  fail "systemd-validator:forbidden-instance-accepted"
+fi
+printf 'PASS systemd-validator:five-allowed-and-materialized-hl-exec-rejected\n'
 
 systemd-analyze security --offline=yes "$materialized" >"$tmp_root/security.txt" ||
   fail "systemd-security-offline"
