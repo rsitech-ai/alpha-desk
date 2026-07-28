@@ -109,11 +109,9 @@ impl TradeScenarioBuilder {
             vec![market_id],
             vec![buyer, seller],
             ConfirmationClass::CommittedPrimary,
-            EventPayload::TradeMatched(TradeMatched {
-                price,
-                quantity,
-                deterministic_seed: self.seed,
-            }),
+            EventPayload::TradeMatched(TradeMatched::without_identities(
+                price, quantity, self.seed,
+            )),
             "fixture-parser-v1",
         )
         .map_err(ScenarioBuildError::from)

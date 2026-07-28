@@ -5,8 +5,8 @@ use api_contracts::{
     encode_default_event_payload, encode_trade_matched, validate_event_payload,
 };
 use domain_types::{
-    Address, BlockHeight, ChainId, EventId, KnownTime, MarketId, Price, ProtocolTime, Quantity,
-    SourceId, TransactionId,
+    Address, BlockHeight, ChainId, EventId, KnownTime, MarketId, OrderId, Price, ProtocolTime,
+    Quantity, SourceId, TradeId, TransactionId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -157,9 +157,28 @@ event_kinds!(
 /// Fully mapped V1 trade payload used by the deterministic Task 4 fixture boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TradeMatched {
+    pub trade_id: Option<TradeId>,
+    pub market_id: Option<MarketId>,
+    pub maker_order_id: Option<OrderId>,
+    pub taker_order_id: Option<OrderId>,
     pub price: Price,
     pub quantity: Quantity,
     pub deterministic_seed: u64,
+}
+
+impl TradeMatched {
+    #[must_use]
+    pub fn without_identities(price: Price, quantity: Quantity, deterministic_seed: u64) -> Self {
+        Self {
+            trade_id: None,
+            market_id: None,
+            maker_order_id: None,
+            taker_order_id: None,
+            price,
+            quantity,
+            deterministic_seed,
+        }
+    }
 }
 
 macro_rules! opaque_payloads {
@@ -199,6 +218,10 @@ macro_rules! opaque_payloads {
                         }
                     )+
                     Self::TradeMatched(value) => encode_trade_matched(&WireTradeMatched {
+                        trade_id: value.trade_id.as_ref().map(ToString::to_string),
+                        market_id: value.market_id.as_ref().map(ToString::to_string),
+                        maker_order_id: value.maker_order_id.as_ref().map(ToString::to_string),
+                        taker_order_id: value.taker_order_id.as_ref().map(ToString::to_string),
                         price: value.price.to_string(),
                         quantity: value.quantity.to_string(),
                         deterministic_seed: value.deterministic_seed,
@@ -238,6 +261,42 @@ macro_rules! opaque_payloads {
                     EventKind::TradeMatched => {
                         let value = decode_trade_matched(bytes).map_err(payload_error)?;
                         Ok(Self::TradeMatched(TradeMatched {
+                            trade_id: value
+                                .trade_id
+                                .map(TradeId::new)
+                                .transpose()
+                                .map_err(|error| ContractError::Invalid {
+                                    field: "payload",
+                                    reason: format!("invalid TradeMatched trade_id: {error}"),
+                                })?,
+                            market_id: value
+                                .market_id
+                                .map(MarketId::new)
+                                .transpose()
+                                .map_err(|error| ContractError::Invalid {
+                                    field: "payload",
+                                    reason: format!("invalid TradeMatched market_id: {error}"),
+                                })?,
+                            maker_order_id: value
+                                .maker_order_id
+                                .map(OrderId::new)
+                                .transpose()
+                                .map_err(|error| ContractError::Invalid {
+                                    field: "payload",
+                                    reason: format!(
+                                        "invalid TradeMatched maker_order_id: {error}"
+                                    ),
+                                })?,
+                            taker_order_id: value
+                                .taker_order_id
+                                .map(OrderId::new)
+                                .transpose()
+                                .map_err(|error| ContractError::Invalid {
+                                    field: "payload",
+                                    reason: format!(
+                                        "invalid TradeMatched taker_order_id: {error}"
+                                    ),
+                                })?,
                             price: Price::from_str(&value.price).map_err(|error| {
                                 ContractError::Invalid {
                                     field: "payload",
@@ -471,21 +530,17 @@ impl CanonicalEventEnvelope {
                 Address::from_bytes([0x22; 20]),
             ],
             ConfirmationClass::CommittedPrimary,
-            EventPayload::TradeMatched(TradeMatched {
-                price: Price::parse_at_scale("65000", 6).map_err(|error| {
-                    ContractError::Invalid {
-                        field: "payload",
-                        reason: error.to_string(),
-                    }
+            EventPayload::TradeMatched(TradeMatched::without_identities(
+                Price::parse_at_scale("65000", 6).map_err(|error| ContractError::Invalid {
+                    field: "payload",
+                    reason: error.to_string(),
                 })?,
-                quantity: Quantity::parse_at_scale("0.01", 8).map_err(|error| {
-                    ContractError::Invalid {
-                        field: "payload",
-                        reason: error.to_string(),
-                    }
+                Quantity::parse_at_scale("0.01", 8).map_err(|error| ContractError::Invalid {
+                    field: "payload",
+                    reason: error.to_string(),
                 })?,
-                deterministic_seed: 7,
-            }),
+                7,
+            )),
             "parser-v1",
         )
     }
