@@ -234,7 +234,13 @@ fn command_evidence(
         .collect();
     CheckCommandEvidence {
         check_id: check_id.to_owned(),
-        program: normalization.tokenize(&command.program.to_string_lossy()),
+        program: normalization.tokenize(
+            &command
+                .evidence_program
+                .as_deref()
+                .unwrap_or(&command.program)
+                .to_string_lossy(),
+        ),
         arg0: command
             .arg0
             .as_ref()

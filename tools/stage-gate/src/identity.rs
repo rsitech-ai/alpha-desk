@@ -10,6 +10,7 @@ use std::os::unix::{fs::PermissionsExt as _, process::CommandExt as _};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tempfile::TempDir;
 
 const VERSION_OUTPUT_LIMIT: usize = 64 * 1024;
 
@@ -26,6 +27,18 @@ pub struct ExecutableIdentity {
 pub struct ResolvedProgram {
     pub invocation_path: PathBuf,
     pub executable_path: PathBuf,
+}
+
+pub struct ProgramSnapshot {
+    _directory: TempDir,
+    executable_path: PathBuf,
+}
+
+impl ProgramSnapshot {
+    #[must_use]
+    pub fn executable_path(&self) -> &Path {
+        &self.executable_path
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +137,42 @@ pub fn executable_file_identity(
     })
 }
 
+pub fn snapshot_resolved_program(
+    program: &ResolvedProgram,
+    expected_sha256: &str,
+) -> Result<ProgramSnapshot, IdentityError> {
+    let bytes = fs::read(&program.executable_path).map_err(|_| {
+        IdentityError::ProgramUnavailable(program.executable_path.display().to_string())
+    })?;
+    if hex::encode(Sha256::digest(&bytes)) != expected_sha256 {
+        return Err(IdentityError::IdentityCommandFailed(
+            program.executable_path.clone(),
+        ));
+    }
+    let directory = tempfile::tempdir()
+        .map_err(|_| IdentityError::IdentityCommandFailed(program.executable_path.clone()))?;
+    let file_name = program
+        .invocation_path
+        .file_name()
+        .ok_or_else(|| IdentityError::IdentityCommandFailed(program.invocation_path.clone()))?;
+    let executable_path = directory.path().join(file_name);
+    fs::write(&executable_path, bytes)
+        .map_err(|_| IdentityError::IdentityCommandFailed(program.executable_path.clone()))?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&executable_path)
+            .map_err(|_| IdentityError::IdentityCommandFailed(program.executable_path.clone()))?
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable_path, permissions)
+            .map_err(|_| IdentityError::IdentityCommandFailed(program.executable_path.clone()))?;
+    }
+    Ok(ProgramSnapshot {
+        _directory: directory,
+        executable_path,
+    })
+}
+
 pub fn capture_executable_identity_with_env(
     id: &str,
     program: &ResolvedProgram,
@@ -132,7 +181,9 @@ pub fn capture_executable_identity_with_env(
 ) -> Result<ExecutableIdentity, IdentityError> {
     let bytes = fs::read(&program.executable_path)
         .map_err(|_| IdentityError::ProgramUnavailable(id.to_owned()))?;
-    let mut command = Command::new(&program.executable_path);
+    let sha256 = hex::encode(Sha256::digest(&bytes));
+    let snapshot = snapshot_resolved_program(program, &sha256)?;
+    let mut command = Command::new(snapshot.executable_path());
     #[cfg(unix)]
     if program.invocation_path != program.executable_path {
         command.arg0(program.invocation_path.as_os_str());
@@ -155,7 +206,7 @@ pub fn capture_executable_identity_with_env(
     Ok(ExecutableIdentity {
         id: id.to_owned(),
         resolved_path: program.executable_path.clone(),
-        sha256: hex::encode(Sha256::digest(bytes)),
+        sha256,
         version_output: String::from_utf8_lossy(&version).trim().to_owned(),
     })
 }

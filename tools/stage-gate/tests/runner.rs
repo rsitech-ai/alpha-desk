@@ -483,6 +483,7 @@ fn helper_spec(cwd: &Path, mode: &str, env: Vec<(String, String)>) -> CommandSpe
     explicit_env.extend(env);
     CommandSpec {
         program: std::env::current_exe().unwrap(),
+        evidence_program: None,
         arg0: None,
         args: vec![
             "--exact".into(),

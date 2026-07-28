@@ -19,7 +19,8 @@ use crate::{
     config::GateConfig,
     identity::{
         ExecutableIdentity, capture_executable_identity_with_env, executable_file_identity,
-        expand_program_roots, parse_rustc_host, resolve_program, version_output_matches,
+        expand_program_roots, parse_rustc_host, resolve_program, snapshot_resolved_program,
+        version_output_matches,
     },
     output::OutputRoot,
     process::{CommandSpec, OutputPolicy},
@@ -293,14 +294,22 @@ pub fn run_gate_with_producer(
         let controlled_environment = controlled_environment(&roots);
         let mut resolved_programs = BTreeMap::new();
         let mut resolved_paths = BTreeMap::new();
-        let resolved_gpgv =
-            resolve_program(&config.approvals.gpgv_program, &roots, &repository).ok();
-        if let Some(program) = &resolved_gpgv {
-            let identity = executable_file_identity("approval:gpgv", program)
+        let mut program_snapshots = Vec::new();
+        let resolved_gpgv = if let Ok(program) =
+            resolve_program(&config.approvals.gpgv_program, &roots, &repository)
+        {
+            let identity = executable_file_identity("approval:gpgv", &program)
                 .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
+            let verifier_snapshot = snapshot_resolved_program(&program, &identity.sha256)
+                .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
+            let verifier_path = verifier_snapshot.executable_path().to_path_buf();
             resolved_paths.insert("approval:gpgv".to_owned(), identity.resolved_path.clone());
             resolved_programs.insert("approval:gpgv".to_owned(), executable_evidence(identity));
-        }
+            program_snapshots.push(verifier_snapshot);
+            Some(verifier_path)
+        } else {
+            None
+        };
         let commands = config
             .checks
             .iter()
@@ -309,8 +318,25 @@ pub fn run_gate_with_producer(
                     .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
                 let identity = executable_file_identity(&check.id, &program)
                     .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
+                let expected_sha256 = identity.sha256.clone();
                 resolved_paths.insert(check.id.clone(), identity.resolved_path.clone());
                 resolved_programs.insert(check.id.clone(), executable_evidence(identity));
+                let evidence_program = program.executable_path.clone();
+                let (execution_program, arg0) = if program.executable_path.starts_with(&repository)
+                {
+                    (
+                        program.executable_path,
+                        (program.invocation_path != evidence_program)
+                            .then(|| program.invocation_path.into_os_string()),
+                    )
+                } else {
+                    let executable_snapshot = snapshot_resolved_program(&program, &expected_sha256)
+                        .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
+                    let execution_program = executable_snapshot.executable_path().to_path_buf();
+                    let arg0 = Some(program.invocation_path.into_os_string());
+                    program_snapshots.push(executable_snapshot);
+                    (execution_program, arg0)
+                };
                 let mut command_environment = check.env.clone();
                 for name in &check.inherit_env {
                     if name == "PATH" {
@@ -322,9 +348,9 @@ pub fn run_gate_with_producer(
                     }
                 }
                 Ok(CommandSpec {
-                    arg0: (program.invocation_path != program.executable_path)
-                        .then(|| program.invocation_path.into_os_string()),
-                    program: program.executable_path,
+                    program: execution_program,
+                    evidence_program: Some(evidence_program),
+                    arg0,
                     args: check.args.iter().map(Into::into).collect(),
                     cwd: PathBuf::from(&check.cwd),
                     env: command_environment.into_iter().collect(),
@@ -333,7 +359,6 @@ pub fn run_gate_with_producer(
                 })
             })
             .collect::<Result<Vec<_>, GateRunError>>()?;
-        let resolved_gpgv = resolved_gpgv.map(|program| program.executable_path);
         let redactions = config
             .checks
             .iter()

@@ -18,6 +18,7 @@ pub const TRUNCATION_MARKER: &str = "[... output truncated ...]";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandSpec {
     pub program: PathBuf,
+    pub evidence_program: Option<PathBuf>,
     pub arg0: Option<OsString>,
     pub args: Vec<OsString>,
     pub cwd: PathBuf,

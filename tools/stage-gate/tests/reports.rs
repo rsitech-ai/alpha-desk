@@ -727,6 +727,7 @@ fn untracked_config_or_schema_is_rejected() {
 fn semantic_spec(repository: &str, home: &str) -> CommandSpec {
     CommandSpec {
         program: Path::new(home).join(".cargo/bin/cargo"),
+        evidence_program: None,
         arg0: None,
         args: vec!["+1.97.1".into(), "test".into()],
         cwd: PathBuf::from(repository),

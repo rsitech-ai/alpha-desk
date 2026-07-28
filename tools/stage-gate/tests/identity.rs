@@ -7,8 +7,8 @@ use std::{
 };
 
 use stage_gate::identity::{
-    IdentityErrorCode, capture_executable_identity, parse_rustc_host, resolve_program,
-    version_output_matches,
+    IdentityErrorCode, capture_executable_identity, executable_file_identity, parse_rustc_host,
+    resolve_program, snapshot_resolved_program, version_output_matches,
 };
 use tempfile::TempDir;
 
@@ -89,6 +89,24 @@ fn approved_multicall_identity_helper() {
     {
         println!("cargo proxy 1.0.0");
     }
+}
+
+#[test]
+fn canonical_target_replacement_is_rejected_before_snapshot() {
+    let trusted = TempDir::new().unwrap();
+    let target = trusted.path().join("multicall");
+    copy_executable(&std::env::current_exe().unwrap(), &target);
+    symlink("multicall", trusted.path().join("cargo")).unwrap();
+    let resolved =
+        resolve_program("cargo", &[trusted.path().to_path_buf()], Path::new(".")).unwrap();
+    let identity = executable_file_identity("cargo", &resolved).unwrap();
+
+    copy_executable(Path::new("/usr/bin/false"), &target);
+
+    assert!(
+        snapshot_resolved_program(&resolved, &identity.sha256).is_err(),
+        "a canonical target replaced after hashing must never be snapshotted for execution"
+    );
 }
 
 #[test]
