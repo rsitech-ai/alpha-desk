@@ -4,11 +4,11 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 
 ## Current focus
 
-1. Finish the local Stage 0 foundation checks and resolve the gate-runner timeout.
-2. Complete Stage 0 runtime evidence that can be produced locally.
-3. Keep hosted CI, trust identities, reviewer signatures, evidence commits, and signed tags explicitly blocked until their external prerequisites exist.
-4. Review the implemented Stage 1 source-observation contracts and strict capture configuration.
-5. Continue with the crash-safe append-only spool.
+1. Keep hosted CI, trust identities, reviewer signatures, evidence commits, and signed tags explicitly blocked until their external prerequisites exist.
+2. Review the implemented Stage 1 source-observation contracts and strict capture configuration.
+3. Continue with the crash-safe append-only spool.
+4. Add primary and independent source adapters behind the typed source ports.
+5. Build continuity, quarantine, archive, replay, and publication before claiming a meaningful long-running product test.
 
 ## Required order
 
@@ -25,7 +25,6 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 
 ## Near-term contributor slices
 
-- Stage 0 runner reliability and focused regression coverage.
 - Stage 1 spool format, recovery scanner, and corruption tests.
 - Primary and independent source adapters, with proprietary operator-feed material kept outside the public repository.
 - Deterministic canonicalization, continuity/quarantine, immutable archive, and replayable publication.
