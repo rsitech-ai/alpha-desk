@@ -23,7 +23,6 @@ readonly LOCK="$ANSIBLE_DIR/requirements.lock"
 readonly COLLECTION_REQUIREMENTS="$ANSIBLE_DIR/collections/requirements.yml"
 readonly UBUNTU_IMAGE='ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90'
 readonly PROMETHEUS_IMAGE='prom/prometheus:v3.13.1@sha256:3c42b892cf723fa54d2f262c37a0e1f80aa8c8ddb1da7b9b0df9455a35a7f893'
-readonly LINUX_VERIFIER_IMAGE='alpha-desk-task9-linux-verifier:stage0'
 
 failures=0
 blocked_count=0
@@ -31,6 +30,9 @@ molecule_created=0
 linux_image_created=0
 tmp_root=''
 venv=''
+run_id=''
+MOLECULE_IMAGE=''
+LINUX_VERIFIER_IMAGE=''
 
 pass() {
   printf 'PASS %s\n' "$1"
@@ -72,19 +74,8 @@ cleanup() {
   if [[ "$linux_image_created" -eq 1 ]]; then
     docker image rm "$LINUX_VERIFIER_IMAGE" >/dev/null 2>&1 || true
   fi
-  if command -v docker >/dev/null 2>&1; then
-    while IFS= read -r molecule_image_id; do
-      if [[ "$molecule_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-        docker image rm "$molecule_image_id" >/dev/null 2>&1 || true
-      fi
-    done < <(
-      docker images \
-        --filter label=org.alpha-desk.task9-verifier=molecule \
-        --format '{{.ID}}' 2>/dev/null |
-        while IFS= read -r short_image_id; do
-          docker image inspect "$short_image_id" --format '{{.Id}}' 2>/dev/null || true
-        done
-    )
+  if [[ -n "$MOLECULE_IMAGE" ]] && command -v docker >/dev/null 2>&1; then
+    docker image rm "$MOLECULE_IMAGE" >/dev/null 2>&1 || true
   fi
   case "$tmp_root" in
     /private/tmp/alpha-task9-check.* | /tmp/alpha-task9-check.*)
@@ -153,6 +144,14 @@ else
 fi
 tmp_root="$(mktemp -d "$TASK_TMP_PARENT/alpha-task9-check.XXXXXX")"
 readonly tmp_root
+run_id="${tmp_root##*.}"
+readonly run_id
+export ALPHA_TASK9_RUN_ID="$run_id"
+readonly ALPHA_TASK9_RUN_ID
+MOLECULE_IMAGE="molecule_local/alpha-desk-task9-molecule:${run_id}"
+readonly MOLECULE_IMAGE
+LINUX_VERIFIER_IMAGE="alpha-desk-task9-linux-verifier:${run_id}"
+readonly LINUX_VERIFIER_IMAGE
 venv="$tmp_root/venv"
 readonly venv
 readonly VERIFIER_PATH="$venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -299,8 +298,8 @@ run_molecule_gates() {
   cd "$ANSIBLE_DIR"
   export MOLECULE_EPHEMERAL_DIRECTORY="$tmp_root/molecule"
   run_gate "molecule:syntax" env -u HOME molecule syntax || return 1
-  run_gate "molecule:create" env -u HOME molecule create || return 1
   molecule_created=1
+  run_gate "molecule:create" env -u HOME molecule create || return 1
   run_gate "molecule:prepare" env -u HOME molecule prepare || return 1
   run_gate "ansible:first-converge" env -u HOME molecule converge || return 1
   run_gate "ansible:check-mode" env -u HOME molecule check || return 1
@@ -333,6 +332,7 @@ run_gate \
   --rm \
   --read-only \
   --tmpfs /opt:rw,exec,nosuid,nodev \
+  --tmpfs /usr/libexec/hyperliquid-alpha-desk:rw,exec,nosuid,nodev \
   --tmpfs /tmp:rw,noexec,nosuid,nodev \
   --tmpfs /run:rw,noexec,nosuid,nodev \
   --volume "$REPO_ROOT:/workspace:ro" \

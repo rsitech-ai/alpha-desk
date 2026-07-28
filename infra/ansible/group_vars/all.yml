@@ -7,12 +7,12 @@ alpha_v1_services:
   - hl-research
 
 alpha_stage0_packages:
-  - chrony
-  - logrotate
-  - openssh-server
-  - sudo
-  - ufw
-  - unattended-upgrades
+  - chrony=4.5-1ubuntu4.2
+  - logrotate=3.21.0-2build1
+  - openssh-server=1:9.6p1-3ubuntu13.18
+  - sudo=1.9.15p5-3ubuntu5.24.04.2
+  - ufw=0.36.2-6
+  - unattended-upgrades=2.9.1+nmu4ubuntu1
 
 alpha_chrony_sources:
   - time.cloudflare.com

@@ -17,6 +17,22 @@
     group: root
     mode: "0644"
 
+- name: Create the immutable validator installation directory
+  ansible.builtin.file:
+    path: /usr/libexec/hyperliquid-alpha-desk
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the exact service-instance validator
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../systemd/validate-instance.sh"
+    dest: /usr/libexec/hyperliquid-alpha-desk/validate-instance
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Install the explicitly non-secret environment example
   ansible.builtin.copy:
     src: "{{ role_path }}/../../../systemd/hl-service.env.example"

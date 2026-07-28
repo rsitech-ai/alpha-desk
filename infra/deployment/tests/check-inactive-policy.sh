@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
+# Literal contract probes intentionally match unexpanded $instance/$run_id text.
 set -euo pipefail
 
 if [[ "$#" -ne 0 ]]; then
@@ -82,6 +84,10 @@ readonly REQUIREMENTS_INPUT="$REPO_ROOT/infra/ansible/requirements.in"
 readonly COLLECTION_REQUIREMENTS="$REPO_ROOT/infra/ansible/collections/requirements.yml"
 readonly MOLECULE_CONFIG="$REPO_ROOT/infra/ansible/molecule/default/molecule.yml"
 readonly MOLECULE_DOCKERFILE="$REPO_ROOT/infra/ansible/molecule/default/Dockerfile.j2"
+readonly COMMON_TASKS="$REPO_ROOT/infra/ansible/roles/common/tasks/main.yml"
+readonly SERVICE_TASKS="$REPO_ROOT/infra/ansible/roles/alpha_service/tasks/main.yml"
+readonly BACKUP_POLICY="$REPO_ROOT/infra/backup/README.md"
+readonly ANSIBLE_HARNESS="$REPO_ROOT/infra/ansible/tests/check.sh"
 
 require_file "infra/ansible/requirements.in" || true
 require_file "infra/ansible/requirements.lock" || true
@@ -242,7 +248,160 @@ assert_absent_pattern \
 assert_present_pattern \
   "ansible:package-policy-rc-d" \
   'policy_rc_d:[[:space:]]*101' \
-  "$REPO_ROOT/infra/ansible/roles/common/tasks/main.yml"
+  "$COMMON_TASKS"
+
+ssh_review_status=0
+grep -F '/etc/ssh/sshd_config.d/00-alpha-desk-stage0.conf' \
+  "$COMMON_TASKS" >/dev/null ||
+  ssh_review_status=1
+rg -n '/etc/ssh/sshd_config.d/99-alpha-desk-stage0.conf' \
+  "$COMMON_TASKS" >/dev/null &&
+  ssh_review_status=1
+for effective_assertion in \
+  'permitrootlogin no' \
+  'passwordauthentication no' \
+  'kbdinteractiveauthentication no' \
+  'pubkeyauthentication yes' \
+  'x11forwarding no' \
+  'allowtcpforwarding no'; do
+  grep -F "$effective_assertion" \
+    "$REPO_ROOT/infra/ansible/molecule/default/verify.yml" >/dev/null ||
+    ssh_review_status=1
+done
+if [[ "$ssh_review_status" -eq 0 ]]; then
+  pass "review:ssh-effective-precedence"
+else
+  fail "review:ssh-effective-precedence"
+fi
+
+validator_review_status=0
+grep -Fx \
+  'ExecCondition=/usr/libexec/hyperliquid-alpha-desk/validate-instance %i' \
+  "$SYSTEMD_UNIT" >/dev/null ||
+  validator_review_status=1
+grep -F '/usr/libexec/hyperliquid-alpha-desk/validate-instance' \
+  "$SERVICE_TASKS" >/dev/null ||
+  validator_review_status=1
+for allowed_instance in \
+  hl-analytics \
+  hl-api \
+  hl-capture \
+  hl-core \
+  hl-research; do
+  grep -Fx "  $allowed_instance" \
+    "$REPO_ROOT/infra/deployment/tests/verify-linux.sh" >/dev/null ||
+    validator_review_status=1
+done
+grep -F 'hl-service@$instance.service' \
+  "$REPO_ROOT/infra/deployment/tests/verify-linux.sh" >/dev/null ||
+  validator_review_status=1
+grep -F 'hl-service@hl-exec.service' \
+  "$REPO_ROOT/infra/deployment/tests/verify-linux.sh" >/dev/null ||
+  validator_review_status=1
+if [[ "$validator_review_status" -eq 0 ]]; then
+  pass "review:unit-instance-validator"
+else
+  fail "review:unit-instance-validator"
+fi
+
+package_review_status=0
+expected_package_specs="$(command cat <<'EXPECTED_PACKAGE_SPECS'
+chrony=4.5-1ubuntu4.2
+logrotate=3.21.0-2build1
+openssh-server=1:9.6p1-3ubuntu13.18
+sudo=1.9.15p5-3ubuntu5.24.04.2
+ufw=0.36.2-6
+unattended-upgrades=2.9.1+nmu4ubuntu1
+EXPECTED_PACKAGE_SPECS
+)"
+actual_package_specs="$(
+  sed -n \
+    '/^alpha_stage0_packages:$/,/^[^[:space:]-]/s/^[[:space:]]*- //p' \
+    "$GROUP_VARS"
+)"
+[[ "$actual_package_specs" == "$expected_package_specs" ]] ||
+  package_review_status=1
+for pin_contract in \
+  '/etc/apt/preferences.d/alpha-desk-stage0' \
+  'Pin-Priority: 1000' \
+  'allow_downgrade: false' \
+  'allow_change_held_packages: false' \
+  'check_mode: false'; do
+  grep -F "$pin_contract" "$COMMON_TASKS" >/dev/null ||
+    package_review_status=1
+done
+rg -n 'Pin-Priority:[[:space:]]*(100[1-9]|10[1-9][0-9]|1[1-9][0-9]{2,})' \
+  "$COMMON_TASKS" >/dev/null &&
+  package_review_status=1
+rg -n 'cache_valid_time:' "$COMMON_TASKS" >/dev/null &&
+  package_review_status=1
+if [[ "$package_review_status" -eq 0 ]]; then
+  pass "review:noble-package-pinning"
+else
+  fail "review:noble-package-pinning"
+fi
+
+ufw_review_status=0
+grep -F '/etc/default/ufw' "$COMMON_TASKS" >/dev/null ||
+  ufw_review_status=1
+for ufw_default in \
+  'DEFAULT_INPUT_POLICY="DROP"' \
+  'DEFAULT_OUTPUT_POLICY="ACCEPT"' \
+  'DEFAULT_FORWARD_POLICY="DROP"'; do
+  grep -F "$ufw_default" "$COMMON_TASKS" >/dev/null ||
+    ufw_review_status=1
+done
+if [[ "$ufw_review_status" -eq 0 ]]; then
+  pass "review:ufw-effective-defaults"
+else
+  fail "review:ufw-effective-defaults"
+fi
+
+backup_review_status=0
+for backup_contract in \
+  'Recent compatible RocksDB checkpoints' \
+  'At least one recent compatible checkpoint' \
+  'current plus checkpoints' \
+  'secondary operator-controlled site' \
+  'block height' \
+  'canonical archive manifest hash' \
+  'schema versions' \
+  'state hash' \
+  'nearest compatible checkpoint' \
+  'subsequent events'; do
+  grep -F "$backup_contract" "$BACKUP_POLICY" >/dev/null ||
+    backup_review_status=1
+done
+if [[ "$backup_review_status" -eq 0 ]]; then
+  pass "review:rocksdb-backup-policy"
+else
+  fail "review:rocksdb-backup-policy"
+fi
+
+concurrency_review_status=0
+for molecule_contract in \
+  'alpha-stage0-noble-${ALPHA_TASK9_RUN_ID}' \
+  'alpha-desk-task9-molecule:${ALPHA_TASK9_RUN_ID}'; do
+  grep -F "$molecule_contract" "$MOLECULE_CONFIG" >/dev/null ||
+    concurrency_review_status=1
+done
+for harness_contract in \
+  'ALPHA_TASK9_RUN_ID="$run_id"' \
+  'MOLECULE_IMAGE="molecule_local/alpha-desk-task9-molecule:${run_id}"' \
+  'alpha-desk-task9-linux-verifier:${run_id}' \
+  'docker image rm "$MOLECULE_IMAGE"' \
+  'docker image rm "$LINUX_VERIFIER_IMAGE"'; do
+  grep -F "$harness_contract" "$ANSIBLE_HARNESS" >/dev/null ||
+    concurrency_review_status=1
+done
+rg -n -- '--filter label=org[.]alpha-desk[.]task9-verifier=molecule' \
+  "$ANSIBLE_HARNESS" >/dev/null &&
+  concurrency_review_status=1
+if [[ "$concurrency_review_status" -eq 0 ]]; then
+  pass "review:concurrent-owned-cleanup"
+else
+  fail "review:concurrent-owned-cleanup"
+fi
 
 if [[ -f "$SYSTEMD_UNIT" ]]; then
   unit_status=0
@@ -252,6 +411,7 @@ if [[ -f "$SYSTEMD_UNIT" ]]; then
     'Wants=network-online.target' \
     'User=hl-%i' \
     'Group=hl-%i' \
+    'ExecCondition=/usr/libexec/hyperliquid-alpha-desk/validate-instance %i' \
     'ExecStart=/opt/hyperliquid-alpha-desk/bin/%i --config /etc/hyperliquid-alpha-desk/%i.toml' \
     'Restart=on-failure' \
     'RestartSec=2s' \
@@ -335,7 +495,7 @@ check_quadlet \
 if [[ -f "$MOLECULE_CONFIG" ]]; then
   molecule_status=0
   grep -Fx \
-    '    image: alpha-desk-task9-molecule:stage0' \
+    '    image: alpha-desk-task9-molecule:${ALPHA_TASK9_RUN_ID}' \
     "$MOLECULE_CONFIG" >/dev/null ||
     molecule_status=1
   grep -Fx '  enabled: false' "$MOLECULE_CONFIG" >/dev/null ||
@@ -387,10 +547,18 @@ EXPECTED_SEQUENCE
   fi
 fi
 
-if grep -Fx '  vars_files:' \
-  "$REPO_ROOT/infra/ansible/molecule/default/converge.yml" >/dev/null &&
+shared_vars_status=0
+for molecule_playbook in converge verify; do
+  grep -Fx '  vars_files:' \
+    "$REPO_ROOT/infra/ansible/molecule/default/$molecule_playbook.yml" \
+    >/dev/null ||
+    shared_vars_status=1
   grep -Fx '    - ../../group_vars/all.yml' \
-    "$REPO_ROOT/infra/ansible/molecule/default/converge.yml" >/dev/null; then
+    "$REPO_ROOT/infra/ansible/molecule/default/$molecule_playbook.yml" \
+    >/dev/null ||
+    shared_vars_status=1
+done
+if [[ "$shared_vars_status" -eq 0 ]]; then
   pass "molecule:shared-vars-single-source"
 else
   fail "molecule:shared-vars-single-source"
@@ -406,10 +574,14 @@ linux_fixture_status=0
 grep -F '/opt/hyperliquid-alpha-desk/bin/i' \
   "$REPO_ROOT/infra/deployment/tests/verify-linux.sh" >/dev/null ||
   linux_fixture_status=1
-grep -F '/opt/hyperliquid-alpha-desk/bin/hl-api' \
+grep -F '/opt/hyperliquid-alpha-desk/bin/$instance' \
   "$REPO_ROOT/infra/deployment/tests/verify-linux.sh" >/dev/null ||
   linux_fixture_status=1
 grep -Fx "  --tmpfs /opt:rw,exec,nosuid,nodev \\" \
+  "$REPO_ROOT/infra/ansible/tests/check.sh" >/dev/null ||
+  linux_fixture_status=1
+grep -Fx \
+  "  --tmpfs /usr/libexec/hyperliquid-alpha-desk:rw,exec,nosuid,nodev \\" \
   "$REPO_ROOT/infra/ansible/tests/check.sh" >/dev/null ||
   linux_fixture_status=1
 rg -n -- '--tmpfs /opt:[^[:space:]]*noexec' \

@@ -2,6 +2,8 @@
 - name: Verify inactive Stage 0 scaffolding
   hosts: all
   gather_facts: false
+  vars_files:
+    - ../../group_vars/all.yml
   tasks:
     - name: Read the systemd template
       ansible.builtin.slurp:
@@ -19,6 +21,96 @@
       ansible.builtin.command:
         cmd: sshd -t
       changed_when: false
+
+    - name: Read effective OpenSSH configuration
+      ansible.builtin.command:
+        cmd: sshd -T
+      register: alpha_sshd_effective
+      changed_when: false
+
+    - name: Assert the earliest managed SSH values win
+      ansible.builtin.assert:
+        that:
+          - "'permitrootlogin no' in alpha_sshd_effective.stdout_lines"
+          - "'passwordauthentication no' in alpha_sshd_effective.stdout_lines"
+          - >-
+            'kbdinteractiveauthentication no' in
+            alpha_sshd_effective.stdout_lines
+          - "'pubkeyauthentication yes' in alpha_sshd_effective.stdout_lines"
+          - "'x11forwarding no' in alpha_sshd_effective.stdout_lines"
+          - "'allowtcpforwarding no' in alpha_sshd_effective.stdout_lines"
+        quiet: true
+
+    - name: Read installed package facts
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Assert every Noble package resolved to its exact reviewed version
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_facts.packages[item.split('=')[0]][0].version ==
+            item.split('=')[1]
+        fail_msg: "Installed package does not match exact pin: {{ item }}"
+        quiet: true
+      loop: "{{ alpha_stage0_packages }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Read effective APT pin policy
+      ansible.builtin.command:
+        cmd: "apt-cache policy {{ item.split('=')[0] }}"
+      register: alpha_apt_policy
+      changed_when: false
+      loop: "{{ alpha_stage0_packages }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Assert exact pins are installed and have priority 1000
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('Installed: ' ~ item.item.split('=')[1]) in item.stdout
+          - >-
+            (item.item.split('=')[1] ~ ' 1000') in
+            (item.stdout | regex_replace('[\\n ]+', ' '))
+        fail_msg: >-
+          APT policy does not expose the exact reviewed pin: {{ item.item }}
+        quiet: true
+      loop: "{{ alpha_apt_policy.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read effective UFW defaults
+      ansible.builtin.slurp:
+        src: /etc/default/ufw
+      register: alpha_ufw_defaults
+
+    - name: Assert inactive UFW consumers have default-deny policy
+      ansible.builtin.assert:
+        that:
+          - >-
+            'DEFAULT_INPUT_POLICY="DROP"' in
+            (alpha_ufw_defaults.content | b64decode)
+          - >-
+            'DEFAULT_OUTPUT_POLICY="ACCEPT"' in
+            (alpha_ufw_defaults.content | b64decode)
+          - >-
+            'DEFAULT_FORWARD_POLICY="DROP"' in
+            (alpha_ufw_defaults.content | b64decode)
+        quiet: true
+
+    - name: Validate allowed installed service instance
+      ansible.builtin.command:
+        cmd: /usr/libexec/hyperliquid-alpha-desk/validate-instance hl-api
+      changed_when: false
+
+    - name: Reject forbidden installed service instance
+      ansible.builtin.command:
+        cmd: /usr/libexec/hyperliquid-alpha-desk/validate-instance hl-exec
+      register: alpha_forbidden_instance
+      changed_when: false
+      failed_when: alpha_forbidden_instance.rc == 0
 
     - name: Validate logrotate configuration syntax
       ansible.builtin.command:

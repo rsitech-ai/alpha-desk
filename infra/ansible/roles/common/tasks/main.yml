@@ -19,15 +19,114 @@
     quiet: true
   when: alpha_inventory_kind == 'example'
 
-- name: Install the minimal Noble host-preparation packages without activation
+- name: Require the reviewed Ubuntu 24.04 package target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version == '24.04'
+      - alpha_stage0_packages | length == 6
+      - >-
+        alpha_stage0_packages
+        | select('match', '^[a-z0-9-]+=[^= ]+$')
+        | list
+        | length == 6
+    fail_msg: >-
+      Stage 0 package pins apply only to the reviewed Ubuntu 24.04 target.
+    quiet: true
+
+- name: Install the exact Stage 0 APT preference policy
+  ansible.builtin.copy:
+    content: |
+      # Exact Ubuntu 24.04 package pins reviewed for the Stage 0 scaffold.
+      # APT never downgrades at priority 1000; Stage 0 also rejects mismatches.
+      {% for package_spec in alpha_stage0_packages %}
+      Package: {{ package_spec.split('=')[0] }}
+      Pin: version {{ package_spec.split('=')[1] }}
+      Pin-Priority: 1000
+
+      {% endfor %}
+    dest: /etc/apt/preferences.d/alpha-desk-stage0
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Refresh Noble package metadata without upgrading packages
+  ansible.builtin.apt:
+    update_cache: true
+  changed_when: false
+
+- name: Read installed packages before exact-version resolution
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Reject installed package replacement or downgrade
+  ansible.builtin.assert:
+    that:
+      - >-
+        ansible_facts.packages.get(item.split('=')[0], []) | length == 0 or
+        ansible_facts.packages[item.split('=')[0]][0].version ==
+        item.split('=')[1]
+    fail_msg: >-
+      Installed package {{ item.split('=')[0] }} does not match the reviewed
+      Noble pin; Stage 0 refuses replacement or downgrade.
+    quiet: true
+  loop: "{{ alpha_stage0_packages }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Resolve each exact Noble package candidate
+  ansible.builtin.command:
+    cmd: "apt-cache policy {{ item.split('=')[0] }}"
+  register: common_stage0_apt_candidates
+  check_mode: false
+  changed_when: false
+  loop: "{{ alpha_stage0_packages }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Reject missing or silently substituted Noble package candidates
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('Candidate: ' ~ item.item.split('=')[1]) in item.stdout
+      - >-
+        (item.item.split('=')[1] ~ ' 1000') in
+        (item.stdout | regex_replace('[\\n ]+', ' '))
+    fail_msg: >-
+      APT did not resolve the exact priority-1000 Noble pin for
+      {{ item.item }}; no fallback version is allowed.
+    quiet: true
+  loop: "{{ common_stage0_apt_candidates.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Install the exact Noble host-preparation packages without activation
   ansible.builtin.apt:
     name: "{{ alpha_stage0_packages }}"
     state: present
-    update_cache: true
     install_recommends: false
     policy_rc_d: 101
+    allow_downgrade: false
+    allow_change_held_packages: false
+    force: false
   environment:
     DEBIAN_FRONTEND: noninteractive
+
+- name: Read installed packages after exact-version resolution
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Verify exact Noble package versions were installed
+  ansible.builtin.assert:
+    that:
+      - >-
+        ansible_facts.packages[item.split('=')[0]][0].version ==
+        item.split('=')[1]
+    fail_msg: "Installed package does not match exact Noble pin: {{ item }}"
+    quiet: true
+  loop: "{{ alpha_stage0_packages }}"
+  loop_control:
+    label: "{{ item }}"
 
 - name: Create the shared service group
   ansible.builtin.group:
@@ -72,7 +171,7 @@
     group: root
     mode: "0644"
 
-- name: Install the inactive OpenSSH hardening drop-in
+- name: Install the earliest inactive OpenSSH hardening drop-in
   ansible.builtin.copy:
     content: |
       # Validate key access in a disposable VM before any later reload.
@@ -82,7 +181,7 @@
       PubkeyAuthentication yes
       X11Forwarding no
       AllowTcpForwarding no
-    dest: /etc/ssh/sshd_config.d/99-alpha-desk-stage0.conf
+    dest: /etc/ssh/sshd_config.d/00-alpha-desk-stage0.conf
     owner: root
     group: root
     mode: "0644"
@@ -95,15 +194,29 @@
     group: root
     mode: "0755"
 
-- name: Write inactive firewall defaults for later operator review
-  ansible.builtin.copy:
-    content: |
-      # Policy scaffold only. Task 9 does not apply or reload UFW.
-      DEFAULT_INPUT_POLICY=DROP
-      DEFAULT_OUTPUT_POLICY=ACCEPT
-      DEFAULT_FORWARD_POLICY=DROP
-      # Exact zone allowlists belong to the production-hardening stage.
-    dest: /etc/hyperliquid-alpha-desk/ufw-policy.stage0
+- name: Configure inactive UFW input default for its actual consumer
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^DEFAULT_INPUT_POLICY='
+    line: 'DEFAULT_INPUT_POLICY="DROP"'
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure inactive UFW output default for its actual consumer
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^DEFAULT_OUTPUT_POLICY='
+    line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"'
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure inactive UFW forward default for its actual consumer
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^DEFAULT_FORWARD_POLICY='
+    line: 'DEFAULT_FORWARD_POLICY="DROP"'
     owner: root
     group: root
     mode: "0644"

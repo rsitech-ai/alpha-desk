@@ -5,8 +5,8 @@ dependency:
 driver:
   name: docker
 platforms:
-  - name: alpha-stage0-noble
-    image: alpha-desk-task9-molecule:stage0
+  - name: alpha-stage0-noble-${ALPHA_TASK9_RUN_ID}
+    image: alpha-desk-task9-molecule:${ALPHA_TASK9_RUN_ID}
     pre_build_image: false
     dockerfile: Dockerfile.j2
     privileged: false

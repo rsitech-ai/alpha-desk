@@ -9,6 +9,7 @@ Type=simple
 User=hl-%i
 Group=hl-%i
 EnvironmentFile=-/etc/hyperliquid-alpha-desk/%i.env
+ExecCondition=/usr/libexec/hyperliquid-alpha-desk/validate-instance %i
 ExecStart=/opt/hyperliquid-alpha-desk/bin/%i --config /etc/hyperliquid-alpha-desk/%i.toml
 Restart=on-failure
 RestartSec=2s

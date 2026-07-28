@@ -15,3 +15,25 @@
           - alpha_pid_one.stdout | trim != 'systemd'
         fail_msg: The Stage 0 Molecule lane must not boot systemd.
         quiet: true
+
+    - name: Create the future OpenSSH drop-in directory for conflict fixture
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install a later conflicting SSH drop-in for precedence proof
+      ansible.builtin.copy:
+        content: |
+          PermitRootLogin yes
+          PasswordAuthentication yes
+          KbdInteractiveAuthentication yes
+          PubkeyAuthentication no
+          X11Forwarding yes
+          AllowTcpForwarding yes
+        dest: /etc/ssh/sshd_config.d/99-review-conflict.conf
+        owner: root
+        group: root
+        mode: "0644"
