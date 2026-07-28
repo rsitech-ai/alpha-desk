@@ -332,6 +332,7 @@ fn run_openpgp_verifier_with_timeout(
     let outcome = run_command(
         &CommandSpec {
             program: verifier,
+            evidence_program: None,
             arg0: None,
             args: vec![
                 "--status-fd".into(),
