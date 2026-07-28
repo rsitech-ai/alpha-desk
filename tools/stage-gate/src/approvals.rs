@@ -187,8 +187,9 @@ pub fn verify_approvals(
     binding: &ApprovalBinding,
     policy: &TrustPolicy,
     evidence: &[ApprovalEvidence],
-    gpgv_program: PathBuf,
+    gpgv_program: impl Into<Option<PathBuf>>,
 ) -> ApprovalOutcome {
+    let gpgv_program = gpgv_program.into();
     let requirements = ApprovalRequirements::stage_zero();
     if let Err(reason) = policy.validate(&requirements) {
         return blocked(reason);
@@ -208,7 +209,7 @@ pub fn verify_approvals(
             policy,
             &policy_by_role,
             evidence,
-            &gpgv_program,
+            gpgv_program.as_deref(),
         );
         status = match (status, outcome.status) {
             (GateStatus::Fail, _) | (_, GateStatus::Fail) => GateStatus::Fail,
@@ -230,7 +231,7 @@ fn verify_single_approval(
     policy: &TrustPolicy,
     policy_by_role: &BTreeMap<&str, &str>,
     evidence: &[ApprovalEvidence],
-    gpgv_program: &std::path::Path,
+    gpgv_program: Option<&std::path::Path>,
 ) -> ApprovalOutcome {
     let Some(item) = evidence.iter().find(|item| item.role == role) else {
         return blocked(ApprovalReasonCode::RequiredApprovalMissing);
@@ -282,6 +283,9 @@ fn verify_single_approval(
     {
         return failed(ApprovalReasonCode::ApprovalBindingMismatch);
     }
+    let Some(gpgv_program) = gpgv_program else {
+        return blocked(ApprovalReasonCode::OpenPgpToolingUnavailable);
+    };
     let mut statement_snapshot = match NamedTempFile::new() {
         Ok(file) => file,
         Err(_) => return failed(ApprovalReasonCode::InvalidDetachedSignature),

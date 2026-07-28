@@ -18,7 +18,7 @@ if [[ ! -f "$manifest_path" ]]; then
   exit 1
 fi
 manifest_directory="$(
-  CDPATH= builtin cd -- "$(command dirname -- "$manifest_path")" &&
+  CDPATH='' builtin cd -- "$(command dirname -- "$manifest_path")" &&
     builtin pwd -P
 )"
 manifest_path="$manifest_directory/$(command basename -- "$manifest_path")"
@@ -70,7 +70,7 @@ fi
 
 caller_cache_home_input="${CARGO_HOME:-${HOME:?HOME must identify the caller cache}/.cargo}"
 if ! caller_cache_home="$(
-  CDPATH= builtin cd -- "$caller_cache_home_input" 2>/dev/null &&
+  CDPATH='' builtin cd -- "$caller_cache_home_input" 2>/dev/null &&
     builtin pwd -P
 )" || [[ -z "$caller_cache_home" ]]; then
   printf \
