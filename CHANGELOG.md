@@ -16,6 +16,9 @@ All notable changes will be documented in this file. The format follows [Keep a 
   manifests, offline inspection, deterministic fixtures, and parser fuzzing.
 - Primary-node per-height and newline-file adapters with stable restart cursors, explicit durable
   acknowledgement, rotation/truncation handling, gap detection, and byte-preserving quarantine.
+- Exhaustive source-trust admission policy that keeps public, provisional,
+  recovery, snapshot, auxiliary, and mempool evidence out of the committed
+  watermark lane.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 
@@ -26,6 +29,8 @@ All notable changes will be documented in this file. The format follows [Keep a 
 ### Known limitations
 
 - Stage 0 gate remains on `HOLD`.
-- Independent/recovery adapters, real-node corpus qualification, the long-running capture runtime,
-  canonicalization, APIs, research workflows, and native applications are not yet implemented.
+- Independent/recovery transports, proprietary operator-feed integration,
+  real-node corpus qualification, the long-running capture runtime,
+  canonicalization, APIs, research workflows, and native applications are not
+  yet implemented.
 - No public release, supported version, production deployment, or performance qualification exists.
