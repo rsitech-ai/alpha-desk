@@ -322,7 +322,7 @@ pub fn run_gate_with_producer(
                     }
                 }
                 Ok(CommandSpec {
-                    program,
+                    program: program.invocation_path,
                     args: check.args.iter().map(Into::into).collect(),
                     cwd: PathBuf::from(&check.cwd),
                     env: command_environment.into_iter().collect(),
@@ -331,6 +331,7 @@ pub fn run_gate_with_producer(
                 })
             })
             .collect::<Result<Vec<_>, GateRunError>>()?;
+        let resolved_gpgv = resolved_gpgv.map(|program| program.invocation_path);
         let redactions = config
             .checks
             .iter()
