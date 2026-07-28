@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod errors;
+pub mod node;
 mod observation;
 mod source;
 

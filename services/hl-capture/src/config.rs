@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use domain_types::SourceId;
 use hl_protocol::ObservationClass;
+use hl_protocol::node::v1::NodeStreamKind;
 use serde::{Deserialize, Serialize};
 
 const MAX_IDENTITY_BYTES: usize = 256;
@@ -13,6 +14,7 @@ const MAX_SEGMENT_TARGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ROTATION_INTERVAL_SECONDS: u64 = 86_400;
 const MAX_BATCH_RECORDS: u32 = 100_000;
 const MAX_BATCH_DELAY_MILLIS: u64 = 60_000;
+const MAX_SOURCE_POLL_INTERVAL_MILLIS: u64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,6 +171,8 @@ pub struct SourceConfig {
     queue_capacity: usize,
     max_payload_bytes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter: Option<SourceAdapterConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     credential_path: Option<PathBuf>,
 }
 
@@ -186,6 +190,9 @@ impl SourceConfig {
         }
         if let Some(path) = &self.credential_path {
             validate_credential_path(path)?;
+        }
+        if let Some(adapter) = &self.adapter {
+            adapter.validate(self.observation_class)?;
         }
         Ok(())
     }
@@ -211,8 +218,67 @@ impl SourceConfig {
     }
 
     #[must_use]
+    pub const fn adapter(&self) -> Option<&SourceAdapterConfig> {
+        self.adapter.as_ref()
+    }
+
+    #[must_use]
     pub fn credential_path(&self) -> Option<&Path> {
         self.credential_path.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SourceAdapterConfig {
+    NodeLine {
+        path: PathBuf,
+        stream_name: String,
+        stream: NodeStreamKind,
+        poll_interval_millis: u64,
+    },
+    NodeBlockDirectory {
+        path: PathBuf,
+        stream_name: String,
+        start_height: u64,
+        poll_interval_millis: u64,
+    },
+}
+
+impl SourceAdapterConfig {
+    fn validate(&self, observation_class: ObservationClass) -> Result<(), ConfigError> {
+        let (path, stream_name, poll_interval_millis, expected_class) = match self {
+            Self::NodeLine {
+                path,
+                stream_name,
+                stream,
+                poll_interval_millis,
+            } => (
+                path,
+                stream_name,
+                *poll_interval_millis,
+                stream.observation_class(),
+            ),
+            Self::NodeBlockDirectory {
+                path,
+                stream_name,
+                start_height: _,
+                poll_interval_millis,
+            } => (
+                path,
+                stream_name,
+                *poll_interval_millis,
+                ObservationClass::CommittedBlock,
+            ),
+        };
+        validate_node_source_path(path)?;
+        validate_identity(stream_name).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+        if !(1..=MAX_SOURCE_POLL_INTERVAL_MILLIS).contains(&poll_interval_millis)
+            || observation_class != expected_class
+        {
+            return Err(ConfigError::InvalidSourceAdapter);
+        }
+        Ok(())
     }
 }
 
@@ -238,6 +304,8 @@ pub enum ConfigError {
     InvalidQueueCapacity,
     #[error("capture payload limit is outside the supported range")]
     InvalidPayloadLimit,
+    #[error("capture source adapter is invalid")]
+    InvalidSourceAdapter,
     #[error("capture credential reference is not an absolute protected path")]
     InvalidCredentialPath,
     #[error("capture configuration has no sources")]
@@ -260,6 +328,7 @@ impl ConfigError {
             Self::DuplicateSource => "capture_config.duplicate_source",
             Self::InvalidQueueCapacity => "capture_config.invalid_queue_capacity",
             Self::InvalidPayloadLimit => "capture_config.invalid_payload_limit",
+            Self::InvalidSourceAdapter => "capture_config.invalid_source_adapter",
             Self::InvalidCredentialPath => "capture_config.invalid_credential_path",
             Self::MissingSources => "capture_config.missing_sources",
             Self::Serialization => "capture_config.serialization",
@@ -303,6 +372,22 @@ fn validate_credential_path(path: &Path) -> Result<(), ConfigError> {
         })
     {
         Err(ConfigError::InvalidCredentialPath)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_node_source_path(path: &Path) -> Result<(), ConfigError> {
+    if !path.is_absolute()
+        || path == Path::new("/")
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::CurDir | Component::Prefix(_)
+            )
+        })
+    {
+        Err(ConfigError::InvalidSourceAdapter)
     } else {
         Ok(())
     }

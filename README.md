@@ -2,7 +2,7 @@
 
 Hyperliquid Alpha Desk is a local-first, read-only market-intelligence and research workstation under active development by RSI Tech. Its production design centers on byte-preserving source capture, a deterministic canonical ledger, reproducible research, evidence-linked signals, and native Apple clients.
 
-This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation, the first two unreleased Stage 1 truth-layer slices, and the approved staged design. The Stage 0 release gate remains on `HOLD`; source adapters, a long-running capture service, APIs, research workflows, and native UI are planned work.
+This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation, the first three unreleased Stage 1 truth-layer slices, and the approved staged design. The Stage 0 release gate remains on `HOLD`; a long-running capture service, independent sources, canonicalization, APIs, research workflows, and native UI are planned work.
 
 ## Current state
 
@@ -12,8 +12,8 @@ This repository is not yet a runnable desk application. It currently contains a 
 | Rust workspace, exact domain types, schemas, fixtures, telemetry, and provenance | Implemented and locally tested | [`docs/STATUS.md`](docs/STATUS.md) |
 | Stage 0 gate tooling | Implemented; gate outcome `HOLD` | [`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml) |
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
-| Source-observation, capture configuration, and crash-safe spool | Implemented and locally tested; no source adapter or service runtime yet | [`docs/STATUS.md`](docs/STATUS.md) |
-| Complete durable capture and canonical truth-layer runtime | Partially implemented; adapters, continuity, archive, replay, and publication remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Source observation, strict spool, and primary-node file adapters | Implemented and locally tested as libraries; no service runtime or real-node qualification yet | [`docs/adapters/hyperliquid-node.md`](docs/adapters/hyperliquid-node.md) |
+| Complete durable capture and canonical truth-layer runtime | Partially implemented; independent sources, runtime orchestration, continuity, archive, replay, and publication remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |
 
@@ -76,10 +76,10 @@ For focused commands and development conventions, read [docs/DEVELOPMENT.md](doc
 ## Repository map
 
 - `crates/` — domain contracts, canonical types, storage ports, telemetry, and research foundations
-- `services/` — service boundaries; `hl-capture` contains observation and spool libraries, while service binaries remain bootstrap-only
+- `services/` — service boundaries; `hl-capture` contains observation, spool, and primary-node adapter libraries, while service binaries remain bootstrap-only
 - `apps/AlphaDesk/` — Swift package foundations; currently no application target
 - `schemas/` — versioned Protobuf and JSON contracts
-- `fixtures/` — synthetic, redistributable deterministic fixtures
+- `fixtures/` — deterministic synthetic fixtures and provenance-labeled normalized public schema examples
 - `infra/` — local dependency and future deployment scaffolding
 - `tools/` — schema, architecture, provenance, fixture, spool inspection, and stage-gate tooling
 - `docs/superpowers/` — approved design, stage plans, traceability, and reviews
