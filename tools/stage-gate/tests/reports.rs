@@ -5,11 +5,11 @@ use stage_gate::{
     artifacts::{ArtifactManifest, ArtifactRecord},
     config::{BuilderConfig, BuilderToolConfig},
     gate::{GateReasonCode, comparison_gate_reason},
-    identity::ExecutableIdentity,
     reports::{
-        BuilderEnvironment, BuilderEvidenceValidation, BuilderReport, ComparisonResult, GateResult,
-        InputHashErrorCode, aggregate_reports, builder_ids_are_independent,
-        comparison_satisfies_reproducibility, hash_committed_inputs, validate_builder_evidence,
+        BuilderEnvironment, BuilderEvidenceValidation, BuilderIdentity, BuilderReport,
+        ComparisonResult, ExecutableEvidence, GateResult, InputHashErrorCode, aggregate_reports,
+        builder_ids_are_independent, comparison_satisfies_reproducibility, hash_committed_inputs,
+        validate_builder_evidence,
     },
 };
 use tempfile::TempDir;
@@ -17,7 +17,11 @@ use tempfile::TempDir;
 #[test]
 fn full_report_and_normalized_projection_have_distinct_hash_contracts() {
     let first = report("builder-a", "macOS 26.0", "aaa", "log-a");
-    let second = report("builder-b", "macOS 26.1", "bbb", "log-b");
+    let mut second = report("builder-b", "macOS 26.0", "aaa", "log-a");
+    second
+        .builder_identity
+        .resolved_paths
+        .insert("cargo-test".to_owned(), "/different-builder/cargo".into());
 
     assert_ne!(first.full_hash().unwrap(), second.full_hash().unwrap());
     assert_eq!(
@@ -31,9 +35,108 @@ fn full_report_and_normalized_projection_have_distinct_hash_contracts() {
 }
 
 #[test]
+fn comparison_projection_excludes_exactly_the_builder_identity_envelope() {
+    let report = report("builder-a", "macOS 26.0", "aaa", "log-a");
+    let full = serde_json::to_value(&report).unwrap();
+    let projection: serde_json::Value =
+        serde_json::from_slice(&report.comparison_projection().unwrap()).unwrap();
+    let full_keys = full
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let projection_keys = projection
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let excluded = full_keys
+        .into_iter()
+        .filter(|key| !projection_keys.contains(key))
+        .collect::<Vec<_>>();
+
+    assert_eq!(excluded, vec!["builder_identity"]);
+    assert_eq!(
+        projection_keys,
+        vec![
+            "artifacts",
+            "check_evidence_hashes",
+            "check_results",
+            "config_sha256",
+            "design_commit",
+            "design_tag_object",
+            "environment",
+            "implementation_commit",
+            "resolved_programs",
+            "schema_sha256",
+            "schema_version",
+            "stage_id",
+        ]
+    );
+}
+
+#[test]
+fn every_deterministic_builder_report_field_remains_in_the_projection() {
+    let baseline = report("builder-a", "macOS 26.0", "aaa", "log-a");
+    let baseline_projection = baseline.projection_hash().unwrap();
+    let mut mutations = Vec::new();
+
+    let mut mutated = baseline.clone();
+    mutated.schema_version = 2;
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.stage_id = "stage-1".to_owned();
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.implementation_commit = "0".repeat(40);
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.design_tag_object = "0".repeat(40);
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.design_commit = "0".repeat(40);
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.config_sha256 = "0".repeat(64);
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.schema_sha256 = "0".repeat(64);
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.environment.os_version = "normalized-linux-6.8".to_owned();
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated
+        .resolved_programs
+        .get_mut("cargo-test")
+        .unwrap()
+        .sha256 = "0".repeat(64);
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated
+        .check_evidence_hashes
+        .insert("cargo-test".to_owned(), "0".repeat(64));
+    mutations.push(mutated);
+    let mut mutated = baseline.clone();
+    mutated.artifacts.artifacts[0].sha256 = "0".repeat(64);
+    mutations.push(mutated);
+    let mut mutated = baseline;
+    mutated
+        .check_results
+        .insert("cargo-test".to_owned(), GateResult::Fail);
+    mutations.push(mutated);
+
+    for mutation in mutations {
+        assert_ne!(mutation.projection_hash().unwrap(), baseline_projection);
+    }
+}
+
+#[test]
 fn aggregate_retains_both_full_hashes_and_projection_hashes() {
     let first = report("builder-a", "macOS 26.0", "aaa", "log-a");
-    let second = report("builder-b", "macOS 26.1", "bbb", "log-b");
+    let second = report("builder-b", "macOS 26.0", "aaa", "log-a");
 
     let aggregate = aggregate_reports(&first, &second).unwrap();
 
@@ -152,9 +255,8 @@ fn consuming_gate_revalidates_second_builder_tools_and_versions() {
     second.environment.toolchains = BTreeMap::from([
         (
             "rustc".to_owned(),
-            ExecutableIdentity {
+            ExecutableEvidence {
                 id: "rustc".to_owned(),
-                resolved_path: "/trusted/rustc".into(),
                 sha256: "7".repeat(64),
                 version_output: concat!("rustc 1.97.1 (fixture)\n", "host: aarch64-apple-darwin")
                     .to_owned(),
@@ -162,9 +264,8 @@ fn consuming_gate_revalidates_second_builder_tools_and_versions() {
         ),
         (
             "swift".to_owned(),
-            ExecutableIdentity {
+            ExecutableEvidence {
                 id: "swift".to_owned(),
-                resolved_path: "/trusted/swift".into(),
                 sha256: "8".repeat(64),
                 version_output: "Swift version 6.3".to_owned(),
             },
@@ -302,15 +403,22 @@ fn report(
         design_commit: "412c380054d16f22549c46a59a5fe0617bc60138".to_owned(),
         config_sha256: "1".repeat(64),
         schema_sha256: "2".repeat(64),
-        builder_id: builder_id.to_owned(),
+        builder_identity: BuilderIdentity {
+            builder_id: builder_id.to_owned(),
+            signer_role: "local".to_owned(),
+            signer_fingerprint: String::new(),
+            resolved_paths: BTreeMap::from([
+                ("rust".to_owned(), "/trusted/rustc".into()),
+                ("cargo-test".to_owned(), "/trusted/cargo".into()),
+            ]),
+        },
         environment: BuilderEnvironment {
             os_version: os_version.to_owned(),
             target_triple: "aarch64-apple-darwin".to_owned(),
             toolchains: BTreeMap::from([(
                 "rust".to_owned(),
-                ExecutableIdentity {
+                ExecutableEvidence {
                     id: "rust".to_owned(),
-                    resolved_path: "/trusted/rustc".into(),
                     sha256: "7".repeat(64),
                     version_output: "rustc observed".to_owned(),
                 },
@@ -319,14 +427,13 @@ fn report(
         },
         resolved_programs: BTreeMap::from([(
             "cargo-test".to_owned(),
-            ExecutableIdentity {
+            ExecutableEvidence {
                 id: "cargo-test".to_owned(),
-                resolved_path: "/trusted/cargo".into(),
                 sha256: "8".repeat(64),
                 version_output: String::new(),
             },
         )]),
-        command_log_hashes: BTreeMap::from([("cargo-test".to_owned(), log_hash.to_owned())]),
+        check_evidence_hashes: BTreeMap::from([("cargo-test".to_owned(), log_hash.to_owned())]),
         artifacts: ArtifactManifest {
             schema_version: 1,
             artifacts: vec![ArtifactRecord {

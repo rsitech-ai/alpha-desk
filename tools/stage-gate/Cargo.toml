@@ -8,13 +8,13 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 ryu-js = "=1.0.3"
+rustix.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

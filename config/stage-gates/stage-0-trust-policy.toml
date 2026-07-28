@@ -1,12 +1,20 @@
 schema_version = 1
 keyring_path = "target/stage-gates/inputs/stage-0-reviewers.gpg"
 
-# HOLD: these placeholders intentionally keep Stage 0 blocked until the real,
-# distinct reviewer fingerprints are reviewed and committed.
+# HOLD: these non-operational fingerprints intentionally keep Stage 0 blocked
+# until four distinct real public keys and fingerprints are reviewed.
 [[reviewers]]
 role = "platform-data"
-fingerprint = "replace-with-full-platform-data-fingerprint"
+fingerprint = "0000000000000000000000000000000000000001"
 
 [[reviewers]]
 role = "independent"
-fingerprint = "replace-with-full-independent-fingerprint"
+fingerprint = "0000000000000000000000000000000000000002"
+
+[[reviewers]]
+role = "builder-b"
+fingerprint = "0000000000000000000000000000000000000003"
+
+[[reviewers]]
+role = "github-ci"
+fingerprint = "0000000000000000000000000000000000000004"

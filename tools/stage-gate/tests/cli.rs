@@ -2,9 +2,12 @@
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
+    os::unix::fs::{PermissionsExt as _, symlink},
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use stage_gate::approvals::{ApprovalDecision, ApprovalStatement, canonical_statement_bytes};
@@ -270,7 +273,7 @@ fn resolved_approval_verifier_path_and_hash_are_bound_into_builder_report() {
         serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
     let identity = &report["builder_report"]["resolved_programs"]["approval:gpgv"];
     assert_eq!(
-        identity["resolved_path"],
+        report["builder_report"]["builder_identity"]["resolved_paths"]["approval:gpgv"],
         verifier.canonicalize().unwrap().to_string_lossy().as_ref()
     );
     assert_eq!(identity["sha256"].as_str().unwrap().len(), 64);
@@ -380,7 +383,11 @@ fn approval_verifier_mutating_a_tracked_file_fails_final_snapshot_check() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(!output_path.exists());
+    let failure: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(failure["stage_outcome"], "HOLD");
+    assert_eq!(failure["overall_result"], "FAIL");
+    assert_eq!(failure["failure_phase"], "repository");
     assert!(
         fs::read_to_string(repository.join("design.md"))
             .unwrap()
@@ -404,6 +411,231 @@ fn output_path_outside_configured_ignored_root_is_rejected() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(!escaped.exists());
+}
+
+#[test]
+fn post_preflight_check_failure_replaces_stale_pass_with_canonical_hold_report() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let config_path = repository.join("config/stage-gates/stage-0.toml");
+    let mut source = fs::read_to_string(&config_path).unwrap().replace(
+        "STAGE_GATE_FIXTURE_CHECK = \"quality\"",
+        concat!(
+            "STAGE_GATE_FIXTURE_CHECK = \"quality\"\n",
+            "STAGE_GATE_FIXTURE_FAIL = \"1\""
+        ),
+    );
+    let check_program = std::env::current_exe().unwrap();
+    let order_path = repository.join("target/stage-gates/check-order.txt");
+    source.push_str(&format!(
+        r#"
+
+[[checks]]
+id = "after-quality"
+program = {}
+args = ["--exact", "stage_gate_cli_check_helper", "--nocapture"]
+cwd = "."
+timeout_seconds = 5
+
+[checks.env]
+STAGE_GATE_FIXTURE_CHECK = "after-quality"
+STAGE_GATE_FIXTURE_ORDER = {}
+"#,
+        toml_string(&check_program),
+        toml_string(&order_path),
+    ));
+    fs::write(&config_path, source).unwrap();
+    git(repository, ["add", "."]);
+    git(
+        repository,
+        ["commit", "-q", "-m", "make quality check fail"],
+    );
+    let expected_commit = git_output(repository, ["rev-parse", "HEAD"]);
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+    let builder_path = repository.join("target/stage-gates/stage-0.builder.json");
+    fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    fs::write(
+        &output_path,
+        br#"{"overall_result":"PASS","stage_outcome":"ACCEPTED"}"#,
+    )
+    .unwrap();
+    fs::write(&builder_path, br#"{"stale":"builder-pass"}"#).unwrap();
+
+    let output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(repository)
+        .arg("--output")
+        .arg(&output_path)
+        .env_clear()
+        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let bytes = fs::read(&output_path).expect("failure evidence must replace stale PASS");
+    let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(bytes, stage_gate::canonical::canonicalize(&report).unwrap());
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["stage_id"], "stage-0");
+    assert_eq!(report["stage_outcome"], "HOLD");
+    assert_eq!(report["overall_result"], "FAIL");
+    assert_eq!(report["error_code"], "check_failed");
+    assert_eq!(report["implementation_commit"], expected_commit);
+    assert_eq!(report["check_results"]["verify"], "PASS");
+    assert_eq!(report["check_results"]["quality"], "FAIL");
+    assert_eq!(report["check_results"]["after-quality"], "NOT_RUN");
+    assert!(
+        !builder_path.exists(),
+        "a failed invocation must remove stale builder evidence"
+    );
+}
+
+#[test]
+fn malformed_config_replaces_stale_pass_with_bootstrap_failure_report() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+    let builder_path = repository.join("target/stage-gates/stage-0.builder.json");
+    let historical_builder_path = repository.join("target/stage-gates/stage-0-builder-report.json");
+    fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    fs::write(&output_path, br#"{"overall_result":"PASS"}"#).unwrap();
+    fs::write(&builder_path, br#"{"overall_result":"PASS"}"#).unwrap();
+    fs::write(&historical_builder_path, br#"{"overall_result":"PASS"}"#).unwrap();
+    fs::write(
+        repository.join("config/stage-gates/stage-0.toml"),
+        b"this is not valid = [toml\n",
+    )
+    .unwrap();
+
+    let output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(repository)
+        .arg("--output")
+        .arg(&output_path)
+        .env_clear()
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let bytes = fs::read(&output_path).unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(bytes, stage_gate::canonical::canonicalize(&report).unwrap());
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["stage_outcome"], "HOLD");
+    assert_eq!(report["overall_result"], "FAIL");
+    assert_eq!(report["error_code"], "config_failed");
+    assert!(
+        !builder_path.exists(),
+        "malformed config must invalidate the stable builder report"
+    );
+    assert!(
+        !historical_builder_path.exists(),
+        "malformed config must invalidate the previously advertised builder report"
+    );
+}
+
+#[test]
+fn output_root_parent_symlink_swap_continues_only_in_retained_directory() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let marker = repository.join(".git/stage-gate-ready");
+    let release = repository.join(".git/stage-gate-release");
+    configure_quality_wait(repository, &marker, &release);
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+    let output_root = repository.join("target/stage-gates");
+    let retained_root = repository.join("target/stage-gates-before-swap");
+    let outside = TempDir::new().unwrap();
+
+    let child = spawn_gate(repository, &output_path);
+    wait_for_path(&marker);
+    fs::rename(&output_root, &retained_root).unwrap();
+    symlink(outside.path(), &output_root).unwrap();
+    fs::write(&release, b"continue\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(
+        fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "the replaced parent must never receive gate output"
+    );
+    assert!(
+        retained_root.join("stage-0.json").is_file(),
+        "the retained output directory must receive the report"
+    );
+    assert!(!output.status.success(), "{output:?}");
+}
+
+#[test]
+fn predictable_temporary_symlink_attack_fails_closed_without_overwriting_target() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let marker = repository.join(".git/stage-gate-ready");
+    let release = repository.join(".git/stage-gate-release");
+    configure_quality_wait(repository, &marker, &release);
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+    let output_root = repository.join("target/stage-gates");
+    let victim = repository.join(".git/must-not-be-overwritten");
+    fs::write(&victim, b"original\n").unwrap();
+
+    let child = spawn_gate(repository, &output_path);
+    wait_for_path(&marker);
+    let predictable = output_root.join(format!(".stage-gate-{}.tmp", child.id()));
+    symlink(&victim, predictable).unwrap();
+    fs::write(&release, b"continue\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(fs::read(&victim).unwrap(), b"original\n");
+    assert!(!output.status.success(), "{output:?}");
+}
+
+#[test]
+fn precreated_predictable_temporary_file_is_never_reused_or_replaced() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let marker = repository.join(".git/stage-gate-ready");
+    let release = repository.join(".git/stage-gate-release");
+    configure_quality_wait(repository, &marker, &release);
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+    let output_root = repository.join("target/stage-gates");
+
+    let child = spawn_gate(repository, &output_path);
+    wait_for_path(&marker);
+    let predictable = output_root.join(format!(".stage-gate-{}.tmp", child.id()));
+    fs::write(&predictable, b"attacker-owned\n").unwrap();
+    fs::write(&release, b"continue\n").unwrap();
+    let _output = child.wait_with_output().unwrap();
+
+    assert_eq!(
+        fs::read(&predictable).unwrap(),
+        b"attacker-owned\n",
+        "exclusive randomized temporary creation must not reuse a predictable file"
+    );
+}
+
+#[test]
+fn final_output_symlink_race_is_removed_without_following_it() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let marker = repository.join(".git/stage-gate-ready");
+    let release = repository.join(".git/stage-gate-release");
+    configure_quality_wait(repository, &marker, &release);
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+    let victim = repository.join(".git/final-output-victim");
+    fs::write(&victim, b"original\n").unwrap();
+
+    let child = spawn_gate(repository, &output_path);
+    wait_for_path(&marker);
+    fs::remove_file(&output_path).unwrap();
+    symlink(&victim, &output_path).unwrap();
+    fs::write(&release, b"continue\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(fs::read(&victim).unwrap(), b"original\n");
+    assert!(
+        fs::symlink_metadata(&output_path).unwrap().is_file(),
+        "the raced symlink must be replaced as a directory entry"
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
 #[test]
@@ -507,6 +739,17 @@ fn checked_in_stage_zero_config_lists_the_complete_check_and_artifact_contract()
             .unwrap();
         assert_eq!(tool.expected_output_contains.as_deref(), Some(expected));
     }
+    let os = config
+        .builder
+        .tools
+        .iter()
+        .find(|tool| tool.id == "os")
+        .unwrap();
+    assert_eq!(os.args, ["-s", "-r", "-m"]);
+    assert!(
+        !os.args.iter().any(|argument| argument == "-a"),
+        "OS evidence must exclude hostname-bearing uname -a output"
+    );
     assert_eq!(
         config.builder_report_output_path,
         "target/stage-gates/stage-0.builder.json"
@@ -523,8 +766,201 @@ fn compose_smoke_has_bounded_health_and_non_destructive_cleanup_contract() {
     assert!(!source.contains("ps -q"));
     assert!(source.contains("up -d --wait --wait-timeout 120"));
     assert!(source.contains("wait-for-dev-stack.sh"));
-    assert!(source.contains("down --timeout 60 --remove-orphans"));
-    assert!(!source.contains("down --volumes"));
+    assert!(source.contains("down --timeout 60 --volumes --remove-orphans"));
+    assert!(source.contains("stage-0.override.yaml"));
+    assert!(source.contains("--project-name"));
+    assert!(!source.contains("alpha-desk-dev_"));
+}
+
+#[test]
+fn compose_partial_start_failure_cleans_only_unique_gate_owned_resources() {
+    let fixture = ComposeSmokeFixture::new();
+    let output = fixture.run("partial");
+
+    assert!(!output.status.success(), "{output:?}");
+    let calls = fixture.calls();
+    let compose_calls = calls
+        .lines()
+        .filter(|line| line.contains(" compose ") || line.starts_with("compose "))
+        .collect::<Vec<_>>();
+    assert!(!compose_calls.is_empty());
+    assert!(compose_calls.iter().all(|line| {
+        line.contains("--project-name alpha-desk-stage0-")
+            && line.contains("compose.yaml")
+            && line.contains("stage-0.override.yaml")
+    }));
+    assert!(
+        compose_calls
+            .iter()
+            .any(|line| line.contains("down --timeout 60 --volumes --remove-orphans"))
+    );
+    assert!(calls.contains("volume inspect alpha-desk-stage0-"));
+    assert!(calls.contains("network inspect alpha-desk-stage0-"));
+    assert!(!calls.contains("alpha-desk-dev"));
+}
+
+#[test]
+fn compose_timeout_cleans_only_the_timed_out_gate_project() {
+    let fixture = ComposeSmokeFixture::new();
+
+    let output = fixture.run("timeout");
+
+    assert_eq!(output.status.code(), Some(124), "{output:?}");
+    let calls = fixture.calls();
+    let cleanup = calls
+        .lines()
+        .find(|line| line.contains(" down "))
+        .expect("timeout must trigger cleanup");
+    assert!(cleanup.contains("--project-name alpha-desk-stage0-"));
+    assert!(cleanup.contains("down --timeout 60 --volumes --remove-orphans"));
+    assert!(!cleanup.contains("alpha-desk-dev"));
+}
+
+#[test]
+fn compose_signal_interruption_cleans_only_the_interrupted_gate_project() {
+    let fixture = ComposeSmokeFixture::new();
+    let mut child = fixture.spawn("signal");
+    wait_for_path(&fixture.signal_marker);
+    let status = Command::new("/bin/kill")
+        .args(["-TERM", &format!("-{}", child.id())])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = child.wait().unwrap();
+
+    assert!(!status.success());
+    let calls = fixture.calls();
+    let cleanup = calls
+        .lines()
+        .find(|line| line.contains(" down "))
+        .expect("signal must trigger cleanup");
+    assert!(cleanup.contains("--project-name alpha-desk-stage0-"));
+    assert!(cleanup.contains("down --timeout 60 --volumes --remove-orphans"));
+    assert!(!cleanup.contains("alpha-desk-dev"));
+}
+
+#[test]
+fn two_compose_runs_use_distinct_projects_and_never_cross_delete() {
+    let fixture = ComposeSmokeFixture::new();
+
+    assert!(fixture.run("success").status.success());
+    assert!(fixture.run("success").status.success());
+
+    let calls = fixture.calls();
+    let cleanup_projects = calls
+        .lines()
+        .filter(|line| line.contains(" down "))
+        .map(compose_project_from_call)
+        .collect::<Vec<_>>();
+    assert_eq!(cleanup_projects.len(), 2, "{calls}");
+    assert_ne!(cleanup_projects[0], cleanup_projects[1], "{calls}");
+    assert!(
+        cleanup_projects
+            .iter()
+            .all(|project| project.starts_with("alpha-desk-stage0-"))
+    );
+    assert!(!calls.contains("alpha-desk-dev"));
+}
+
+#[test]
+fn compose_rejects_merged_config_that_retains_occupied_base_ports() {
+    let fixture = ComposeSmokeFixture::new();
+
+    let output = fixture.run("merged-conflict");
+
+    assert!(!output.status.success());
+    let calls = fixture.calls();
+    assert!(calls.contains("config --format json"), "{calls}");
+    assert!(
+        !calls.lines().any(|line| line.contains(" up ")),
+        "merged config must fail before startup: {calls}"
+    );
+}
+
+#[test]
+fn compose_success_parameterizes_wait_consumer_with_exact_gate_ports() {
+    let fixture = ComposeSmokeFixture::new();
+
+    let output = fixture.run("success");
+
+    assert!(output.status.success(), "{output:?}");
+    let wait = fs::read_to_string(&fixture.wait_log).unwrap();
+    let fields = wait.trim().split('|').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 8, "{wait}");
+    assert!(fields[0].starts_with("alpha-desk-stage0-"));
+    assert!(fields[1].contains("compose.yaml"));
+    assert!(fields[1].contains("stage-0.override.yaml"));
+    assert_eq!(
+        &fields[2..],
+        &["18222", "18123", "15432", "19000", "13134", "18428"]
+    );
+}
+
+#[test]
+fn stage_zero_compose_override_uses_dedicated_ports_and_gate_owned_resources() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let override_source =
+        fs::read_to_string(manifest_dir.join("../../infra/docker-compose/stage-0.override.yaml"))
+            .expect("the Stage 0 override must be committed");
+    assert!(
+        override_source.matches("ports: !override").count() >= 6,
+        "every service port list must fully replace the base list"
+    );
+    for mapping in [
+        "14222:4222",
+        "18222:8222",
+        "18123:8123",
+        "15432:5432",
+        "19000:9000",
+        "14317:4317",
+        "14318:4318",
+        "13134:13133",
+        "18428:8428",
+    ] {
+        assert!(
+            override_source.contains(mapping),
+            "missing dedicated Stage 0 mapping {mapping}"
+        );
+    }
+    for occupied in ["127.0.0.1:5432:5432", "127.0.0.1:9000:9000"] {
+        assert!(
+            !override_source.contains(occupied),
+            "Stage 0 must not bind occupied host mapping {occupied}"
+        );
+    }
+    for owned_name in [
+        "${STAGE_GATE_COMPOSE_PROJECT}_nats-data",
+        "${STAGE_GATE_COMPOSE_PROJECT}_clickhouse-data",
+        "${STAGE_GATE_COMPOSE_PROJECT}_postgres-data",
+        "${STAGE_GATE_COMPOSE_PROJECT}_minio-data",
+        "${STAGE_GATE_COMPOSE_PROJECT}_victoriametrics-data",
+        "${STAGE_GATE_COMPOSE_PROJECT}_network",
+    ] {
+        assert!(
+            override_source.contains(owned_name),
+            "Stage 0 resource must use exact owned name {owned_name}"
+        );
+    }
+    assert!(!override_source.contains("alpha-desk-dev_"));
+
+    let wait_source =
+        fs::read_to_string(manifest_dir.join("../../tools/ci/wait-for-dev-stack.sh")).unwrap();
+    for variable in [
+        "DEV_STACK_COMPOSE_PROJECT",
+        "DEV_STACK_COMPOSE_FILES",
+        "DEV_STACK_NATS_MONITOR_PORT",
+        "DEV_STACK_CLICKHOUSE_PORT",
+        "DEV_STACK_POSTGRES_PORT",
+        "DEV_STACK_MINIO_PORT",
+        "DEV_STACK_OTEL_HEALTH_PORT",
+        "DEV_STACK_VICTORIAMETRICS_PORT",
+    ] {
+        assert!(
+            wait_source.contains(variable),
+            "wait consumer must support {variable}"
+        );
+    }
 }
 
 #[test]
@@ -537,6 +973,21 @@ fn stage_gate_cli_check_helper() {
     options.create(true).append(true);
     use std::io::Write as _;
     writeln!(options.open(order).unwrap(), "{label}").unwrap();
+    if std::env::var("STAGE_GATE_FIXTURE_FAIL").as_deref() == Ok("1") {
+        std::process::exit(29);
+    }
+    if let Ok(marker) = std::env::var("STAGE_GATE_FIXTURE_WAIT_MARKER") {
+        fs::write(marker, b"ready\n").unwrap();
+        let release = PathBuf::from(std::env::var("STAGE_GATE_FIXTURE_RELEASE").unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !release.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "test release marker was not written"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 #[test]
@@ -656,6 +1107,8 @@ commit = "{design_commit}"
 
 [comparison]
 second_builder_report_path = "target/stage-gates/external/builder-b.json"
+second_builder_signature_path = "target/stage-gates/external/builder-b.json.asc"
+signer_role = "builder-b"
 
 [builder]
 target_tool = "fixture-tool"
@@ -684,7 +1137,17 @@ signature_path = "target/stage-gates/external/independent.json.asc"
 
 [remote]
 proof_path = "target/stage-gates/external/github.json"
-app_source = "rsitech-ai/alpha-desk"
+signature_path = "target/stage-gates/external/github.json.asc"
+signer_role = "github-ci"
+repository = "s1korrrr/alpha-desk"
+repository_id = 1311268858
+repository_owner_id = 24563931
+workflow = ".github/workflows/stage-0-evidence.yml"
+workflow_ref = "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main"
+workflow_sha = "95c4cd709bee9d11e2f7fc591d2861427a36cc3a"
+event_name = "push"
+git_ref = "refs/heads/main"
+signing_check_name = "Stage 0 evidence signing"
 required_checks = ["rust-linux", "swift-macos"]
 
 [[artifacts]]
@@ -722,6 +1185,219 @@ STAGE_GATE_FIXTURE_ORDER = {order}
 
 fn toml_string(path: &Path) -> String {
     format!("{:?}", path.to_string_lossy())
+}
+
+fn configure_quality_wait(repository: &Path, marker: &Path, release: &Path) {
+    let config_path = repository.join("config/stage-gates/stage-0.toml");
+    let source = fs::read_to_string(&config_path).unwrap().replace(
+        "STAGE_GATE_FIXTURE_CHECK = \"quality\"",
+        &format!(
+            concat!(
+                "STAGE_GATE_FIXTURE_CHECK = \"quality\"\n",
+                "STAGE_GATE_FIXTURE_WAIT_MARKER = {}\n",
+                "STAGE_GATE_FIXTURE_RELEASE = {}"
+            ),
+            toml_string(marker),
+            toml_string(release)
+        ),
+    );
+    fs::write(&config_path, source).unwrap();
+    git(repository, ["add", "."]);
+    git(
+        repository,
+        ["commit", "-q", "-m", "add deterministic output race hook"],
+    );
+}
+
+fn spawn_gate(repository: &Path, output_path: &Path) -> std::process::Child {
+    Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(repository)
+        .arg("--output")
+        .arg(output_path)
+        .env_clear()
+        .env("STAGE_GATE_BUILDER_ID", "fixture-builder-a")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn write_executable(path: &Path, source: &str) {
+    fs::write(path, source).unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
+struct ComposeSmokeFixture {
+    _temp: TempDir,
+    script: PathBuf,
+    fake_bin: PathBuf,
+    docker_log: PathBuf,
+    wait_log: PathBuf,
+    signal_marker: PathBuf,
+}
+
+impl ComposeSmokeFixture {
+    fn new() -> Self {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let tools = root.join("tools/ci");
+        let infra = root.join("infra/docker-compose");
+        let fake_bin = root.join("fake-bin");
+        fs::create_dir_all(&tools).unwrap();
+        fs::create_dir_all(&infra).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        let script = tools.join("stage-0-compose-smoke.sh");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/ci/stage-0-compose-smoke.sh"),
+            &script,
+        )
+        .unwrap();
+        write_executable(
+            &infra.join("test-contract.sh"),
+            "#!/bin/sh\nset -eu\nexit 0\n",
+        );
+        write_executable(
+            &tools.join("wait-for-dev-stack.sh"),
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "printf '%s\\n' ",
+                "\"$DEV_STACK_COMPOSE_PROJECT|$DEV_STACK_COMPOSE_FILES|",
+                "$DEV_STACK_NATS_MONITOR_PORT|$DEV_STACK_CLICKHOUSE_PORT|",
+                "$DEV_STACK_POSTGRES_PORT|$DEV_STACK_MINIO_PORT|",
+                "$DEV_STACK_OTEL_HEALTH_PORT|$DEV_STACK_VICTORIAMETRICS_PORT\" ",
+                ">> \"$STAGE_GATE_WAIT_LOG\"\n",
+            ),
+        );
+        fs::write(infra.join("compose.yaml"), "services: {}\n").unwrap();
+        fs::write(
+            infra.join("stage-0.override.yaml"),
+            "services: {}\nvolumes: {}\nnetworks: {}\n",
+        )
+        .unwrap();
+        let docker_log = root.join("docker.log");
+        let wait_log = root.join("wait.log");
+        let signal_marker = root.join("signal-ready");
+        write_executable(
+            &fake_bin.join("docker"),
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "printf '%s\\n' \"$*\" >> \"$STAGE_GATE_DOCKER_LOG\"\n",
+                "project=''\n",
+                "previous=''\n",
+                "for argument in \"$@\"; do\n",
+                "  if [ \"$previous\" = '--project-name' ]; then project=\"$argument\"; fi\n",
+                "  previous=\"$argument\"\n",
+                "done\n",
+                "case \" $* \" in\n",
+                "  *' volume inspect '*|*' network inspect '*) exit 1 ;;\n",
+                "  *' config --format json '*)\n",
+                "    if [ \"$STAGE_GATE_FAKE_SCENARIO\" = 'merged-conflict' ]; then\n",
+                "      postgres_port=5432\n",
+                "      minio_port=9000\n",
+                "    else\n",
+                "      postgres_port=15432\n",
+                "      minio_port=19000\n",
+                "    fi\n",
+                "    printf '%s\\n' ",
+                "'{\"name\":\"'\"$project\"'\",\"services\":{",
+                "\"nats\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"14222\",\"target\":4222},{\"host_ip\":\"127.0.0.1\",\"published\":\"18222\",\"target\":8222}]},",
+                "\"clickhouse\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"18123\",\"target\":8123}]},",
+                "\"postgres\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"'\"$postgres_port\"'\",\"target\":5432}]},",
+                "\"minio\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"'\"$minio_port\"'\",\"target\":9000}]},",
+                "\"otel-collector\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"14317\",\"target\":4317},{\"host_ip\":\"127.0.0.1\",\"published\":\"14318\",\"target\":4318},{\"host_ip\":\"127.0.0.1\",\"published\":\"13134\",\"target\":13133}]},",
+                "\"victoriametrics\":{\"ports\":[{\"host_ip\":\"127.0.0.1\",\"published\":\"18428\",\"target\":8428}]}},",
+                "\"volumes\":{\"nats-data\":{\"name\":\"'\"$project\"'_nats-data\"},",
+                "\"clickhouse-data\":{\"name\":\"'\"$project\"'_clickhouse-data\"},",
+                "\"postgres-data\":{\"name\":\"'\"$project\"'_postgres-data\"},",
+                "\"minio-data\":{\"name\":\"'\"$project\"'_minio-data\"},",
+                "\"victoriametrics-data\":{\"name\":\"'\"$project\"'_victoriametrics-data\"}},",
+                "\"networks\":{\"default\":{\"name\":\"'\"$project\"'_network\"}}}'\n",
+                "    ;;\n",
+                "  *' up '*)\n",
+                "    case \"$STAGE_GATE_FAKE_SCENARIO\" in\n",
+                "      partial) exit 17 ;;\n",
+                "      timeout) exit 124 ;;\n",
+                "      signal)\n",
+                "        : > \"$STAGE_GATE_SIGNAL_MARKER\"\n",
+                "        sleep 30\n",
+                "        ;;\n",
+                "      success) exit 0 ;;\n",
+                "      *) exit 92 ;;\n",
+                "    esac\n",
+                "    ;;\n",
+                "  *) exit 0 ;;\n",
+                "esac\n",
+            ),
+        );
+        Self {
+            _temp: temp,
+            script,
+            fake_bin,
+            docker_log,
+            wait_log,
+            signal_marker,
+        }
+    }
+
+    fn command(&self, scenario: &str) -> Command {
+        let inherited_path = std::env::var("PATH").unwrap();
+        let mut command = Command::new(&self.script);
+        command
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:{inherited_path}", self.fake_bin.display()),
+            )
+            .env("STAGE_GATE_DOCKER_LOG", &self.docker_log)
+            .env("STAGE_GATE_WAIT_LOG", &self.wait_log)
+            .env("STAGE_GATE_SIGNAL_MARKER", &self.signal_marker)
+            .env("STAGE_GATE_FAKE_SCENARIO", scenario);
+        command
+    }
+
+    fn run(&self, scenario: &str) -> std::process::Output {
+        self.command(scenario).output().unwrap()
+    }
+
+    fn spawn(&self, scenario: &str) -> std::process::Child {
+        let mut command = self.command(scenario);
+        command
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn calls(&self) -> String {
+        fs::read_to_string(&self.docker_log).unwrap()
+    }
+}
+
+fn compose_project_from_call(call: &str) -> &str {
+    let fields = call.split_ascii_whitespace().collect::<Vec<_>>();
+    let index = fields
+        .iter()
+        .position(|field| *field == "--project-name")
+        .expect("Compose call must include --project-name");
+    fields[index + 1]
 }
 
 fn git<const N: usize>(repository: &Path, args: [&str; N]) {

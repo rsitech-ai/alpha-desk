@@ -8,6 +8,8 @@ use std::{
 };
 
 #[cfg(unix)]
+use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -147,41 +149,94 @@ where
             program: spec.program.clone(),
             source,
         })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ProcessError::TerminationFailed("stdout pipe was not created".to_owned()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ProcessError::TerminationFailed("stderr pipe was not created".to_owned()))?;
-    let stdout_limit = output_policy.max_bytes_per_stream;
-    let stderr_limit = output_policy.max_bytes_per_stream;
-    let stdout_reader = thread::spawn(move || drain_stream(stdout, stdout_limit));
-    let stderr_reader = thread::spawn(move || drain_stream(stderr, stderr_limit));
-
-    let status = match wait_until(&mut child, spec.timeout)? {
-        Some(status) => status,
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
         None => {
+            terminate_process_group(&mut child, spec.termination_grace)?;
+            return Err(ProcessError::TerminationFailed(
+                "stdout pipe was not created".to_owned(),
+            ));
+        }
+    };
+    let mut stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_process_group(&mut child, spec.termination_grace)?;
+            return Err(ProcessError::TerminationFailed(
+                "stderr pipe was not created".to_owned(),
+            ));
+        }
+    };
+    if let Err(error) = set_nonblocking(&stdout, "stdout") {
+        terminate_process_group(&mut child, spec.termination_grace)?;
+        return Err(error);
+    }
+    if let Err(error) = set_nonblocking(&stderr, "stderr") {
+        terminate_process_group(&mut child, spec.termination_grace)?;
+        return Err(error);
+    }
+    let deadline = started + spec.timeout;
+    let mut stdout_output = RawOutput::new(output_policy.max_bytes_per_stream);
+    let mut stderr_output = RawOutput::new(output_policy.max_bytes_per_stream);
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    let mut status = None;
+    loop {
+        let stdout_progress =
+            match drain_once(&mut stdout, &mut stdout_output, "stdout", &mut stdout_eof) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    terminate_process_group(&mut child, spec.termination_grace)?;
+                    return Err(error);
+                }
+            };
+        let stderr_progress =
+            match drain_once(&mut stderr, &mut stderr_output, "stderr", &mut stderr_eof) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    terminate_process_group(&mut child, spec.termination_grace)?;
+                    return Err(error);
+                }
+            };
+        if status.is_none() {
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let original = ProcessError::WaitFailed(error);
+                    terminate_process_group(&mut child, spec.termination_grace)?;
+                    return Err(original);
+                }
+            };
+        }
+        if let Some(exit_status) = status
+            && stdout_eof
+            && stderr_eof
+        {
+            let stdout = protect_retained_output(stdout_output, output_policy);
+            let stderr = protect_retained_output(stderr_output, output_policy);
+            return Ok(CommandOutcome {
+                success: exit_status.success(),
+                exit_code: exit_status.code(),
+                stdout,
+                stderr,
+                elapsed: started.elapsed(),
+            });
+        }
+        if Instant::now() >= deadline {
             observer(child.id(), ProcessObservation::TimeoutDetected);
             terminate_process_group(&mut child, spec.termination_grace)?;
-            let _ = join_reader(stdout_reader, "stdout")?;
-            let _ = join_reader(stderr_reader, "stderr")?;
+            drop(stdout);
+            drop(stderr);
             return Err(ProcessError::TimedOut {
                 timeout: spec.timeout,
             });
         }
-    };
-
-    let stdout = protect_retained_output(join_reader(stdout_reader, "stdout")?, output_policy);
-    let stderr = protect_retained_output(join_reader(stderr_reader, "stderr")?, output_policy);
-    Ok(CommandOutcome {
-        success: status.success(),
-        exit_code: status.code(),
-        stdout,
-        stderr,
-        elapsed: started.elapsed(),
-    })
+        if !stdout_progress && !stderr_progress {
+            thread::sleep(
+                WAIT_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
 }
 
 fn current_platform() -> ProcessPlatform {
@@ -207,7 +262,13 @@ fn configure_process_group(_command: &mut Command) -> Result<(), ProcessError> {
 }
 
 fn wait_until(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>, ProcessError> {
-    let deadline = Instant::now() + timeout;
+    wait_until_deadline(child, Instant::now() + timeout)
+}
+
+fn wait_until_deadline(
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<Option<ExitStatus>, ProcessError> {
     loop {
         if let Some(status) = child.try_wait().map_err(ProcessError::WaitFailed)? {
             return Ok(Some(status));
@@ -269,38 +330,71 @@ fn signal_process_group(process_group: u32, signal: &str) -> Result<(), ProcessE
     }
 }
 
-fn drain_stream(mut stream: impl Read, limit: usize) -> io::Result<RawOutput> {
-    let mut retained = Vec::with_capacity(limit.min(8192));
-    let mut total_bytes = 0usize;
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let count = stream.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        total_bytes = total_bytes.saturating_add(count);
-        let remaining = limit.saturating_sub(retained.len());
-        retained.extend_from_slice(&buffer[..count.min(remaining)]);
-    }
-    Ok(RawOutput {
-        retained,
-        total_bytes,
+#[cfg(unix)]
+fn set_nonblocking(
+    stream: &impl std::os::fd::AsFd,
+    name: &'static str,
+) -> Result<(), ProcessError> {
+    let flags = fcntl_getfl(stream).map_err(|source| ProcessError::OutputReadFailed {
+        stream: name,
+        source: io::Error::from(source),
+    })?;
+    fcntl_setfl(stream, flags | OFlags::NONBLOCK).map_err(|source| ProcessError::OutputReadFailed {
+        stream: name,
+        source: io::Error::from(source),
     })
 }
 
-fn join_reader(
-    reader: thread::JoinHandle<io::Result<RawOutput>>,
-    stream: &'static str,
-) -> Result<RawOutput, ProcessError> {
-    reader
-        .join()
-        .map_err(|_| ProcessError::TerminationFailed(format!("{stream} reader panicked")))?
-        .map_err(|source| ProcessError::OutputReadFailed { stream, source })
+#[cfg(not(unix))]
+fn set_nonblocking(_stream: &impl Sized, _name: &'static str) -> Result<(), ProcessError> {
+    Err(ProcessError::UnsupportedPlatform)
+}
+
+fn drain_once(
+    stream: &mut impl Read,
+    output: &mut RawOutput,
+    name: &'static str,
+    eof: &mut bool,
+) -> Result<bool, ProcessError> {
+    if *eof {
+        return Ok(false);
+    }
+    let mut buffer = [0_u8; 8192];
+    match stream.read(&mut buffer) {
+        Ok(0) => {
+            *eof = true;
+            Ok(true)
+        }
+        Ok(count) => {
+            output.total_bytes = output.total_bytes.saturating_add(count);
+            let remaining = output.limit.saturating_sub(output.retained.len());
+            output
+                .retained
+                .extend_from_slice(&buffer[..count.min(remaining)]);
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(source) => Err(ProcessError::OutputReadFailed {
+            stream: name,
+            source,
+        }),
+    }
 }
 
 struct RawOutput {
     retained: Vec<u8>,
     total_bytes: usize,
+    limit: usize,
+}
+
+impl RawOutput {
+    fn new(limit: usize) -> Self {
+        Self {
+            retained: Vec::with_capacity(limit.min(8192)),
+            total_bytes: 0,
+            limit,
+        }
+    }
 }
 
 fn protect_retained_output(raw: RawOutput, policy: &OutputPolicy) -> CapturedOutput {

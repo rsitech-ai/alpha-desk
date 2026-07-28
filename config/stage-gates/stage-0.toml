@@ -32,6 +32,8 @@ commit = "412c380054d16f22549c46a59a5fe0617bc60138"
 
 [comparison]
 second_builder_report_path = "target/stage-gates/inputs/stage-0.builder-b.json"
+second_builder_signature_path = "target/stage-gates/inputs/stage-0.builder-b.json.asc"
+signer_role = "builder-b"
 
 [builder]
 target_tool = "rustc"
@@ -67,7 +69,7 @@ args = ["--version"]
 [[builder.tools]]
 id = "os"
 program = "/usr/bin/uname"
-args = ["-a"]
+args = ["-s", "-r", "-m"]
 
 [approvals]
 policy_path = "config/stage-gates/stage-0-trust-policy.toml"
@@ -76,6 +78,8 @@ gpgv_program = "gpgv"
 known_limitations = [
   "Stage 0 validates foundations only; it does not authorize deployment or trading.",
   "Approval signatures, remote required-check proof, and the second-builder report are externally supplied evidence.",
+  "The custom github-ci OpenPGP signature proves possession of a long-lived key, not GitHub or Sigstore workload identity; key custody, rotation, and revocation remain operator-controlled.",
+  "Unix process-group cleanup cannot contain a hostile descendant that escapes into a new session with setsid; stronger OS-level containment is required for untrusted commands.",
 ]
 
 [[approvals.evidence]]
@@ -90,7 +94,18 @@ signature_path = "target/stage-gates/inputs/independent.statement.json.asc"
 
 [remote]
 proof_path = "target/stage-gates/inputs/github-required-checks.json"
-app_source = "rsitech-ai/alpha-desk"
+signature_path = "target/stage-gates/inputs/github-required-checks.json.asc"
+signer_role = "github-ci"
+repository = "s1korrrr/alpha-desk"
+repository_id = 1311268858
+repository_owner_id = 24563931
+workflow = ".github/workflows/stage-0-evidence.yml"
+workflow_ref = "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main"
+# Immutable source commit for the reviewed signing workflow.
+workflow_sha = "9996166da6f38df467fa4fc479ab80edcd5bb28f"
+event_name = "push"
+git_ref = "refs/heads/main"
+signing_check_name = "Stage 0 evidence signing"
 required_checks = [
   "Rust quality",
   "Rust tests",
@@ -274,6 +289,7 @@ program = "./tools/ci/stage-0-compose-smoke.sh"
 args = []
 cwd = "."
 timeout_seconds = 900
+termination_grace_seconds = 70
 inherit_env = ["PATH", "HOME", "TMPDIR"]
 
 [[checks]]

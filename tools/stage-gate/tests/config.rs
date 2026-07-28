@@ -1,5 +1,54 @@
 use stage_gate::config::{ConfigErrorCode, GateConfig};
 
+#[test]
+fn published_schema_covers_signed_provenance_and_check_termination_fields() {
+    let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/stage-gates/schema-v1.json");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(schema_path).unwrap()).unwrap();
+
+    for field in [
+        "second_builder_report_path",
+        "second_builder_signature_path",
+        "signer_role",
+    ] {
+        assert!(
+            schema["properties"]["comparison"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == field)
+        );
+    }
+    for field in [
+        "proof_path",
+        "signature_path",
+        "signer_role",
+        "repository",
+        "repository_id",
+        "repository_owner_id",
+        "workflow",
+        "workflow_ref",
+        "workflow_sha",
+        "event_name",
+        "git_ref",
+        "signing_check_name",
+        "required_checks",
+    ] {
+        assert!(
+            schema["properties"]["remote"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == field)
+        );
+    }
+    assert_eq!(
+        schema["$defs"]["check"]["properties"]["termination_grace_seconds"]["minimum"],
+        1
+    );
+}
+
 const VALID_CONFIG: &str = r#"
 schema_version = 1
 stage_id = "stage-0-foundations"
@@ -18,6 +67,8 @@ commit = "412c380054d16f22549c46a59a5fe0617bc60138"
 
 [comparison]
 second_builder_report_path = "target/stage-gates/inputs/builder-b.json"
+second_builder_signature_path = "target/stage-gates/inputs/builder-b.json.asc"
+signer_role = "builder-b"
 
 [builder]
 target_tool = "just"
@@ -46,7 +97,14 @@ signature_path = "target/stage-gates/inputs/independent.json.asc"
 
 [remote]
 proof_path = "target/stage-gates/inputs/github-required-checks.json"
-app_source = "rsitech-ai/alpha-desk"
+signature_path = "target/stage-gates/inputs/github-required-checks.json.asc"
+signer_role = "github-ci"
+repository = "s1korrrr/alpha-desk"
+repository_id = 1311268858
+repository_owner_id = 24563931
+workflow = ".github/workflows/stage-0-evidence.yml"
+workflow_ref = "refs/heads/main"
+workflow_sha = "95c4cd709bee9d11e2f7fc591d2861427a36cc3a"
 required_checks = ["CI / Rust quality"]
 
 [[artifacts]]
@@ -85,8 +143,41 @@ timeout_seconds = 60
 }
 
 #[test]
-fn valid_configuration_is_accepted() {
-    GateConfig::parse(VALID_CONFIG).expect("valid configuration must parse");
+fn signed_provenance_configuration_is_accepted() {
+    GateConfig::parse(VALID_CONFIG)
+        .expect("Builder B and GitHub proof signatures and immutable identity must parse");
+}
+
+#[test]
+fn unsigned_external_provenance_configuration_is_rejected() {
+    let source = VALID_CONFIG
+        .replace(
+            concat!(
+                "second_builder_signature_path = ",
+                "\"target/stage-gates/inputs/builder-b.json.asc\"\n",
+                "signer_role = \"builder-b\"\n",
+            ),
+            "",
+        )
+        .replace(
+            concat!(
+                "signature_path = ",
+                "\"target/stage-gates/inputs/github-required-checks.json.asc\"\n",
+                "signer_role = \"github-ci\"\n",
+                "repository = \"s1korrrr/alpha-desk\"\n",
+                "repository_id = 1311268858\n",
+                "repository_owner_id = 24563931\n",
+                "workflow = \".github/workflows/stage-0-evidence.yml\"\n",
+                "workflow_ref = \"refs/heads/main\"\n",
+                "workflow_sha = \"95c4cd709bee9d11e2f7fc591d2861427a36cc3a\"\n",
+            ),
+            "",
+        );
+
+    let error =
+        GateConfig::parse(&source).expect_err("unsigned Builder B and GitHub proof must fail");
+
+    assert_eq!(error.code(), ConfigErrorCode::InvalidValue);
 }
 
 #[test]

@@ -59,9 +59,15 @@
     "comparison": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["second_builder_report_path"],
+      "required": [
+        "second_builder_report_path",
+        "second_builder_signature_path",
+        "signer_role"
+      ],
       "properties": {
-        "second_builder_report_path": { "$ref": "#/$defs/repositoryPath" }
+        "second_builder_report_path": { "$ref": "#/$defs/repositoryPath" },
+        "second_builder_signature_path": { "$ref": "#/$defs/repositoryPath" },
+        "signer_role": { "const": "builder-b" }
       }
     },
     "builder": {
@@ -109,13 +115,38 @@
     "remote": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["proof_path", "app_source", "required_checks"],
+      "required": [
+        "proof_path",
+        "signature_path",
+        "signer_role",
+        "repository",
+        "repository_id",
+        "repository_owner_id",
+        "workflow",
+        "workflow_ref",
+        "workflow_sha",
+        "event_name",
+        "git_ref",
+        "signing_check_name",
+        "required_checks"
+      ],
       "properties": {
         "proof_path": { "$ref": "#/$defs/repositoryPath" },
-        "app_source": { "type": "string", "minLength": 1 },
+        "signature_path": { "$ref": "#/$defs/repositoryPath" },
+        "signer_role": { "const": "github-ci" },
+        "repository": { "type": "string", "minLength": 1 },
+        "repository_id": { "type": "integer", "minimum": 1 },
+        "repository_owner_id": { "type": "integer", "minimum": 1 },
+        "workflow": { "$ref": "#/$defs/repositoryPath" },
+        "workflow_ref": { "type": "string", "minLength": 1 },
+        "workflow_sha": { "$ref": "#/$defs/gitObject" },
+        "event_name": { "const": "push" },
+        "git_ref": { "const": "refs/heads/main" },
+        "signing_check_name": { "const": "Stage 0 evidence signing" },
         "required_checks": {
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         }
       }
@@ -202,6 +233,11 @@
         },
         "cwd": { "$ref": "#/$defs/repositoryPath" },
         "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "termination_grace_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
         "env": {
           "type": "object",
           "additionalProperties": { "type": "string" }

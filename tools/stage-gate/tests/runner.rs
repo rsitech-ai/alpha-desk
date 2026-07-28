@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    os::unix::process::CommandExt as _,
     path::Path,
     process::{Command, Stdio},
     thread,
@@ -332,6 +333,76 @@ fn leader_exit_after_timeout_detection_still_kills_descendants_and_reaps() {
 }
 
 #[test]
+fn early_zero_leader_with_detached_inherited_pipe_is_bounded_by_command_deadline() {
+    let temp = TempDir::new().unwrap();
+    let pid_path = temp.path().join("detached-descendant.pid");
+    let mut command = helper_spec(
+        Path::new("."),
+        "exit-zero-with-detached-inherited-pipe",
+        vec![(
+            "STAGE_GATE_HELPER_PID_PATH".to_owned(),
+            pid_path.to_string_lossy().into_owned(),
+        )],
+    );
+    command.timeout = Duration::from_millis(100);
+    command.termination_grace = Duration::from_millis(100);
+
+    let started = Instant::now();
+    let result = run_command(&command, &output_policy());
+    let elapsed = started.elapsed();
+    let descendant = wait_for_pid(&pid_path);
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &descendant.to_string()])
+        .status();
+
+    let error = result.expect_err("inherited output pipes must not outlive the command deadline");
+    assert_eq!(error.code(), ProcessErrorCode::TimedOut);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "command deadline plus bounded grace took {elapsed:?}"
+    );
+}
+
+#[test]
+fn inherited_pipe_drain_cannot_overrun_the_whole_gate_deadline() {
+    let repository = TestRepository::new();
+    let snapshot = RepositorySnapshot::capture(repository.path(), &repository.design()).unwrap();
+    let pid_path = repository.path().join(".git/detached-descendant.pid");
+    let mut command = helper_spec(
+        repository.path(),
+        "exit-zero-with-detached-inherited-pipe",
+        vec![(
+            "STAGE_GATE_HELPER_PID_PATH".to_owned(),
+            pid_path.to_string_lossy().into_owned(),
+        )],
+    );
+    command.timeout = Duration::from_secs(5);
+    command.termination_grace = Duration::from_millis(100);
+
+    let started = Instant::now();
+    let result = run_guarded_checks(
+        repository.path(),
+        &snapshot,
+        &[command],
+        &output_policy(),
+        Duration::from_millis(100),
+    );
+    let elapsed = started.elapsed();
+    let descendant = wait_for_pid(&pid_path);
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &descendant.to_string()])
+        .status();
+
+    let error = result.expect_err("the whole gate deadline must include output draining");
+    assert_eq!(error.code(), RunnerErrorCode::GateDeadlineExceeded);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "whole-gate deadline plus bounded grace took {elapsed:?}"
+    );
+}
+
+#[test]
+#[allow(clippy::zombie_processes)] // Detached-pipe fixture exits without owning the child handle.
 fn stage_gate_process_helper() {
     let Ok(mode) = std::env::var("STAGE_GATE_HELPER_MODE") else {
         return;
@@ -388,6 +459,19 @@ fn stage_gate_process_helper() {
             )
             .unwrap();
             let _ = child.wait();
+        }
+        "exit-zero-with-detached-inherited-pipe" => {
+            let child = Command::new("/bin/sleep")
+                .arg("3")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap();
+            fs::write(
+                required_env("STAGE_GATE_HELPER_PID_PATH"),
+                format!("{}\n", child.id()),
+            )
+            .unwrap();
         }
         "sleep" => thread::sleep(Duration::from_secs(30)),
         other => panic!("unknown helper mode {other}"),

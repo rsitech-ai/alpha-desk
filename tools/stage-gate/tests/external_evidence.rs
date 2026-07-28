@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt as _, symlink},
+    path::PathBuf,
+    process::Command,
+};
 
 use sha2::Digest as _;
 use stage_gate::{
@@ -13,6 +18,38 @@ use tempfile::TempDir;
 
 const PLATFORM_FINGERPRINT: &str = "0123456789abcdef0123456789abcdef01234567";
 const INDEPENDENT_FINGERPRINT: &str = "89abcdef0123456789abcdef0123456789abcdef";
+const REQUIRED_CHECKS: [&str; 6] = [
+    "Rust quality",
+    "Rust tests",
+    "Swift 6.3",
+    "Static Compose policy",
+    "Trusted integration smoke",
+    "Reproducible service binaries",
+];
+
+#[test]
+fn workflow_jq_command_substitution_emits_exact_canonical_fixture_bytes() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("proof.json");
+    let value: serde_json::Value = serde_json::from_slice(&authenticated_remote_proof()).unwrap();
+    fs::write(&input, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let output = Command::new("/bin/bash")
+        .args([
+            "-c",
+            "proof=\"$(jq -cS . \"$1\")\"; printf '%s' \"$proof\"",
+            "workflow-proof",
+        ])
+        .arg(&input)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        stage_gate::canonical::canonicalize(&value).unwrap()
+    );
+}
 
 #[test]
 fn approval_statement_bytes_are_canonical_and_exact() {
@@ -158,6 +195,98 @@ fn invalid_detached_signature_is_blocked() {
 }
 
 #[test]
+fn verifier_requires_one_clean_validsig_for_the_exact_expected_fingerprint() {
+    for (scenario, body) in [
+        (
+            "nonzero",
+            concat!(
+                "printf '[GNUPG:] VALIDSIG %s 0 0 0 0 0 0 0 0 0\\n' \"$fingerprint\"\n",
+                "exit 9\n"
+            ),
+        ),
+        ("zero-without-validsig", "exit 0\n"),
+        (
+            "wrong-fingerprint",
+            concat!(
+                "printf '[GNUPG:] VALIDSIG ",
+                "ffffffffffffffffffffffffffffffffffffffff 0 0 0 0 0 0 0 0 0\\n'\n",
+            ),
+        ),
+        (
+            "multiple-validsig",
+            concat!(
+                "printf '[GNUPG:] VALIDSIG %s 0 0 0 0 0 0 0 0 0\\n' \"$fingerprint\"\n",
+                "printf '[GNUPG:] VALIDSIG ",
+                "ffffffffffffffffffffffffffffffffffffffff 0 0 0 0 0 0 0 0 0\\n'\n",
+            ),
+        ),
+        (
+            "bad-signature-status",
+            concat!(
+                "printf '[GNUPG:] BADSIG %s rejected\\n' \"$fingerprint\"\n",
+                "printf '[GNUPG:] VALIDSIG %s 0 0 0 0 0 0 0 0 0\\n' \"$fingerprint\"\n",
+            ),
+        ),
+        (
+            "revoked-key-status",
+            concat!(
+                "printf '[GNUPG:] REVKEYSIG %s revoked\\n' \"$fingerprint\"\n",
+                "printf '[GNUPG:] VALIDSIG %s 0 0 0 0 0 0 0 0 0\\n' \"$fingerprint\"\n",
+            ),
+        ),
+        (
+            "error-status",
+            concat!(
+                "printf '[GNUPG:] ERRSIG %s 1 2 3 4 5 6\\n' \"$fingerprint\"\n",
+                "printf '[GNUPG:] VALIDSIG %s 0 0 0 0 0 0 0 0 0\\n' \"$fingerprint\"\n",
+            ),
+        ),
+    ] {
+        let fixture = ApprovalFixture::new();
+        let verifier = fixture._temp.path().join(format!("gpgv-{scenario}"));
+        fs::write(
+            &verifier,
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "set -eu\n",
+                    "statement=\"$6\"\n",
+                    "case \"$(sed -n 's/.*\\\"role\\\":\\\"\\([^\\\"]*\\)\\\".*/\\1/p' \"$statement\")\" in\n",
+                    "  platform-data) fingerprint={} ;;\n",
+                    "  independent) fingerprint={} ;;\n",
+                    "  *) exit 43 ;;\n",
+                    "esac\n",
+                    "{}",
+                ),
+                PLATFORM_FINGERPRINT, INDEPENDENT_FINGERPRINT, body
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&verifier).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&verifier, permissions).unwrap();
+
+        let outcome = verify_approvals(
+            &fixture.binding,
+            &fixture.policy,
+            &fixture.evidence,
+            verifier,
+        );
+
+        assert_eq!(
+            outcome.status,
+            GateStatus::Blocked,
+            "scenario {scenario} must fail closed: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.reasons,
+            vec![ApprovalReasonCode::InvalidDetachedSignature],
+            "scenario {scenario}"
+        );
+    }
+}
+
+#[test]
 fn approval_for_different_statement_bytes_is_blocked_before_gpg() {
     let fixture = ApprovalFixture::new();
     fs::write(&fixture.evidence[0].statement_path, b"different bytes").unwrap();
@@ -177,6 +306,57 @@ fn approval_for_different_statement_bytes_is_blocked_before_gpg() {
 }
 
 #[test]
+fn approval_verifier_uses_private_snapshots_instead_of_caller_paths() {
+    let fixture = ApprovalFixture::new();
+    let verifier = fixture._temp.path().join("snapshot-checking-gpgv");
+    let original_paths = fixture
+        .evidence
+        .iter()
+        .flat_map(|item| [&item.signature_path, &item.statement_path])
+        .map(|path| format!("{:?}", path.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    fs::write(
+        &verifier,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "signature=\"$5\"\n",
+                "statement=\"$6\"\n",
+                "for original in {}; do\n",
+                "  [ \"$signature\" != \"$original\" ] || exit 41\n",
+                "  [ \"$statement\" != \"$original\" ] || exit 42\n",
+                "done\n",
+                "case \"$(sed -n 's/.*\\\"role\\\":\\\"\\([^\\\"]*\\)\\\".*/\\1/p' \"$statement\")\" in\n",
+                "  platform-data) fingerprint={} ;;\n",
+                "  independent) fingerprint={} ;;\n",
+                "  *) exit 43 ;;\n",
+                "esac\n",
+                "printf '[GNUPG:] VALIDSIG %s\\n' \"$fingerprint\"\n",
+            ),
+            original_paths,
+            PLATFORM_FINGERPRINT,
+            INDEPENDENT_FINGERPRINT,
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&verifier).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&verifier, permissions).unwrap();
+
+    let outcome = verify_approvals(
+        &fixture.binding,
+        &fixture.policy,
+        &fixture.evidence,
+        verifier,
+    );
+
+    assert_eq!(outcome.status, GateStatus::Pass, "{outcome:?}");
+    assert!(outcome.reasons.is_empty());
+}
+
+#[test]
 fn absent_remote_proof_is_blocked() {
     let temp = TempDir::new().unwrap();
     let outcome = verify_remote_proof(&temp.path().join("missing.json"), &remote_requirement());
@@ -185,6 +365,42 @@ fn absent_remote_proof_is_blocked() {
     assert_eq!(
         outcome.reasons,
         vec![RemoteProofReasonCode::RemoteProofMissing]
+    );
+}
+
+#[test]
+fn remote_proof_must_be_a_regular_non_symlink_file() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("proof-target.json");
+    let proof = temp.path().join("proof.json");
+    fs::write(&target, valid_remote_proof()).unwrap();
+    symlink(&target, &proof).unwrap();
+
+    let outcome = verify_remote_proof(&proof, &remote_requirement());
+
+    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(
+        outcome.reasons,
+        vec![RemoteProofReasonCode::RemoteProofMalformed]
+    );
+}
+
+#[test]
+fn remote_proof_must_be_the_exact_canonical_json_bytes() {
+    let temp = TempDir::new().unwrap();
+    let proof = temp.path().join("proof.json");
+    fs::write(
+        &proof,
+        serde_json::to_vec_pretty(&legacy_remote_proof_value()).unwrap(),
+    )
+    .unwrap();
+
+    let outcome = verify_remote_proof(&proof, &remote_requirement());
+
+    assert_eq!(outcome.status, GateStatus::Blocked);
+    assert_eq!(
+        outcome.reasons,
+        vec![RemoteProofReasonCode::RemoteProofMalformed]
     );
 }
 
@@ -226,12 +442,110 @@ fn remote_proof_must_match_commit_source_and_exact_check_names() {
     assert_eq!(outcome.status, GateStatus::Blocked);
     assert_eq!(
         outcome.reasons,
-        vec![
-            RemoteProofReasonCode::ImplementationCommitMismatch,
-            RemoteProofReasonCode::AppSourceMismatch,
-            RemoteProofReasonCode::RequiredCheckMissing,
-        ]
+        vec![RemoteProofReasonCode::RemoteProofMalformed]
     );
+}
+
+#[test]
+fn canonical_remote_proof_with_full_immutable_run_identity_is_accepted() {
+    let temp = TempDir::new().unwrap();
+    let proof = temp.path().join("proof.json");
+    fs::write(&proof, authenticated_remote_proof()).unwrap();
+
+    let outcome = verify_remote_proof(&proof, &remote_requirement());
+
+    assert_eq!(outcome.status, GateStatus::Pass, "{outcome:?}");
+    assert!(outcome.reasons.is_empty());
+}
+
+#[test]
+fn remote_proof_rejects_duplicate_extra_and_cross_run_check_identity() {
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&authenticated_remote_proof()).unwrap();
+    let mut invalid = Vec::new();
+
+    let mut value = baseline.clone();
+    value["repository_id"] = serde_json::json!(999_999_u64);
+    invalid.push(("repository-id", value));
+    let mut value = baseline.clone();
+    value["repository_owner_id"] = serde_json::json!(999_998_u64);
+    invalid.push(("repository-owner-id", value));
+    let mut value = baseline.clone();
+    value["workflow_sha"] = serde_json::json!("0".repeat(40));
+    invalid.push(("workflow-sha", value));
+    let mut value = baseline.clone();
+    value["workflow_ref"] =
+        serde_json::json!("rsitech-ai/alpha-desk/.github/workflows/other.yml@refs/heads/main");
+    invalid.push(("workflow-ref", value));
+    let mut value = baseline.clone();
+    value["event_name"] = serde_json::json!("pull_request_target");
+    invalid.push(("event", value));
+    let mut value = baseline.clone();
+    value["git_ref"] = serde_json::json!("refs/heads/release");
+    invalid.push(("git-ref", value));
+    let mut value = baseline.clone();
+    value["head_sha"] = serde_json::json!("0".repeat(40));
+    invalid.push(("head-sha", value));
+    let mut value = baseline.clone();
+    value["checks"][0]["run_id"] = serde_json::json!(8_800_000_002_u64);
+    invalid.push(("cross-run", value));
+    let mut value = baseline.clone();
+    value["checks"][0]["run_attempt"] = serde_json::json!(2_u64);
+    invalid.push(("cross-attempt", value));
+    let mut value = baseline.clone();
+    let duplicate_id = value["checks"][0]["check_run_id"].clone();
+    value["checks"][1]["check_run_id"] = duplicate_id;
+    invalid.push(("duplicate-check-id", value));
+    let mut value = baseline.clone();
+    let duplicate_name = value["checks"][0]["name"].clone();
+    value["checks"][1]["name"] = duplicate_name;
+    invalid.push(("duplicate-check-name", value));
+    let mut value = baseline.clone();
+    let required_check_id = value["checks"][0]["check_run_id"].clone();
+    value["signing_check_run_id"] = required_check_id;
+    invalid.push(("signer-is-required-check", value));
+    let mut value = baseline.clone();
+    value["signing_check"]["check_run_id"] = serde_json::json!(9_900_000_099_u64);
+    invalid.push(("signing-check-id-mismatch", value));
+    let mut value = baseline.clone();
+    value["signing_check"]["run_id"] = serde_json::json!(8_800_000_001_u64);
+    invalid.push(("signing-check-reuses-ci-run", value));
+    let mut value = baseline.clone();
+    value["signing_check"]["run_attempt"] = serde_json::json!(0_u64);
+    invalid.push(("signing-check-zero-attempt", value));
+    let mut value = baseline.clone();
+    value["signing_check"]["head_sha"] = serde_json::json!("0".repeat(40));
+    invalid.push(("signing-check-cross-head", value));
+    let mut value = baseline.clone();
+    value["signing_check"]["status"] = serde_json::json!("completed");
+    invalid.push(("signing-check-not-in-progress", value));
+    let mut value = baseline;
+    value["checks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "check_run_id": 9_900_000_099_u64,
+            "conclusion": "success",
+            "head_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+            "name": "unexpected",
+            "run_attempt": 1,
+            "run_id": 8_800_000_001_u64
+        }));
+    invalid.push(("extra-check", value));
+
+    for (scenario, value) in invalid {
+        let temp = TempDir::new().unwrap();
+        let proof = temp.path().join("proof.json");
+        fs::write(&proof, stage_gate::canonical::canonicalize(&value).unwrap()).unwrap();
+
+        let outcome = verify_remote_proof(&proof, &remote_requirement());
+
+        assert_eq!(
+            outcome.status,
+            GateStatus::Blocked,
+            "scenario {scenario} must fail closed: {outcome:?}"
+        );
+    }
 }
 
 fn statement() -> ApprovalStatement {
@@ -263,9 +577,77 @@ fn reviewer(role: &str, fingerprint: &str) -> TrustedReviewer {
 fn remote_requirement() -> RemoteRequirement {
     RemoteRequirement {
         implementation_commit: "95c4cd709bee9d11e2f7fc591d2861427a36cc3a".to_owned(),
-        app_source: "rsitech-ai/alpha-desk".to_owned(),
-        required_checks: vec!["rust-linux".to_owned(), "swift-macos".to_owned()],
+        repository: "s1korrrr/alpha-desk".to_owned(),
+        repository_id: 1_311_268_858,
+        repository_owner_id: 24_563_931,
+        workflow: ".github/workflows/stage-0-evidence.yml".to_owned(),
+        workflow_ref: "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main"
+            .to_owned(),
+        workflow_sha: "95c4cd709bee9d11e2f7fc591d2861427a36cc3a".to_owned(),
+        event_name: "push".to_owned(),
+        git_ref: "refs/heads/main".to_owned(),
+        signing_check_name: "Stage 0 evidence signing".to_owned(),
+        required_checks: REQUIRED_CHECKS.iter().map(ToString::to_string).collect(),
     }
+}
+
+fn legacy_remote_proof_value() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "implementation_commit": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+        "app_source": "s1korrrr/alpha-desk",
+        "checks": REQUIRED_CHECKS
+            .iter()
+            .map(|name| serde_json::json!({"name": name, "conclusion": "success"}))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn valid_remote_proof() -> Vec<u8> {
+    stage_gate::canonical::canonicalize(&legacy_remote_proof_value()).unwrap()
+}
+
+fn authenticated_remote_proof() -> Vec<u8> {
+    let checks = REQUIRED_CHECKS
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            serde_json::json!({
+                "check_run_id": 9_900_000_001_u64 + index as u64,
+                "conclusion": "success",
+                "head_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+                "name": name,
+                "run_attempt": 1,
+                "run_id": 8_800_000_001_u64,
+            })
+        })
+        .collect::<Vec<_>>();
+    stage_gate::canonical::canonicalize(&serde_json::json!({
+        "checks": checks,
+        "event_name": "push",
+        "git_ref": "refs/heads/main",
+        "head_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+        "repository": "s1korrrr/alpha-desk",
+        "repository_id": 1_311_268_858_u64,
+        "repository_owner_id": 24_563_931_u64,
+        "run_attempt": 1,
+        "run_id": 8_800_000_001_u64,
+        "schema_version": 1,
+        "signing_check": {
+            "check_run_id": 9_900_000_009_u64,
+            "head_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+            "name": "Stage 0 evidence signing",
+            "run_attempt": 1,
+            "run_id": 8_900_000_001_u64,
+            "status": "in_progress",
+        },
+        "signing_check_run_id": 9_900_000_009_u64,
+        "workflow": ".github/workflows/stage-0-evidence.yml",
+        "workflow_ref":
+            "s1korrrr/alpha-desk/.github/workflows/stage-0-evidence.yml@refs/heads/main",
+        "workflow_sha": "95c4cd709bee9d11e2f7fc591d2861427a36cc3a",
+    }))
+    .unwrap()
 }
 
 struct ApprovalFixture {
