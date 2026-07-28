@@ -322,7 +322,9 @@ pub fn run_gate_with_producer(
                     }
                 }
                 Ok(CommandSpec {
-                    program: program.invocation_path,
+                    arg0: (program.invocation_path != program.executable_path)
+                        .then(|| program.invocation_path.into_os_string()),
+                    program: program.executable_path,
                     args: check.args.iter().map(Into::into).collect(),
                     cwd: PathBuf::from(&check.cwd),
                     env: command_environment.into_iter().collect(),
@@ -331,7 +333,7 @@ pub fn run_gate_with_producer(
                 })
             })
             .collect::<Result<Vec<_>, GateRunError>>()?;
-        let resolved_gpgv = resolved_gpgv.map(|program| program.invocation_path);
+        let resolved_gpgv = resolved_gpgv.map(|program| program.executable_path);
         let redactions = config
             .checks
             .iter()

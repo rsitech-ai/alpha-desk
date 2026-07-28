@@ -6,7 +6,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::{fs::PermissionsExt as _, process::CommandExt as _};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -132,7 +132,12 @@ pub fn capture_executable_identity_with_env(
 ) -> Result<ExecutableIdentity, IdentityError> {
     let bytes = fs::read(&program.executable_path)
         .map_err(|_| IdentityError::ProgramUnavailable(id.to_owned()))?;
-    let output = Command::new(&program.invocation_path)
+    let mut command = Command::new(&program.executable_path);
+    #[cfg(unix)]
+    if program.invocation_path != program.executable_path {
+        command.arg0(program.invocation_path.as_os_str());
+    }
+    let output = command
         .args(args)
         .env_clear()
         .envs(environment)

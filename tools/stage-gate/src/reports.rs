@@ -134,6 +134,8 @@ struct CheckEvidence<'a> {
 struct CheckCommandEvidence {
     check_id: String,
     program: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arg0: Option<String>,
     args: Vec<String>,
     cwd: String,
     env: BTreeMap<String, String>,
@@ -233,6 +235,10 @@ fn command_evidence(
     CheckCommandEvidence {
         check_id: check_id.to_owned(),
         program: normalization.tokenize(&command.program.to_string_lossy()),
+        arg0: command
+            .arg0
+            .as_ref()
+            .map(|arg0| normalization.tokenize(&arg0.to_string_lossy())),
         args: command
             .args
             .iter()
