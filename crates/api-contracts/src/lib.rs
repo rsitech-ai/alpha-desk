@@ -542,6 +542,10 @@ pub enum PayloadCodecError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireTradeMatched {
+    pub trade_id: Option<String>,
+    pub market_id: Option<String>,
+    pub maker_order_id: Option<String>,
+    pub taker_order_id: Option<String>,
     pub price: String,
     pub quantity: String,
     pub deterministic_seed: u64,
@@ -592,6 +596,10 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
         "TwapCompleted" => default_message::<generated::hl::canonical::v1::TwapCompleted>(),
         "TradeMatched" => {
             return encode_trade_matched(&WireTradeMatched {
+                trade_id: None,
+                market_id: None,
+                maker_order_id: None,
+                taker_order_id: None,
                 price: "0".to_owned(),
                 quantity: "0".to_owned(),
                 deterministic_seed: 0,
@@ -719,10 +727,10 @@ pub fn encode_trade_matched(value: &WireTradeMatched) -> Result<Vec<u8>, Payload
         });
     }
     let message = generated::hl::canonical::v1::TradeMatched {
-        trade_id: String::new(),
-        market_id: String::new(),
-        maker_order_id: String::new(),
-        taker_order_id: String::new(),
+        trade_id: encode_optional_identity("trade_id", &value.trade_id)?,
+        market_id: encode_optional_identity("market_id", &value.market_id)?,
+        maker_order_id: encode_optional_identity("maker_order_id", &value.maker_order_id)?,
+        taker_order_id: encode_optional_identity("taker_order_id", &value.taker_order_id)?,
         price: Some(generated::hl::common::v1::DecimalValue {
             value: value.price.clone(),
         }),
@@ -743,17 +751,6 @@ pub fn decode_trade_matched(bytes: &[u8]) -> Result<WireTradeMatched, PayloadCod
                 source,
             }
         })?;
-    if !message.trade_id.is_empty()
-        || !message.market_id.is_empty()
-        || !message.maker_order_id.is_empty()
-        || !message.taker_order_id.is_empty()
-    {
-        return Err(PayloadCodecError::Invalid {
-            kind: "TradeMatched".to_owned(),
-            reason: "legacy trade/order identifiers are unsupported by the V1 domain payload"
-                .to_owned(),
-        });
-    }
     let price = message.price.ok_or_else(|| PayloadCodecError::Invalid {
         kind: "TradeMatched".to_owned(),
         reason: "missing price".to_owned(),
@@ -763,10 +760,46 @@ pub fn decode_trade_matched(bytes: &[u8]) -> Result<WireTradeMatched, PayloadCod
         reason: "missing quantity".to_owned(),
     })?;
     Ok(WireTradeMatched {
+        trade_id: decode_optional_identity("trade_id", message.trade_id)?,
+        market_id: decode_optional_identity("market_id", message.market_id)?,
+        maker_order_id: decode_optional_identity("maker_order_id", message.maker_order_id)?,
+        taker_order_id: decode_optional_identity("taker_order_id", message.taker_order_id)?,
         price: price.value,
         quantity: quantity.value,
         deterministic_seed: message.deterministic_seed,
     })
+}
+
+fn encode_optional_identity(
+    field: &str,
+    value: &Option<String>,
+) -> Result<String, PayloadCodecError> {
+    match value {
+        None => Ok(String::new()),
+        Some(value) if value.is_empty() || value.trim() != value => {
+            Err(PayloadCodecError::Invalid {
+                kind: "TradeMatched".to_owned(),
+                reason: format!("{field} must be non-empty without surrounding whitespace"),
+            })
+        }
+        Some(value) => Ok(value.clone()),
+    }
+}
+
+fn decode_optional_identity(
+    field: &str,
+    value: String,
+) -> Result<Option<String>, PayloadCodecError> {
+    if value.is_empty() {
+        Ok(None)
+    } else if value.trim() != value {
+        Err(PayloadCodecError::Invalid {
+            kind: "TradeMatched".to_owned(),
+            reason: format!("{field} must not contain surrounding whitespace"),
+        })
+    } else {
+        Ok(Some(value))
+    }
 }
 
 fn default_message<M: Message + Default>() -> Vec<u8> {

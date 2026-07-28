@@ -3,8 +3,8 @@ use canonical_events::{
     CanonicalEventEnvelope, ConfirmationClass, ContractError, EventKind, EventPayload, TradeMatched,
 };
 use domain_types::{
-    Address, BlockHeight, EventId, KnownTime, MarketId, Price, ProtocolTime, Quantity,
-    TransactionId,
+    Address, BlockHeight, EventId, KnownTime, MarketId, OrderId, Price, ProtocolTime, Quantity,
+    TradeId, TransactionId,
 };
 
 fn task_4_envelope(schema_version: &str) -> Result<CanonicalEventEnvelope, ContractError> {
@@ -22,11 +22,11 @@ fn task_4_envelope(schema_version: &str) -> Result<CanonicalEventEnvelope, Contr
         vec![MarketId::new("perp:BTC").unwrap()],
         vec![buyer, seller],
         ConfirmationClass::CommittedPrimary,
-        EventPayload::TradeMatched(TradeMatched {
-            price: Price::parse_at_scale("65000", 6).unwrap(),
-            quantity: Quantity::parse_at_scale("0.01", 8).unwrap(),
-            deterministic_seed: 7,
-        }),
+        EventPayload::TradeMatched(TradeMatched::without_identities(
+            Price::parse_at_scale("65000", 6).unwrap(),
+            Quantity::parse_at_scale("0.01", 8).unwrap(),
+            7,
+        )),
         "fixture-parser-v1",
     )
 }
@@ -63,6 +63,40 @@ fn exact_task_4_constructor_is_deterministic_typed_and_round_trips() {
     assert_eq!(
         CanonicalEventEnvelope::decode(&first.encode_to_vec().unwrap()).unwrap(),
         first
+    );
+}
+
+#[test]
+fn trade_payload_round_trip_preserves_non_empty_v1_identities() {
+    let payload = EventPayload::TradeMatched(TradeMatched {
+        trade_id: Some(TradeId::new("trade-42").unwrap()),
+        market_id: Some(MarketId::new("perp:BTC").unwrap()),
+        maker_order_id: Some(OrderId::new("maker-7").unwrap()),
+        taker_order_id: Some(OrderId::new("taker-9").unwrap()),
+        price: Price::parse_at_scale("65000", 6).unwrap(),
+        quantity: Quantity::parse_at_scale("0.01", 8).unwrap(),
+        deterministic_seed: 7,
+    });
+    let encoded = payload.encode_to_vec().unwrap();
+
+    assert_eq!(
+        EventPayload::decode(EventKind::TradeMatched, &encoded).unwrap(),
+        payload
+    );
+
+    let mut wire = WireCanonicalEventEnvelope::decode(
+        &task_4_envelope("1.0.0").unwrap().encode_to_vec().unwrap(),
+    )
+    .unwrap();
+    wire.payload_hash = blake3::hash(&encoded).as_bytes().to_vec();
+    wire.payload = encoded.clone();
+    let decoded = CanonicalEventEnvelope::decode(&wire.encode_to_vec()).unwrap();
+    let reencoded = WireCanonicalEventEnvelope::decode(&decoded.encode_to_vec().unwrap()).unwrap();
+
+    assert_eq!(reencoded.payload, encoded);
+    assert_eq!(
+        reencoded.payload_hash,
+        blake3::hash(&reencoded.payload).as_bytes()
     );
 }
 
@@ -106,11 +140,11 @@ fn payload_decode_rejects_malformed_bytes_and_wrong_event_kind() {
         Err(ContractError::Decode(_)) | Err(ContractError::Invalid { .. })
     ));
 
-    let payload = EventPayload::TradeMatched(TradeMatched {
-        price: Price::parse_at_scale("1", 6).unwrap(),
-        quantity: Quantity::parse_at_scale("2", 8).unwrap(),
-        deterministic_seed: 9,
-    });
+    let payload = EventPayload::TradeMatched(TradeMatched::without_identities(
+        Price::parse_at_scale("1", 6).unwrap(),
+        Quantity::parse_at_scale("2", 8).unwrap(),
+        9,
+    ));
     let bytes = payload.encode_to_vec().unwrap();
     assert!(EventPayload::decode(EventKind::OrderAccepted, &bytes).is_err());
 }
