@@ -40,13 +40,15 @@ just stage-0-gate
 The command writes transient canonical JSON only to the Git-ignored
 `target/stage-gates/stage-0.json` and writes the exact canonical local builder
 evidence to `target/stage-gates/stage-0.builder.json`. Copy Builder B's
-`stage-0.builder.json` byte-for-byte to Builder A's configured
-`target/stage-gates/inputs/stage-0.builder-b.json`; no JSON extraction or
-rewriting is required. Exit status `0` means `PASS`, `1` means a local
+canonical `stage-0.builder.json` and its detached OpenPGP signature byte-for-byte
+to Builder A's configured input paths; no JSON extraction or rewriting is
+permitted. Builder B's report identity must be
+`builder-b:<full-fingerprint>`, must agree with the pinned `builder-b` signer,
+and must be distinct from Builder A and both reviewers. Exit status `0` means `PASS`, `1` means a local
 verification `FAIL`, and `2` means `BLOCKED`. A local builder remains
-`BLOCKED` until a second independent builder report, the exact required GitHub
-check proof, two distinct detached reviewer approvals, a configured reviewer
-keyring, and usable OpenPGP verification tooling are supplied. Any non-PASS
+`BLOCKED` until a signed second-builder report, the signed exact GitHub run
+proof, two distinct detached reviewer approvals, a four-role trust registry,
+and usable OpenPGP verification tooling are supplied. Any non-PASS
 result has the explicit stage outcome `HOLD`. External reports, proofs,
 signatures, and the keyring stay under the ignored input paths named by the
 configuration. The gate never creates an approval record, signature, evidence
@@ -55,11 +57,59 @@ commit, or tag.
 The tracked operational trust registry is
 [`stage-0-trust-policy.toml`](config/stage-gates/stage-0-trust-policy.toml).
 Its current placeholder fingerprints intentionally keep Stage 0 blocked. They
-must be replaced by distinct, reviewed, full fingerprints in a committed
+must be replaced by four distinct, reviewed, full fingerprints for
+`platform-data`, `independent`, `builder-b`, and `github-ci` in a committed
 change; the gate hashes the exact committed registry bytes. The separate
 [`stage-0-trust-policy.example.toml`](config/stage-gates/stage-0-trust-policy.example.toml)
-remains a non-operational template for the `platform-data` and `independent`
-roles.
+remains a non-operational template for all four roles.
+
+### Evidence normalization
+
+Builder comparison excludes exactly `builder_identity`, the envelope containing
+the builder ID, signer metadata, and resolved executable paths. It still binds
+normalized hostname-free OS identity (`uname -s -r -m`), tool IDs, executable
+SHA-256 values, version output, artifact metadata and bytes, check results, and
+`check_evidence_hashes`. Each check-evidence hash covers the check ID, resolved
+executable hash, and exit code. Raw stdout/stderr are bounded local diagnostics
+and are not published as reproducibility evidence.
+
+### GitHub proof defaults and migration
+
+The least-privilege `Stage 0 evidence` workflow runs only after a successful
+trusted `push` CI run on `main`; its token has `actions: read`, `checks: read`,
+and `contents: read`. It signs a canonical proof for the six jobs in that exact
+CI run and records the separate in-progress signing job identity. It uploads
+the proof, detached signature, and public key for 30 days. The job fails closed
+when the dedicated `STAGE0_GITHUB_CI_PRIVATE_KEY` secret is absent.
+
+The reviewed workflow is pinned by `remote.workflow_sha` to commit
+`9996166da6f38df467fa4fc479ab80edcd5bb28f`. Before it can produce consumable
+evidence:
+
+1. Replace all four trust-policy placeholders, provision the dedicated CI
+   private key, and distribute the matching public key through the reviewed
+   keyring.
+
+The current OpenPGP mechanism proves possession of a long-lived dedicated key;
+it does not prove GitHub workload identity. Key custody, rotation, and
+revocation remain operator responsibilities. GitHub documents that
+`workflow_run` jobs can access secrets, so the workflow rejects untrusted event,
+branch, and repository identities before touching the key. The future migration
+target is GitHub/Sigstore artifact attestation, but GitHub currently requires
+Enterprise Cloud for private-repository attestations. See GitHub's official
+[workflow-run security note](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run),
+[check-runs API](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference),
+[least-privilege token guidance](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token),
+and [private-repository attestation requirement](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).
+
+### Runtime-proof boundary
+
+The gate uses a retained directory descriptor for evidence publication and
+isolated Compose project names/resources. Static tests prove the command and
+cleanup contract without touching a real Docker daemon. A real merged Compose
+render and startup/cleanup smoke remain required runtime proof. Unix
+process-group cleanup also cannot contain a hostile descendant that escapes
+with `setsid`; such commands require stronger OS-level containment.
 
 ## V1 safety boundary
 

@@ -70,6 +70,10 @@ pub struct DesignConfig {
 #[serde(deny_unknown_fields)]
 pub struct ComparisonConfig {
     pub second_builder_report_path: String,
+    #[serde(default)]
+    pub second_builder_signature_path: String,
+    #[serde(default)]
+    pub signer_role: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -94,8 +98,41 @@ pub struct ApprovalEvidenceConfig {
 #[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
     pub proof_path: String,
-    pub app_source: String,
+    #[serde(default)]
+    pub signature_path: String,
+    #[serde(default)]
+    pub signer_role: String,
+    #[serde(default)]
+    pub repository: String,
+    #[serde(default)]
+    pub repository_id: u64,
+    #[serde(default)]
+    pub repository_owner_id: u64,
+    #[serde(default)]
+    pub workflow: String,
+    #[serde(default)]
+    pub workflow_ref: String,
+    #[serde(default)]
+    pub workflow_sha: String,
+    #[serde(default = "default_event_name")]
+    pub event_name: String,
+    #[serde(default = "default_git_ref")]
+    pub git_ref: String,
+    #[serde(default = "default_signing_check_name")]
+    pub signing_check_name: String,
     pub required_checks: Vec<String>,
+}
+
+fn default_event_name() -> String {
+    "push".to_owned()
+}
+
+fn default_git_ref() -> String {
+    "refs/heads/main".to_owned()
+}
+
+fn default_signing_check_name() -> String {
+    "Stage 0 evidence signing".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -119,10 +156,16 @@ pub struct CheckConfig {
     pub args: Vec<String>,
     pub cwd: String,
     pub timeout_seconds: u64,
+    #[serde(default = "default_termination_grace_seconds")]
+    pub termination_grace_seconds: u64,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub inherit_env: Vec<String>,
+}
+
+const fn default_termination_grace_seconds() -> u64 {
+    2
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,14 +258,54 @@ impl GateConfig {
         )?;
         require_token("design tag", &self.design.tag)?;
         require_sha1_object("design tag object", &self.design.object)?;
-        require_sha256_like_commit(&self.design.commit)?;
+        require_sha1_object("design commit", &self.design.commit)?;
         validate_relative_path(
             "second builder report path",
             &self.comparison.second_builder_report_path,
         )?;
+        validate_relative_path(
+            "second builder signature path",
+            &self.comparison.second_builder_signature_path,
+        )?;
+        if self.comparison.signer_role != "builder-b" {
+            return Err(ConfigError::InvalidValue(
+                "comparison.signer_role must be builder-b".to_owned(),
+            ));
+        }
         validate_relative_path("approval policy path", &self.approvals.policy_path)?;
         validate_relative_path("remote proof path", &self.remote.proof_path)?;
-        require_token("remote app source", &self.remote.app_source)?;
+        validate_relative_path("remote signature path", &self.remote.signature_path)?;
+        if self.remote.signer_role != "github-ci" {
+            return Err(ConfigError::InvalidValue(
+                "remote.signer_role must be github-ci".to_owned(),
+            ));
+        }
+        require_token("remote repository", &self.remote.repository)?;
+        require_token("remote workflow", &self.remote.workflow)?;
+        require_token("remote workflow ref", &self.remote.workflow_ref)?;
+        require_token("remote event", &self.remote.event_name)?;
+        require_token("remote git ref", &self.remote.git_ref)?;
+        require_token("remote signing check name", &self.remote.signing_check_name)?;
+        if self.remote.repository_id == 0 || self.remote.repository_owner_id == 0 {
+            return Err(ConfigError::InvalidValue(
+                "remote repository numeric identities must be non-zero".to_owned(),
+            ));
+        }
+        require_sha1_object("remote workflow source commit", &self.remote.workflow_sha)?;
+        if self.remote.required_checks.is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "remote.required_checks must not be empty".to_owned(),
+            ));
+        }
+        let mut remote_checks = BTreeSet::new();
+        for check in &self.remote.required_checks {
+            require_token("remote required check", check)?;
+            if !remote_checks.insert(check) {
+                return Err(ConfigError::InvalidValue(format!(
+                    "duplicate remote required check {check}"
+                )));
+            }
+        }
         if self.whole_gate_timeout_seconds == 0 {
             return Err(ConfigError::InvalidValue(
                 "whole_gate_timeout_seconds must be non-zero".to_owned(),
@@ -273,12 +356,6 @@ impl GateConfig {
                 return Err(ConfigError::MissingReviewerRole(role.to_owned()));
             }
         }
-        if self.remote.required_checks.is_empty() {
-            return Err(ConfigError::InvalidValue(
-                "remote.required_checks must not be empty".to_owned(),
-            ));
-        }
-
         let output_root = Path::new(&self.output_root);
         validate_relative_path("output root", &self.output_root)?;
         if output_root != Path::new("target/stage-gates")
@@ -422,6 +499,12 @@ impl GateConfig {
                     check.id
                 )));
             }
+            if check.termination_grace_seconds == 0 || check.termination_grace_seconds > 300 {
+                return Err(ConfigError::InvalidValue(format!(
+                    "check {} termination_grace_seconds must be between 1 and 300",
+                    check.id
+                )));
+            }
             for (key, value) in &check.env {
                 require_token("environment key", key)?;
                 if value.chars().any(char::is_control) {
@@ -473,10 +556,6 @@ fn require_token(field: &'static str, value: &str) -> Result<(), ConfigError> {
         )));
     }
     Ok(())
-}
-
-fn require_sha256_like_commit(value: &str) -> Result<(), ConfigError> {
-    require_sha1_object("design commit", value)
 }
 
 fn require_sha1_object(field: &'static str, value: &str) -> Result<(), ConfigError> {

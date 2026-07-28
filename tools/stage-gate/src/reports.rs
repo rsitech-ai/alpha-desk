@@ -12,7 +12,7 @@ use crate::{
     artifacts::ArtifactManifest,
     canonical::{CanonicalError, canonicalize},
     config::BuilderConfig,
-    identity::{ExecutableIdentity, parse_rustc_host, version_output_matches},
+    identity::{parse_rustc_host, version_output_matches},
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -29,8 +29,25 @@ pub enum GateResult {
 pub struct BuilderEnvironment {
     pub os_version: String,
     pub target_triple: String,
-    pub toolchains: BTreeMap<String, ExecutableIdentity>,
+    pub toolchains: BTreeMap<String, ExecutableEvidence>,
     pub toolchain_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableEvidence {
+    pub id: String,
+    pub sha256: String,
+    pub version_output: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuilderIdentity {
+    pub builder_id: String,
+    pub signer_role: String,
+    pub signer_fingerprint: String,
+    pub resolved_paths: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -43,10 +60,10 @@ pub struct BuilderReport {
     pub design_commit: String,
     pub config_sha256: String,
     pub schema_sha256: String,
-    pub builder_id: String,
+    pub builder_identity: BuilderIdentity,
     pub environment: BuilderEnvironment,
-    pub resolved_programs: BTreeMap<String, ExecutableIdentity>,
-    pub command_log_hashes: BTreeMap<String, String>,
+    pub resolved_programs: BTreeMap<String, ExecutableEvidence>,
+    pub check_evidence_hashes: BTreeMap<String, String>,
     pub artifacts: ArtifactManifest,
     pub check_results: BTreeMap<String, GateResult>,
 }
@@ -61,6 +78,9 @@ pub struct ComparisonProjection {
     pub design_commit: String,
     pub config_sha256: String,
     pub schema_sha256: String,
+    pub environment: BuilderEnvironment,
+    pub resolved_programs: BTreeMap<String, ExecutableEvidence>,
+    pub check_evidence_hashes: BTreeMap<String, String>,
     pub artifacts: ArtifactManifest,
     pub check_results: BTreeMap<String, GateResult>,
 }
@@ -75,6 +95,9 @@ impl BuilderReport {
             design_commit: self.design_commit.clone(),
             config_sha256: self.config_sha256.clone(),
             schema_sha256: self.schema_sha256.clone(),
+            environment: self.environment.clone(),
+            resolved_programs: self.resolved_programs.clone(),
+            check_evidence_hashes: self.check_evidence_hashes.clone(),
             artifacts: self.artifacts.clone(),
             check_results: self.check_results.clone(),
         })
@@ -135,7 +158,7 @@ pub fn validate_builder_evidence(
     config: &BuilderConfig,
     report: &BuilderReport,
 ) -> BuilderEvidenceValidation {
-    if !valid_builder_id(&report.builder_id)
+    if !valid_builder_id(&report.builder_identity.builder_id)
         || report.environment.target_triple == "unavailable"
         || report.environment.os_version == "unavailable"
         || canonicalize(&report.environment.toolchains)

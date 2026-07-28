@@ -1,0 +1,38 @@
+services:
+  nats:
+    ports: !override
+      - "127.0.0.1:14222:4222"
+      - "127.0.0.1:18222:8222"
+  clickhouse:
+    ports: !override
+      - "127.0.0.1:18123:8123"
+  postgres:
+    ports: !override
+      - "127.0.0.1:15432:5432"
+  minio:
+    ports: !override
+      - "127.0.0.1:19000:9000"
+  otel-collector:
+    ports: !override
+      - "127.0.0.1:14317:4317"
+      - "127.0.0.1:14318:4318"
+      - "127.0.0.1:13134:13133"
+  victoriametrics:
+    ports: !override
+      - "127.0.0.1:18428:8428"
+
+volumes:
+  nats-data:
+    name: "${STAGE_GATE_COMPOSE_PROJECT}_nats-data"
+  clickhouse-data:
+    name: "${STAGE_GATE_COMPOSE_PROJECT}_clickhouse-data"
+  postgres-data:
+    name: "${STAGE_GATE_COMPOSE_PROJECT}_postgres-data"
+  minio-data:
+    name: "${STAGE_GATE_COMPOSE_PROJECT}_minio-data"
+  victoriametrics-data:
+    name: "${STAGE_GATE_COMPOSE_PROJECT}_victoriametrics-data"
+
+networks:
+  default:
+    name: "${STAGE_GATE_COMPOSE_PROJECT}_network"

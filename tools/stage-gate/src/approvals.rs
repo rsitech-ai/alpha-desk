@@ -1,14 +1,19 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::File,
+    io::{Read as _, Write as _},
     path::PathBuf,
-    process::{Command, Stdio},
 };
 
+use rustix::fs::{FileType, Mode, OFlags, fstat, open};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tempfile::NamedTempFile;
 
-use crate::canonical::{CanonicalError, canonicalize, canonicalize_json_str};
+use crate::{
+    canonical::{CanonicalError, canonicalize, canonicalize_json_str},
+    provenance::{clean_validsig, run_openpgp_verifier},
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -204,9 +209,13 @@ pub fn verify_approvals(
         if item.claimed_fingerprint != *expected_fingerprint {
             return blocked(ApprovalReasonCode::UntrustedReviewer);
         }
-        let statement_bytes = match fs::read(&item.statement_path) {
+        let statement_bytes = match read_regular_nofollow(&item.statement_path, 4 * 1024 * 1024) {
             Ok(bytes) => bytes,
             Err(_) => return blocked(ApprovalReasonCode::ApprovalStatementMismatch),
+        };
+        let signature_bytes = match read_regular_nofollow(&item.signature_path, 4 * 1024 * 1024) {
+            Ok(bytes) => bytes,
+            Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
         };
         let canonical = match std::str::from_utf8(&statement_bytes)
             .ok()
@@ -235,31 +244,39 @@ pub fn verify_approvals(
         {
             return blocked(ApprovalReasonCode::ApprovalBindingMismatch);
         }
-        if !item.signature_path.is_file() {
+        let mut statement_snapshot = match NamedTempFile::new() {
+            Ok(file) => file,
+            Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
+        };
+        let mut signature_snapshot = match NamedTempFile::new() {
+            Ok(file) => file,
+            Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
+        };
+        if statement_snapshot
+            .write_all(&statement_bytes)
+            .and_then(|()| statement_snapshot.as_file().sync_all())
+            .is_err()
+            || signature_snapshot
+                .write_all(&signature_bytes)
+                .and_then(|()| signature_snapshot.as_file().sync_all())
+                .is_err()
+        {
             return blocked(ApprovalReasonCode::InvalidDetachedSignature);
         }
 
-        let output = Command::new(&gpgv_program)
-            .args(["--status-fd", "1", "--keyring"])
-            .arg(&policy.keyring_path)
-            .arg(&item.signature_path)
-            .arg(&item.statement_path)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
-        let output = match output {
+        let output = match run_openpgp_verifier(
+            gpgv_program.clone(),
+            &policy.keyring_path,
+            signature_snapshot.path(),
+            statement_snapshot.path(),
+        ) {
             Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.contains("No such file") => {
                 return blocked(ApprovalReasonCode::OpenPgpToolingUnavailable);
             }
             Err(_) => return blocked(ApprovalReasonCode::InvalidDetachedSignature),
         };
-        if !output.status.success()
-            || !validsig_fingerprints(&output.stdout)
-                .iter()
-                .any(|fingerprint| fingerprint == expected_fingerprint)
-        {
+        if !output.success || !clean_validsig(output.status.as_bytes(), expected_fingerprint) {
             return blocked(ApprovalReasonCode::InvalidDetachedSignature);
         }
     }
@@ -287,14 +304,24 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn validsig_fingerprints(status: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(status)
-        .lines()
-        .filter_map(|line| line.strip_prefix("[GNUPG:] VALIDSIG "))
-        .filter_map(|fields| fields.split_ascii_whitespace().next())
-        .filter(|fingerprint| {
-            fingerprint.len() == 40 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        .map(str::to_ascii_lowercase)
-        .collect()
+fn read_regular_nofollow(path: &std::path::Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let stat = fstat(&fd).map_err(std::io::Error::from)?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(std::io::Error::other("evidence is not a regular file"));
+    }
+    let mut file = File::from(fd);
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(std::io::Error::other("evidence exceeds configured limit"));
+    }
+    Ok(bytes)
 }

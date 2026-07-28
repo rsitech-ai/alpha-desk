@@ -7,9 +7,14 @@ use std::{
 use stage_gate::{approvals::GateStatus, gate::run_gate};
 
 fn main() -> ExitCode {
-    match parse_args().and_then(|args| {
-        run_gate(&args.repository, &args.config, &args.output).map_err(|error| error.to_string())
-    }) {
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("stage-gate:error:{error}");
+            return ExitCode::from(1);
+        }
+    };
+    match run_gate(&args.repository, &args.config, &args.output) {
         Ok(report) => {
             eprintln!(
                 "stage-gate:{}:{:?}:{}",

@@ -147,6 +147,33 @@ pub fn run_guarded_checks(
     output_policy: &OutputPolicy,
     gate_timeout: Duration,
 ) -> Result<Vec<CommandOutcome>, RunnerError> {
+    run_guarded_checks_observed(
+        repository,
+        snapshot,
+        checks,
+        output_policy,
+        gate_timeout,
+        |_, _| {},
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckProgress {
+    Pass,
+    Fail,
+}
+
+pub fn run_guarded_checks_observed<F>(
+    repository: &Path,
+    snapshot: &RepositorySnapshot,
+    checks: &[CommandSpec],
+    output_policy: &OutputPolicy,
+    gate_timeout: Duration,
+    mut observer: F,
+) -> Result<Vec<CommandOutcome>, RunnerError>
+where
+    F: FnMut(usize, CheckProgress),
+{
     let canonical_repository = repository
         .canonicalize()
         .map_err(|_| RunnerError::UnsafeWorkingDirectory(repository.to_path_buf()))?;
@@ -154,41 +181,53 @@ pub fn run_guarded_checks(
         .checked_add(gate_timeout)
         .ok_or(RunnerError::GateDeadlineExceeded)?;
     let mut outcomes = Vec::with_capacity(checks.len());
-    for check in checks {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(RunnerError::GateDeadlineExceeded);
-        }
-        let canonical_cwd = if check.cwd.is_absolute() {
-            check.cwd.canonicalize()
-        } else {
-            canonical_repository.join(&check.cwd).canonicalize()
-        }
-        .map_err(|_| RunnerError::UnsafeWorkingDirectory(check.cwd.clone()))?;
-        if !canonical_cwd.starts_with(&canonical_repository) {
-            return Err(RunnerError::UnsafeWorkingDirectory(canonical_cwd));
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let gate_limited = remaining <= check.timeout;
-        let mut bounded_check = check.clone();
-        bounded_check.cwd = canonical_cwd;
-        bounded_check.timeout = remaining.min(check.timeout);
-        let outcome = run_command(&bounded_check, output_policy);
-        snapshot.verify_unchanged(repository)?;
-        let outcome = match outcome {
-            Err(error) if gate_limited && error.code() == ProcessErrorCode::TimedOut => {
+    for (index, check) in checks.iter().enumerate() {
+        let result = (|| {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(RunnerError::GateDeadlineExceeded);
             }
-            Err(error) => return Err(RunnerError::Process(error)),
-            Ok(outcome) => outcome,
-        };
-        if !outcome.success {
-            return Err(RunnerError::NonZeroExit {
-                program: check.program.clone(),
-                exit_code: outcome.exit_code,
-            });
+            let canonical_cwd = if check.cwd.is_absolute() {
+                check.cwd.canonicalize()
+            } else {
+                canonical_repository.join(&check.cwd).canonicalize()
+            }
+            .map_err(|_| RunnerError::UnsafeWorkingDirectory(check.cwd.clone()))?;
+            if !canonical_cwd.starts_with(&canonical_repository) {
+                return Err(RunnerError::UnsafeWorkingDirectory(canonical_cwd));
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let gate_limited = remaining <= check.timeout;
+            let mut bounded_check = check.clone();
+            bounded_check.cwd = canonical_cwd;
+            bounded_check.timeout = remaining.min(check.timeout);
+            let outcome = run_command(&bounded_check, output_policy);
+            snapshot.verify_unchanged(repository)?;
+            let outcome = match outcome {
+                Err(error) if gate_limited && error.code() == ProcessErrorCode::TimedOut => {
+                    return Err(RunnerError::GateDeadlineExceeded);
+                }
+                Err(error) => return Err(RunnerError::Process(error)),
+                Ok(outcome) => outcome,
+            };
+            if !outcome.success {
+                return Err(RunnerError::NonZeroExit {
+                    program: check.program.clone(),
+                    exit_code: outcome.exit_code,
+                });
+            }
+            Ok(outcome)
+        })();
+        match result {
+            Ok(outcome) => {
+                observer(index, CheckProgress::Pass);
+                outcomes.push(outcome);
+            }
+            Err(error) => {
+                observer(index, CheckProgress::Fail);
+                return Err(error);
+            }
         }
-        outcomes.push(outcome);
     }
     Ok(outcomes)
 }

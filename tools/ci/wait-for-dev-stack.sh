@@ -9,16 +9,27 @@ repo_root="$(
   CDPATH='' builtin cd -- "$script_dir/../.." &&
     builtin pwd -P
 )"
-compose_file="$repo_root/infra/docker-compose/compose.yaml"
-compose_project="alpha-desk-dev"
+compose_files="${DEV_STACK_COMPOSE_FILES:-$repo_root/infra/docker-compose/compose.yaml}"
+compose_project="${DEV_STACK_COMPOSE_PROJECT:-alpha-desk-dev}"
+nats_monitor_port="${DEV_STACK_NATS_MONITOR_PORT:-8222}"
+clickhouse_port="${DEV_STACK_CLICKHOUSE_PORT:-8123}"
+postgres_port="${DEV_STACK_POSTGRES_PORT:-5432}"
+minio_port="${DEV_STACK_MINIO_PORT:-9000}"
+otel_health_port="${DEV_STACK_OTEL_HEALTH_PORT:-13133}"
+victoriametrics_port="${DEV_STACK_VICTORIAMETRICS_PORT:-8428}"
+IFS=':' read -r -a compose_file_list <<<"$compose_files"
+compose=(docker compose --project-name "$compose_project")
+for compose_file in "${compose_file_list[@]}"; do
+  [[ -f "$compose_file" ]] || {
+    printf 'dev-stack-wait:error missing Compose file %s\n' "$compose_file" >&2
+    exit 2
+  }
+  compose+=(-f "$compose_file")
+done
 
 timeout_seconds="${DEV_STACK_WAIT_TIMEOUT_SECONDS:-120}"
 poll_seconds="${DEV_STACK_WAIT_POLL_SECONDS:-2}"
 
-[[ -f "$compose_file" ]] || {
-  printf 'dev-stack-wait:error missing Compose file %s\n' "$compose_file" >&2
-  exit 2
-}
 [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || {
   printf 'dev-stack-wait:error invalid timeout %q\n' "$timeout_seconds" >&2
   exit 2
@@ -43,10 +54,7 @@ check_initializer() {
   local -a container_ids=()
 
   container_output="$(
-    docker compose \
-      --project-name "$compose_project" \
-      -f "$compose_file" \
-      ps --all --quiet "$service" 2>/dev/null
+    "${compose[@]}" ps --all --quiet "$service" 2>/dev/null
   )" || return 1
 
   [[ -n "$container_output" ]] || return 1
@@ -77,23 +85,23 @@ check_initializer() {
 check_nats() {
   check_initializer nats-init &&
     curl --fail --silent --show-error --max-time 2 \
-      'http://127.0.0.1:8222/healthz?js-enabled-only=true' 2>/dev/null |
+      "http://127.0.0.1:${nats_monitor_port}/healthz?js-enabled-only=true" 2>/dev/null |
       jq -e '.status == "ok" and ((.error? // null) == null)' >/dev/null
 }
 
 check_clickhouse() {
   response="$(
     curl --fail --silent --show-error --max-time 2 \
-      http://127.0.0.1:8123/ping 2>/dev/null
+      "http://127.0.0.1:${clickhouse_port}/ping" 2>/dev/null
   )" &&
     [[ "$response" == "Ok." ]]
 }
 
 check_postgres() {
-  pg_isready -h 127.0.0.1 -p 5432 -U alpha -d alpha -t 2 >/dev/null 2>&1 &&
+  pg_isready -h 127.0.0.1 -p "$postgres_port" -U alpha -d alpha -t 2 >/dev/null 2>&1 &&
     PGPASSWORD=alpha_dev_only PGCONNECT_TIMEOUT=2 \
       psql -X --no-password --tuples-only --no-align \
-      -h 127.0.0.1 -p 5432 -U alpha -d alpha \
+      -h 127.0.0.1 -p "$postgres_port" -U alpha -d alpha \
       -c "SELECT current_database() || '|' || current_user" 2>/dev/null |
       grep -qx 'alpha|alpha'
 }
@@ -101,19 +109,19 @@ check_postgres() {
 check_minio() {
   check_initializer minio-init &&
     curl --fail --silent --show-error --max-time 2 --output /dev/null \
-      http://127.0.0.1:9000/minio/health/live 2>/dev/null
+      "http://127.0.0.1:${minio_port}/minio/health/live" 2>/dev/null
 }
 
 check_otel() {
   curl --fail --silent --show-error --max-time 2 --output /dev/null \
-    http://127.0.0.1:13133/ 2>/dev/null
+    "http://127.0.0.1:${otel_health_port}/" 2>/dev/null
 }
 
 check_victoriametrics() {
   curl --fail --silent --show-error --max-time 2 --output /dev/null \
-    http://127.0.0.1:8428/health 2>/dev/null &&
+    "http://127.0.0.1:${victoriametrics_port}/health" 2>/dev/null &&
     curl --fail --silent --show-error --max-time 2 \
-      http://127.0.0.1:8428/api/v1/targets 2>/dev/null |
+      "http://127.0.0.1:${victoriametrics_port}/api/v1/targets" 2>/dev/null |
       jq -e '
         .status == "success" and
         (.data.activeTargets | type == "array") and

@@ -18,19 +18,21 @@ use crate::{
     canonical::canonicalize,
     config::GateConfig,
     identity::{
-        capture_executable_identity_with_env, executable_file_identity, expand_program_roots,
-        parse_rustc_host, resolve_program, version_output_matches,
+        ExecutableIdentity, capture_executable_identity_with_env, executable_file_identity,
+        expand_program_roots, parse_rustc_host, resolve_program, version_output_matches,
     },
+    output::OutputRoot,
     process::{CommandSpec, OutputPolicy},
-    remote::{RemoteRequirement, verify_remote_proof},
+    provenance::{SignedEvidence, verify_signed_builder_report, verify_signed_remote_proof},
+    remote::RemoteRequirement,
     reports::{
-        AggregateManifest, BuilderEnvironment, BuilderEvidenceValidation, BuilderReport,
-        ComparisonResult, GateResult, aggregate_reports, builder_ids_are_independent,
-        comparison_satisfies_reproducibility, hash_committed_file_sha256, hash_committed_inputs,
-        read_committed_file_bytes, single_builder_aggregate, valid_builder_id,
-        validate_builder_evidence,
+        AggregateManifest, BuilderEnvironment, BuilderEvidenceValidation, BuilderIdentity,
+        BuilderReport, ComparisonResult, ExecutableEvidence, GateResult, aggregate_reports,
+        builder_ids_are_independent, comparison_satisfies_reproducibility,
+        hash_committed_file_sha256, hash_committed_inputs, read_committed_file_bytes,
+        single_builder_aggregate, valid_builder_id, validate_builder_evidence,
     },
-    runner::{DesignExpectation, RepositorySnapshot, run_guarded_checks},
+    runner::{CheckProgress, DesignExpectation, RepositorySnapshot, run_guarded_checks_observed},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -112,16 +114,37 @@ pub fn run_gate(
     config_path: &Path,
     requested_output: &Path,
 ) -> Result<GateRunReport, GateRunError> {
+    let requested_output = if requested_output.is_absolute() {
+        requested_output
+            .strip_prefix(repository)
+            .map_err(|_| GateRunError::UnsafeOutput)?
+            .to_path_buf()
+    } else {
+        requested_output.to_path_buf()
+    };
     let repository = repository
         .canonicalize()
         .map_err(|error| GateRunError::Repository(error.to_string()))?;
+    let bootstrap = bootstrap_output(&repository, &requested_output);
     let relative_config = repository_relative(&repository, config_path)?;
-    let config_source = fs::read_to_string(repository.join(&relative_config))
-        .map_err(|error| GateRunError::ConfigRead(error.to_string()))?;
-    let config = GateConfig::parse(&config_source)
-        .map_err(|error| GateRunError::ConfigInvalid(error.to_string()))?;
-    let output = prepare_output_path(&repository, &config, requested_output)?;
-    let builder_output = prepare_output_path(
+    let config_source = match fs::read_to_string(repository.join(&relative_config)) {
+        Ok(source) => source,
+        Err(error) => {
+            let run_error = GateRunError::ConfigRead(error.to_string());
+            publish_bootstrap_failure(bootstrap.as_ref(), &run_error)?;
+            return Err(run_error);
+        }
+    };
+    let config = match GateConfig::parse(&config_source) {
+        Ok(config) => config,
+        Err(error) => {
+            let run_error = GateRunError::ConfigInvalid(error.to_string());
+            publish_bootstrap_failure(bootstrap.as_ref(), &run_error)?;
+            return Err(run_error);
+        }
+    };
+    let output = prepare_output_name(&repository, &config, &requested_output)?;
+    let builder_output = prepare_output_name(
         &repository,
         &config,
         Path::new(&config.builder_report_output_path),
@@ -129,250 +152,479 @@ pub fn run_gate(
     if output == builder_output {
         return Err(GateRunError::UnsafeOutput);
     }
-    let input_hashes = hash_committed_inputs(
-        &repository,
-        &relative_config,
-        Path::new(&config.schema_path),
-    )
-    .map_err(|error| GateRunError::Input(error.to_string()))?;
-    let trust_registry_sha256 =
-        hash_committed_file_sha256(&repository, Path::new(&config.approvals.policy_path))
-            .map_err(|error| GateRunError::Input(error.to_string()))?;
-
-    let snapshot = RepositorySnapshot::capture(
-        &repository,
-        &DesignExpectation {
-            tag: config.design.tag.clone(),
-            tag_object: config.design.object.clone(),
-            commit: config.design.commit.clone(),
-        },
-    )
-    .map_err(|error| GateRunError::Repository(error.to_string()))?;
-    let roots = expand_program_roots(&config.program_roots);
-    let controlled_environment = controlled_environment(&roots);
-    let mut resolved_programs = BTreeMap::new();
-    let resolved_gpgv = resolve_program(&config.approvals.gpgv_program, &roots, &repository).ok();
-    if let Some(program) = &resolved_gpgv {
-        resolved_programs.insert(
-            "approval:gpgv".to_owned(),
-            executable_file_identity("approval:gpgv", program)
-                .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?,
-        );
-    }
-    let commands = config
+    let output_root = if config.output_root == "target/stage-gates" {
+        bootstrap
+            .map(|(root, _)| root)
+            .ok_or(GateRunError::UnsafeOutput)?
+    } else {
+        OutputRoot::open(&repository, Path::new(&config.output_root))
+            .map_err(|error| GateRunError::Output(error.to_string()))?
+    };
+    output_root
+        .remove_if_exists(&output)
+        .map_err(|error| GateRunError::Output(error.to_string()))?;
+    output_root
+        .remove_if_exists(&builder_output)
+        .map_err(|error| GateRunError::Output(error.to_string()))?;
+    let invocation_id = random_invocation_id()?;
+    let mut implementation_commit = repository_head(&repository);
+    let mut check_states = config
         .checks
         .iter()
-        .map(|check| {
-            let program = resolve_program(&check.program, &roots, &repository)
+        .map(|check| (check.id.clone(), "NOT_RUN"))
+        .collect::<BTreeMap<_, _>>();
+    publish_lifecycle_report(
+        &output_root,
+        &output,
+        &config.stage_id,
+        &invocation_id,
+        &implementation_commit,
+        "initialized",
+        "gate_in_progress",
+        "NOT_RUN",
+        &check_states,
+    )?;
+
+    let execution = (|| {
+        let input_hashes = hash_committed_inputs(
+            &repository,
+            &relative_config,
+            Path::new(&config.schema_path),
+        )
+        .map_err(|error| GateRunError::Input(error.to_string()))?;
+        let trust_registry_sha256 =
+            hash_committed_file_sha256(&repository, Path::new(&config.approvals.policy_path))
+                .map_err(|error| GateRunError::Input(error.to_string()))?;
+
+        let snapshot = RepositorySnapshot::capture(
+            &repository,
+            &DesignExpectation {
+                tag: config.design.tag.clone(),
+                tag_object: config.design.object.clone(),
+                commit: config.design.commit.clone(),
+            },
+        )
+        .map_err(|error| GateRunError::Repository(error.to_string()))?;
+        implementation_commit = snapshot.head().to_owned();
+        let roots = expand_program_roots(&config.program_roots);
+        let controlled_environment = controlled_environment(&roots);
+        let mut resolved_programs = BTreeMap::new();
+        let mut resolved_paths = BTreeMap::new();
+        let resolved_gpgv =
+            resolve_program(&config.approvals.gpgv_program, &roots, &repository).ok();
+        if let Some(program) = &resolved_gpgv {
+            let identity = executable_file_identity("approval:gpgv", program)
                 .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
-            resolved_programs.insert(
-                check.id.clone(),
-                executable_file_identity(&check.id, &program)
-                    .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?,
-            );
-            let mut command_environment = check.env.clone();
-            for name in &check.inherit_env {
-                if name == "PATH" {
-                    if let Some(path) = controlled_environment.get("PATH") {
-                        command_environment.insert(name.clone(), path.clone());
-                    }
-                } else if let Ok(value) = env::var(name) {
-                    command_environment.insert(name.clone(), value);
-                }
-            }
-            Ok(CommandSpec {
-                program,
-                args: check.args.iter().map(Into::into).collect(),
-                cwd: PathBuf::from(&check.cwd),
-                env: command_environment.into_iter().collect(),
-                timeout: Duration::from_secs(check.timeout_seconds),
-                termination_grace: Duration::from_secs(2),
-            })
-        })
-        .collect::<Result<Vec<_>, GateRunError>>()?;
-    let redactions = config
-        .checks
-        .iter()
-        .flat_map(|check| check.env.values())
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .collect();
-    let outcomes = run_guarded_checks(
-        &repository,
-        &snapshot,
-        &commands,
-        &OutputPolicy {
-            max_bytes_per_stream: config.max_output_bytes,
-            redactions,
-        },
-        Duration::from_secs(config.whole_gate_timeout_seconds),
-    )
-    .map_err(|error| GateRunError::Check(error.to_string()))?;
-
-    let mut reasons = Vec::new();
-    let (environment, identity_complete, versions_match) =
-        capture_builder_environment(&config, &roots, &repository, &controlled_environment)?;
-    if !identity_complete {
-        reasons.push(GateReasonCode::BuilderIdentityUnavailable);
-    }
-    if !versions_match {
-        reasons.push(GateReasonCode::BuilderVersionMismatch);
-    }
-    let artifacts = collect_artifacts(
-        &repository,
-        &config
-            .artifacts
+            resolved_paths.insert("approval:gpgv".to_owned(), identity.resolved_path.clone());
+            resolved_programs.insert("approval:gpgv".to_owned(), executable_evidence(identity));
+        }
+        let commands = config
+            .checks
             .iter()
-            .map(|artifact| ArtifactRequest {
-                logical_name: artifact.id.clone(),
-                relative_path: PathBuf::from(&artifact.path),
-                kind: artifact.kind.clone(),
-                producer: artifact.producer.clone(),
-                target_triple: if artifact.target_triple == "builder-host" {
-                    environment.target_triple.clone()
-                } else {
-                    artifact.target_triple.clone()
-                },
-                profile: artifact.profile.clone(),
-                expected_sha256: artifact.expected_sha256.clone(),
+            .map(|check| {
+                let program = resolve_program(&check.program, &roots, &repository)
+                    .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
+                let identity = executable_file_identity(&check.id, &program)
+                    .map_err(|error| GateRunError::ProgramUnavailable(error.to_string()))?;
+                resolved_paths.insert(check.id.clone(), identity.resolved_path.clone());
+                resolved_programs.insert(check.id.clone(), executable_evidence(identity));
+                let mut command_environment = check.env.clone();
+                for name in &check.inherit_env {
+                    if name == "PATH" {
+                        if let Some(path) = controlled_environment.get("PATH") {
+                            command_environment.insert(name.clone(), path.clone());
+                        }
+                    } else if let Ok(value) = env::var(name) {
+                        command_environment.insert(name.clone(), value);
+                    }
+                }
+                Ok(CommandSpec {
+                    program,
+                    args: check.args.iter().map(Into::into).collect(),
+                    cwd: PathBuf::from(&check.cwd),
+                    env: command_environment.into_iter().collect(),
+                    timeout: Duration::from_secs(check.timeout_seconds),
+                    termination_grace: Duration::from_secs(check.termination_grace_seconds),
+                })
             })
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| GateRunError::Artifact(error.to_string()))?;
-    snapshot
-        .verify_unchanged(&repository)
-        .map_err(|error| GateRunError::Repository(error.to_string()))?;
+            .collect::<Result<Vec<_>, GateRunError>>()?;
+        let redactions = config
+            .checks
+            .iter()
+            .flat_map(|check| check.env.values())
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .collect();
+        let outcomes = run_guarded_checks_observed(
+            &repository,
+            &snapshot,
+            &commands,
+            &OutputPolicy {
+                max_bytes_per_stream: config.max_output_bytes,
+                redactions,
+            },
+            Duration::from_secs(config.whole_gate_timeout_seconds),
+            |index, progress| {
+                if let Some(check) = config.checks.get(index)
+                    && let Some(state) = check_states.get_mut(&check.id)
+                {
+                    *state = match progress {
+                        CheckProgress::Pass => "PASS",
+                        CheckProgress::Fail => "FAIL",
+                    };
+                }
+            },
+        )
+        .map_err(|error| GateRunError::Check(error.to_string()))?;
 
-    let command_log_hashes = config
-        .checks
-        .iter()
-        .zip(&outcomes)
-        .map(|(check, outcome)| {
-            let mut bytes = outcome.stdout.text.as_bytes().to_vec();
-            bytes.extend_from_slice(outcome.stderr.text.as_bytes());
-            (check.id.clone(), sha256(&bytes))
-        })
-        .collect();
-    let check_results = config
-        .checks
-        .iter()
-        .map(|check| (check.id.clone(), GateResult::Pass))
-        .collect();
-    let builder_id =
-        env::var("STAGE_GATE_BUILDER_ID").unwrap_or_else(|_| "local-unidentified".to_owned());
-    if !valid_builder_id(&builder_id) {
-        reasons.push(GateReasonCode::BuilderIdentityUnavailable);
-    }
-    let builder_report = BuilderReport {
-        schema_version: 1,
-        stage_id: config.stage_id.clone(),
-        implementation_commit: snapshot.head().to_owned(),
-        design_tag_object: config.design.object.clone(),
-        design_commit: config.design.commit.clone(),
-        config_sha256: input_hashes.config_sha256,
-        schema_sha256: input_hashes.schema_sha256,
-        builder_id,
-        environment,
-        resolved_programs,
-        command_log_hashes,
-        artifacts,
-        check_results,
-    };
-    let builder_report_sha256 = builder_report
-        .full_hash()
-        .map_err(|error| GateRunError::Report(error.to_string()))?;
-    let comparison_projection_sha256 = builder_report
-        .projection_hash()
-        .map_err(|error| GateRunError::Report(error.to_string()))?;
+        let mut reasons = Vec::new();
+        let (environment, tool_paths, identity_complete, versions_match) =
+            capture_builder_environment(&config, &roots, &repository, &controlled_environment)?;
+        resolved_paths.extend(tool_paths);
+        if !identity_complete {
+            reasons.push(GateReasonCode::BuilderIdentityUnavailable);
+        }
+        if !versions_match {
+            reasons.push(GateReasonCode::BuilderVersionMismatch);
+        }
+        let artifacts = collect_artifacts(
+            &repository,
+            &config
+                .artifacts
+                .iter()
+                .map(|artifact| ArtifactRequest {
+                    logical_name: artifact.id.clone(),
+                    relative_path: PathBuf::from(&artifact.path),
+                    kind: artifact.kind.clone(),
+                    producer: artifact.producer.clone(),
+                    target_triple: if artifact.target_triple == "builder-host" {
+                        environment.target_triple.clone()
+                    } else {
+                        artifact.target_triple.clone()
+                    },
+                    profile: artifact.profile.clone(),
+                    expected_sha256: artifact.expected_sha256.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| GateRunError::Artifact(error.to_string()))?;
+        snapshot
+            .verify_unchanged(&repository)
+            .map_err(|error| GateRunError::Repository(error.to_string()))?;
 
-    let mut aggregate =
-        aggregate_builder_reports(&repository, &config, &builder_report, &mut reasons)?;
-    let policy = load_trust_policy(&repository, &config, &mut reasons);
-    let remote_path = repository.join(&config.remote.proof_path);
-    let remote = verify_remote_proof(
-        &remote_path,
-        &RemoteRequirement {
-            implementation_commit: builder_report.implementation_commit.clone(),
-            app_source: config.remote.app_source.clone(),
-            required_checks: config.remote.required_checks.clone(),
-        },
-    );
-    let remote_hash = fs::read(&remote_path).ok().map(|bytes| sha256(&bytes));
-    let remote_result = if remote.status == GateStatus::Pass {
-        GateResult::Pass
-    } else {
-        reasons.push(GateReasonCode::RequiredGithubChecksUnavailable);
-        GateResult::Blocked
-    };
-    aggregate = aggregate.bind_external_inputs_with_status(
-        remote_hash,
-        remote_result,
-        trust_registry_sha256,
-    );
-    let aggregate_evidence_sha256 = aggregate
-        .full_hash()
-        .map_err(|error| GateRunError::Report(error.to_string()))?;
-    let comparison_manifest_sha256 = aggregate
-        .comparison_manifest_sha256()
-        .map_err(|error| GateRunError::Report(error.to_string()))?;
-    let known_limitations_sha256 = sha256(
-        &canonicalize(&config.approvals.known_limitations)
-            .map_err(|error| GateRunError::Report(error.to_string()))?,
-    );
-
-    verify_external_approvals(
-        &repository,
-        &config,
-        policy.as_ref(),
-        resolved_gpgv,
-        ApprovalBinding {
+        let check_evidence_hashes = config
+            .checks
+            .iter()
+            .zip(&outcomes)
+            .map(|(check, outcome)| {
+                let stable = serde_json::json!({
+                    "check_id": check.id,
+                    "executable_sha256": resolved_programs
+                        .get(&check.id)
+                        .map(|evidence| evidence.sha256.as_str()),
+                    "exit_code": outcome.exit_code,
+                });
+                let bytes =
+                    canonicalize(&stable).expect("stable check evidence is canonicalizable");
+                (check.id.clone(), sha256(&bytes))
+            })
+            .collect();
+        let check_results = config
+            .checks
+            .iter()
+            .map(|check| (check.id.clone(), GateResult::Pass))
+            .collect();
+        let builder_id =
+            env::var("STAGE_GATE_BUILDER_ID").unwrap_or_else(|_| "local-unidentified".to_owned());
+        if !valid_builder_id(&builder_id) {
+            reasons.push(GateReasonCode::BuilderIdentityUnavailable);
+        }
+        let builder_report = BuilderReport {
+            schema_version: 1,
             stage_id: config.stage_id.clone(),
-            implementation_commit: builder_report.implementation_commit.clone(),
-            design_tag_object: builder_report.design_tag_object.clone(),
-            design_commit: builder_report.design_commit.clone(),
-            aggregate_evidence_sha256: aggregate_evidence_sha256.clone(),
-            comparison_manifest_sha256: comparison_manifest_sha256.clone(),
-            known_limitations: config.approvals.known_limitations.clone(),
-            known_limitations_sha256,
-        },
-        &mut reasons,
-    );
-    snapshot
-        .verify_unchanged(&repository)
-        .map_err(|error| GateRunError::Repository(error.to_string()))?;
+            implementation_commit: snapshot.head().to_owned(),
+            design_tag_object: config.design.object.clone(),
+            design_commit: config.design.commit.clone(),
+            config_sha256: input_hashes.config_sha256,
+            schema_sha256: input_hashes.schema_sha256,
+            builder_identity: BuilderIdentity {
+                builder_id,
+                signer_role: "local".to_owned(),
+                signer_fingerprint: String::new(),
+                resolved_paths,
+            },
+            environment,
+            resolved_programs,
+            check_evidence_hashes,
+            artifacts,
+            check_results,
+        };
+        let builder_report_sha256 = builder_report
+            .full_hash()
+            .map_err(|error| GateRunError::Report(error.to_string()))?;
+        let comparison_projection_sha256 = builder_report
+            .projection_hash()
+            .map_err(|error| GateRunError::Report(error.to_string()))?;
 
-    reasons.sort_by_key(reason_order);
-    reasons.dedup();
-    let overall_result = if reasons.is_empty() {
-        GateStatus::Pass
-    } else if reasons.contains(&GateReasonCode::SecondBuilderMismatch) {
-        GateStatus::Fail
-    } else {
-        GateStatus::Blocked
-    };
-    let report = GateRunReport {
-        schema_version: 1,
-        stage_id: config.stage_id,
-        stage_outcome: if overall_result == GateStatus::Pass {
-            StageOutcome::Accepted
+        let policy = load_trust_policy(&repository, &config, &mut reasons);
+        let mut aggregate = aggregate_builder_reports(
+            &repository,
+            &config,
+            &builder_report,
+            policy.as_ref(),
+            resolved_gpgv.clone(),
+            &mut reasons,
+        )?;
+        let remote_requirement = RemoteRequirement {
+            implementation_commit: builder_report.implementation_commit.clone(),
+            repository: config.remote.repository.clone(),
+            repository_id: config.remote.repository_id,
+            repository_owner_id: config.remote.repository_owner_id,
+            workflow: config.remote.workflow.clone(),
+            workflow_ref: config.remote.workflow_ref.clone(),
+            workflow_sha: config.remote.workflow_sha.clone(),
+            event_name: config.remote.event_name.clone(),
+            git_ref: config.remote.git_ref.clone(),
+            signing_check_name: config.remote.signing_check_name.clone(),
+            required_checks: config.remote.required_checks.clone(),
+        };
+        let remote = policy
+            .as_ref()
+            .zip(resolved_gpgv.clone())
+            .and_then(|(policy, verifier)| {
+                verify_signed_remote_proof(
+                    &SignedEvidence {
+                        role: config.remote.signer_role.clone(),
+                        payload_path: repository.join(&config.remote.proof_path),
+                        signature_path: repository.join(&config.remote.signature_path),
+                    },
+                    &remote_requirement,
+                    policy,
+                    verifier,
+                    config.max_output_bytes,
+                )
+                .ok()
+            });
+        let (remote_hash, remote_result) = match remote {
+            Some(verified) => (Some(verified.sha256), GateResult::Pass),
+            None => {
+                reasons.push(GateReasonCode::RequiredGithubChecksUnavailable);
+                (None, GateResult::Blocked)
+            }
+        };
+        aggregate = aggregate.bind_external_inputs_with_status(
+            remote_hash,
+            remote_result,
+            trust_registry_sha256,
+        );
+        let aggregate_evidence_sha256 = aggregate
+            .full_hash()
+            .map_err(|error| GateRunError::Report(error.to_string()))?;
+        let comparison_manifest_sha256 = aggregate
+            .comparison_manifest_sha256()
+            .map_err(|error| GateRunError::Report(error.to_string()))?;
+        let known_limitations_sha256 = sha256(
+            &canonicalize(&config.approvals.known_limitations)
+                .map_err(|error| GateRunError::Report(error.to_string()))?,
+        );
+
+        verify_external_approvals(
+            &repository,
+            &config,
+            policy.as_ref(),
+            resolved_gpgv,
+            ApprovalBinding {
+                stage_id: config.stage_id.clone(),
+                implementation_commit: builder_report.implementation_commit.clone(),
+                design_tag_object: builder_report.design_tag_object.clone(),
+                design_commit: builder_report.design_commit.clone(),
+                aggregate_evidence_sha256: aggregate_evidence_sha256.clone(),
+                comparison_manifest_sha256: comparison_manifest_sha256.clone(),
+                known_limitations: config.approvals.known_limitations.clone(),
+                known_limitations_sha256,
+            },
+            &mut reasons,
+        );
+        snapshot
+            .verify_unchanged(&repository)
+            .map_err(|error| GateRunError::Repository(error.to_string()))?;
+
+        reasons.sort_by_key(reason_order);
+        reasons.dedup();
+        let overall_result = if reasons.is_empty() {
+            GateStatus::Pass
+        } else if reasons.contains(&GateReasonCode::SecondBuilderMismatch) {
+            GateStatus::Fail
         } else {
-            StageOutcome::Hold
-        },
-        overall_result,
-        reason_codes: reasons,
-        builder_report,
-        builder_report_sha256,
-        comparison_projection_sha256,
-        aggregate_manifest: aggregate,
-        aggregate_evidence_sha256,
-        comparison_manifest_sha256,
+            GateStatus::Blocked
+        };
+        let report = GateRunReport {
+            schema_version: 1,
+            stage_id: config.stage_id.clone(),
+            stage_outcome: if overall_result == GateStatus::Pass {
+                StageOutcome::Accepted
+            } else {
+                StageOutcome::Hold
+            },
+            overall_result,
+            reason_codes: reasons,
+            builder_report,
+            builder_report_sha256,
+            comparison_projection_sha256,
+            aggregate_manifest: aggregate,
+            aggregate_evidence_sha256,
+            comparison_manifest_sha256,
+        };
+        let bytes =
+            canonicalize(&report).map_err(|error| GateRunError::Report(error.to_string()))?;
+        let builder_bytes = canonicalize(&report.builder_report)
+            .map_err(|error| GateRunError::Report(error.to_string()))?;
+        output_root
+            .write_atomic(&builder_output, &builder_bytes)
+            .map_err(|error| GateRunError::Output(error.to_string()))?;
+        output_root
+            .write_atomic(&output, &bytes)
+            .map_err(|error| GateRunError::Output(error.to_string()))?;
+        Ok(report)
+    })();
+    match execution {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            let _ = output_root.remove_if_exists(&builder_output);
+            let publication = publish_lifecycle_report(
+                &output_root,
+                &output,
+                &config.stage_id,
+                &invocation_id,
+                &implementation_commit,
+                failure_phase(&error),
+                gate_error_code(&error),
+                "FAIL",
+                &check_states,
+            );
+            match publication {
+                Ok(()) => Err(error),
+                Err(publication_error) => Err(publication_error),
+            }
+        }
+    }
+}
+
+fn gate_error_code(error: &GateRunError) -> &'static str {
+    match error {
+        GateRunError::ConfigRead(_) | GateRunError::ConfigInvalid(_) => "config_failed",
+        GateRunError::UnsafeOutput | GateRunError::Output(_) => "output_failed",
+        GateRunError::ProgramUnavailable(_) => "program_unavailable",
+        GateRunError::Repository(_) => "repository_failed",
+        GateRunError::Check(_) => "check_failed",
+        GateRunError::Artifact(_) => "artifact_failed",
+        GateRunError::Input(_) => "input_failed",
+        GateRunError::Report(_) => "report_failed",
+    }
+}
+
+fn bootstrap_output(repository: &Path, requested: &Path) -> Option<(OutputRoot, PathBuf)> {
+    let relative = if requested.is_absolute() {
+        requested.strip_prefix(repository).ok()?.to_path_buf()
+    } else {
+        requested.to_path_buf()
     };
+    if relative.parent()? != Path::new("target/stage-gates") {
+        return None;
+    }
+    let name = PathBuf::from(relative.file_name()?);
+    let root = OutputRoot::open(repository, Path::new("target/stage-gates")).ok()?;
+    Some((root, name))
+}
+
+fn publish_bootstrap_failure(
+    bootstrap: Option<&(OutputRoot, PathBuf)>,
+    error: &GateRunError,
+) -> Result<(), GateRunError> {
+    let Some((root, output)) = bootstrap else {
+        return Ok(());
+    };
+    for stale_output in [
+        output.as_path(),
+        Path::new("stage-0.builder.json"),
+        Path::new("stage-0-builder-report.json"),
+    ] {
+        root.remove_if_exists(stale_output)
+            .map_err(|remove_error| GateRunError::Output(remove_error.to_string()))?;
+    }
+    let invocation_id = random_invocation_id().unwrap_or_else(|_| "unavailable".to_owned());
+    publish_lifecycle_report(
+        root,
+        output,
+        "stage-0-foundations",
+        &invocation_id,
+        "",
+        failure_phase(error),
+        gate_error_code(error),
+        "FAIL",
+        &BTreeMap::new(),
+    )
+}
+
+fn failure_phase(error: &GateRunError) -> &'static str {
+    match error {
+        GateRunError::ConfigRead(_) | GateRunError::ConfigInvalid(_) => "configuration",
+        GateRunError::UnsafeOutput | GateRunError::Output(_) => "output",
+        GateRunError::ProgramUnavailable(_) => "program_resolution",
+        GateRunError::Repository(_) => "repository",
+        GateRunError::Check(_) => "checks",
+        GateRunError::Artifact(_) => "artifacts",
+        GateRunError::Input(_) => "committed_inputs",
+        GateRunError::Report(_) => "report",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_lifecycle_report(
+    root: &OutputRoot,
+    output: &Path,
+    stage_id: &str,
+    invocation_id: &str,
+    implementation_commit: &str,
+    failure_phase: &str,
+    error_code: &str,
+    overall_result: &str,
+    check_states: &BTreeMap<String, &str>,
+) -> Result<(), GateRunError> {
+    let report = serde_json::json!({
+        "check_results": check_states,
+        "error_code": error_code,
+        "failure_phase": failure_phase,
+        "implementation_commit": implementation_commit,
+        "invocation_id": invocation_id,
+        "overall_result": overall_result,
+        "schema_version": 1,
+        "stage_id": stage_id,
+        "stage_outcome": "HOLD",
+    });
     let bytes = canonicalize(&report).map_err(|error| GateRunError::Report(error.to_string()))?;
-    let builder_bytes = canonicalize(&report.builder_report)
-        .map_err(|error| GateRunError::Report(error.to_string()))?;
-    write_atomic(&builder_output, &builder_bytes)?;
-    write_atomic(&output, &bytes)?;
-    Ok(report)
+    root.write_atomic(output, &bytes)
+        .map_err(|error| GateRunError::Output(error.to_string()))
+}
+
+fn random_invocation_id() -> Result<String, GateRunError> {
+    let mut random = [0_u8; 16];
+    getrandom::getrandom(&mut random).map_err(|error| GateRunError::Output(error.to_string()))?;
+    Ok(hex::encode(random))
+}
+
+fn repository_head(repository: &Path) -> String {
+    Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(repository)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .env_clear()
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn capture_builder_environment(
@@ -380,8 +632,9 @@ fn capture_builder_environment(
     roots: &[PathBuf],
     repository: &Path,
     environment: &BTreeMap<String, String>,
-) -> Result<(BuilderEnvironment, bool, bool), GateRunError> {
+) -> Result<(BuilderEnvironment, BTreeMap<String, PathBuf>, bool, bool), GateRunError> {
     let mut identities = BTreeMap::new();
+    let mut resolved_paths = BTreeMap::new();
     let mut complete = true;
     let mut versions_match = true;
     for tool in &config.builder.tools {
@@ -396,7 +649,8 @@ fn capture_builder_environment(
                 ) {
                     versions_match = false;
                 }
-                identities.insert(tool.id.clone(), identity);
+                resolved_paths.insert(tool.id.clone(), identity.resolved_path.clone());
+                identities.insert(tool.id.clone(), executable_evidence(identity));
             }
             Err(_) => complete = false,
         }
@@ -427,51 +681,74 @@ fn capture_builder_environment(
             toolchains: identities,
             toolchain_fingerprint,
         },
+        resolved_paths,
         complete,
         versions_match,
     ))
+}
+
+fn executable_evidence(identity: ExecutableIdentity) -> ExecutableEvidence {
+    ExecutableEvidence {
+        id: identity.id,
+        sha256: identity.sha256,
+        version_output: identity.version_output,
+    }
 }
 
 fn aggregate_builder_reports(
     repository: &Path,
     config: &GateConfig,
     builder_report: &BuilderReport,
+    policy: Option<&TrustPolicy>,
+    verifier: Option<PathBuf>,
     reasons: &mut Vec<GateReasonCode>,
 ) -> Result<AggregateManifest, GateRunError> {
-    let path = repository.join(&config.comparison.second_builder_report_path);
-    let aggregate = match fs::read(&path) {
-        Err(_) => {
+    let second = policy.zip(verifier).and_then(|(policy, verifier)| {
+        verify_signed_builder_report(
+            &SignedEvidence {
+                role: config.comparison.signer_role.clone(),
+                payload_path: repository.join(&config.comparison.second_builder_report_path),
+                signature_path: repository.join(&config.comparison.second_builder_signature_path),
+            },
+            builder_report,
+            &config.builder,
+            policy,
+            verifier,
+            config.max_output_bytes,
+        )
+        .ok()
+    });
+    let aggregate = match second {
+        None => {
             reasons.push(GateReasonCode::SecondBuilderUnavailable);
             single_builder_aggregate(builder_report)
         }
-        Ok(bytes) => match serde_json::from_slice::<BuilderReport>(&bytes) {
-            Ok(second) => {
-                let aggregate = aggregate_reports(builder_report, &second);
-                if !builder_ids_are_independent(&builder_report.builder_id, &second.builder_id) {
+        Some(verified) => {
+            let second = verified.value;
+            let aggregate = aggregate_reports(builder_report, &second);
+            if !builder_ids_are_independent(
+                &builder_report.builder_identity.builder_id,
+                &second.builder_identity.builder_id,
+            ) {
+                reasons.push(GateReasonCode::SecondBuilderIdentityInvalid);
+            }
+            match validate_builder_evidence(&config.builder, &second) {
+                BuilderEvidenceValidation::Valid => {}
+                BuilderEvidenceValidation::IdentityInvalid => {
                     reasons.push(GateReasonCode::SecondBuilderIdentityInvalid);
                 }
-                match validate_builder_evidence(&config.builder, &second) {
-                    BuilderEvidenceValidation::Valid => {}
-                    BuilderEvidenceValidation::IdentityInvalid => {
-                        reasons.push(GateReasonCode::SecondBuilderIdentityInvalid);
-                    }
-                    BuilderEvidenceValidation::VersionMismatch => {
-                        reasons.push(GateReasonCode::SecondBuilderVersionMismatch);
-                    }
+                BuilderEvidenceValidation::VersionMismatch => {
+                    reasons.push(GateReasonCode::SecondBuilderVersionMismatch);
                 }
-                if let Ok(value) = &aggregate
-                    && !comparison_satisfies_reproducibility(value.comparison)
-                    && let Some(reason) = comparison_gate_reason(value.comparison)
-                {
-                    reasons.push(reason);
-                }
-                aggregate
             }
-            Err(_) => {
-                reasons.push(GateReasonCode::SecondBuilderMismatch);
-                single_builder_aggregate(builder_report)
+            if let Ok(value) = &aggregate
+                && !comparison_satisfies_reproducibility(value.comparison)
+                && let Some(reason) = comparison_gate_reason(value.comparison)
+            {
+                reasons.push(reason);
             }
-        },
+            aggregate
+        }
     };
     aggregate.map_err(|error| GateRunError::Report(error.to_string()))
 }
@@ -592,29 +869,31 @@ fn controlled_environment(roots: &[PathBuf]) -> BTreeMap<String, String> {
     environment
 }
 
-fn prepare_output_path(
+fn prepare_output_name(
     repository: &Path,
     config: &GateConfig,
     requested: &Path,
 ) -> Result<PathBuf, GateRunError> {
-    let output_root = repository.join(&config.output_root);
-    let unresolved_output = if requested.is_absolute() {
-        requested.to_path_buf()
+    let relative = if requested.is_absolute() {
+        requested
+            .strip_prefix(repository)
+            .map_err(|_| GateRunError::UnsafeOutput)?
+            .to_path_buf()
     } else {
-        repository.join(requested)
+        requested.to_path_buf()
     };
-    let output = normalize_nonexistent_path(&unresolved_output)?;
-    if !lexically_inside(&output_root, &output) || output == output_root {
+    if relative.parent() != Some(Path::new(&config.output_root)) {
         return Err(GateRunError::UnsafeOutput);
     }
-    let relative = output
-        .strip_prefix(repository)
-        .map_err(|_| GateRunError::UnsafeOutput)?;
+    let name = relative
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or(GateRunError::UnsafeOutput)?;
     let ignored = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(repository)
         .args(["check-ignore", "-q", "--"])
-        .arg(relative)
+        .arg(&relative)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -624,40 +903,7 @@ fn prepare_output_path(
     if !ignored.success() {
         return Err(GateRunError::UnsafeOutput);
     }
-    fs::create_dir_all(&output_root).map_err(|error| GateRunError::Output(error.to_string()))?;
-    let canonical_root = output_root
-        .canonicalize()
-        .map_err(|_| GateRunError::UnsafeOutput)?;
-    if !canonical_root.starts_with(repository) {
-        return Err(GateRunError::UnsafeOutput);
-    }
-    Ok(output)
-}
-
-fn normalize_nonexistent_path(path: &Path) -> Result<PathBuf, GateRunError> {
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
-    {
-        return Err(GateRunError::UnsafeOutput);
-    }
-    let mut ancestor = path;
-    let mut suffix = Vec::new();
-    while !ancestor.exists() {
-        let name = ancestor
-            .file_name()
-            .ok_or(GateRunError::UnsafeOutput)?
-            .to_owned();
-        suffix.push(name);
-        ancestor = ancestor.parent().ok_or(GateRunError::UnsafeOutput)?;
-    }
-    let mut normalized = ancestor
-        .canonicalize()
-        .map_err(|_| GateRunError::UnsafeOutput)?;
-    for component in suffix.into_iter().rev() {
-        normalized.push(component);
-    }
-    Ok(normalized)
+    Ok(PathBuf::from(name))
 }
 
 fn repository_relative(repository: &Path, path: &Path) -> Result<PathBuf, GateRunError> {
@@ -681,21 +927,6 @@ fn repository_relative(repository: &Path, path: &Path) -> Result<PathBuf, GateRu
         ));
     }
     Ok(relative)
-}
-
-fn lexically_inside(root: &Path, path: &Path) -> bool {
-    path.starts_with(root)
-        && !path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), GateRunError> {
-    let parent = path.parent().ok_or(GateRunError::UnsafeOutput)?;
-    fs::create_dir_all(parent).map_err(|error| GateRunError::Output(error.to_string()))?;
-    let temporary = parent.join(format!(".stage-gate-{}.tmp", std::process::id()));
-    fs::write(&temporary, bytes).map_err(|error| GateRunError::Output(error.to_string()))?;
-    fs::rename(&temporary, path).map_err(|error| GateRunError::Output(error.to_string()))
 }
 
 fn sha256(bytes: &[u8]) -> String {
