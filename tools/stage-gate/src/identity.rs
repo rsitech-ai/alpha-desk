@@ -22,6 +22,12 @@ pub struct ExecutableIdentity {
     pub version_output: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedProgram {
+    pub invocation_path: PathBuf,
+    pub executable_path: PathBuf,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityErrorCode {
     ProgramUnavailable,
@@ -78,7 +84,7 @@ pub fn resolve_program(
     configured: &str,
     approved_roots: &[PathBuf],
     repository: &Path,
-) -> Result<PathBuf, IdentityError> {
+) -> Result<ResolvedProgram, IdentityError> {
     let requested = Path::new(configured);
     if requested.components().count() > 1 && !requested.is_absolute() {
         let candidate = repository.join(requested);
@@ -98,7 +104,7 @@ pub fn resolve_program(
 
 pub fn capture_executable_identity(
     id: &str,
-    program: &Path,
+    program: &ResolvedProgram,
     args: &[String],
 ) -> Result<ExecutableIdentity, IdentityError> {
     capture_executable_identity_with_env(id, program, args, &BTreeMap::new())
@@ -106,12 +112,13 @@ pub fn capture_executable_identity(
 
 pub fn executable_file_identity(
     id: &str,
-    program: &Path,
+    program: &ResolvedProgram,
 ) -> Result<ExecutableIdentity, IdentityError> {
-    let bytes = fs::read(program).map_err(|_| IdentityError::ProgramUnavailable(id.to_owned()))?;
+    let bytes = fs::read(&program.executable_path)
+        .map_err(|_| IdentityError::ProgramUnavailable(id.to_owned()))?;
     Ok(ExecutableIdentity {
         id: id.to_owned(),
-        resolved_path: program.to_path_buf(),
+        resolved_path: program.executable_path.clone(),
         sha256: hex::encode(Sha256::digest(bytes)),
         version_output: String::new(),
     })
@@ -119,27 +126,30 @@ pub fn executable_file_identity(
 
 pub fn capture_executable_identity_with_env(
     id: &str,
-    program: &Path,
+    program: &ResolvedProgram,
     args: &[String],
     environment: &BTreeMap<String, String>,
 ) -> Result<ExecutableIdentity, IdentityError> {
-    let bytes = fs::read(program).map_err(|_| IdentityError::ProgramUnavailable(id.to_owned()))?;
-    let output = Command::new(program)
+    let bytes = fs::read(&program.executable_path)
+        .map_err(|_| IdentityError::ProgramUnavailable(id.to_owned()))?;
+    let output = Command::new(&program.invocation_path)
         .args(args)
         .env_clear()
         .envs(environment)
         .stdin(Stdio::null())
         .output()
-        .map_err(|_| IdentityError::IdentityCommandFailed(program.to_path_buf()))?;
+        .map_err(|_| IdentityError::IdentityCommandFailed(program.invocation_path.clone()))?;
     if !output.status.success() {
-        return Err(IdentityError::IdentityCommandFailed(program.to_path_buf()));
+        return Err(IdentityError::IdentityCommandFailed(
+            program.invocation_path.clone(),
+        ));
     }
     let mut version = output.stdout;
     version.extend_from_slice(&output.stderr);
     version.truncate(VERSION_OUTPUT_LIMIT);
     Ok(ExecutableIdentity {
         id: id.to_owned(),
-        resolved_path: program.to_path_buf(),
+        resolved_path: program.executable_path.clone(),
         sha256: hex::encode(Sha256::digest(bytes)),
         version_output: String::from_utf8_lossy(&version).trim().to_owned(),
     })
@@ -162,7 +172,7 @@ pub fn version_output_matches(output: &str, expected_contains: Option<&str>) -> 
 fn validate_repository_program(
     candidate: &Path,
     repository: &Path,
-) -> Result<PathBuf, IdentityError> {
+) -> Result<ResolvedProgram, IdentityError> {
     let canonical_repository = repository
         .canonicalize()
         .map_err(|_| IdentityError::ProgramUnavailable(candidate.display().to_string()))?;
@@ -172,13 +182,13 @@ fn validate_repository_program(
     if !canonical.starts_with(canonical_repository) {
         return Err(IdentityError::OutsideApprovedRoot(canonical));
     }
-    require_executable(canonical)
+    require_executable(candidate, canonical)
 }
 
 fn validate_root_program(
     candidate: &Path,
     approved_roots: &[PathBuf],
-) -> Result<PathBuf, IdentityError> {
+) -> Result<ResolvedProgram, IdentityError> {
     let canonical = candidate
         .canonicalize()
         .map_err(|_| IdentityError::ProgramUnavailable(candidate.display().to_string()))?;
@@ -189,19 +199,25 @@ fn validate_root_program(
     if !inside {
         return Err(IdentityError::OutsideApprovedRoot(canonical));
     }
-    require_executable(canonical)
+    require_executable(candidate, canonical)
 }
 
-fn require_executable(path: PathBuf) -> Result<PathBuf, IdentityError> {
-    let metadata = fs::metadata(&path)
-        .map_err(|_| IdentityError::ProgramUnavailable(path.display().to_string()))?;
+fn require_executable(
+    invocation_path: &Path,
+    executable_path: PathBuf,
+) -> Result<ResolvedProgram, IdentityError> {
+    let metadata = fs::metadata(&executable_path)
+        .map_err(|_| IdentityError::ProgramUnavailable(executable_path.display().to_string()))?;
     #[cfg(unix)]
     let executable = metadata.is_file() && metadata.permissions().mode() & 0o111 != 0;
     #[cfg(not(unix))]
     let executable = false;
     if executable {
-        Ok(path)
+        Ok(ResolvedProgram {
+            invocation_path: invocation_path.to_path_buf(),
+            executable_path,
+        })
     } else {
-        Err(IdentityError::NotExecutable(path))
+        Err(IdentityError::NotExecutable(executable_path))
     }
 }
