@@ -24,6 +24,13 @@
       "linux_arm64_digest": "sha256:edb5c6e30f13be8c8d4c710d4ce631e06850aea19012327b69047562d0e1ccc9"
     },
     {
+      "service": "clickhouse-init",
+      "version": "26.3.17.56-alpine",
+      "compose_ref": "docker.io/clickhouse/clickhouse-server:26.3.17.56-alpine@sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd",
+      "index_digest": "sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd",
+      "linux_arm64_digest": "sha256:edb5c6e30f13be8c8d4c710d4ce631e06850aea19012327b69047562d0e1ccc9"
+    },
+    {
       "service": "postgres",
       "version": "18.4-alpine3.24",
       "compose_ref": "docker.io/library/postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",

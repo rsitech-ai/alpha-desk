@@ -90,10 +90,11 @@ check_nats() {
 }
 
 check_clickhouse() {
-  response="$(
-    curl --fail --silent --show-error --max-time 2 \
-      "http://127.0.0.1:${clickhouse_port}/ping" 2>/dev/null
-  )" &&
+  check_initializer clickhouse-init &&
+    response="$(
+      curl --fail --silent --show-error --max-time 2 \
+        "http://127.0.0.1:${clickhouse_port}/ping" 2>/dev/null
+    )" &&
     [[ "$response" == "Ok." ]]
 }
 

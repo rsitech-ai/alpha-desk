@@ -36,7 +36,7 @@ docker compose -f "$compose_file" config --format json >"$compose_json"
 jq -e '
   .schema_version == 1 and
   (.images | type == "array") and
-  (.images | length == 8) and
+  (.images | length == 9) and
   all(
     .images[];
     . as $image |
@@ -46,7 +46,7 @@ jq -e '
     ($image.linux_arm64_digest | test("^sha256:[0-9a-f]{64}$")) and
     ($image.compose_ref | endswith("@" + $image.index_digest))
   ) and
-  (([.images[].service] | unique | length) == 8)
+  (([.images[].service] | unique | length) == 9)
 ' "$lock_file" >/dev/null
 
 jq -e '.name == "alpha-desk-dev"' "$compose_json" >/dev/null
@@ -122,14 +122,50 @@ jq -e '
 
 if ! jq -e '
   (.services["nats-init"].restart == "no") and
+  (.services["clickhouse-init"].restart == "no") and
   (.services["minio-init"].restart == "no") and
   (.services["nats-init"].depends_on.nats.condition == "service_healthy") and
+  (.services["clickhouse-init"].depends_on.clickhouse.condition == "service_healthy") and
   (.services["minio-init"].depends_on.minio.condition == "service_healthy") and
   (.services.victoriametrics.depends_on["otel-collector"].condition == "service_healthy") and
   (.services.victoriametrics.depends_on["nats-init"].condition == "service_completed_successfully") and
+  (.services.victoriametrics.depends_on["clickhouse-init"].condition == "service_completed_successfully") and
   (.services.victoriametrics.depends_on["minio-init"].condition == "service_completed_successfully")
 ' "$compose_json" >/dev/null; then
   printf 'dev-stack-contract:error initializer dependency gate is incomplete\n' >&2
+  exit 1
+fi
+
+if ! jq -e '
+  (.services.clickhouse.environment | has("CLICKHOUSE_DB") | not) and
+  (.services["clickhouse-init"].user == "101:101") and
+  (.services["clickhouse-init"].entrypoint == ["/usr/bin/clickhouse-client"]) and
+  (
+    .services["clickhouse-init"].command == [
+      "--host",
+      "clickhouse",
+      "--user",
+      "alpha",
+      "--password",
+      "alpha_dev_only",
+      "--query",
+      "CREATE DATABASE IF NOT EXISTS alpha"
+    ]
+  ) and
+  ((.services["clickhouse-init"].ports // []) == []) and
+  ((.services["clickhouse-init"].volumes // []) == [])
+' "$compose_json" >/dev/null; then
+  printf 'dev-stack-contract:error ClickHouse initialization is not isolated\n' >&2
+  exit 1
+fi
+
+if ! jq -e '
+  (
+    .services.postgres.environment.POSTGRES_INITDB_ARGS ==
+    "--no-locale --auth-local=scram-sha-256"
+  )
+' "$compose_json" >/dev/null; then
+  printf 'dev-stack-contract:error PostgreSQL init policy is incomplete\n' >&2
   exit 1
 fi
 
@@ -336,6 +372,7 @@ set -euo pipefail
 scenario="${FAKE_DOCKER_SCENARIO:-success}"
 expected_compose_file="${EXPECTED_COMPOSE_FILE:?EXPECTED_COMPOSE_FILE is required}"
 nats_id="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+clickhouse_id="2223456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 minio_id="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 extra_id="1111111111111111111111111111111111111111111111111111111111111111"
 
@@ -352,7 +389,7 @@ case "${1:-}" in
     [[ "$8" == "--quiet" ]] || exit 2
     service="$9"
     case "$scenario:$service" in
-      nats-missing:nats-init|minio-missing:minio-init)
+      nats-missing:nats-init|clickhouse-missing:clickhouse-init|minio-missing:minio-init)
         :
         ;;
       nats-multiple:nats-init)
@@ -363,6 +400,9 @@ case "${1:-}" in
         ;;
       *:nats-init)
         printf '%s\n' "$nats_id"
+        ;;
+      *:clickhouse-init)
+        printf '%s\n' "$clickhouse_id"
         ;;
       *:minio-init)
         printf '%s\n' "$minio_id"
@@ -379,11 +419,15 @@ case "${1:-}" in
     [[ "$4" == "--format" ]] || exit 2
     [[ "$5" == '{{json .State}}' ]] || exit 2
     container_id="$6"
-    [[ "$container_id" == "$nats_id" || "$container_id" == "$minio_id" ]] ||
+    [[ "$container_id" == "$nats_id" ||
+      "$container_id" == "$clickhouse_id" ||
+      "$container_id" == "$minio_id" ]] ||
       exit 2
     if [[ "$container_id" == "$nats_id" && "$scenario" == "nats-running" ]]; then
       printf '%s\n' '{"Status":"running","Running":true,"ExitCode":0}'
     elif [[ "$container_id" == "$nats_id" && "$scenario" == "nats-nonzero" ]]; then
+      printf '%s\n' '{"Status":"exited","Running":false,"ExitCode":17}'
+    elif [[ "$container_id" == "$clickhouse_id" && "$scenario" == "clickhouse-nonzero" ]]; then
       printf '%s\n' '{"Status":"exited","Running":false,"ExitCode":17}'
     else
       printf '%s\n' '{"Status":"exited","Running":false,"ExitCode":0}'
@@ -448,6 +492,8 @@ for scenario in \
   nats-nonzero \
   nats-multiple \
   nats-unsafe \
+  clickhouse-missing \
+  clickhouse-nonzero \
   minio-missing; do
   if PATH="$fake_bin:$PATH" \
     EXPECTED_COMPOSE_FILE="$compose_file" \
@@ -462,6 +508,8 @@ for scenario in \
 
   if [[ "$scenario" == minio-* ]]; then
     grep -qx 'minio:error timeout' "$tmp_dir/$scenario.err"
+  elif [[ "$scenario" == clickhouse-* ]]; then
+    grep -qx 'clickhouse:error timeout' "$tmp_dir/$scenario.err"
   else
     grep -qx 'nats:error timeout' "$tmp_dir/$scenario.err"
   fi

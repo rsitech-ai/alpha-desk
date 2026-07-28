@@ -20,6 +20,14 @@ failures. This stack does not add privileges to hide them. Production host
 provisioning must set transparent huge pages to `madvise` and enable task delay
 accounting when its metrics are required.
 
+Fresh local volumes can also emit initialization notices: ClickHouse creates
+its access list, MinIO warns that a single local drive has no host redundancy,
+and Alpine PostgreSQL reports its absent locale utility plus a generic local
+trust hint. PostgreSQL is nevertheless initialized with the deterministic `C`
+locale and `scram-sha-256` local-socket authentication; the resulting
+`pg_hba.conf` is what governs access. These notices are expected only for this
+single-host development stack and are not production-readiness claims.
+
 ## Provisional contracts
 
 - `alpha-archive` is the provisional local MinIO bucket. A later archive
@@ -41,10 +49,13 @@ source build remains the stronger long-term path.
 
 `just dev-up` requires the Docker CLI, `curl`, `jq`, `pg_isready`, and `psql`.
 It starts the stack and waits for NATS JetStream, ClickHouse, PostgreSQL,
-MinIO, OpenTelemetry, and VictoriaMetrics. NATS and MinIO are reported ready
-only after their fixed-project initializer resolves to exactly one container
-whose final state is `exited` with exit code zero. `just dev-down` stops the
-stack without deleting data.
+MinIO, OpenTelemetry, and VictoriaMetrics. NATS, ClickHouse, and MinIO are
+reported ready only after their fixed-project initializer resolves to exactly
+one container whose final state is `exited` with exit code zero. ClickHouse
+database creation runs in that one-shot initializer instead of the server
+image's temporary init-server path, keeping normal startup logs free of the
+image's expected HTTP probe reset. `just dev-down` stops the stack without
+deleting data.
 
 `just dev-reset` is intentionally destructive: it removes all five
 `alpha-desk-dev` named data volumes. The recipe prints this boundary before it
