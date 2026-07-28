@@ -155,7 +155,7 @@ impl OutputRoot {
     fn create_temporary(&self) -> Result<(String, OwnedFd), OutputError> {
         for _ in 0..128 {
             let mut random = [0_u8; 16];
-            getrandom::getrandom(&mut random)
+            getrandom::fill(&mut random)
                 .map_err(|error| OutputError::CreateFailed(error.to_string()))?;
             let mut random_hex = String::with_capacity(random.len() * 2);
             for byte in random {
