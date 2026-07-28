@@ -19,11 +19,14 @@ fn main() -> ExitCode {
     if raw_arguments.first().and_then(|value| value.to_str()) == Some("validate-config") {
         return validate_config(&raw_arguments);
     }
-    if let Err(error) = invalidate_targeted_stage_zero_outputs(&raw_arguments) {
+    let parsed = parse_run_args(&raw_arguments);
+    if let Err(error) =
+        invalidate_targeted_stage_zero_outputs(parsed.targeted_stage_zero_repository.as_deref())
+    {
         eprintln!("stage-gate:error:{error}");
         return ExitCode::from(1);
     }
-    let args = match parse_run_args(&raw_arguments) {
+    let args = match parsed.arguments {
         Ok(args) => args,
         Err(error) => {
             eprintln!("stage-gate:error:{error}");
@@ -58,64 +61,121 @@ struct Arguments {
     producer: BuilderProducer,
 }
 
-fn parse_run_args(raw_arguments: &[OsString]) -> Result<Arguments, String> {
+struct ParsedRunArguments {
+    targeted_stage_zero_repository: Option<PathBuf>,
+    arguments: Result<Arguments, String>,
+}
+
+fn parse_run_args(raw_arguments: &[OsString]) -> ParsedRunArguments {
     let mut arguments = raw_arguments.iter().cloned();
     if arguments.next().as_deref() != Some("run".as_ref()) {
-        return Err(usage());
+        return ParsedRunArguments {
+            targeted_stage_zero_repository: None,
+            arguments: Err(usage()),
+        };
     }
-    let config = arguments.next().ok_or_else(usage)?;
-    let mut repository = env::current_dir().map_err(|error| error.to_string())?;
+    let Some(config) = arguments.next() else {
+        return ParsedRunArguments {
+            targeted_stage_zero_repository: None,
+            arguments: Err(usage()),
+        };
+    };
+    let mut repository = match env::current_dir() {
+        Ok(repository) => repository,
+        Err(error) => {
+            return ParsedRunArguments {
+                targeted_stage_zero_repository: None,
+                arguments: Err(error.to_string()),
+            };
+        }
+    };
     let mut output = None;
     let mut builder_id = None;
     let mut builder_role = None;
     let mut builder_fingerprint = None;
-    while let Some(flag) = arguments.next() {
+    let parse_error = loop {
+        let Some(flag) = arguments.next() else {
+            break None;
+        };
         match flag.to_str() {
             Some("--repository") => {
-                repository = arguments.next().map(PathBuf::from).ok_or_else(usage)?;
+                let Some(value) = arguments.next() else {
+                    break Some(usage());
+                };
+                repository = PathBuf::from(value);
             }
             Some("--output") => {
                 output = arguments.next().map(PathBuf::from);
                 if output.is_none() {
-                    return Err(usage());
+                    break Some(usage());
                 }
             }
             Some("--builder-id") => {
                 builder_id = arguments.next().and_then(|value| value.into_string().ok());
                 if builder_id.is_none() {
-                    return Err(usage());
+                    break Some(usage());
                 }
             }
             Some("--builder-role") => {
                 builder_role = arguments.next().and_then(|value| value.into_string().ok());
                 if builder_role.is_none() {
-                    return Err(usage());
+                    break Some(usage());
                 }
             }
             Some("--builder-fingerprint") => {
                 builder_fingerprint = arguments.next().and_then(|value| value.into_string().ok());
                 if builder_fingerprint.is_none() {
-                    return Err(usage());
+                    break Some(usage());
                 }
             }
-            _ => return Err(usage()),
+            _ => break Some(usage()),
         }
+    };
+    let targeted_stage_zero_repository =
+        targeted_stage_zero_repository(Path::new(&config), &repository);
+    if let Some(error) = parse_error {
+        return ParsedRunArguments {
+            targeted_stage_zero_repository,
+            arguments: Err(error),
+        };
     }
     let producer = match (builder_id, builder_role, builder_fingerprint) {
         (Some(builder_id), None, None) if valid_builder_id(&builder_id) => {
             BuilderProducer::local(builder_id)
         }
         (None, Some(role), Some(fingerprint)) => {
-            BuilderProducer::builder_b(&role, &fingerprint).map_err(|error| error.to_string())?
+            match BuilderProducer::builder_b(&role, &fingerprint) {
+                Ok(producer) => producer,
+                Err(error) => {
+                    return ParsedRunArguments {
+                        targeted_stage_zero_repository,
+                        arguments: Err(error.to_string()),
+                    };
+                }
+            }
         }
-        _ => return Err(usage()),
+        _ => {
+            return ParsedRunArguments {
+                targeted_stage_zero_repository,
+                arguments: Err(usage()),
+            };
+        }
     };
-    Ok(Arguments {
-        repository,
-        config: Path::new(&config).to_path_buf(),
-        output: output.ok_or_else(usage)?,
-        producer,
-    })
+    let Some(output) = output else {
+        return ParsedRunArguments {
+            targeted_stage_zero_repository,
+            arguments: Err(usage()),
+        };
+    };
+    ParsedRunArguments {
+        targeted_stage_zero_repository,
+        arguments: Ok(Arguments {
+            repository,
+            config: Path::new(&config).to_path_buf(),
+            output,
+            producer,
+        }),
+    }
 }
 
 fn validate_config(raw_arguments: &[OsString]) -> ExitCode {
@@ -152,11 +212,11 @@ fn validate_config(raw_arguments: &[OsString]) -> ExitCode {
     }
 }
 
-fn invalidate_targeted_stage_zero_outputs(raw_arguments: &[OsString]) -> Result<(), String> {
-    let Some(repository) = targeted_stage_zero_repository(raw_arguments) else {
+fn invalidate_targeted_stage_zero_outputs(repository: Option<&Path>) -> Result<(), String> {
+    let Some(repository) = repository else {
         return Ok(());
     };
-    let root = OutputRoot::open(&repository, Path::new("target/stage-gates"))
+    let root = OutputRoot::open(repository, Path::new("target/stage-gates"))
         .map_err(|error| format!("could not open fixed Stage 0 output scope: {error}"))?;
     for output in [
         Path::new("stage-0.json"),
@@ -169,23 +229,7 @@ fn invalidate_targeted_stage_zero_outputs(raw_arguments: &[OsString]) -> Result<
     Ok(())
 }
 
-fn targeted_stage_zero_repository(raw_arguments: &[OsString]) -> Option<PathBuf> {
-    if raw_arguments.first().and_then(|value| value.to_str()) != Some("run") {
-        return None;
-    }
-    let config = raw_arguments.get(1).map(PathBuf::from)?;
-    let mut repository = env::current_dir().ok()?;
-    let mut index = 2;
-    while index < raw_arguments.len() {
-        if raw_arguments[index] == "--repository"
-            && let Some(value) = raw_arguments.get(index + 1)
-        {
-            repository = PathBuf::from(value);
-            index += 2;
-        } else {
-            index += 1;
-        }
-    }
+fn targeted_stage_zero_repository(config: &Path, repository: &Path) -> Option<PathBuf> {
     let repository = repository.canonicalize().ok()?;
     if !repository.join(".git").exists() {
         return None;

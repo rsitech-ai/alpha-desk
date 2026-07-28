@@ -420,6 +420,84 @@ fn invalid_stage_zero_invocations_invalidate_only_fixed_outputs_and_preserve_inp
 }
 
 #[test]
+fn malformed_flag_values_never_retarget_early_stage_zero_cleanup() {
+    let selected = CliFixture::new();
+    let unrelated = CliFixture::new();
+    let selected_output = selected
+        .repository
+        .path()
+        .join("target/stage-gates/stage-0.json");
+    let unrelated_output = unrelated
+        .repository
+        .path()
+        .join("target/stage-gates/stage-0.json");
+    fs::create_dir_all(selected_output.parent().unwrap()).unwrap();
+    fs::create_dir_all(unrelated_output.parent().unwrap()).unwrap();
+    fs::write(&selected_output, br#"{"overall_result":"PASS"}"#).unwrap();
+    fs::write(&unrelated_output, br#"{"overall_result":"PASS"}"#).unwrap();
+
+    let output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(selected.repository.path())
+        .args(["--builder-id", "--repository"])
+        .arg(unrelated.repository.path())
+        .args(["--output"])
+        .arg(&selected_output)
+        .env_clear()
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        !selected_output.exists(),
+        "the repository consumed by the CLI parser must have stale output invalidated"
+    );
+    assert_eq!(
+        fs::read(&unrelated_output).unwrap(),
+        br#"{"overall_result":"PASS"}"#,
+        "a flag-looking builder value must not retarget cleanup to another repository"
+    );
+}
+
+#[test]
+fn mixed_present_invalid_and_missing_approvals_fail_at_the_gate_boundary() {
+    let fixture = CliFixture::new();
+    let repository = fixture.repository.path();
+    let external = repository.join("target/stage-gates/external");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(
+        external.join("platform-data.json"),
+        b"{\"not\":\"a canonical approval statement\"}",
+    )
+    .unwrap();
+    fs::write(
+        external.join("platform-data.json.asc"),
+        b"present invalid signature input",
+    )
+    .unwrap();
+    let output_path = repository.join("target/stage-gates/stage-0.json");
+
+    let output = Command::new(stage_gate_binary())
+        .args(["run", "config/stage-gates/stage-0.toml", "--repository"])
+        .arg(repository)
+        .arg("--output")
+        .arg(&output_path)
+        .args(["--builder-id", "fixture-builder-a"])
+        .env_clear()
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    let reasons = report["reason_codes"].as_array().unwrap();
+    assert_eq!(report["overall_result"], "FAIL");
+    assert_eq!(report["stage_outcome"], "HOLD");
+    assert!(reasons.contains(&serde_json::json!("approval_evidence_invalid")));
+    assert!(reasons.contains(&serde_json::json!("independent_review_missing")));
+}
+
+#[test]
 fn explicit_validated_local_builder_id_is_published_without_an_environment_fallback() {
     let fixture = CliFixture::new();
     let output_path = fixture

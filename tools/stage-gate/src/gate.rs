@@ -933,16 +933,7 @@ fn verify_external_approvals(
     let Some(policy) = policy else {
         return;
     };
-    let all_inputs_exist = config.approvals.evidence.iter().all(|evidence| {
-        repository.join(&evidence.statement_path).is_file()
-            && repository.join(&evidence.signature_path).is_file()
-    });
-    if !all_inputs_exist {
-        return;
-    }
-    let Some(gpgv) = resolved_gpgv else {
-        return;
-    };
+    let gpgv = resolved_gpgv.unwrap_or_else(|| PathBuf::from(&config.approvals.gpgv_program));
     let evidence = config
         .approvals
         .evidence
@@ -968,7 +959,11 @@ fn verify_external_approvals(
             .contains(&ApprovalReasonCode::OpenPgpToolingUnavailable)
         {
             reasons.push(GateReasonCode::OpenpgpToolingUnavailable);
-        } else {
+        } else if approval
+            .reasons
+            .iter()
+            .any(|reason| *reason != ApprovalReasonCode::RequiredApprovalMissing)
+        {
             reasons.push(GateReasonCode::ApprovalVerificationUnavailable);
         }
     }
