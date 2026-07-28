@@ -16,7 +16,7 @@ This is the evidence ledger for the current working repository. The approved des
 
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
-| 0 — Foundations | Implemented in substantial part; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, and gate tooling | Resolve local runner defect; complete real Compose proof; replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean-commit, and signed-tag evidence |
+| 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
 | 1 — Truth layer | Task 1 implemented on the hardening branch; stage not passed | Validated byte-preserving observations, cursor transitions, source-error disposition, cancellation/backpressure context, async source ports, and strict capture configuration | Durable spool, real source adapters, canonicalization, continuity/quarantine, archive, JetStream publication, long-running capture service, runtime evidence, and signed gate |
 | 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
@@ -45,6 +45,23 @@ The five service packages compile but their binaries exit immediately. `hl-captu
 - `blocked:runtime-evidence` — capture, replay, restart, archive, API, UI, load, soak, restore, canary, and rollback evidence do not exist yet.
 
 No validated secret exposure was found by the 2026-07-28 local audit, but normal secret scanning is not sufficient to approve encoded archives or every remote ref for publication.
+
+## Latest local evidence
+
+The following checks passed on 2026-07-28. They establish local code and
+dependency-stack evidence only; they do not close the signed Stage 0 gate or
+prove a running Alpha Desk product:
+
+- `just verify`
+- `just generated`
+- `SOURCE_DATE_EPOCH=1784894400 just reproducible`
+- `just stage-0-compose-smoke`
+- `just oss-audit`
+- `gitleaks detect --source . --no-banner --redact --exit-code 1`
+
+The Compose smoke verified NATS, ClickHouse, PostgreSQL, MinIO, the OpenTelemetry
+Collector, and VictoriaMetrics, then removed its uniquely owned containers,
+volumes, and network.
 
 ## Evidence discipline
 
