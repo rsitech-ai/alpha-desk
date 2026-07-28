@@ -15,7 +15,12 @@ Use the committed lockfiles. Normal verification is offline after dependencies h
 just --list
 just verify
 just generated
+SOURCE_DATE_EPOCH=1784894400 just reproducible
 ```
+
+The reproducibility check intentionally requires an explicit unsigned
+`SOURCE_DATE_EPOCH`; it does not infer a timestamp from the working tree or
+ambient clock.
 
 Focused Rust work should use the smallest package:
 
