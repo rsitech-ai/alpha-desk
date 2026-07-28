@@ -28,6 +28,7 @@ members = [
   "tools/schema-check",
   "tools/build-info",
   "tools/architecture-check",
+  "tools/stage-gate",
 ]
 
 [workspace.package]

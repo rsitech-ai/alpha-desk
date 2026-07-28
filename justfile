@@ -41,6 +41,12 @@ ci-verify: check-workspace quality ci-test
 
 verify: check-workspace quality test
 
+stage-0-gate:
+    cargo +1.97.1 run -p stage-gate --locked --offline -- run config/stage-gates/stage-0.toml --output target/stage-gates/stage-0.json
+
+stage-0-compose-smoke:
+    ./tools/ci/stage-0-compose-smoke.sh
+
 dev-up:
     docker compose -f infra/docker-compose/compose.yaml up -d --wait --wait-timeout 120
     ./tools/ci/wait-for-dev-stack.sh

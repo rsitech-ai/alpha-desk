@@ -1,0 +1,12 @@
+schema_version = 1
+keyring_path = "target/stage-gates/inputs/stage-0-reviewers.gpg"
+
+# HOLD: these placeholders intentionally keep Stage 0 blocked until the real,
+# distinct reviewer fingerprints are reviewed and committed.
+[[reviewers]]
+role = "platform-data"
+fingerprint = "replace-with-full-platform-data-fingerprint"
+
+[[reviewers]]
+role = "independent"
+fingerprint = "replace-with-full-independent-fingerprint"

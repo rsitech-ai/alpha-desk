@@ -1,0 +1,307 @@
+schema_version = 1
+stage_id = "stage-0-foundations"
+schema_path = "config/stage-gates/schema-v1.json"
+output_root = "target/stage-gates"
+builder_report_output_path = "target/stage-gates/stage-0.builder.json"
+whole_gate_timeout_seconds = 7200
+max_output_bytes = 1048576
+allowed_programs = [
+  "just",
+  "cargo",
+  "rustc",
+  "swift",
+  "docker",
+  "gpgv",
+  "/usr/bin/uname",
+  "./tools/ci/stage-0-compose-smoke.sh",
+  "./infra/ansible/tests/check.sh",
+]
+program_roots = [
+  "$CARGO_HOME/bin",
+  "$HOME/.cargo/bin",
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+]
+
+[design]
+tag = "design-approved-v1.0.0"
+object = "32e520a68e6596027fa0dc9673ddb70706474fef"
+commit = "412c380054d16f22549c46a59a5fe0617bc60138"
+
+[comparison]
+second_builder_report_path = "target/stage-gates/inputs/stage-0.builder-b.json"
+
+[builder]
+target_tool = "rustc"
+
+[[builder.tools]]
+id = "rustc"
+program = "rustc"
+args = ["+1.97.1", "-vV"]
+expected_output_contains = "rustc 1.97.1"
+
+[[builder.tools]]
+id = "cargo"
+program = "cargo"
+args = ["+1.97.1", "--version", "--verbose"]
+expected_output_contains = "cargo 1.97.1"
+
+[[builder.tools]]
+id = "swift"
+program = "swift"
+args = ["--version"]
+expected_output_contains = "Swift version 6.3"
+
+[[builder.tools]]
+id = "just"
+program = "just"
+args = ["--version"]
+
+[[builder.tools]]
+id = "docker"
+program = "docker"
+args = ["--version"]
+
+[[builder.tools]]
+id = "os"
+program = "/usr/bin/uname"
+args = ["-a"]
+
+[approvals]
+policy_path = "config/stage-gates/stage-0-trust-policy.toml"
+required_roles = ["platform-data", "independent"]
+gpgv_program = "gpgv"
+known_limitations = [
+  "Stage 0 validates foundations only; it does not authorize deployment or trading.",
+  "Approval signatures, remote required-check proof, and the second-builder report are externally supplied evidence.",
+]
+
+[[approvals.evidence]]
+role = "platform-data"
+statement_path = "target/stage-gates/inputs/platform-data.statement.json"
+signature_path = "target/stage-gates/inputs/platform-data.statement.json.asc"
+
+[[approvals.evidence]]
+role = "independent"
+statement_path = "target/stage-gates/inputs/independent.statement.json"
+signature_path = "target/stage-gates/inputs/independent.statement.json.asc"
+
+[remote]
+proof_path = "target/stage-gates/inputs/github-required-checks.json"
+app_source = "rsitech-ai/alpha-desk"
+required_checks = [
+  "Rust quality",
+  "Rust tests",
+  "Swift 6.3",
+  "Static Compose policy",
+  "Trusted integration smoke",
+  "Reproducible service binaries",
+]
+
+[[artifacts]]
+id = "cargo-lock"
+path = "Cargo.lock"
+kind = "dependency-lock"
+producer = "repository"
+target_triple = "platform-independent"
+profile = "source"
+
+[[artifacts]]
+id = "cargo-config"
+path = ".cargo/config.toml"
+kind = "build-configuration"
+producer = "repository"
+target_triple = "platform-independent"
+profile = "source"
+
+[[artifacts]]
+id = "schema-descriptor"
+path = "schemas/proto/baseline/v1.pb"
+kind = "protobuf-descriptor"
+producer = "schema-generate"
+target_triple = "platform-independent"
+profile = "baseline"
+
+[[artifacts]]
+id = "fixture-manifest"
+path = "fixtures/golden/manifest.toml"
+kind = "fixture-manifest"
+producer = "fixture-inspect"
+target_triple = "platform-independent"
+profile = "golden"
+
+[[artifacts]]
+id = "rust-toolchain"
+path = "rust-toolchain.toml"
+kind = "toolchain-manifest"
+producer = "repository"
+target_triple = "platform-independent"
+profile = "source"
+
+[[artifacts]]
+id = "swift-package"
+path = "apps/AlphaDesk/Package.swift"
+kind = "swift-package-manifest"
+producer = "repository"
+target_triple = "platform-independent"
+profile = "source"
+
+[[artifacts]]
+id = "hl-api"
+path = "target/release/hl-api"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "hl-capture"
+path = "target/release/hl-capture"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "hl-core"
+path = "target/release/hl-core"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "hl-analytics"
+path = "target/release/hl-analytics"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "hl-research"
+path = "target/release/hl-research"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "architecture-check"
+path = "target/release/architecture-check"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "build-info"
+path = "target/release/build-info"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "fixture-inspect"
+path = "target/release/fixture-inspect"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "schema-check"
+path = "target/release/schema-check"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "schema-generate"
+path = "target/release/schema-generate"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[artifacts]]
+id = "stage-gate"
+path = "target/release/stage-gate"
+kind = "executable"
+producer = "cargo-build"
+target_triple = "builder-host"
+profile = "release"
+
+[[checks]]
+id = "verify"
+program = "just"
+args = ["verify"]
+cwd = "."
+timeout_seconds = 1800
+inherit_env = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]
+
+[[checks]]
+id = "quality"
+program = "just"
+args = ["quality"]
+cwd = "."
+timeout_seconds = 1200
+inherit_env = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]
+
+[[checks]]
+id = "generated"
+program = "just"
+args = ["generated"]
+cwd = "."
+timeout_seconds = 600
+inherit_env = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]
+
+[[checks]]
+id = "fixtures"
+program = "cargo"
+args = ["+1.97.1", "test", "-p", "test-fixtures", "--locked", "--offline"]
+cwd = "."
+timeout_seconds = 600
+inherit_env = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]
+
+[[checks]]
+id = "compose"
+program = "./tools/ci/stage-0-compose-smoke.sh"
+args = []
+cwd = "."
+timeout_seconds = 900
+inherit_env = ["PATH", "HOME", "TMPDIR"]
+
+[[checks]]
+id = "ansible"
+program = "./infra/ansible/tests/check.sh"
+args = []
+cwd = "."
+timeout_seconds = 1800
+inherit_env = ["PATH", "HOME", "TMPDIR"]
+
+[[checks]]
+id = "release-binaries"
+program = "cargo"
+args = ["+1.97.1", "build", "--workspace", "--bins", "--release", "--all-features", "--locked", "--offline"]
+cwd = "."
+timeout_seconds = 1800
+inherit_env = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]
+
+[checks.env]
+SOURCE_DATE_EPOCH = "1784894400"
+
+[[checks]]
+id = "reproducible"
+program = "just"
+args = ["reproducible"]
+cwd = "."
+timeout_seconds = 1800
+inherit_env = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]
+
+[checks.env]
+SOURCE_DATE_EPOCH = "1784894400"
