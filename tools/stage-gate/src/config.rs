@@ -191,6 +191,32 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigDocumentError {
+    #[error("configuration structural validation failed: {0}")]
+    Structural(String),
+    #[error("configuration semantic validation failed: {0}")]
+    Semantic(#[from] ConfigError),
+}
+
+pub fn validate_config_document(
+    source: &str,
+    schema_source: &str,
+) -> Result<GateConfig, ConfigDocumentError> {
+    let schema: serde_json::Value = serde_json::from_str(schema_source)
+        .map_err(|error| ConfigDocumentError::Structural(error.to_string()))?;
+    let validator = jsonschema::draft202012::new(&schema)
+        .map_err(|error| ConfigDocumentError::Structural(error.to_string()))?;
+    let document: toml::Value = toml::from_str(source)
+        .map_err(|error| ConfigDocumentError::Structural(error.to_string()))?;
+    let instance = serde_json::to_value(document)
+        .map_err(|error| ConfigDocumentError::Structural(error.to_string()))?;
+    if let Err(error) = validator.validate(&instance) {
+        return Err(ConfigDocumentError::Structural(error.to_string()));
+    }
+    GateConfig::parse(source).map_err(ConfigDocumentError::Semantic)
+}
+
 impl ConfigError {
     #[must_use]
     pub fn code(&self) -> ConfigErrorCode {
@@ -257,6 +283,15 @@ impl GateConfig {
             ));
         }
         require_token("remote repository", &self.remote.repository)?;
+        let mut repository_parts = self.remote.repository.split('/');
+        if repository_parts.next().is_none_or(str::is_empty)
+            || repository_parts.next().is_none_or(str::is_empty)
+            || repository_parts.next().is_some()
+        {
+            return Err(ConfigError::InvalidValue(
+                "remote repository must be exactly owner/repository".to_owned(),
+            ));
+        }
         require_token("remote workflow", &self.remote.workflow)?;
         require_token("remote workflow ref", &self.remote.workflow_ref)?;
         require_token(

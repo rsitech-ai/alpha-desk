@@ -177,9 +177,17 @@ pub fn run_gate(
     config_path: &Path,
     requested_output: &Path,
 ) -> Result<GateRunReport, GateRunError> {
-    let producer = BuilderProducer::local(
-        env::var("STAGE_GATE_BUILDER_ID").unwrap_or_else(|_| "local-unidentified".to_owned()),
-    );
+    let builder_id = env::var("STAGE_GATE_BUILDER_ID").map_err(|_| {
+        GateRunError::ConfigInvalid(
+            "STAGE_GATE_BUILDER_ID must explicitly identify the local builder".to_owned(),
+        )
+    })?;
+    if !valid_builder_id(&builder_id) {
+        return Err(GateRunError::ConfigInvalid(
+            "STAGE_GATE_BUILDER_ID is not a valid builder identity".to_owned(),
+        ));
+    }
+    let producer = BuilderProducer::local(builder_id);
     run_gate_with_producer(repository, config_path, requested_output, producer)
 }
 

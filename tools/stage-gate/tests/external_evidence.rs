@@ -148,7 +148,10 @@ fn approval_statement_must_match_the_expected_known_limitations() {
 
     assert_eq!(
         outcome.reasons,
-        vec![ApprovalReasonCode::ApprovalBindingMismatch]
+        vec![
+            ApprovalReasonCode::ApprovalBindingMismatch,
+            ApprovalReasonCode::OpenPgpToolingUnavailable,
+        ]
     );
 }
 
@@ -224,6 +227,34 @@ fn present_invalid_detached_signature_fails() {
     assert_eq!(
         outcome.reasons,
         vec![ApprovalReasonCode::InvalidDetachedSignature]
+    );
+}
+
+#[test]
+fn present_invalid_approval_fails_even_when_the_peer_approval_is_missing() {
+    let fixture = ApprovalFixture::new();
+    fs::write(
+        &fixture.evidence[0].statement_path,
+        b"{\"not\":\"a canonical approval statement\"}",
+    )
+    .unwrap();
+    fs::remove_file(&fixture.evidence[1].statement_path).unwrap();
+    fs::remove_file(&fixture.evidence[1].signature_path).unwrap();
+
+    let outcome = verify_approvals(
+        &fixture.binding,
+        &fixture.policy,
+        &fixture.evidence,
+        PathBuf::from("/definitely/missing/gpgv"),
+    );
+
+    assert_eq!(outcome.status, GateStatus::Fail);
+    assert_eq!(
+        outcome.reasons,
+        vec![
+            ApprovalReasonCode::ApprovalStatementInvalid,
+            ApprovalReasonCode::RequiredApprovalMissing,
+        ]
     );
 }
 
@@ -334,7 +365,10 @@ fn approval_for_different_statement_bytes_fails_before_gpg() {
     assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(
         outcome.reasons,
-        vec![ApprovalReasonCode::ApprovalStatementMismatch]
+        vec![
+            ApprovalReasonCode::ApprovalStatementMismatch,
+            ApprovalReasonCode::OpenPgpToolingUnavailable,
+        ]
     );
 }
 
