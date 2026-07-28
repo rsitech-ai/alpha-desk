@@ -1,0 +1,41 @@
+name: Feature proposal
+description: Propose a scoped change aligned with the staged design
+title: "[Proposal]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or engineering problem needs to be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior, not a preferred implementation.
+    validations:
+      required: true
+  - type: input
+    id: plan
+    attributes:
+      label: Relevant design or stage
+      description: Link the applicable design section or stage-plan task.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Safety, privacy, and compatibility impact
+      description: Include data, execution, signer, public API, migration, and rollback implications.
+    validations:
+      required: true
+  - type: checkboxes
+    id: exclusions
+    attributes:
+      label: Repository boundary
+      options:
+        - label: This proposal does not require publishing private alpha, real wallet labels, proprietary feeds, credentials, or production inventory.
+          required: true

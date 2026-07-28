@@ -4,6 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Synthetic deterministic fixtures for Hyperliquid Alpha Desk tests."
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
 
 [dependencies]
 canonical-events = { path = "../canonical-events", version = "=0.1.0" }

@@ -1,0 +1,4 @@
+* text=auto
+
+# Generated compatibility baseline; review through the generator and schema checks.
+schemas/proto/baseline/v1.pb binary

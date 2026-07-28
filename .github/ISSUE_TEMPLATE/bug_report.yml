@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible, non-sensitive defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, wallet labels, private data, proprietary feeds, internal infrastructure, or vulnerability details. Use SECURITY.md for sensitive reports.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or version
+      description: Provide the exact Git commit or released version.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: What happened, including the exact error and sanitized output?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic sequence of commands or inputs.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, Rust/Swift/Docker versions as relevant.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, private data, wallet labels, proprietary feed material, and internal infrastructure details.
+          required: true

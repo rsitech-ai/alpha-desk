@@ -1681,7 +1681,13 @@ fn spawn_gate(repository: &Path, output_path: &Path) -> std::process::Child {
 }
 
 fn wait_for_path(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Reaching this hook includes gate startup, identity probing, and the
+    // preceding check. Under a parallel workspace test run those steps can
+    // legitimately take longer than the individual check's five-second
+    // timeout. Keep the harness wait bounded by the gate's declared
+    // whole-run budget instead of conflating scheduler delay with a failed
+    // race-safety assertion.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !path.exists() {
         assert!(
             Instant::now() < deadline,

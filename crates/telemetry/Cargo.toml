@@ -4,6 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Health, metrics, tracing, and build-provenance foundations."
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
 
 [dependencies]
 http.workspace = true

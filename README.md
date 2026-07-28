@@ -1,184 +1,94 @@
-# Hyperliquid Alpha Desk — Approved Design and Implementation Plans
+# Hyperliquid Alpha Desk
 
-This repository contains the approved production design and the complete staged implementation plan for a private, local-only Hyperliquid market-intelligence and alpha-research desk.
+Hyperliquid Alpha Desk is a local-first, read-only market-intelligence and research workstation under active development by RSI Tech. Its production design centers on byte-preserving source capture, a deterministic canonical ledger, reproducible research, evidence-linked signals, and native Apple clients.
 
-The design defines the production architecture, canonical data model, deterministic state reconstruction, wallet/entity intelligence, market-sentiment framework, signal validation, native SwiftUI desk, security boundaries, operations, testing, and phased acceptance gates. The implementation plan translates that design into reviewer-sized, test-driven tasks with exact files, interfaces, commands, expected results, commits, and stage gates.
+This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation and the approved staged design. The Stage 0 release gate remains on `HOLD`; the capture runtime, APIs, research workflows, and native UI are planned work.
 
-## Canonical documents
+## Current state
 
-- [Approved production design](docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md)
-- [Implementation-plan index](docs/superpowers/plans/README.md)
-- [Program roadmap](docs/superpowers/plans/2026-07-24-00-hyperliquid-alpha-desk-program-roadmap.md)
-- [Specification traceability](docs/superpowers/plans/2026-07-24-99-spec-traceability.md)
-- [Plan self-review](docs/superpowers/plans/2026-07-24-98-plan-self-review.md)
+| Area | Status | Evidence |
+| --- | --- | --- |
+| Production design and staged plans | Approved | [`docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md`](docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md) |
+| Rust workspace, exact domain types, schemas, fixtures, telemetry, and provenance | Implemented and locally tested | [`docs/STATUS.md`](docs/STATUS.md) |
+| Stage 0 gate tooling | Implemented; gate outcome `HOLD` | [`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml) |
+| Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
+| Source-observation and capture configuration contracts | Implemented on the hardening branch; no source adapter or runtime yet | [`docs/STATUS.md`](docs/STATUS.md) |
+| Durable capture and canonical truth-layer runtime | Not implemented | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
+| Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |
 
-## Selected baseline
+No part of this table should be read as evidence of trading performance, complete venue coverage, production deployment, or release readiness.
 
-- Rust 1.97.1, edition 2024, for the canonical event-sourced core, replay, research, APIs, and tooling.
-- Swift 6.3, SwiftUI, Swift Charts, GRDB, and Core ML for the native Apple desk and local personalization.
-- NATS JetStream, RocksDB, ClickHouse LTS, PostgreSQL, Arrow/Parquet, DataFusion, Polars, and ONNX Runtime.
-- Kanidm for self-hosted OIDC/WebAuthn.
-- Dedicated Ubuntu 24.04/systemd hot path with Ansible/Podman for reproducible local deployment; no mandatory Kubernetes.
-- Read-only V1 with no trading signer, exchange private key, or order-placement path.
+## Architecture
 
-## Status
+The approved system is intentionally evidence-first:
 
-Design version 1.0.0 was approved for implementation on 2026-07-24. The implementation-plan set is complete. The Stage 0 workspace bootstrap is in place; production domain behavior proceeds only through evidence-based stage gates.
-
-The future execution enclave is outside V1 and requires a separate threat model, approved design, and implementation plan after shadow-live and paper evidence satisfy the admission policy.
-
-## Stage 0 gate
-
-The committed Stage 0 contract is
-[`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml). Run it
-only from the clean, frozen implementation commit:
-
-```sh
-just stage-0-validate-config
-just stage-0-gate <builder-id>
+```text
+primary and independent sources
+        │
+        ▼
+byte-preserving observation spool
+        │
+        ▼
+canonicalization and continuity checks
+        │
+        ├── immutable archive and deterministic replay
+        └── operational event streams
+                    │
+                    ▼
+state, intelligence, research, APIs, and native clients
 ```
 
-`stage-0-validate-config` is the published configuration validator. It first
-applies the Draft 2020-12 JSON Schema and then runs the same Rust semantic
-validator used by the gate. The JSON Schema is the structural contract only:
-cross-item uniqueness by `id` or `path`, absolute/tokenized program-root
-policy, and `builder.target_tool` membership in `builder.tools` are semantic
-invariants. JSON Schema validation alone is therefore not claimed to establish
-runtime-valid configuration.
+Public WebSocket data is a provisional or reconciliation source, not a substitute for committed primary evidence. Canonical publication occurs only after durability and continuity policy pass. See the [architecture overview](docs/architecture/overview.md) and [approved design](docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md).
 
-The local builder ID is mandatory and explicit. It must be 3–128 ASCII
-alphanumeric characters or `-`, `_`, `.`, `:`, or `@`, and it must not contain
-`unknown`, `placeholder`, or `unidentified` in any letter case. There is no
-implicit local identity or environment fallback in the CLI.
+## Local verification
 
-The command writes transient canonical JSON only to the Git-ignored
-`target/stage-gates/stage-0.json` and writes the exact canonical local builder
-evidence to `target/stage-gates/stage-0.builder.json`; nested/custom output
-roots and filenames are rejected. Bootstrap/configuration failure invalidates
-both advertised outputs (and the historical builder filename) without deleting
-anything under `target/stage-gates/inputs/`. Any CLI invocation that names the
-fixed Stage 0 config first invalidates those three fixed outputs, including
-when output or Builder B arguments are missing or malformed. This early cleanup
-is limited to the explicitly selected Git repository and never derives a
-cleanup path from a caller-supplied output. Copy Builder B's
-canonical `stage-0.builder.json` and its detached OpenPGP signature byte-for-byte
-to Builder A's configured input paths; no JSON extraction or rewriting is
-permitted. Builder B's report identity must be
-`builder-b:<full-fingerprint>`, must agree with the pinned `builder-b` signer,
-and must be distinct from Builder A and both reviewers. Produce it without
-editing the generated bytes:
+Prerequisites:
+
+- macOS or Linux for the Rust workspace
+- Rust and Cargo `1.97.1` via the pinned toolchain
+- `just`
+- Swift `6.3` for the Apple package
+- Docker with Compose for dependency-stack smoke checks
+
+Run the normal local verification:
 
 ```sh
-cargo +1.97.1 run -p stage-gate --locked --offline -- \
-  run config/stage-gates/stage-0.toml \
-  --output target/stage-gates/stage-0.json \
-  --builder-role builder-b \
-  --builder-fingerprint <40-lowercase-hex>
-gpg --armor --detach-sign \
-  --output target/stage-gates/stage-0.builder.json.asc \
-  target/stage-gates/stage-0.builder.json
+just verify
+just generated
 ```
 
-The role and full lowercase fingerprint are an exact argument pair; partial,
-free-form, uppercase, or non-`builder-b` identities are rejected. Exit status
-`0` means `PASS`, `1` means verification `FAIL`, and `2` means `BLOCKED`.
-Missing external evidence is `BLOCKED`; evidence that is present but has an
-invalid signature, identity, version, workflow binding, or comparison
-projection is `FAIL`. Each present reviewer approval is verified independently:
-if one approval is malformed and its peer is absent, the report retains both
-the invalid-evidence and missing-evidence reasons and the overall result is
-`FAIL`. A local builder remains
-`BLOCKED` until a signed second-builder report, the signed exact GitHub run
-proof, two distinct detached reviewer approvals, a four-role trust registry,
-and usable OpenPGP verification tooling are supplied. Any non-PASS
-result has the explicit stage outcome `HOLD`. External reports, proofs,
-signatures, and the keyring stay under the ignored input paths named by the
-configuration. The gate never creates an approval record, signature, evidence
-commit, or tag.
+`just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
 
-The tracked operational trust registry is
-[`stage-0-trust-policy.toml`](config/stage-gates/stage-0-trust-policy.toml).
-Its current placeholder fingerprints intentionally keep Stage 0 blocked. They
-must be replaced by four distinct, reviewed, full fingerprints for
-`platform-data`, `independent`, `builder-b`, and `github-ci` in a committed
-change; the gate hashes the exact committed registry bytes. The separate
-[`stage-0-trust-policy.example.toml`](config/stage-gates/stage-0-trust-policy.example.toml)
-remains a non-operational template for all four roles.
+To validate the local dependency stack separately:
 
-### Evidence normalization
+```sh
+just stage-0-compose-smoke
+```
 
-Builder comparison excludes exactly `builder_identity`, the envelope containing
-the builder ID, signer metadata, and resolved executable paths. It still binds
-normalized hostname-free OS identity (`uname -s -r -m`), tool IDs, executable
-SHA-256 values, version output, artifact metadata and bytes, check results, and
-`check_evidence_hashes`. Each check-evidence hash covers the check ID, resolved
-executable hash, actual resolved command path, arguments, canonical working
-directory, concrete environment, configured per-check timeout and termination
-grace (with the whole-gate timeout bound by the committed config hash),
-exit status, and the semantic projections of bounded redacted stdout/stderr.
-The published algorithm identifier is `stage-gate-semantic-v1`.
+For focused commands and development conventions, read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-That algorithm removes only exact Cargo, Swift, and Docker build-progress
-grammars, tokenizes exact gate-owned repository, HOME/toolchain/temp, and
-eight-character Compose project prefixes, and normalizes standalone duration
-tokens. It preserves whitespace and line framing. Lines containing
-warning/error/fail/skip/ignore/panic are byte-exact, except for the terminal
-elapsed-duration field in exact Cargo and Swift test-summary grammars; all
-names, counts, results, and status tokens remain exact. Near-miss progress
-lines are retained. A truncated stream fails the gate before builder evidence
-is published. Raw bounded/redacted stdout/stderr remain local diagnostics and
-are not claimed as the bytes compared across builders. Residual limitation:
-new tool output formats are retained conservatively and can cause a safe false
-mismatch until the versioned normalizer is reviewed and changed.
+## Repository map
 
-### GitHub proof defaults and migration
+- `crates/` — domain contracts, canonical types, storage ports, telemetry, and research foundations
+- `services/` — future long-running service boundaries; currently bootstrap-only
+- `apps/AlphaDesk/` — Swift package foundations; currently no application target
+- `schemas/` — versioned Protobuf and JSON contracts
+- `fixtures/` — synthetic, redistributable deterministic fixtures
+- `infra/` — local dependency and future deployment scaffolding
+- `tools/` — schema, architecture, provenance, fixture, and stage-gate tooling
+- `docs/superpowers/` — approved design, stage plans, traceability, and reviews
 
-The least-privilege `Stage 0 evidence` workflow runs only after a successful
-trusted `push` CI run on `main`; its token has `actions: read`, `checks: read`,
-and `contents: read`. It signs a canonical proof for the six jobs in that exact
-CI run and records the separate in-progress signing job identity. It uploads
-the proof, detached signature, and public key for 30 days. The job fails closed
-when the dedicated `STAGE0_GITHUB_CI_PRIVATE_KEY` secret is absent.
+## Safety boundary
 
-The proof binds the actual `github.workflow_sha/ref` and the matching
-`job.workflow_sha/ref/repository/file_path`; both execution SHAs must equal the
-triggering CI head SHA and the implementation commit. If `main` advances
-between the CI run and the signer run, signing fails closed instead of
-substituting the workflow file's last-modified commit. The triggering CI
-workflow is separately pinned by its numeric workflow ID, API-reported name,
-stable API path, active state, and the same implementation SHA.
+V1 is read-only by design. This workspace contains no trading signer, exchange private-key handling, order-placement route, custodial function, or live execution service. Simulation code does not grant execution capability. Any future execution enclave requires a separate design, threat model, approval, and repository boundary.
 
-The committed `trigger_workflow_id = 0` is an explicit migration blocker because
-the unpublished CI workflow has no reviewed numeric GitHub Actions workflow ID
-yet. Before the workflow can produce consumable evidence:
+Research outputs can be incomplete, delayed, provisional, statistically weak, or wrong. They are not a promise of profitability and are not financial advice. Hyperliquid Alpha Desk is an independent project and is not affiliated with, endorsed by, or sponsored by Hyperliquid.
 
-1. Replace all four trust-policy placeholders, provision the dedicated CI
-   private key, and distribute the matching public key through the reviewed
-   keyring.
-2. After `.github/workflows/ci.yml` is published, read its numeric ID from the
-   GitHub Actions workflow API, review it, and replace the zero placeholder.
+## Contributing and support
 
-The current OpenPGP mechanism proves possession of a long-lived dedicated key;
-it does not prove GitHub workload identity. Key custody, rotation, and
-revocation remain operator responsibilities. GitHub documents that
-`workflow_run` jobs can access secrets, so the workflow rejects untrusted event,
-branch, and repository identities before touching the key. The future migration
-target is GitHub/Sigstore artifact attestation, but GitHub currently requires
-Enterprise Cloud for private-repository attestations. See GitHub's official
-[workflow-run security note](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run),
-[check-runs API](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference),
-[least-privilege token guidance](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token),
-and [private-repository attestation requirement](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md), the [roadmap](docs/ROADMAP.md), and the [current status ledger](docs/STATUS.md). Use [SUPPORT.md](SUPPORT.md) for ordinary help and [SECURITY.md](SECURITY.md) for sensitive vulnerability reports. Do not put credentials, private wallet labels, proprietary feed data, private alpha, or internal deployment details in issues or pull requests.
 
-### Runtime-proof boundary
+## License
 
-The gate uses a retained directory descriptor for evidence publication and
-isolated Compose project names/resources. Static tests prove the command and
-cleanup contract without touching a real Docker daemon. A real merged Compose
-render and startup/cleanup smoke remain required runtime proof. Unix
-process-group cleanup also cannot contain a hostile descendant that escapes
-with `setsid`; such commands require stronger OS-level containment.
-
-## V1 safety boundary
-
-The current V1 is read-only. It contains no execution service, trading signer, exchange private-key handling, order-placement path, or signing capability. Any future execution enclave is explicitly outside this workspace boundary until separately designed, reviewed, and approved.
+The current repository is licensed under [Apache License 2.0](LICENSE). The approved design records a possible future dual-license choice subject to legal review; no such change has been approved.

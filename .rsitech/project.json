@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "identity": {
+    "slug": "alpha-desk",
+    "name": "Hyperliquid Alpha Desk",
+    "repository": "rsitech-ai/alpha-desk"
+  },
+  "positioning": {
+    "oneLine": "Local-first, evidence-first market intelligence and research for Hyperliquid.",
+    "description": "A read-only research workstation under active development around byte-preserving source capture, a deterministic canonical ledger, reproducible analysis, and native Apple clients.",
+    "category": "Crypto research infrastructure"
+  },
+  "lifecycle": {
+    "stage": "public-preview",
+    "version": null
+  },
+  "platforms": [
+    "Linux",
+    "macOS"
+  ],
+  "languages": [
+    "Rust",
+    "Swift"
+  ],
+  "links": {
+    "repository": "https://github.com/rsitech-ai/alpha-desk",
+    "documentation": "https://github.com/rsitech-ai/alpha-desk/tree/main/docs",
+    "release": null,
+    "download": null,
+    "appStore": null
+  },
+  "media": {
+    "cardImage": "docs/assets/alpha-desk-card.svg",
+    "screenshots": []
+  },
+  "openSource": {
+    "license": "Apache-2.0",
+    "readme": "README.md",
+    "contributing": "CONTRIBUTING.md",
+    "security": "SECURITY.md",
+    "support": "SUPPORT.md",
+    "codeOfConduct": "CODE_OF_CONDUCT.md"
+  },
+  "capabilities": [
+    {
+      "claim": "Defines an approved evidence-first architecture and staged implementation program.",
+      "evidence": [
+        "docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md",
+        "docs/superpowers/plans/README.md"
+      ]
+    },
+    {
+      "claim": "Provides checked fixed-point domain primitives, versioned contracts, and deterministic synthetic fixtures.",
+      "evidence": [
+        "crates/domain-types/tests/decimal.rs",
+        "crates/canonical-events/tests/envelope.rs",
+        "fixtures/golden/manifest.toml"
+      ]
+    },
+    {
+      "claim": "Enforces local architecture, dependency, schema, provenance, and Stage 0 gate policies.",
+      "evidence": [
+        "justfile",
+        "tools/architecture-check/src/lib.rs",
+        "tools/stage-gate/src/lib.rs",
+        "tools/ci/check-generated.sh"
+      ]
+    },
+    {
+      "claim": "Defines validated byte-preserving source observations, explicit source failure policy, async source ports, and strict capture configuration.",
+      "evidence": [
+        "crates/hl-protocol/tests/observation.rs",
+        "services/hl-capture/tests/config.rs",
+        "config/capture.example.toml"
+      ]
+    }
+  ],
+  "limitations": [
+    "The canonical public repository has not been created; this manifest is prepared for a future public preview.",
+    "The Stage 0 gate remains on HOLD and lacks required signed external evidence.",
+    "Real source adapters, durable spooling, canonical runtime, APIs, long-running services, research workflows, and native applications are not yet implemented.",
+    "No supported release, production deployment, benchmark, load, soak, restore, canary, or rollback qualification exists."
+  ],
+  "safetyBoundaries": [
+    "V1 is read-only and contains no trading signer, exchange private-key handling, custody, order-placement route, or live execution service.",
+    "Public market feeds are provisional and cannot substitute for committed primary evidence.",
+    "Private alpha, operator-feed schemas, wallet labels, models, credentials, and deployment inventory remain outside the public export.",
+    "Research outputs are not guaranteed trading advice or a promise of profitability."
+  ]
+}

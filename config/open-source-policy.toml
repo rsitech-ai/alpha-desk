@@ -1,0 +1,96 @@
+schema_version = 1
+max_file_bytes = 1048576
+
+public = [
+  ".cargo",
+  ".gitattributes",
+  ".gitignore",
+  "CHANGELOG.md",
+  "CODE_OF_CONDUCT.md",
+  "CONTRIBUTING.md",
+  "Cargo.lock",
+  "Cargo.toml",
+  "GOVERNANCE.md",
+  "LICENSE",
+  "README.md",
+  "SECURITY.md",
+  "SUPPORT.md",
+  "apps",
+  "crates",
+  "deny.toml",
+  "docs",
+  "fixtures",
+  "justfile",
+  "rust-toolchain.toml",
+  "schemas",
+  "services",
+  "tools",
+]
+
+# These roots can contain public material, but every release export requires
+# an explicit human review because they can also carry identity, deployment,
+# workflow, or operational configuration.
+generated_review_required = [
+  ".github",
+  ".rsitech",
+  "config",
+  "infra",
+]
+
+private = []
+excluded = ["artifacts"]
+
+forbidden_path_prefixes = [
+  ".superpowers/",
+  "bootstrap/source.part.",
+  "target/stage-gates/inputs/",
+]
+
+allowed_binary_paths = ["schemas/proto/baseline/v1.pb"]
+
+# The audit implementation and its canary tests must contain detector strings.
+# Each exception is exact by rule and path; directory-wide exceptions are not
+# permitted.
+[[content_allowlist]]
+rule = "private.absolute_user_path"
+path = "tools/open-source-audit/src/lib.rs"
+
+[[content_allowlist]]
+rule = "private.alpha_threshold"
+path = "tools/open-source-audit/src/lib.rs"
+
+[[content_allowlist]]
+rule = "secret.github_pat"
+path = "tools/open-source-audit/src/lib.rs"
+
+[[content_allowlist]]
+rule = "secret.inline_api_key"
+path = "tools/open-source-audit/src/lib.rs"
+
+[[content_allowlist]]
+rule = "secret.private_key"
+path = "tools/open-source-audit/src/lib.rs"
+
+[[content_allowlist]]
+rule = "execution.package"
+path = "tools/open-source-audit/src/lib.rs"
+
+[[content_allowlist]]
+rule = "private.absolute_user_path"
+path = "tools/open-source-audit/tests/policy.rs"
+
+[[content_allowlist]]
+rule = "private.alpha_threshold"
+path = "tools/open-source-audit/tests/policy.rs"
+
+[[content_allowlist]]
+rule = "secret.github_pat"
+path = "tools/open-source-audit/tests/policy.rs"
+
+[[content_allowlist]]
+rule = "private.alpha_threshold"
+path = "tools/open-source-audit/tests/cli.rs"
+
+[[content_allowlist]]
+rule = "private.absolute_user_path"
+path = "tools/build-info/tests/cli.rs"

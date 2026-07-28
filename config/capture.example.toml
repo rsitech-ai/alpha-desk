@@ -1,0 +1,29 @@
+# Safe local example. This starts no network source by itself.
+parser_version = "parser-v1"
+
+[spool]
+path = "state/capture-spool"
+segment_target_bytes = 67108864
+rotation_interval_seconds = 300
+
+[spool.committed_durability]
+mode = "fsync-every-record"
+
+[spool.provisional_durability]
+mode = "batched"
+max_records = 128
+max_delay_millis = 100
+
+[[sources]]
+id = "primary-node"
+class = "committed-block"
+queue_capacity = 4096
+max_payload_bytes = 8388608
+
+[[sources]]
+id = "public-market"
+class = "public-market-data"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+# Optional credentials are protected path references, never inline values.
+credential_path = "/run/secrets/public-market-token"

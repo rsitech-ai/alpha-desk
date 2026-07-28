@@ -41,6 +41,9 @@ ci-verify: check-workspace quality ci-test
 
 verify: check-workspace quality test
 
+oss-audit:
+    cargo +1.97.1 run -p open-source-audit --locked --offline -- check --policy config/open-source-policy.toml --root .
+
 stage-0-validate-config:
     cargo +1.97.1 run -p stage-gate --locked --offline -- validate-config config/stage-gates/stage-0.toml --schema config/stage-gates/schema-v1.json
 
