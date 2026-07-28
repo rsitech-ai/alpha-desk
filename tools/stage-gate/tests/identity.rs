@@ -51,36 +51,44 @@ fn non_executable_and_outside_root_symlink_are_rejected() {
 #[test]
 fn approved_multicall_symlink_keeps_its_invocation_identity() {
     let trusted = TempDir::new().unwrap();
-    let multicall = trusted.path().join("multicall");
-    fs::write(
-        &multicall,
-        concat!(
-            "#!/bin/sh\n",
-            "case \"${0##*/}\" in\n",
-            "  cargo) printf 'cargo proxy 1.0.0\\n' ;;\n",
-            "  *) exit 41 ;;\n",
-            "esac\n",
-        ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&multicall).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&multicall, permissions).unwrap();
-    symlink("multicall", trusted.path().join("cargo")).unwrap();
+    let multicall = std::env::current_exe().unwrap().canonicalize().unwrap();
+    symlink(&multicall, trusted.path().join("cargo")).unwrap();
+    let roots = vec![
+        trusted.path().to_path_buf(),
+        multicall.parent().unwrap().to_path_buf(),
+    ];
 
-    let resolved =
-        resolve_program("cargo", &[trusted.path().to_path_buf()], Path::new(".")).unwrap();
-    let identity = capture_executable_identity("cargo", &resolved, &[])
-        .expect("an approved proxy must execute through its selected invocation name");
+    let resolved = resolve_program("cargo", &roots, Path::new(".")).unwrap();
+    fs::remove_file(trusted.path().join("cargo")).unwrap();
+    symlink("/usr/bin/false", trusted.path().join("cargo")).unwrap();
+    let identity = capture_executable_identity(
+        "cargo",
+        &resolved,
+        &[
+            "--exact".to_owned(),
+            "approved_multicall_identity_helper".to_owned(),
+            "--nocapture".to_owned(),
+        ],
+    )
+    .expect("execution must stay bound to the approved target after a proxy swap");
 
     assert_eq!(resolved.invocation_path, trusted.path().join("cargo"));
-    assert_eq!(
-        resolved.executable_path,
-        trusted.path().join("multicall").canonicalize().unwrap()
-    );
+    assert_eq!(resolved.executable_path, multicall);
     assert_eq!(identity.resolved_path, resolved.executable_path);
-    assert_eq!(identity.version_output, "cargo proxy 1.0.0");
+    assert!(identity.version_output.contains("cargo proxy 1.0.0"));
     assert_eq!(identity.sha256.len(), 64);
+}
+
+#[test]
+fn approved_multicall_identity_helper() {
+    let invoked_as = std::env::args_os().next().unwrap();
+    if Path::new(&invoked_as)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("cargo")
+    {
+        println!("cargo proxy 1.0.0");
+    }
 }
 
 #[test]

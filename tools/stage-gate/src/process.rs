@@ -18,6 +18,7 @@ pub const TRUNCATION_MARKER: &str = "[... output truncated ...]";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandSpec {
     pub program: PathBuf,
+    pub arg0: Option<OsString>,
     pub args: Vec<OsString>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
@@ -133,6 +134,10 @@ where
 
     let started = Instant::now();
     let mut command = Command::new(&spec.program);
+    #[cfg(unix)]
+    if let Some(arg0) = &spec.arg0 {
+        command.arg0(arg0);
+    }
     command
         .args(&spec.args)
         .current_dir(&spec.cwd)
