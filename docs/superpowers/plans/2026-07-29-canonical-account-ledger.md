@@ -441,6 +441,22 @@ on them.
       pub last_block_height: BlockHeight,
   }
 
+  pub struct VaultPrincipalFlowCurrentRecordV1 {
+      pub vault_id: VaultId,
+      pub deposits: QuoteAmount,
+      pub withdrawals: QuoteAmount,
+      pub last_event_id: EventId,
+      pub last_block_height: BlockHeight,
+  }
+
+  pub struct VaultShareFlowCurrentRecordV1 {
+      pub vault_id: VaultId,
+      pub shares_issued: Quantity,
+      pub shares_redeemed: Quantity,
+      pub last_event_id: EventId,
+      pub last_block_height: BlockHeight,
+  }
+
   pub struct AccountModeCurrentRecordV1 {
       pub account_id: Address,
       pub initial_previous: AccountAbstractionModeV1,
@@ -479,9 +495,12 @@ on them.
   master. Do not infer transitive hierarchy or acyclicity.
 
   Vault deposits atomically debit quote principal and credit shares for the
-  account; withdrawals credit quote principal and debit shares. The two typed
-  legs and observed account/vault relation are the conservation evidence;
-  principal and shares are never compared or presented as current holdings.
+  account while increasing the vault's observed deposited-principal and
+  issued-share totals; withdrawals credit account quote principal and debit
+  account shares while increasing the vault's observed withdrawn-principal
+  and redeemed-share totals. Require account-side and vault-side totals to
+  reconcile independently within each unit. Principal and shares are never
+  compared or presented as current holdings.
 
   Builder fees debit the charged account and credit the builder in the same
   asset scope. Referral rewards credit `referrer_account_id` only; the payload
@@ -771,6 +790,10 @@ on them.
 - 2026-07-30: A subaccount relation is derived only when the declared master
   is exactly one transfer endpoint. Three-distinct-account payloads remain
   valid typed facts but fail state reduction as relationship-ambiguous.
+- 2026-07-30: Vault conservation means reconciliation of observed account and
+  vault flow totals independently for quote principal and share quantity. It
+  is not a principal/share equality, current holding, or active-membership
+  claim.
 
 ## Progress Log
 
