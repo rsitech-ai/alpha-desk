@@ -24,6 +24,8 @@ const METADATA_SCHEMA: &str = "hyperliquid-alpha-desk/market-metadata-version/v1
 const OUTCOME_SCHEMA: &str = "hyperliquid-alpha-desk/market-outcome-current/v1";
 const CREATION_METADATA_VERSION: &str = "creation@1.0.0";
 const MAX_RECORD_BYTES: usize = 16 * 1024;
+const MAX_STATE_KEY_BYTES: usize = 64 * 1024;
+const KEY_FRAME_BYTES: usize = size_of::<u64>();
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CanonicalMarketReducerV1;
@@ -221,9 +223,6 @@ impl EventReducer for CanonicalMarketReducerV1 {
                 let current_key = MarketCurrentRecordV1::state_key(&payload.market_id)
                     .map_err(codec_reducer_error)?;
                 let mut current = load_market(state, &current_key)?;
-                if current.metadata_resolution != MarketMetadataResolutionV1::Exact {
-                    return Err(metadata_unresolved());
-                }
                 if payload.metadata_version.as_str() <= current.metadata_version.as_str()
                     || event.block_height() <= current.updated_at_block
                 {
@@ -290,6 +289,13 @@ impl EventReducer for CanonicalMarketReducerV1 {
                 current.lot_size = None;
                 current.price_scale = None;
                 current.quantity_scale = None;
+                current.open_interest_cap = None;
+                current.margin_table_hash = None;
+                current.oracle_price = None;
+                current.oracle_source = None;
+                current.oracle_effective_at = None;
+                current.funding_rate = None;
+                current.funding_effective_at = None;
                 current.updated_at_block = event.block_height();
                 mutations.push(StateMutation::put(
                     prior_key,
@@ -1142,33 +1148,51 @@ impl MarketCurrentRecordV1 {
     }
 
     #[must_use]
-    pub fn price_scale(&self) -> u8 {
-        self.price_scale.unwrap_or(0)
+    pub const fn price_scale(&self) -> Option<u32> {
+        match self.price_scale {
+            Some(scale) => Some(scale as u32),
+            None => None,
+        }
     }
 
     #[must_use]
-    pub fn quantity_scale(&self) -> u8 {
-        self.quantity_scale.unwrap_or(0)
+    pub const fn quantity_scale(&self) -> Option<u32> {
+        match self.quantity_scale {
+            Some(scale) => Some(scale as u32),
+            None => None,
+        }
     }
 
     #[must_use]
     pub const fn open_interest_cap(&self) -> Option<QuoteAmount> {
-        self.open_interest_cap
+        match self.metadata_resolution {
+            MarketMetadataResolutionV1::Exact => self.open_interest_cap,
+            MarketMetadataResolutionV1::Unresolved => None,
+        }
     }
 
     #[must_use]
     pub fn margin_table_hash(&self) -> Option<&str> {
-        self.margin_table_hash.as_deref()
+        match self.metadata_resolution {
+            MarketMetadataResolutionV1::Exact => self.margin_table_hash.as_deref(),
+            MarketMetadataResolutionV1::Unresolved => None,
+        }
     }
 
     #[must_use]
     pub const fn oracle_price(&self) -> Option<Price> {
-        self.oracle_price
+        match self.metadata_resolution {
+            MarketMetadataResolutionV1::Exact => self.oracle_price,
+            MarketMetadataResolutionV1::Unresolved => None,
+        }
     }
 
     #[must_use]
     pub const fn funding_rate(&self) -> Option<FundingRate> {
-        self.funding_rate
+        match self.metadata_resolution {
+            MarketMetadataResolutionV1::Exact => self.funding_rate,
+            MarketMetadataResolutionV1::Unresolved => None,
+        }
     }
 
     #[must_use]
@@ -1178,17 +1202,26 @@ impl MarketCurrentRecordV1 {
 
     #[must_use]
     pub fn oracle_source(&self) -> Option<&str> {
-        self.oracle_source.as_deref()
+        match self.metadata_resolution {
+            MarketMetadataResolutionV1::Exact => self.oracle_source.as_deref(),
+            MarketMetadataResolutionV1::Unresolved => None,
+        }
     }
 
     #[must_use]
     pub const fn oracle_effective_at(&self) -> Option<ProtocolTime> {
-        self.oracle_effective_at
+        match self.metadata_resolution {
+            MarketMetadataResolutionV1::Exact => self.oracle_effective_at,
+            MarketMetadataResolutionV1::Unresolved => None,
+        }
     }
 
     #[must_use]
     pub const fn funding_effective_at(&self) -> Option<ProtocolTime> {
-        self.funding_effective_at
+        match self.metadata_resolution {
+            MarketMetadataResolutionV1::Exact => self.funding_effective_at,
+            MarketMetadataResolutionV1::Unresolved => None,
+        }
     }
 
     #[must_use]
@@ -1682,13 +1715,24 @@ fn single_key(namespace: &str, identity: &[u8]) -> Result<StateKey, MarketStateE
 }
 
 fn compound_key(namespace: &str, identities: &[&[u8]]) -> Result<StateKey, MarketStateError> {
+    let framed_len = identities.iter().try_fold(0_usize, |total, identity| {
+        if identity.is_empty() {
+            return Err(MarketStateError::InvalidKey);
+        }
+        total
+            .checked_add(KEY_FRAME_BYTES)
+            .and_then(|size| size.checked_add(identity.len()))
+            .ok_or(MarketStateError::InvalidKey)
+    })?;
+    if framed_len > MAX_STATE_KEY_BYTES {
+        return Err(MarketStateError::InvalidKey);
+    }
+
     let mut key = Vec::new();
+    key.try_reserve_exact(framed_len)
+        .map_err(|_| MarketStateError::InvalidKey)?;
     for identity in identities {
         let length = u64::try_from(identity.len()).map_err(|_| MarketStateError::InvalidKey)?;
-        key.len()
-            .checked_add(8)
-            .and_then(|size| size.checked_add(identity.len()))
-            .ok_or(MarketStateError::InvalidKey)?;
         key.extend_from_slice(&length.to_be_bytes());
         key.extend_from_slice(identity);
     }

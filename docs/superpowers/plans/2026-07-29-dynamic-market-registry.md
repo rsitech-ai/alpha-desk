@@ -100,6 +100,60 @@ focused market-state tests, the combined canonical-ledger/replay suites, and
 strict all-target/all-feature Clippy. The local M3 commit is recorded in the
 task report.
 
+### M3 independent-review remediation ExecPlan
+
+**Goal:** Clear the Task 3 HOLD with observable consecutive unresolved metadata
+intervals, absence-preserving scale inspection, pre-allocation compound-key
+bounds, and complete identity/codec regression evidence.
+
+**Current state:** Commit `7530484` passes its reported gates but rejects a
+second hash-only metadata version, exposes absent scales as zero, allocates
+oversized compound keys before rejection, and has an incomplete minimum test
+matrix. Work remains restricted to the Task 3-owned reducer, exports, tests,
+contract, plan, and report.
+
+**Target state:** Strictly increasing metadata versions close either exact or
+unresolved open intervals; value-dependent transitions remain suppressed while
+unresolved; public applicability getters preserve absence; compound keys reject
+oversize before allocation; all record families and identity/collision
+boundaries have direct tests. Restore-time semantic scans and authoritative
+metadata snapshots remain out of scope.
+
+**Risks and failure modes:** Accidentally re-exposing stale exact values,
+accepting overlapping intervals, allocating attacker-sized key buffers,
+weakening exact envelope identity, or writing codec tests that exercise only a
+single record family.
+
+**Milestones:**
+
+1. Add focused failing interval-chain and scale-absence tests, implement the
+   minimal transition/getter changes, and rerun the focused suite.
+2. Add failing compound-key boundary and complete identity/codec matrix tests,
+   implement checked preflight plus fallible reservation, and rerun the focused
+   suite.
+3. Update the contract/report, run the focused and combined suites, strict
+   Clippy, formatting and diff checks, then create the required new local fix
+   commit without amend, rebase, or push.
+
+**Verification:** Run the exact Task 3 focused test, combined
+canonical-ledger/replay tests, strict all-target/all-feature Clippy,
+`cargo +1.97.1 fmt --all -- --check`, and `git diff --check`.
+
+**Decision log (2026-07-29):** Metadata ordering remains strict lexical version
+ordering plus strictly increasing block height. Unresolved intervals may
+supersede unresolved intervals, but no exact tick, lot, or scale values are
+carried forward.
+
+**Progress log (2026-07-29):** All four review findings are remediated.
+Interval-chain and absence-preserving getter REDs were observed, the focused
+suite now covers 17 tests, and the combined suites plus strict Clippy pass.
+Formatting and diff verification also pass; only the separate fix commit
+remains.
+
+**Rollback / recovery:** Keep remediation in a separate commit. If a gate
+fails, leave `7530484` and the worktree intact, report the exact failure, and do
+not amend, rebase, push, or discard user work.
+
 ## Milestone 4: Add replay/checkpoint evidence and soak
 
 **Files:**
