@@ -92,6 +92,67 @@ impl OrderSide {
     }
 }
 
+macro_rules! wire_enum {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $($variant:ident => $wire:literal),+ $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        $(#[$meta])*
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            #[must_use]
+            pub const fn as_wire_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire),+
+                }
+            }
+
+            pub fn parse_wire(value: &str) -> Result<Self, ValueError> {
+                match value {
+                    $($wire => Ok(Self::$variant)),+,
+                    _ => Err(ValueError::Invalid),
+                }
+            }
+        }
+    };
+}
+
+wire_enum! {
+    #[serde(rename_all = "snake_case")]
+    pub enum FeeTypeV1 {
+        Maker => "maker",
+        Taker => "taker",
+        MakerRebate => "maker_rebate",
+        ReferralDiscount => "referral_discount",
+        Protocol => "protocol",
+    }
+}
+
+wire_enum! {
+    #[serde(rename_all = "snake_case")]
+    pub enum AccountAbstractionModeV1 {
+        Standard => "standard",
+        Unified => "unified",
+        Portfolio => "portfolio",
+        DexAbstraction => "dex_abstraction",
+    }
+}
+
+wire_enum! {
+    #[serde(rename_all = "snake_case")]
+    pub enum MarginModeV1 {
+        Cross => "cross",
+        Isolated => "isolated",
+        StrictIsolated => "strict_isolated",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CalibrationStatus {
     Calibrated,

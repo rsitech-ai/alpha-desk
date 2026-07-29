@@ -1,6 +1,6 @@
 use domain_types::{
-    BlockHeight, BlockRange, ClosedInterval, KnownTime, LatencyDistribution, OrderSide,
-    ProtocolTime, ValueError,
+    AccountAbstractionModeV1, BlockHeight, BlockRange, ClosedInterval, FeeTypeV1, KnownTime,
+    LatencyDistribution, MarginModeV1, OrderSide, ProtocolTime, ValueError,
 };
 use proptest::prelude::*;
 
@@ -59,6 +59,69 @@ fn order_side_has_an_exact_wire_contract_distinct_from_position_direction() {
     assert_eq!(OrderSide::parse_wire("sell"), Ok(OrderSide::Sell));
     for invalid in ["Buy", "SELL", "long", "short", " buy", "sell ", ""] {
         assert_eq!(OrderSide::parse_wire(invalid), Err(ValueError::Invalid));
+    }
+}
+
+#[test]
+fn canonical_account_enums_have_frozen_case_sensitive_wire_contracts() {
+    let fee_types = [
+        ("maker", FeeTypeV1::Maker),
+        ("taker", FeeTypeV1::Taker),
+        ("maker_rebate", FeeTypeV1::MakerRebate),
+        ("referral_discount", FeeTypeV1::ReferralDiscount),
+        ("protocol", FeeTypeV1::Protocol),
+    ];
+    for (wire, value) in fee_types {
+        assert_eq!(value.as_wire_name(), wire);
+        assert_eq!(FeeTypeV1::parse_wire(wire), Ok(value));
+    }
+
+    let account_modes = [
+        ("standard", AccountAbstractionModeV1::Standard),
+        ("unified", AccountAbstractionModeV1::Unified),
+        ("portfolio", AccountAbstractionModeV1::Portfolio),
+        ("dex_abstraction", AccountAbstractionModeV1::DexAbstraction),
+    ];
+    for (wire, value) in account_modes {
+        assert_eq!(value.as_wire_name(), wire);
+        assert_eq!(AccountAbstractionModeV1::parse_wire(wire), Ok(value));
+    }
+
+    let margin_modes = [
+        ("cross", MarginModeV1::Cross),
+        ("isolated", MarginModeV1::Isolated),
+        ("strict_isolated", MarginModeV1::StrictIsolated),
+    ];
+    for (wire, value) in margin_modes {
+        assert_eq!(value.as_wire_name(), wire);
+        assert_eq!(MarginModeV1::parse_wire(wire), Ok(value));
+    }
+
+    for invalid in ["", "Maker", " maker", "maker ", "maker-rebate", "unknown"] {
+        assert_eq!(FeeTypeV1::parse_wire(invalid), Err(ValueError::Invalid));
+    }
+    for invalid in [
+        "",
+        "Standard",
+        " standard",
+        "standard ",
+        "dex-abstraction",
+        "unknown",
+    ] {
+        assert_eq!(
+            AccountAbstractionModeV1::parse_wire(invalid),
+            Err(ValueError::Invalid)
+        );
+    }
+    for invalid in [
+        "",
+        "Cross",
+        " cross",
+        "cross ",
+        "strict-isolated",
+        "unknown",
+    ] {
+        assert_eq!(MarginModeV1::parse_wire(invalid), Err(ValueError::Invalid));
     }
 }
 

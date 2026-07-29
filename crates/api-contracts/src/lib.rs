@@ -673,6 +673,70 @@ pub struct WireVaultWithdrawal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireFeeCharged {
+    pub account_id: String,
+    pub asset_id: String,
+    pub amount: String,
+    pub fee_rate: String,
+    pub fee_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireBuilderFeeCharged {
+    pub account_id: String,
+    pub builder_account_id: String,
+    pub asset_id: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireFundingPaid {
+    pub account_id: String,
+    pub market_id: String,
+    pub amount: String,
+    pub funding_rate: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireFundingReceived {
+    pub account_id: String,
+    pub market_id: String,
+    pub amount: String,
+    pub funding_rate: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireReferralReward {
+    pub account_id: String,
+    pub referrer_account_id: String,
+    pub asset_id: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireAccountModeChanged {
+    pub account_id: String,
+    pub previous_mode: String,
+    pub new_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMarginModeChanged {
+    pub account_id: String,
+    pub market_id: String,
+    pub previous_mode: String,
+    pub new_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireLeverageChanged {
+    pub account_id: String,
+    pub market_id: String,
+    pub previous_leverage: String,
+    pub new_leverage: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireDexCreated {
     pub dex_id: String,
     pub name: String,
@@ -1202,6 +1266,266 @@ pub fn decode_vault_withdrawal(bytes: &[u8]) -> Result<WireVaultWithdrawal, Payl
     })
 }
 
+pub fn encode_fee_charged(value: &WireFeeCharged) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_fee_charged(value.clone())?;
+    bounded_account_payload(
+        "FeeCharged",
+        generated::hl::canonical::v1::FeeCharged {
+            account_id: value.account_id,
+            asset_id: value.asset_id,
+            amount: value.amount,
+            fee_rate: value.fee_rate,
+            fee_type: value.fee_type,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_fee_charged(bytes: &[u8]) -> Result<WireFeeCharged, PayloadCodecError> {
+    validate_account_payload_size("FeeCharged", bytes)?;
+    let message = generated::hl::canonical::v1::FeeCharged::decode(
+        unwrap_payload("FeeCharged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "FeeCharged".to_owned(),
+        source,
+    })?;
+    validate_fee_charged(WireFeeCharged {
+        account_id: message.account_id,
+        asset_id: message.asset_id,
+        amount: message.amount,
+        fee_rate: message.fee_rate,
+        fee_type: message.fee_type,
+    })
+}
+
+pub fn encode_builder_fee_charged(
+    value: &WireBuilderFeeCharged,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_builder_fee_charged(value.clone())?;
+    bounded_account_payload(
+        "BuilderFeeCharged",
+        generated::hl::canonical::v1::BuilderFeeCharged {
+            account_id: value.account_id,
+            builder_account_id: value.builder_account_id,
+            asset_id: value.asset_id,
+            amount: value.amount,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_builder_fee_charged(
+    bytes: &[u8],
+) -> Result<WireBuilderFeeCharged, PayloadCodecError> {
+    validate_account_payload_size("BuilderFeeCharged", bytes)?;
+    let message = generated::hl::canonical::v1::BuilderFeeCharged::decode(
+        unwrap_payload("BuilderFeeCharged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "BuilderFeeCharged".to_owned(),
+        source,
+    })?;
+    validate_builder_fee_charged(WireBuilderFeeCharged {
+        account_id: message.account_id,
+        builder_account_id: message.builder_account_id,
+        asset_id: message.asset_id,
+        amount: message.amount,
+    })
+}
+
+pub fn encode_funding_paid(value: &WireFundingPaid) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_funding_paid(value.clone())?;
+    bounded_account_payload(
+        "FundingPaid",
+        generated::hl::canonical::v1::FundingPaid {
+            account_id: value.account_id,
+            market_id: value.market_id,
+            amount: value.amount,
+            funding_rate: value.funding_rate,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_funding_paid(bytes: &[u8]) -> Result<WireFundingPaid, PayloadCodecError> {
+    validate_account_payload_size("FundingPaid", bytes)?;
+    let message = generated::hl::canonical::v1::FundingPaid::decode(
+        unwrap_payload("FundingPaid", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "FundingPaid".to_owned(),
+        source,
+    })?;
+    validate_funding_paid(WireFundingPaid {
+        account_id: message.account_id,
+        market_id: message.market_id,
+        amount: message.amount,
+        funding_rate: message.funding_rate,
+    })
+}
+
+pub fn encode_funding_received(value: &WireFundingReceived) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_funding_received(value.clone())?;
+    bounded_account_payload(
+        "FundingReceived",
+        generated::hl::canonical::v1::FundingReceived {
+            account_id: value.account_id,
+            market_id: value.market_id,
+            amount: value.amount,
+            funding_rate: value.funding_rate,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_funding_received(bytes: &[u8]) -> Result<WireFundingReceived, PayloadCodecError> {
+    validate_account_payload_size("FundingReceived", bytes)?;
+    let message = generated::hl::canonical::v1::FundingReceived::decode(
+        unwrap_payload("FundingReceived", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "FundingReceived".to_owned(),
+        source,
+    })?;
+    validate_funding_received(WireFundingReceived {
+        account_id: message.account_id,
+        market_id: message.market_id,
+        amount: message.amount,
+        funding_rate: message.funding_rate,
+    })
+}
+
+pub fn encode_referral_reward(value: &WireReferralReward) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_referral_reward(value.clone())?;
+    bounded_account_payload(
+        "ReferralReward",
+        generated::hl::canonical::v1::ReferralReward {
+            account_id: value.account_id,
+            referrer_account_id: value.referrer_account_id,
+            asset_id: value.asset_id,
+            amount: value.amount,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_referral_reward(bytes: &[u8]) -> Result<WireReferralReward, PayloadCodecError> {
+    validate_account_payload_size("ReferralReward", bytes)?;
+    let message = generated::hl::canonical::v1::ReferralReward::decode(
+        unwrap_payload("ReferralReward", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "ReferralReward".to_owned(),
+        source,
+    })?;
+    validate_referral_reward(WireReferralReward {
+        account_id: message.account_id,
+        referrer_account_id: message.referrer_account_id,
+        asset_id: message.asset_id,
+        amount: message.amount,
+    })
+}
+
+pub fn encode_account_mode_changed(
+    value: &WireAccountModeChanged,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_account_mode_changed(value.clone())?;
+    bounded_account_payload(
+        "AccountModeChanged",
+        generated::hl::canonical::v1::AccountModeChanged {
+            account_id: value.account_id,
+            previous_mode: value.previous_mode,
+            new_mode: value.new_mode,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_account_mode_changed(
+    bytes: &[u8],
+) -> Result<WireAccountModeChanged, PayloadCodecError> {
+    validate_account_payload_size("AccountModeChanged", bytes)?;
+    let message = generated::hl::canonical::v1::AccountModeChanged::decode(
+        unwrap_payload("AccountModeChanged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "AccountModeChanged".to_owned(),
+        source,
+    })?;
+    validate_account_mode_changed(WireAccountModeChanged {
+        account_id: message.account_id,
+        previous_mode: message.previous_mode,
+        new_mode: message.new_mode,
+    })
+}
+
+pub fn encode_margin_mode_changed(
+    value: &WireMarginModeChanged,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_margin_mode_changed(value.clone())?;
+    bounded_account_payload(
+        "MarginModeChanged",
+        generated::hl::canonical::v1::MarginModeChanged {
+            account_id: value.account_id,
+            market_id: value.market_id,
+            previous_mode: value.previous_mode,
+            new_mode: value.new_mode,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_margin_mode_changed(
+    bytes: &[u8],
+) -> Result<WireMarginModeChanged, PayloadCodecError> {
+    validate_account_payload_size("MarginModeChanged", bytes)?;
+    let message = generated::hl::canonical::v1::MarginModeChanged::decode(
+        unwrap_payload("MarginModeChanged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "MarginModeChanged".to_owned(),
+        source,
+    })?;
+    validate_margin_mode_changed(WireMarginModeChanged {
+        account_id: message.account_id,
+        market_id: message.market_id,
+        previous_mode: message.previous_mode,
+        new_mode: message.new_mode,
+    })
+}
+
+pub fn encode_leverage_changed(value: &WireLeverageChanged) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_leverage_changed(value.clone())?;
+    bounded_account_payload(
+        "LeverageChanged",
+        generated::hl::canonical::v1::LeverageChanged {
+            account_id: value.account_id,
+            market_id: value.market_id,
+            previous_leverage: value.previous_leverage,
+            new_leverage: value.new_leverage,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_leverage_changed(bytes: &[u8]) -> Result<WireLeverageChanged, PayloadCodecError> {
+    validate_account_payload_size("LeverageChanged", bytes)?;
+    let message = generated::hl::canonical::v1::LeverageChanged::decode(
+        unwrap_payload("LeverageChanged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "LeverageChanged".to_owned(),
+        source,
+    })?;
+    validate_leverage_changed(WireLeverageChanged {
+        account_id: message.account_id,
+        market_id: message.market_id,
+        previous_leverage: message.previous_leverage,
+        new_leverage: message.new_leverage,
+    })
+}
+
 pub fn encode_dex_created(value: &WireDexCreated) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_dex_created(value.clone())?;
     Ok(wrap_payload(
@@ -1648,16 +1972,70 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
                 shares_redeemed: "1".to_owned(),
             });
         }
-        "FeeCharged" => default_message::<generated::hl::canonical::v1::FeeCharged>(),
-        "BuilderFeeCharged" => default_message::<generated::hl::canonical::v1::BuilderFeeCharged>(),
-        "FundingPaid" => default_message::<generated::hl::canonical::v1::FundingPaid>(),
-        "FundingReceived" => default_message::<generated::hl::canonical::v1::FundingReceived>(),
-        "ReferralReward" => default_message::<generated::hl::canonical::v1::ReferralReward>(),
-        "AccountModeChanged" => {
-            default_message::<generated::hl::canonical::v1::AccountModeChanged>()
+        "FeeCharged" => {
+            return encode_fee_charged(&WireFeeCharged {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                fee_rate: "0.001".to_owned(),
+                fee_type: "protocol".to_owned(),
+            });
         }
-        "MarginModeChanged" => default_message::<generated::hl::canonical::v1::MarginModeChanged>(),
-        "LeverageChanged" => default_message::<generated::hl::canonical::v1::LeverageChanged>(),
+        "BuilderFeeCharged" => {
+            return encode_builder_fee_charged(&WireBuilderFeeCharged {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                builder_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            });
+        }
+        "FundingPaid" => {
+            return encode_funding_paid(&WireFundingPaid {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "-0.0001".to_owned(),
+            });
+        }
+        "FundingReceived" => {
+            return encode_funding_received(&WireFundingReceived {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "0.0001".to_owned(),
+            });
+        }
+        "ReferralReward" => {
+            return encode_referral_reward(&WireReferralReward {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                referrer_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            });
+        }
+        "AccountModeChanged" => {
+            return encode_account_mode_changed(&WireAccountModeChanged {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                previous_mode: "standard".to_owned(),
+                new_mode: "unified".to_owned(),
+            });
+        }
+        "MarginModeChanged" => {
+            return encode_margin_mode_changed(&WireMarginModeChanged {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                previous_mode: "cross".to_owned(),
+                new_mode: "isolated".to_owned(),
+            });
+        }
+        "LeverageChanged" => {
+            return encode_leverage_changed(&WireLeverageChanged {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                previous_leverage: "1".to_owned(),
+                new_leverage: "2".to_owned(),
+            });
+        }
         "LiquidationStarted" => {
             default_message::<generated::hl::canonical::v1::LiquidationStarted>()
         }
@@ -1703,6 +2081,14 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
             | "SubaccountTransfer"
             | "VaultDeposit"
             | "VaultWithdrawal"
+            | "FeeCharged"
+            | "BuilderFeeCharged"
+            | "FundingPaid"
+            | "FundingReceived"
+            | "ReferralReward"
+            | "AccountModeChanged"
+            | "MarginModeChanged"
+            | "LeverageChanged"
     ) {
         validate_account_payload_size(kind, bytes)?;
     }
@@ -1737,14 +2123,14 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "SubaccountTransfer" => decode_subaccount_transfer(bytes).map(|_| ()),
         "VaultDeposit" => decode_vault_deposit(bytes).map(|_| ()),
         "VaultWithdrawal" => decode_vault_withdrawal(bytes).map(|_| ()),
-        "FeeCharged" => decode!(generated::hl::canonical::v1::FeeCharged),
-        "BuilderFeeCharged" => decode!(generated::hl::canonical::v1::BuilderFeeCharged),
-        "FundingPaid" => decode!(generated::hl::canonical::v1::FundingPaid),
-        "FundingReceived" => decode!(generated::hl::canonical::v1::FundingReceived),
-        "ReferralReward" => decode!(generated::hl::canonical::v1::ReferralReward),
-        "AccountModeChanged" => decode!(generated::hl::canonical::v1::AccountModeChanged),
-        "MarginModeChanged" => decode!(generated::hl::canonical::v1::MarginModeChanged),
-        "LeverageChanged" => decode!(generated::hl::canonical::v1::LeverageChanged),
+        "FeeCharged" => decode_fee_charged(bytes).map(|_| ()),
+        "BuilderFeeCharged" => decode_builder_fee_charged(bytes).map(|_| ()),
+        "FundingPaid" => decode_funding_paid(bytes).map(|_| ()),
+        "FundingReceived" => decode_funding_received(bytes).map(|_| ()),
+        "ReferralReward" => decode_referral_reward(bytes).map(|_| ()),
+        "AccountModeChanged" => decode_account_mode_changed(bytes).map(|_| ()),
+        "MarginModeChanged" => decode_margin_mode_changed(bytes).map(|_| ()),
+        "LeverageChanged" => decode_leverage_changed(bytes).map(|_| ()),
         "LiquidationStarted" => decode!(generated::hl::canonical::v1::LiquidationStarted),
         "LiquidationFill" => decode!(generated::hl::canonical::v1::LiquidationFill),
         "BackstopLiquidation" => decode!(generated::hl::canonical::v1::BackstopLiquidation),
@@ -2025,6 +2411,176 @@ fn validate_vault_withdrawal(
     Ok(value)
 }
 
+fn validate_fee_charged(mut value: WireFeeCharged) -> Result<WireFeeCharged, PayloadCodecError> {
+    const CHARGED_FEE_TYPES: [&str; 4] = ["maker", "taker", "referral_discount", "protocol"];
+    value.account_id = required_api_address("FeeCharged", "account_id", value.account_id)?;
+    value.asset_id = required_payload_field("FeeCharged", "asset_id", value.asset_id)?;
+    value.amount = required_payload_field("FeeCharged", "amount", value.amount)?;
+    value.fee_rate = required_payload_field("FeeCharged", "fee_rate", value.fee_rate)?;
+    value.fee_type = required_wire_value(
+        "FeeCharged",
+        "fee_type",
+        value.fee_type,
+        &[
+            "maker",
+            "taker",
+            "maker_rebate",
+            "referral_discount",
+            "protocol",
+        ],
+    )?;
+    let sign = decimal_wire_sign("FeeCharged", "fee_rate", &value.fee_rate)?;
+    let valid_sign = if value.fee_type == "maker_rebate" {
+        sign < 0
+    } else {
+        CHARGED_FEE_TYPES.contains(&value.fee_type.as_str()) && sign > 0
+    };
+    if !valid_sign {
+        return Err(PayloadCodecError::Invalid {
+            kind: "FeeCharged".to_owned(),
+            reason: "maker_rebate requires a negative fee_rate; charged fees require a positive fee_rate"
+                .to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+fn validate_builder_fee_charged(
+    mut value: WireBuilderFeeCharged,
+) -> Result<WireBuilderFeeCharged, PayloadCodecError> {
+    value.account_id = required_api_address("BuilderFeeCharged", "account_id", value.account_id)?;
+    value.builder_account_id = required_api_address(
+        "BuilderFeeCharged",
+        "builder_account_id",
+        value.builder_account_id,
+    )?;
+    require_distinct_accounts(
+        "BuilderFeeCharged",
+        "account_id",
+        &value.account_id,
+        "builder_account_id",
+        &value.builder_account_id,
+    )?;
+    value.asset_id = required_payload_field("BuilderFeeCharged", "asset_id", value.asset_id)?;
+    value.amount = required_payload_field("BuilderFeeCharged", "amount", value.amount)?;
+    Ok(value)
+}
+
+fn validate_funding_paid(mut value: WireFundingPaid) -> Result<WireFundingPaid, PayloadCodecError> {
+    value.account_id = required_api_address("FundingPaid", "account_id", value.account_id)?;
+    value.market_id = required_payload_field("FundingPaid", "market_id", value.market_id)?;
+    value.amount = required_payload_field("FundingPaid", "amount", value.amount)?;
+    value.funding_rate = required_payload_field("FundingPaid", "funding_rate", value.funding_rate)?;
+    Ok(value)
+}
+
+fn validate_funding_received(
+    mut value: WireFundingReceived,
+) -> Result<WireFundingReceived, PayloadCodecError> {
+    value.account_id = required_api_address("FundingReceived", "account_id", value.account_id)?;
+    value.market_id = required_payload_field("FundingReceived", "market_id", value.market_id)?;
+    value.amount = required_payload_field("FundingReceived", "amount", value.amount)?;
+    value.funding_rate =
+        required_payload_field("FundingReceived", "funding_rate", value.funding_rate)?;
+    Ok(value)
+}
+
+fn validate_referral_reward(
+    mut value: WireReferralReward,
+) -> Result<WireReferralReward, PayloadCodecError> {
+    value.account_id = required_api_address("ReferralReward", "account_id", value.account_id)?;
+    value.referrer_account_id = required_api_address(
+        "ReferralReward",
+        "referrer_account_id",
+        value.referrer_account_id,
+    )?;
+    require_distinct_accounts(
+        "ReferralReward",
+        "account_id",
+        &value.account_id,
+        "referrer_account_id",
+        &value.referrer_account_id,
+    )?;
+    value.asset_id = required_payload_field("ReferralReward", "asset_id", value.asset_id)?;
+    value.amount = required_payload_field("ReferralReward", "amount", value.amount)?;
+    Ok(value)
+}
+
+fn validate_account_mode_changed(
+    mut value: WireAccountModeChanged,
+) -> Result<WireAccountModeChanged, PayloadCodecError> {
+    value.account_id = required_api_address("AccountModeChanged", "account_id", value.account_id)?;
+    value.previous_mode = required_wire_value(
+        "AccountModeChanged",
+        "previous_mode",
+        value.previous_mode,
+        &["standard", "unified", "portfolio", "dex_abstraction"],
+    )?;
+    value.new_mode = required_wire_value(
+        "AccountModeChanged",
+        "new_mode",
+        value.new_mode,
+        &["standard", "unified", "portfolio", "dex_abstraction"],
+    )?;
+    require_changed(
+        "AccountModeChanged",
+        "previous_mode",
+        &value.previous_mode,
+        "new_mode",
+        &value.new_mode,
+    )?;
+    Ok(value)
+}
+
+fn validate_margin_mode_changed(
+    mut value: WireMarginModeChanged,
+) -> Result<WireMarginModeChanged, PayloadCodecError> {
+    value.account_id = required_api_address("MarginModeChanged", "account_id", value.account_id)?;
+    value.market_id = required_payload_field("MarginModeChanged", "market_id", value.market_id)?;
+    value.previous_mode = required_wire_value(
+        "MarginModeChanged",
+        "previous_mode",
+        value.previous_mode,
+        &["cross", "isolated", "strict_isolated"],
+    )?;
+    value.new_mode = required_wire_value(
+        "MarginModeChanged",
+        "new_mode",
+        value.new_mode,
+        &["cross", "isolated", "strict_isolated"],
+    )?;
+    require_changed(
+        "MarginModeChanged",
+        "previous_mode",
+        &value.previous_mode,
+        "new_mode",
+        &value.new_mode,
+    )?;
+    Ok(value)
+}
+
+fn validate_leverage_changed(
+    mut value: WireLeverageChanged,
+) -> Result<WireLeverageChanged, PayloadCodecError> {
+    value.account_id = required_api_address("LeverageChanged", "account_id", value.account_id)?;
+    value.market_id = required_payload_field("LeverageChanged", "market_id", value.market_id)?;
+    value.previous_leverage = required_payload_field(
+        "LeverageChanged",
+        "previous_leverage",
+        value.previous_leverage,
+    )?;
+    value.new_leverage =
+        required_payload_field("LeverageChanged", "new_leverage", value.new_leverage)?;
+    require_changed(
+        "LeverageChanged",
+        "previous_leverage",
+        &value.previous_leverage,
+        "new_leverage",
+        &value.new_leverage,
+    )?;
+    Ok(value)
+}
+
 fn validate_dex_created(mut value: WireDexCreated) -> Result<WireDexCreated, PayloadCodecError> {
     value.dex_id = required_payload_field("DexCreated", "dex_id", value.dex_id)?;
     value.name = required_bounded_text("DexCreated", "name", value.name, 256)?;
@@ -2296,6 +2852,87 @@ fn require_distinct_endpoints(
         });
     }
     Ok(())
+}
+
+fn require_distinct_accounts(
+    kind: &str,
+    left_field: &str,
+    left: &str,
+    right_field: &str,
+    right: &str,
+) -> Result<(), PayloadCodecError> {
+    if left == right {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{left_field} and {right_field} must differ"),
+        });
+    }
+    Ok(())
+}
+
+fn require_changed(
+    kind: &str,
+    previous_field: &str,
+    previous: &str,
+    new_field: &str,
+    new: &str,
+) -> Result<(), PayloadCodecError> {
+    if previous == new {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{previous_field} and {new_field} must differ"),
+        });
+    }
+    Ok(())
+}
+
+fn required_wire_value(
+    kind: &str,
+    field: &str,
+    value: String,
+    allowed: &[&str],
+) -> Result<String, PayloadCodecError> {
+    let value = required_payload_field(kind, field, value)?;
+    if !allowed.contains(&value.as_str()) {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} has an unknown wire value"),
+        });
+    }
+    Ok(value)
+}
+
+fn decimal_wire_sign(kind: &str, field: &str, value: &str) -> Result<i8, PayloadCodecError> {
+    let (negative, unsigned) = match value.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, value),
+    };
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some()
+        || whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|digits| {
+            digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be a canonical decimal string"),
+        });
+    }
+    let nonzero = whole
+        .bytes()
+        .chain(fraction.unwrap_or_default().bytes())
+        .any(|byte| byte != b'0');
+    Ok(if !nonzero {
+        0
+    } else if negative {
+        -1
+    } else {
+        1
+    })
 }
 
 fn decode_optional_identity(
