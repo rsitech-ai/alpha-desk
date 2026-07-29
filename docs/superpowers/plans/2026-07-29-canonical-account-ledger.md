@@ -290,7 +290,7 @@ Parquet archive, private local checkpoints.
   not contain transfer price or cost basis; the later reducer must mark
   affected position accounting unresolved instead of inventing either value.
 
-- [ ] **Step 1: Write failing risk tests**
+- [x] **Step 1: Write failing risk tests**
 
   Cover valid exact round trips and reject malformed addresses/IDs,
   zero/negative fill price or quantity, negative margin values, equal
@@ -300,13 +300,13 @@ Parquet archive, private local checkpoints.
   identities against enclosing account/market identities remains a single
   block-atomic reducer responsibility in Task 4.
 
-- [ ] **Step 2: Run red**
+- [x] **Step 2: Run red**
 
   ```bash
   cargo +1.97.1 test -p canonical-events --test account_payloads --locked --offline
   ```
 
-- [ ] **Step 3: Implement the risk payloads**
+- [x] **Step 3: Implement the risk payloads**
 
   ```rust
   pub struct LiquidationStarted {
@@ -345,7 +345,7 @@ Parquet archive, private local checkpoints.
   require `margin_value < maintenance_requirement` for
   `LiquidationStarted`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   ```bash
   cargo +1.97.1 test -p domain-types -p api-contracts -p canonical-events --locked --offline
@@ -717,6 +717,14 @@ Parquet archive, private local checkpoints.
   decoder limits, all amount/identity fields, funding signs, and fixed-point
   precision 38/39 were covered. Parent verification passed 144 affected
   tests, strict all-target/all-feature Clippy, formatting, and diff checks.
+- 2026-07-30: Task 3 completed at `81f2a2d`. All four liquidation and
+  settlement payloads plus `LiquidationId` are strict typed contracts. Exact
+  semantics cover liquidation margin ordering and scale, positive fills,
+  distinct backstop accounts, zero-price settlement, and signed realized PnL
+  without inventing backstop price or basis. Final independent review returned
+  spec-compliance and code-quality GO. Worker, reviewer, and parent each
+  reproduced the focused and 152-test package gates; strict Clippy, formatting,
+  size preflight, and exact-range diff checks passed.
 
 ## Rollback / Recovery
 
