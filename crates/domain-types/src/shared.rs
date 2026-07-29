@@ -68,6 +68,31 @@ pub enum Direction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+impl OrderSide {
+    #[must_use]
+    pub const fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Buy => "buy",
+            Self::Sell => "sell",
+        }
+    }
+
+    pub fn parse_wire(value: &str) -> Result<Self, ValueError> {
+        match value {
+            "buy" => Ok(Self::Buy),
+            "sell" => Ok(Self::Sell),
+            _ => Err(ValueError::Invalid),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CalibrationStatus {
     Calibrated,
     UnderReview,

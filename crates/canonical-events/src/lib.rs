@@ -16,12 +16,14 @@ pub use node_mapping::{
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
-    WireCanonicalEventEnvelope, WireSourceEvidence, WireTradeMatched, decode_trade_matched,
-    encode_default_event_payload, encode_trade_matched, validate_event_payload,
+    WireCanonicalEventEnvelope, WireOrderAccepted, WireOrderModified, WireOrderRested,
+    WireSourceEvidence, WireTradeMatched, decode_order_accepted, decode_order_modified,
+    decode_order_rested, decode_trade_matched, encode_default_event_payload, encode_order_accepted,
+    encode_order_modified, encode_order_rested, encode_trade_matched, validate_event_payload,
 };
 use domain_types::{
-    Address, BlockHeight, ChainId, EventId, KnownTime, MarketId, OrderId, Price, ProtocolTime,
-    Quantity, SourceId, TradeId, TransactionId,
+    Address, BlockHeight, ChainId, EventId, KnownTime, MarketId, OrderId, OrderSide, Price,
+    ProtocolTime, Quantity, SourceId, TradeId, TransactionId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -196,6 +198,33 @@ impl TradeMatched {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderAccepted {
+    pub order_id: OrderId,
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub side: OrderSide,
+    pub limit_price: Price,
+    pub quantity: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderRested {
+    pub order_id: OrderId,
+    pub market_id: MarketId,
+    pub remaining_quantity: Quantity,
+    pub limit_price: Price,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderModified {
+    pub order_id: OrderId,
+    pub previous_price: Price,
+    pub new_price: Price,
+    pub previous_quantity: Quantity,
+    pub new_quantity: Quantity,
+}
+
 macro_rules! opaque_payloads {
     ($($kind:ident),+ $(,)?) => {
         $(
@@ -212,6 +241,9 @@ macro_rules! opaque_payloads {
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub enum EventPayload {
             $($kind($kind),)+
+            OrderAccepted(OrderAccepted),
+            OrderRested(OrderRested),
+            OrderModified(OrderModified),
             TradeMatched(TradeMatched),
         }
 
@@ -220,6 +252,9 @@ macro_rules! opaque_payloads {
             pub const fn kind(&self) -> EventKind {
                 match self {
                     $(Self::$kind(_) => EventKind::$kind,)+
+                    Self::OrderAccepted(_) => EventKind::OrderAccepted,
+                    Self::OrderRested(_) => EventKind::OrderRested,
+                    Self::OrderModified(_) => EventKind::OrderModified,
                     Self::TradeMatched(_) => EventKind::TradeMatched,
                 }
             }
@@ -232,6 +267,30 @@ macro_rules! opaque_payloads {
                             Ok(value.encoded.clone())
                         }
                     )+
+                    Self::OrderAccepted(value) => encode_order_accepted(&WireOrderAccepted {
+                        order_id: value.order_id.to_string(),
+                        account_id: value.account_id.to_api_string(),
+                        market_id: value.market_id.to_string(),
+                        side: value.side.as_wire_name().to_owned(),
+                        limit_price: value.limit_price.to_string(),
+                        quantity: value.quantity.to_string(),
+                    })
+                    .map_err(payload_error),
+                    Self::OrderRested(value) => encode_order_rested(&WireOrderRested {
+                        order_id: value.order_id.to_string(),
+                        market_id: value.market_id.to_string(),
+                        remaining_quantity: value.remaining_quantity.to_string(),
+                        limit_price: value.limit_price.to_string(),
+                    })
+                    .map_err(payload_error),
+                    Self::OrderModified(value) => encode_order_modified(&WireOrderModified {
+                        order_id: value.order_id.to_string(),
+                        previous_price: value.previous_price.to_string(),
+                        new_price: value.new_price.to_string(),
+                        previous_quantity: value.previous_quantity.to_string(),
+                        new_quantity: value.new_quantity.to_string(),
+                    })
+                    .map_err(payload_error),
                     Self::TradeMatched(value) => encode_trade_matched(&WireTradeMatched {
                         trade_id: value.trade_id.as_ref().map(ToString::to_string),
                         market_id: value.market_id.as_ref().map(ToString::to_string),
@@ -265,6 +324,15 @@ macro_rules! opaque_payloads {
             ) -> Result<Self, ContractError> {
                 required_payload(bytes)?;
                 match kind {
+                    EventKind::OrderAccepted => {
+                        decode_order_accepted_payload(bytes).map(Self::OrderAccepted)
+                    }
+                    EventKind::OrderRested => {
+                        decode_order_rested_payload(bytes).map(Self::OrderRested)
+                    }
+                    EventKind::OrderModified => {
+                        decode_order_modified_payload(bytes).map(Self::OrderModified)
+                    }
                     $(
                         EventKind::$kind => {
                             validate_payload(kind, bytes)?;
@@ -334,8 +402,7 @@ macro_rules! opaque_payloads {
                 EventKind::ALL
                     .into_iter()
                     .map(|kind| {
-                        let bytes = encode_default_event_payload(kind.as_wire_name())
-                            .map_err(payload_error)?;
+                        let bytes = fixture_payload_bytes(kind)?;
                         Self::decode(kind, &bytes)
                     })
                     .collect()
@@ -345,9 +412,6 @@ macro_rules! opaque_payloads {
 }
 
 opaque_payloads!(
-    OrderAccepted,
-    OrderRested,
-    OrderModified,
     OrderPartiallyFilled,
     OrderFilled,
     OrderCancelled,
@@ -388,6 +452,109 @@ opaque_payloads!(
     OutcomeCreated,
     OutcomeResolved,
 );
+
+fn decode_order_accepted_payload(bytes: &[u8]) -> Result<OrderAccepted, ContractError> {
+    let value = decode_order_accepted(bytes).map_err(payload_error)?;
+    let limit_price = parse_positive_price(&value.limit_price)?;
+    let quantity = parse_positive_quantity(&value.quantity)?;
+    Ok(OrderAccepted {
+        order_id: payload_value(OrderId::new(value.order_id))?,
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        side: payload_value(OrderSide::parse_wire(&value.side))?,
+        limit_price,
+        quantity,
+    })
+}
+
+fn decode_order_rested_payload(bytes: &[u8]) -> Result<OrderRested, ContractError> {
+    let value = decode_order_rested(bytes).map_err(payload_error)?;
+    Ok(OrderRested {
+        order_id: payload_value(OrderId::new(value.order_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        remaining_quantity: parse_positive_quantity(&value.remaining_quantity)?,
+        limit_price: parse_positive_price(&value.limit_price)?,
+    })
+}
+
+fn decode_order_modified_payload(bytes: &[u8]) -> Result<OrderModified, ContractError> {
+    let value = decode_order_modified(bytes).map_err(payload_error)?;
+    let modified = OrderModified {
+        order_id: payload_value(OrderId::new(value.order_id))?,
+        previous_price: parse_positive_price(&value.previous_price)?,
+        new_price: parse_positive_price(&value.new_price)?,
+        previous_quantity: parse_positive_quantity(&value.previous_quantity)?,
+        new_quantity: parse_positive_quantity(&value.new_quantity)?,
+    };
+    if modified.previous_price == modified.new_price
+        && modified.previous_quantity == modified.new_quantity
+    {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "OrderModified must change price or quantity".to_owned(),
+        });
+    }
+    Ok(modified)
+}
+
+fn parse_positive_price(value: &str) -> Result<Price, ContractError> {
+    let price = payload_value(Price::from_str(value))?;
+    if price.raw() <= 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "order price must be positive".to_owned(),
+        });
+    }
+    Ok(price)
+}
+
+fn parse_positive_quantity(value: &str) -> Result<Quantity, ContractError> {
+    let quantity = payload_value(Quantity::from_str(value))?;
+    if quantity.raw() <= 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "order quantity must be positive".to_owned(),
+        });
+    }
+    Ok(quantity)
+}
+
+fn payload_value<T>(value: Result<T, domain_types::ValueError>) -> Result<T, ContractError> {
+    value.map_err(|error| ContractError::Invalid {
+        field: "payload",
+        reason: error.to_string(),
+    })
+}
+
+fn fixture_payload_bytes(kind: EventKind) -> Result<Vec<u8>, ContractError> {
+    match kind {
+        EventKind::OrderAccepted => encode_order_accepted(&WireOrderAccepted {
+            order_id: "fixture-order".to_owned(),
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            side: "buy".to_owned(),
+            limit_price: "1.000000".to_owned(),
+            quantity: "1.00000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::OrderRested => encode_order_rested(&WireOrderRested {
+            order_id: "fixture-order".to_owned(),
+            market_id: "perp:BTC".to_owned(),
+            remaining_quantity: "1.00000000".to_owned(),
+            limit_price: "1.000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::OrderModified => encode_order_modified(&WireOrderModified {
+            order_id: "fixture-order".to_owned(),
+            previous_price: "1.000000".to_owned(),
+            new_price: "2.000000".to_owned(),
+            previous_quantity: "1.00000000".to_owned(),
+            new_quantity: "1.00000000".to_owned(),
+        })
+        .map_err(payload_error),
+        _ => encode_default_event_payload(kind.as_wire_name()).map_err(payload_error),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEvidence {

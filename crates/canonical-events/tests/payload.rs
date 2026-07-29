@@ -126,7 +126,8 @@ fn opaque_typed_payload_preserves_non_default_message_bytes_exactly() {
         side: "buy".to_owned(),
         limit_price: "65000.125".to_owned(),
         quantity: "0.75".to_owned(),
-    });
+    })
+    .unwrap();
 
     let payload = EventPayload::decode(EventKind::OrderAccepted, &bytes).unwrap();
     assert_eq!(payload.encode_to_vec().unwrap(), bytes);
