@@ -12,6 +12,7 @@ nats_server_url = "nats://127.0.0.1:4222"
 nats_stream = "HL_CANONICAL"
 nats_username = "capture"
 nats_password_path = "/run/secrets/alpha-desk-nats-capture-password"
+postgres_operation_timeout_millis = 5000
 max_pending_blocks = 4096
 retained_committed_blocks = 4096
 publisher_ledger_capacity = 100000

@@ -191,6 +191,10 @@ pub struct CloseReceipt {
 }
 
 impl CloseReceipt {
+    pub fn load(segment_path: impl AsRef<Path>) -> Result<Self, SpoolError> {
+        load_close_receipt(segment_path)
+    }
+
     #[must_use]
     pub const fn manifest(&self) -> &ClosedSegmentManifestV1 {
         &self.manifest

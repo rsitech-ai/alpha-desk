@@ -183,6 +183,7 @@ shutdown:
 
 ```sh
 just capture-e2e
+just capture-outage-e2e
 just capture-soak 10m
 ```
 
@@ -193,8 +194,19 @@ resource high-water marks, spool/archive summaries, log byte counts, and
 shutdown result. The test removes only its disposable containers, network, and
 temporary secret directory.
 
+`capture-outage-e2e` uses five records and pauses its test-owned NATS and
+PostgreSQL containers in turn. It requires the spool to grow during each
+outage, captures the degraded atomic status, restores the dependency, and
+requires exact raw/spool/block/publication parity at the final contiguous
+cursor. The test never stops or modifies host PostgreSQL, shared NATS, or
+unrelated containers. `runtime.postgres_operation_timeout_millis` independently
+bounds PostgreSQL connection and progress operations; it is not coupled to the
+JetStream publication timeout.
+
 This is a synthetic node-format runtime-mechanics lane. Its report deliberately
-contains `"mode": "synthetic-node-source"` and
+uses `"mode": "synthetic-node-source"` for restart/soak and
+`"mode": "synthetic-node-source-dependency-outage"` for the fault lane. Every
+report contains
 `"live_source_qualified": false`. The production `run` command is connected,
 but the committed mapper accepts only structurally valid blocks with no action
 bundles. Action-bearing records fail closed with

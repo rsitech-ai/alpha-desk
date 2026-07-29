@@ -12,6 +12,7 @@ use storage_ports::ArchiveReceipt;
 
 pub use jetstream::{
     JetStreamAuthentication, JetStreamConfig, JetStreamConfigError, JetStreamPublisher,
+    ReconnectingJetStreamPublisher,
 };
 pub use subjects::{
     CANONICAL_STREAM, DEAD_LETTER_STREAM, FEATURE_STREAM, HEALTH_STREAM, SIGNAL_STREAM,

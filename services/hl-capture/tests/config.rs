@@ -196,6 +196,11 @@ fn runtime_boundaries_reject_inline_credentials_unsafe_paths_and_unbounded_limit
             "capture_config.invalid_credential_path",
         ),
         (
+            "postgres_operation_timeout_millis = 5000",
+            "postgres_operation_timeout_millis = 0",
+            "capture_config.invalid_runtime_limit",
+        ),
+        (
             "publish_timeout_millis = 5000",
             "publish_timeout_millis = 0",
             "capture_config.invalid_runtime_limit",

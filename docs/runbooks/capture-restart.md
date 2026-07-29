@@ -7,6 +7,7 @@ records:
 
 ```sh
 just capture-e2e
+just capture-outage-e2e
 just capture-soak 10m
 ```
 
@@ -16,6 +17,14 @@ SIGTERM, restarts the same binary against the same spool, archive, publication
 journal, stream, and chain, then drip-feeds the remaining blocks. It does not
 qualify action-bearing Hyperliquid semantics, a live source, crash failpoints,
 host reboot, or a multi-node production deployment.
+
+`capture-outage-e2e` pauses only its disposable NATS and PostgreSQL containers.
+It proves that local source acquisition continues into the fsynced spool while
+canonical drain is degraded, then requires contiguous catch-up after each
+dependency returns. Retained `status-nats-outage.json` and
+`status-postgres-outage.json` snapshots must be non-ready with a stable reason
+code. This is reconnect/replay evidence, not production-cluster failover
+qualification.
 
 `hl-capture run` is the tested command. The committed mapper deliberately
 rejects non-empty action bundles until a qualified corpus and response mapping
@@ -48,6 +57,15 @@ A successful default run has:
   archived empty blocks, and three acknowledged block publications;
 - a terminal status with `ready=false`, `health=yellow`, no pending blocks,
   and the expected durable height.
+
+A successful outage run additionally has:
+
+- `mode` equal to `synthetic-node-source-dependency-outage`;
+- `outage_mode` equal to `nats-postgres`;
+- `nats_outage_spool_records` equal to `3`;
+- `postgres_outage_spool_records` equal to the five-block test count;
+- final raw, spool, canonical block, and acknowledgement counts all equal to
+  the configured block count.
 
 The retained configuration contains credential paths but no credential values.
 Its temporary credential directory is removed during cleanup, so it cannot be

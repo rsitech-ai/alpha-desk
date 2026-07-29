@@ -25,6 +25,7 @@ readonly report_staging="${evidence_root}/.report.json.tmp"
 readonly block_count="${CAPTURE_E2E_BLOCKS:-3}"
 readonly block_delay_millis="${CAPTURE_E2E_BLOCK_DELAY_MILLIS:-10}"
 readonly minimum_runtime_seconds="${CAPTURE_E2E_MIN_RUNTIME_SECONDS:-0}"
+readonly outage_mode="${CAPTURE_E2E_OUTAGE_MODE:-none}"
 readonly first_height="$((9001000000 + ($$ % 100000)))"
 readonly last_height="$((first_height + block_count - 1))"
 readonly chain_id="fixture-e2e-${run_id}"
@@ -35,6 +36,8 @@ max_rss_kib=0
 nats_client_port=''
 nats_monitor_port=''
 restart_count=0
+nats_outage_spool_records=0
+postgres_outage_spool_records=0
 
 cleanup() {
   local exit_status=$?
@@ -81,6 +84,14 @@ fi
 if ! [[ "$minimum_runtime_seconds" =~ ^[0-9]+$ ]] ||
   ! ((minimum_runtime_seconds <= 86400)); then
   printf '%s\n' 'capture-e2e:error CAPTURE_E2E_MIN_RUNTIME_SECONDS must be at most 86400' >&2
+  exit 2
+fi
+if [[ "$outage_mode" != 'none' && "$outage_mode" != 'nats-postgres' ]]; then
+  printf '%s\n' 'capture-e2e:error CAPTURE_E2E_OUTAGE_MODE must be none or nats-postgres' >&2
+  exit 2
+fi
+if [[ "$outage_mode" == 'nats-postgres' ]] && ((block_count < 5)); then
+  printf '%s\n' 'capture-e2e:error nats-postgres outage mode requires at least 5 blocks' >&2
   exit 2
 fi
 
@@ -203,6 +214,7 @@ nats_server_url = "nats://127.0.0.1:${nats_client_port}"
 nats_stream = "HL_CANONICAL"
 nats_username = "${ALPHA_DESK_NATS_CAPTURE_USER}"
 nats_password_path = "${nats_password_path}"
+postgres_operation_timeout_millis = 5000
 max_pending_blocks = 4096
 retained_committed_blocks = 4096
 publisher_ledger_capacity = 100000
@@ -323,6 +335,46 @@ wait_for_durable_height() {
   exit 1
 }
 
+wait_for_spool_records() {
+  local expected_records="$1"
+  local attempt
+  local summary
+  for attempt in $(seq 1 "$readiness_attempts"); do
+    if ! kill -0 "$capture_pid" >/dev/null 2>&1; then
+      wait "$capture_pid" || true
+      capture_pid=''
+      printf '%s\n' 'capture-e2e:error capture process exited before spooling outage records' >&2
+      exit 1
+    fi
+    sample_process
+    summary="$("${repository_root}/target/debug/spool-inspect" \
+      verify "${evidence_root}/spool/synthetic-fixture" 2>/dev/null || true)"
+    if [[ "$summary" == *"records=${expected_records}"* ]]; then
+      return
+    fi
+    sleep 0.25
+  done
+  printf '%s\n' 'capture-e2e:error spool growth timeout during dependency outage' >&2
+  exit 1
+}
+
+wait_for_degraded_status() {
+  local evidence_name="$1"
+  local attempt
+  for attempt in $(seq 1 "$readiness_attempts"); do
+    if [[ -f "$status_path" ]] \
+      && jq -e \
+        '.ready == false and (.health == "yellow" or .health == "red") and (.last_error_reason | type == "string")' \
+        "$status_path" >/dev/null 2>&1; then
+      cp "$status_path" "${evidence_root}/${evidence_name}"
+      return
+    fi
+    sleep 0.25
+  done
+  printf '%s\n' 'capture-e2e:error degraded status timeout during dependency outage' >&2
+  exit 1
+}
+
 stop_capture() {
   local expected_height="$1"
   kill -TERM "$capture_pid"
@@ -338,24 +390,51 @@ stop_capture() {
     "$status_path" >/dev/null
 }
 
-write_source_block "$first_height"
-if ((block_count >= 2)); then
+if [[ "$outage_mode" == 'nats-postgres' ]]; then
+  write_source_block "$first_height"
   start_capture
   wait_for_durable_height "$first_height"
-  stop_capture "$first_height"
-  restart_count=1
+
+  docker pause "$nats_container" >/dev/null
   write_source_block "$((first_height + 1))"
-  start_capture
-  if ((block_count >= 3)); then
-    start_source_writer "$((first_height + 2))" "$last_height"
-  fi
+  write_source_block "$((first_height + 2))"
+  wait_for_spool_records 3
+  nats_outage_spool_records=3
+  wait_for_degraded_status 'status-nats-outage.json'
+  docker unpause "$nats_container" >/dev/null
+  wait_for_durable_height "$((first_height + 2))"
+
+  docker pause "$postgres_container" >/dev/null
+  outage_height="$((first_height + 3))"
+  while ((outage_height <= last_height)); do
+    write_source_block "$outage_height"
+    outage_height="$((outage_height + 1))"
+  done
+  wait_for_spool_records "$block_count"
+  postgres_outage_spool_records="$block_count"
+  wait_for_degraded_status 'status-postgres-outage.json'
+  docker unpause "$postgres_container" >/dev/null
+  wait_for_durable_height "$last_height"
 else
-  start_capture
-fi
-wait_for_durable_height "$last_height"
-if [[ -n "$source_writer_pid" ]]; then
-  wait "$source_writer_pid"
-  source_writer_pid=''
+  write_source_block "$first_height"
+  if ((block_count >= 2)); then
+    start_capture
+    wait_for_durable_height "$first_height"
+    stop_capture "$first_height"
+    restart_count=1
+    write_source_block "$((first_height + 1))"
+    start_capture
+    if ((block_count >= 3)); then
+      start_source_writer "$((first_height + 2))" "$last_height"
+    fi
+  else
+    start_capture
+  fi
+  wait_for_durable_height "$last_height"
+  if [[ -n "$source_writer_pid" ]]; then
+    wait "$source_writer_pid"
+    source_writer_pid=''
+  fi
 fi
 
 while (( $(date -u '+%s') - process_started_at_epoch < minimum_runtime_seconds )); do
@@ -424,12 +503,15 @@ jq -n \
   --arg schema_version 'hl.capture.e2e.v1' \
   --arg run_id "$run_id" \
   --arg chain_id "$chain_id" \
+  --arg outage_mode "$outage_mode" \
   --argjson first_height "$first_height" \
   --argjson last_height "$last_height" \
   --argjson block_count "$block_count" \
   --argjson raw_observation_count "$block_count" \
   --argjson acknowledged_publications "$acknowledged_publications" \
   --argjson restart_count "$restart_count" \
+  --argjson nats_outage_spool_records "$nats_outage_spool_records" \
+  --argjson postgres_outage_spool_records "$postgres_outage_spool_records" \
   --argjson minimum_runtime_seconds "$minimum_runtime_seconds" \
   --argjson elapsed_seconds "$elapsed_seconds" \
   --argjson max_rss_kib "$max_rss_kib" \
@@ -444,8 +526,9 @@ jq -n \
   '{
     schema_version: $schema_version,
     run_id: $run_id,
-    mode: "synthetic-node-source",
+    mode: (if $outage_mode == "none" then "synthetic-node-source" else "synthetic-node-source-dependency-outage" end),
     live_source_qualified: false,
+    outage_mode: $outage_mode,
     chain_id: $chain_id,
     first_height: $first_height,
     last_height: $last_height,
@@ -453,6 +536,8 @@ jq -n \
     raw_observation_count: $raw_observation_count,
     acknowledged_publications: $acknowledged_publications,
     restart_count: $restart_count,
+    nats_outage_spool_records: $nats_outage_spool_records,
+    postgres_outage_spool_records: $postgres_outage_spool_records,
     minimum_runtime_seconds: $minimum_runtime_seconds,
     elapsed_seconds: $elapsed_seconds,
     max_rss_kib: $max_rss_kib,

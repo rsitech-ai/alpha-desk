@@ -21,6 +21,7 @@ pub enum SpoolRead {
     IncompleteTail { record_offset: u64 },
 }
 
+#[derive(Debug)]
 pub struct SpoolRecordStream {
     file: File,
     next_offset: u64,

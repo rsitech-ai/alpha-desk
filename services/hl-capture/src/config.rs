@@ -102,6 +102,7 @@ pub struct RuntimeConfig {
     nats_stream: String,
     nats_username: String,
     nats_password_path: PathBuf,
+    postgres_operation_timeout_millis: u64,
     max_pending_blocks: usize,
     retained_committed_blocks: usize,
     publisher_ledger_capacity: usize,
@@ -125,7 +126,8 @@ impl RuntimeConfig {
         }
         validate_identity(&self.nats_username).map_err(|_| ConfigError::InvalidRuntimeIdentity)?;
         validate_credential_path(&self.nats_password_path)?;
-        if !(1..=MAX_RUNTIME_BLOCK_CAPACITY).contains(&self.max_pending_blocks)
+        if !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(&self.postgres_operation_timeout_millis)
+            || !(1..=MAX_RUNTIME_BLOCK_CAPACITY).contains(&self.max_pending_blocks)
             || !(1..=MAX_RUNTIME_BLOCK_CAPACITY).contains(&self.retained_committed_blocks)
             || !(1..=MAX_RUNTIME_BLOCK_CAPACITY).contains(&self.publisher_ledger_capacity)
             || !(1..=MAX_NATS_ACK_INFLIGHT).contains(&self.nats_max_ack_inflight)
@@ -183,6 +185,11 @@ impl RuntimeConfig {
     #[must_use]
     pub fn nats_password_path(&self) -> &Path {
         &self.nats_password_path
+    }
+
+    #[must_use]
+    pub const fn postgres_operation_timeout_millis(&self) -> u64 {
+        self.postgres_operation_timeout_millis
     }
 
     #[must_use]

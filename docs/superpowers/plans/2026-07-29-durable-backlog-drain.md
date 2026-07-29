@@ -9,11 +9,35 @@ system. It does not add trading, signing, private-key access, remote
 publication, or live-source qualification.
 
 **Spec contract:** The source spool is the first and only source
-acknowledgement boundary. A downstream outage may make canonical state stale
-and health red, but it must not stop capture while the configured disk reserve
+acknowledgement boundary. A downstream outage makes canonical state stale and
+health degraded/non-ready, but it must not stop capture while the configured disk reserve
 can be preserved. Recovery reads exact source bytes from the spool, never from
 an invented substitute. The affected canonical watermark remains contiguous;
 later observations may accumulate durably without being applied out of order.
+
+## Progress
+
+- [x] Stream spool verification, replay, and raw archival with bounded record
+  and byte allocation.
+- [x] Split local acquisition from canonical drain; accepted observations are
+  fsynced and acknowledged without a PostgreSQL, JetStream, or coordinator
+  dependency.
+- [x] Drain verified cursor ranges from durable PostgreSQL progress and advance
+  only after committed or identical-duplicate outcomes.
+- [x] Recreate bounded PostgreSQL and JetStream sessions after storage or
+  transport failure, including operation timeouts and cancellation-aware
+  retry.
+- [x] Emit non-ready yellow status with stable reasons while downstream is
+  unavailable, retaining the last verified durable cursor when possible.
+- [x] Prove real disposable NATS and PostgreSQL pause/recovery with exact
+  five-record spool/raw/block/publication parity and
+  `live_source_qualified=false`.
+- [ ] Add explicit backlog size/oldest-cursor and percentage disk-health
+  metrics.
+- [ ] Replace fixed retry delay with bounded exponential backoff plus jitter
+  that remains deterministic under tests.
+- [ ] Add the SIGKILL boundary matrix, multi-hour soak, host-restart proof, and
+  production TLS/identity/replicated JetStream qualification.
 
 ## Architecture
 
