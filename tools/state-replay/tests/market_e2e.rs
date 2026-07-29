@@ -54,16 +54,23 @@ fn market_e2e_proves_exact_registry_repeat_resume_and_fail_closed_boundaries() {
         report["expected_final_state_hash"],
         report["resumed_final_state_hash"]
     );
-    assert_eq!(report["market_fact_count"], 34);
+    assert_eq!(
+        report["expected_final_state_hash"],
+        report["unresolved_final_state_hash"]
+    );
+    assert_eq!(report["metadata_transition_height"], 1_000_004);
+    assert_eq!(report["market_fact_count"], 29);
     assert_eq!(report["dex_current_count"], 1);
     assert_eq!(report["asset_context_current_count"], 2);
     assert_eq!(report["market_current_count"], 1);
-    assert_eq!(report["market_metadata_version_count"], 1);
+    assert_eq!(report["market_metadata_version_count"], 2);
     assert_eq!(report["outcome_current_count"], 1);
     assert_eq!(report["active_market_count"], 1);
     assert_eq!(report["halted_market_count"], 0);
-    assert_eq!(report["exact_metadata_count"], 1);
-    assert_eq!(report["unresolved_metadata_count"], 0);
+    assert_eq!(report["exact_current_metadata_count"], 0);
+    assert_eq!(report["unresolved_current_metadata_count"], 1);
+    assert_eq!(report["exact_metadata_version_count"], 1);
+    assert_eq!(report["unresolved_metadata_version_count"], 1);
     assert_eq!(report["resolved_outcome_count"], 1);
     assert_eq!(report["unresolved_outcome_count"], 0);
     assert_eq!(report["sample_market"]["market_id"], "perp:BTC");
@@ -71,19 +78,26 @@ fn market_e2e_proves_exact_registry_repeat_resume_and_fail_closed_boundaries() {
     assert_eq!(report["sample_market"]["base_asset_id"], "BTC");
     assert_eq!(report["sample_market"]["quote_asset_id"], "USDC");
     assert_eq!(report["sample_market"]["status"], "active");
-    assert_eq!(report["sample_market"]["metadata_resolution"], "exact");
+    assert_eq!(report["sample_market"]["metadata_resolution"], "unresolved");
     assert_eq!(
         report["sample_market"]["metadata_version"],
-        "creation@1.0.0"
+        "metadata@1.0.1"
     );
-    assert_eq!(report["sample_market"]["tick_size"], "0.100000");
-    assert_eq!(report["sample_market"]["lot_size"], "0.00001000");
-    assert_eq!(report["sample_market"]["price_scale"], 6);
-    assert_eq!(report["sample_market"]["quantity_scale"], 8);
-    assert_eq!(report["sample_market"]["open_interest_cap"], "140.000000");
-    assert_eq!(report["sample_market"]["margin_table_hash"], "margin-4");
-    assert_eq!(report["sample_market"]["oracle_price"], "65004.000000");
-    assert_eq!(report["sample_market"]["funding_rate"], "0.00010400");
+    for field in [
+        "tick_size",
+        "lot_size",
+        "price_scale",
+        "quantity_scale",
+        "open_interest_cap",
+        "margin_table_hash",
+        "oracle_price",
+        "oracle_source",
+        "oracle_effective_at_micros",
+        "funding_rate",
+        "funding_effective_at_micros",
+    ] {
+        assert!(report["sample_market"][field].is_null(), "{field}");
+    }
     assert_eq!(report["sample_market"]["outcome_id"], "BTC-ABOVE-60000");
     assert_eq!(report["sample_market"]["outcome_resolution"], "resolved");
     assert_eq!(report["sample_market"]["settlement_value"], "1.000000");
@@ -91,8 +105,8 @@ fn market_e2e_proves_exact_registry_repeat_resume_and_fail_closed_boundaries() {
     let metadata = &report["hash_only_metadata"];
     assert_eq!(metadata["prior_version"], "creation@1.0.0");
     assert_eq!(metadata["next_version"], "metadata@1.0.1");
-    assert_eq!(metadata["prior_effective_until_block"], 1_000_004);
-    assert_eq!(metadata["next_effective_from_block"], 1_000_005);
+    assert_eq!(metadata["prior_effective_until_block"], 1_000_003);
+    assert_eq!(metadata["next_effective_from_block"], 1_000_004);
     assert_eq!(metadata["next_resolution"], "unresolved");
     for field in [
         "tick_size",
@@ -142,15 +156,21 @@ fn market_e2e_rejects_invalid_bounds_and_existing_output() {
     assert_eq!(error.reason_code(), "state_replay.invalid_config");
     assert!(!excessive_work.exists());
 
+    let one_replay = temporary.path().join("one-replay");
+    let error = run_market_e2e(&MarketRunConfig::new(&one_replay, 3, 1, 1))
+        .expect_err("at least two independent replays");
+    assert_eq!(error.reason_code(), "state_replay.invalid_config");
+    assert!(!one_replay.exists());
+
     let unsafe_output = temporary.path().join("parent").join("..").join("unsafe");
     let error =
-        run_market_e2e(&MarketRunConfig::new(&unsafe_output, 3, 1, 1)).expect_err("unsafe output");
+        run_market_e2e(&MarketRunConfig::new(&unsafe_output, 3, 1, 2)).expect_err("unsafe output");
     assert_eq!(error.reason_code(), "state_replay.unsafe_output");
 
     let existing = temporary.path().join("existing");
     fs::create_dir(&existing).expect("existing");
     let error =
-        run_market_e2e(&MarketRunConfig::new(&existing, 3, 1, 1)).expect_err("existing output");
+        run_market_e2e(&MarketRunConfig::new(&existing, 3, 1, 2)).expect_err("existing output");
     assert_eq!(error.reason_code(), "state_replay.output_exists");
 }
 

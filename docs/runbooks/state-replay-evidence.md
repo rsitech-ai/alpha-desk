@@ -152,18 +152,23 @@ just state-replay-market-e2e
 The command writes a new private directory under
 `target/evidence/state-replay-market/`. Generated V1 events create the DEX,
 base and quote asset contexts, market, and outcome before applying valuation,
-cap/table, halt/resume, and outcome transitions. The run requires:
+cap/table, halt/resume, and outcome transitions. The final valid block changes
+the market to a hash-only metadata version, so the primary replay range and
+the resumed checkpoint suffix both cross the exact-to-unresolved boundary.
+The run requires at least two independent rebuilds and:
 
-1. identical final state and replay receipt hashes across independent rebuilds;
+1. identical unresolved final-state and full replay-receipt hashes across
+   independent rebuilds;
 2. a published, verified, loaded, and resumed prefix checkpoint with the same
-   final state hash;
+   unresolved final-state hash after its suffix crosses the metadata change;
 3. strict decoding and exact cardinality for every market fact, DEX, asset,
-   current market, metadata version, and outcome namespace;
-4. exact active/halted, exact/unresolved, and resolved/unresolved counts plus a
-   deterministic market/outcome sample;
-5. a hash-only metadata change to close the exact interval, open an unresolved
-   interval, clear exact applicability, and suppress a later oracle value with
-   `market_state.metadata_unresolved` and no block effects;
+   current market, both metadata versions, and outcome namespace after every
+   independent replay and the resumed path;
+4. one closed exact prior interval and one open unresolved current interval,
+   absent exact-value getters, exact status/resolution counts, and a
+   deterministic unresolved market/resolved-outcome sample;
+5. a later oracle value suppressed with `market_state.metadata_unresolved` and
+   no block effects;
 6. a valid oracle update followed by an invalid resume to roll back the whole
    late block with `market_state.invalid_status_transition`; and
 7. schema `1.1.0` to quarantine with `ledger.unsupported_event` and no state

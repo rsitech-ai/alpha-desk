@@ -391,12 +391,15 @@ Focused tests prove:
   margin, and execution qualification; and
 - a bounded operator-visible synthetic market runner proving prerequisite-
   ordered creation, valuation, cap/table, halt/resume, and outcome transitions;
-  repeated state and receipt equality; strictly decoded fact/current/version
-  and status/resolution cardinalities; private checkpoint resume; exact-to-
-  unresolved metadata interval closure and cleared applicability; suppressed
-  value updates with `market_state.metadata_unresolved`; late invalid-
-  transition whole-block rollback; schema `1.1.0` quarantine; and recursively
-  owner-only evidence permissions.
+  at least two independent full-range replays that include the metadata
+  transition and produce identical unresolved final-state and receipt hashes;
+  strict decoding of both exact and unresolved metadata intervals after every
+  full replay; a private checkpoint resume whose suffix crosses the same
+  transition and reaches the same unresolved final hash; exact-to-unresolved
+  interval closure and cleared applicability; suppressed value updates with
+  `market_state.metadata_unresolved`; late invalid-transition whole-block
+  rollback; schema `1.1.0` quarantine; and recursively owner-only evidence
+  permissions.
 
 This proves stored canonical trade-fact reconciliation and exact synthetic
 order-lifecycle and market-registry contracts. It does not prove deployed

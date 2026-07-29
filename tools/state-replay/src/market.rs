@@ -69,11 +69,14 @@ pub struct MarketEvidence {
 }
 
 pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, FixtureRunError> {
+    if config.block_count < 3 || config.iterations < 2 {
+        return Err(FixtureRunError::InvalidConfig);
+    }
     validate_replay_counts(
         config.block_count,
         config.checkpoint_after,
         config.iterations,
-        4,
+        3,
     )?;
     let output_root = create_private_output_root(&config.output_root)?;
     let archive = LocalParquetArchive::open(
@@ -96,7 +99,13 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
             .ok_or(FixtureRunError::InvalidConfig)?;
         manifests.push(
             archive
-                .append_block(&market_block(height, offset, &chain, "1.0.0")?)?
+                .append_block(&market_block(
+                    height,
+                    offset,
+                    height == end_height,
+                    &chain,
+                    "1.0.0",
+                )?)?
                 .manifest_id()
                 .clone(),
         );
@@ -152,6 +161,14 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
                 ));
             }
         }
+        summarize_market_state(&ledger, config.block_count)?;
+        summarize_hash_only_metadata(
+            &ledger,
+            end_height
+                .checked_sub(1)
+                .ok_or(FixtureRunError::InvalidConfig)?,
+            end_height,
+        )?;
     }
     let replay_elapsed_micros =
         u64::try_from(replay_started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -219,20 +236,47 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
     let resume_start = checkpoint_end
         .checked_add(1)
         .ok_or(FixtureRunError::InvalidConfig)?;
-    let resume_request = replay_request(
+    let metadata_height = end_height;
+    let pre_metadata_end = metadata_height
+        .checked_sub(1)
+        .ok_or(FixtureRunError::InvalidConfig)?;
+    let metadata_index = manifests
+        .len()
+        .checked_sub(1)
+        .ok_or(FixtureRunError::Invariant("market manifest set is empty"))?;
+    if resume_start <= pre_metadata_end {
+        let prefix_request = replay_request(
+            &chain,
+            resume_start,
+            pre_metadata_end,
+            manifests[checkpoint_len..metadata_index].to_vec(),
+            resumed.state_hash(),
+            schema_fingerprint,
+        )?;
+        let ReplayOutcome::Completed(_) =
+            SerialReplayEngine::new(&archive, &mut resumed, ReplayLimits::production())
+                .run(&prefix_request, &NeverCancel)?
+        else {
+            return Err(FixtureRunError::Invariant(
+                "uncancelled market checkpoint prefix resume was cancelled",
+            ));
+        };
+    }
+    let exact_state_image = resumed.state_image().clone();
+    let metadata_request = replay_request(
         &chain,
-        resume_start,
-        end_height,
-        manifests[checkpoint_len..].to_vec(),
+        metadata_height,
+        metadata_height,
+        vec![manifests[metadata_index].clone()],
         resumed.state_hash(),
         schema_fingerprint,
     )?;
     let ReplayOutcome::Completed(resume_receipt) =
         SerialReplayEngine::new(&archive, &mut resumed, ReplayLimits::production())
-            .run(&resume_request, &NeverCancel)?
+            .run(&metadata_request, &NeverCancel)?
     else {
         return Err(FixtureRunError::Invariant(
-            "uncancelled market checkpoint resume was cancelled",
+            "uncancelled market metadata resume was cancelled",
         ));
     };
     if resumed.state_hash() != expected_state_hash {
@@ -241,37 +285,13 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
         ));
     }
     let state_summary = summarize_market_state(&resumed, config.block_count)?;
-
-    let metadata_height = end_height
-        .checked_add(1)
-        .ok_or(FixtureRunError::InvalidConfig)?;
-    let metadata_manifest = archive
-        .append_block(&metadata_change_block(metadata_height, &chain)?)?
-        .manifest_id()
-        .clone();
+    let mut metadata_evidence =
+        summarize_hash_only_metadata(&resumed, pre_metadata_end, metadata_height)?;
     let mut metadata_ledger = CanonicalLedger::try_from_state_image(
         resumed.state_image().clone(),
         CanonicalMarketReducerV1,
         LedgerLimits::production(),
     )?;
-    let metadata_request = replay_request(
-        &chain,
-        metadata_height,
-        metadata_height,
-        vec![metadata_manifest],
-        metadata_ledger.state_hash(),
-        schema_fingerprint,
-    )?;
-    let ReplayOutcome::Completed(_) =
-        SerialReplayEngine::new(&archive, &mut metadata_ledger, ReplayLimits::production())
-            .run(&metadata_request, &NeverCancel)?
-    else {
-        return Err(FixtureRunError::Invariant(
-            "uncancelled metadata replay was cancelled",
-        ));
-    };
-    let mut metadata_evidence =
-        summarize_hash_only_metadata(&metadata_ledger, end_height, metadata_height)?;
 
     let suppressed_height = metadata_height
         .checked_add(1)
@@ -353,7 +373,7 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
     )?;
     let malformed = malformed_transition_block(malformed_height, &chain)?;
     let mut malformed_direct = CanonicalLedger::try_from_state_image(
-        resumed.state_image().clone(),
+        exact_state_image.clone(),
         CanonicalMarketReducerV1,
         LedgerLimits::production(),
     )?;
@@ -382,7 +402,7 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
         .manifest_id()
         .clone();
     let mut malformed_ledger = CanonicalLedger::try_from_state_image(
-        resumed.state_image().clone(),
+        exact_state_image,
         CanonicalMarketReducerV1,
         LedgerLimits::production(),
     )?;
@@ -429,8 +449,9 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
             KnownTime::from_unix_micros(FIXTURE_EPOCH_MICROS)?,
         )?,
     )?;
+    let unsupported_height = suppressed_height;
     let unsupported_manifest = unsupported_archive
-        .append_block(&valuation_block(malformed_height, 2, &chain, "1.1.0")?)?
+        .append_block(&valuation_block(unsupported_height, 2, &chain, "1.1.0")?)?
         .manifest_id()
         .clone();
     let mut unsupported_ledger = CanonicalLedger::try_from_state_image(
@@ -441,8 +462,8 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
     let unsupported_before = unsupported_ledger.state_hash();
     let unsupported_request = replay_request(
         &chain,
-        malformed_height,
-        malformed_height,
+        unsupported_height,
+        unsupported_height,
         vec![unsupported_manifest],
         unsupported_before,
         schema_fingerprint,
@@ -495,6 +516,8 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
         checkpoint_after: config.checkpoint_after,
         iterations_completed: config.iterations,
         expected_final_state_hash: hex::encode(expected_state_hash),
+        unresolved_final_state_hash: hex::encode(expected_state_hash),
+        metadata_transition_height: metadata_height,
         deterministic_replay_receipt_hash: hex::encode(expected_receipt_hash),
         checkpoint_id: artifact.checkpoint_id().as_str(),
         resumed_final_state_hash: hex::encode(resumed.state_hash()),
@@ -508,8 +531,10 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
         outcome_current_count: state_summary.outcome_current_count,
         active_market_count: state_summary.active_market_count,
         halted_market_count: state_summary.halted_market_count,
-        exact_metadata_count: state_summary.exact_metadata_count,
-        unresolved_metadata_count: state_summary.unresolved_metadata_count,
+        exact_current_metadata_count: state_summary.exact_current_metadata_count,
+        unresolved_current_metadata_count: state_summary.unresolved_current_metadata_count,
+        exact_metadata_version_count: state_summary.exact_metadata_version_count,
+        unresolved_metadata_version_count: state_summary.unresolved_metadata_version_count,
         resolved_outcome_count: state_summary.resolved_outcome_count,
         unresolved_outcome_count: state_summary.unresolved_outcome_count,
         sample_market: state_summary.sample_market,
@@ -522,7 +547,7 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
             malformed_after,
         )?,
         unsupported_schema: rejection_report(
-            malformed_height,
+            unsupported_height,
             &unsupported_error,
             None,
             unsupported_before,
@@ -549,10 +574,13 @@ fn empty_market_ledger(
 fn market_block(
     height: u64,
     offset: u64,
+    include_metadata: bool,
     chain: &ChainId,
     schema_version: &str,
 ) -> Result<BlockEnvelope, FixtureRunError> {
-    if offset == 0 {
+    if include_metadata {
+        metadata_change_block(height, chain, schema_version)
+    } else if offset == 0 {
         initial_market_block(height, chain, schema_version)
     } else {
         valuation_block(height, offset, chain, schema_version)
@@ -705,7 +733,7 @@ fn valuation_block(
     ];
     if offset == 1 {
         payloads.push(EventPayload::OutcomeResolved(OutcomeResolved {
-            market_id: market,
+            market_id: market.clone(),
             outcome_id: outcome_id()?,
             settlement_value: Price::parse_at_scale("1", 6)?,
             resolved_at: time,
@@ -714,11 +742,15 @@ fn valuation_block(
     market_events_block(height, chain, schema_version, payloads)
 }
 
-fn metadata_change_block(height: u64, chain: &ChainId) -> Result<BlockEnvelope, FixtureRunError> {
+fn metadata_change_block(
+    height: u64,
+    chain: &ChainId,
+    schema_version: &str,
+) -> Result<BlockEnvelope, FixtureRunError> {
     market_events_block(
         height,
         chain,
-        "1.0.0",
+        schema_version,
         vec![EventPayload::MarketMetadataChanged(MarketMetadataChanged {
             market_id: market_id()?,
             metadata_version: HASH_ONLY_METADATA_VERSION.to_owned(),
@@ -885,8 +917,10 @@ fn summarize_market_state(
     let mut outcome_current_count = 0_u64;
     let mut active_market_count = 0_u64;
     let mut halted_market_count = 0_u64;
-    let mut exact_metadata_count = 0_u64;
-    let mut unresolved_metadata_count = 0_u64;
+    let mut exact_current_metadata_count = 0_u64;
+    let mut unresolved_current_metadata_count = 0_u64;
+    let mut exact_metadata_version_count = 0_u64;
+    let mut unresolved_metadata_version_count = 0_u64;
     let mut resolved_outcome_count = 0_u64;
     let mut unresolved_outcome_count = 0_u64;
 
@@ -917,16 +951,26 @@ fn summarize_market_state(
                 }
                 match current.metadata_resolution() {
                     MarketMetadataResolutionV1::Exact => {
-                        exact_metadata_count = checked_count(exact_metadata_count)?;
+                        exact_current_metadata_count = checked_count(exact_current_metadata_count)?;
                     }
                     MarketMetadataResolutionV1::Unresolved => {
-                        unresolved_metadata_count = checked_count(unresolved_metadata_count)?;
+                        unresolved_current_metadata_count =
+                            checked_count(unresolved_current_metadata_count)?;
                     }
                 }
             }
             "market-metadata-version.v1" => {
-                MarketMetadataVersionRecordV1::decode_at(key, bytes)?;
+                let version = MarketMetadataVersionRecordV1::decode_at(key, bytes)?;
                 market_metadata_version_count = checked_count(market_metadata_version_count)?;
+                match version.resolution() {
+                    MarketMetadataResolutionV1::Exact => {
+                        exact_metadata_version_count = checked_count(exact_metadata_version_count)?;
+                    }
+                    MarketMetadataResolutionV1::Unresolved => {
+                        unresolved_metadata_version_count =
+                            checked_count(unresolved_metadata_version_count)?;
+                    }
+                }
             }
             "market-outcome-current.v1" => {
                 let outcome = OutcomeCurrentRecordV1::decode_at(key, bytes)?;
@@ -950,18 +994,20 @@ fn summarize_market_state(
     }
     let expected_fact_count = expected_block_count
         .checked_mul(6)
-        .and_then(|value| value.checked_add(4))
+        .and_then(|value| value.checked_sub(1))
         .ok_or(FixtureRunError::InvalidConfig)?;
     if market_fact_count != expected_fact_count
         || dex_current_count != 1
         || asset_context_current_count != 2
         || market_current_count != 1
-        || market_metadata_version_count != 1
+        || market_metadata_version_count != 2
         || outcome_current_count != 1
         || active_market_count != 1
         || halted_market_count != 0
-        || exact_metadata_count != 1
-        || unresolved_metadata_count != 0
+        || exact_current_metadata_count != 0
+        || unresolved_current_metadata_count != 1
+        || exact_metadata_version_count != 1
+        || unresolved_metadata_version_count != 1
         || resolved_outcome_count != 1
         || unresolved_outcome_count != 0
     {
@@ -1038,8 +1084,10 @@ fn summarize_market_state(
         outcome_current_count,
         active_market_count,
         halted_market_count,
-        exact_metadata_count,
-        unresolved_metadata_count,
+        exact_current_metadata_count,
+        unresolved_current_metadata_count,
+        exact_metadata_version_count,
+        unresolved_metadata_version_count,
         resolved_outcome_count,
         unresolved_outcome_count,
         sample_market,
@@ -1163,8 +1211,10 @@ struct MarketStateSummary {
     outcome_current_count: u64,
     active_market_count: u64,
     halted_market_count: u64,
-    exact_metadata_count: u64,
-    unresolved_metadata_count: u64,
+    exact_current_metadata_count: u64,
+    unresolved_current_metadata_count: u64,
+    exact_metadata_version_count: u64,
+    unresolved_metadata_version_count: u64,
     resolved_outcome_count: u64,
     unresolved_outcome_count: u64,
     sample_market: MarketSample,
@@ -1247,6 +1297,8 @@ struct MarketReport<'a> {
     checkpoint_after: u64,
     iterations_completed: u64,
     expected_final_state_hash: String,
+    unresolved_final_state_hash: String,
+    metadata_transition_height: u64,
     deterministic_replay_receipt_hash: String,
     checkpoint_id: &'a str,
     resumed_final_state_hash: String,
@@ -1260,8 +1312,10 @@ struct MarketReport<'a> {
     outcome_current_count: u64,
     active_market_count: u64,
     halted_market_count: u64,
-    exact_metadata_count: u64,
-    unresolved_metadata_count: u64,
+    exact_current_metadata_count: u64,
+    unresolved_current_metadata_count: u64,
+    exact_metadata_version_count: u64,
+    unresolved_metadata_version_count: u64,
     resolved_outcome_count: u64,
     unresolved_outcome_count: u64,
     sample_market: MarketSample,
