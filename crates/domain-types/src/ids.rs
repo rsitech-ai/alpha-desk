@@ -62,6 +62,7 @@ string_id!(OutcomeId);
 string_id!(OrderId);
 string_id!(ClientOrderId);
 string_id!(TradeId);
+string_id!(LiquidationId);
 string_id!(PositionEpisodeId);
 string_id!(FeatureSetVersion);
 string_id!(ModelVersion);
