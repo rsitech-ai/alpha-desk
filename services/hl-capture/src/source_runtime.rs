@@ -16,9 +16,9 @@ use crate::spool::{
 };
 use crate::{
     AppError, BacklogError, BacklogRead, CaptureConfig, CommittedNodePipeline,
-    CommittedNodePipelineConfig, DiskReserveError, DiskReserveGuard, FilesystemDiskSpaceProbe,
-    OwnedTask, PipelineError, PipelineOutcome, RawSegmentArchive, RawSegmentArchiveConfig,
-    RawSegmentArchiveError, SourceAdapterConfig, SpoolBacklog,
+    CommittedNodePipelineConfig, DiskReserveError, DiskReserveGuard, DiskSpaceProbe,
+    FilesystemDiskSpaceProbe, OwnedTask, PipelineError, PipelineOutcome, RawSegmentArchive,
+    RawSegmentArchiveConfig, RawSegmentArchiveError, SourceAdapterConfig, SpoolBacklog,
 };
 
 const SPOOL_SCHEMA_VERSION: &str = "spool-v1";
@@ -286,6 +286,31 @@ async fn run_committed_node_acquisition(
     health: Arc<CaptureRuntimeHealth>,
     cancellation: CancellationToken,
 ) -> Result<(), SourceRuntimeError> {
+    run_committed_node_acquisition_with_probe(
+        config,
+        raw_archive,
+        notification,
+        health,
+        cancellation,
+        |config| {
+            FilesystemDiskSpaceProbe::open([config.spool_path.clone(), config.archive_path.clone()])
+        },
+    )
+    .await
+}
+
+async fn run_committed_node_acquisition_with_probe<P, F>(
+    config: NodeSourceTaskConfig,
+    raw_archive: Arc<dyn RawSegmentArchive>,
+    notification: mpsc::Sender<SourceNotification>,
+    health: Arc<CaptureRuntimeHealth>,
+    cancellation: CancellationToken,
+    probe_factory: F,
+) -> Result<(), SourceRuntimeError>
+where
+    P: DiskSpaceProbe,
+    F: FnOnce(&NodeSourceTaskConfig) -> Result<P, DiskReserveError>,
+{
     let spool_config = SourceSpoolConfig::try_new(
         config.spool_path.clone(),
         config.source_id.clone(),
@@ -303,10 +328,7 @@ async fn run_committed_node_acquisition(
             .await
             .map_err(|_| SourceRuntimeError::BlockingTask)?
             .map_err(SourceRuntimeError::Spool)?;
-    let disk_guard = DiskReserveGuard::try_new(
-        FilesystemDiskSpaceProbe::open([config.spool_path.clone(), config.archive_path.clone()])?,
-        config.disk_reserve_bytes,
-    )?;
+    let disk_guard = DiskReserveGuard::try_new(probe_factory(&config)?, config.disk_reserve_bytes)?;
     let raw_archive_config = RawSegmentArchiveConfig::try_new(
         config.max_payload_bytes,
         config.queue_capacity.min(4096),
@@ -839,10 +861,10 @@ enum DrainSessionError {
     Fatal(SourceRuntimeError),
 }
 
-async fn close_spool(
+async fn close_spool<P: DiskSpaceProbe>(
     spool: SourceSpool,
     raw_archive: &dyn RawSegmentArchive,
-    disk_guard: &DiskReserveGuard<FilesystemDiskSpaceProbe>,
+    disk_guard: &DiskReserveGuard<P>,
     chain_id: &ChainId,
     raw_archive_config: RawSegmentArchiveConfig,
 ) -> Result<(), SourceRuntimeError> {
@@ -864,9 +886,9 @@ async fn close_spool(
     Ok(())
 }
 
-async fn archive_closed_segment(
+async fn archive_closed_segment<P: DiskSpaceProbe>(
     raw_archive: &dyn RawSegmentArchive,
-    disk_guard: &DiskReserveGuard<FilesystemDiskSpaceProbe>,
+    disk_guard: &DiskReserveGuard<P>,
     chain_id: &ChainId,
     segment: &CloseReceipt,
     raw_archive_config: RawSegmentArchiveConfig,
@@ -975,12 +997,28 @@ mod tests {
     use crate::spool::{
         DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolRotationPolicy, inspect_spool,
     };
-    use crate::{BlockingRawSegmentArchive, FailoverStore, RawSegmentArchive};
+    use crate::{
+        BlockingRawSegmentArchive, DiskReserveError, DiskSpaceProbe, FailoverStore,
+        RawSegmentArchive,
+    };
 
     use super::{
         CommittedSourceRole, DrainSessionError, NodeSourceTaskConfig, RetryBackoff,
-        SourceNotification, attempt_failover, run_committed_node_acquisition,
+        SourceNotification, attempt_failover, run_committed_node_acquisition_with_probe,
     };
+
+    #[derive(Debug, Clone, Copy)]
+    struct TestDiskSpaceProbe;
+
+    impl DiskSpaceProbe for TestDiskSpaceProbe {
+        fn minimum_available_bytes(&self) -> Result<u64, DiskReserveError> {
+            Ok(u64::MAX)
+        }
+
+        fn minimum_free_basis_points(&self) -> Result<u16, DiskReserveError> {
+            Ok(10_000)
+        }
+    }
 
     #[test]
     fn retry_backoff_is_bounded_deterministic_and_source_staggered() {
@@ -1107,22 +1145,24 @@ mod tests {
         let primary_spool = primary_config.spool_path.clone();
         let independent_spool = independent_config.spool_path.clone();
 
-        let primary = tokio::spawn(run_committed_node_acquisition(
+        let primary = tokio::spawn(run_committed_node_acquisition_with_probe(
             primary_config,
             Arc::clone(&raw_archive),
             notifications.clone(),
             Arc::clone(&health),
             cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
         ));
-        let independent = tokio::spawn(run_committed_node_acquisition(
+        let independent = tokio::spawn(run_committed_node_acquisition_with_probe(
             independent_config,
             raw_archive,
             notifications,
             health,
             cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
         ));
 
-        let gap = tokio::time::timeout(Duration::from_secs(3), async {
+        let gap_result = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if let Some(notification @ SourceNotification::VisibleGap { .. }) =
                     received.recv().await
@@ -1131,8 +1171,27 @@ mod tests {
                 }
             }
         })
-        .await
-        .expect("primary gap signal");
+        .await;
+        let gap = match gap_result {
+            Ok(gap) => gap,
+            Err(error) => {
+                let primary_finished = primary.is_finished();
+                let independent_finished = independent.is_finished();
+                let primary_records =
+                    inspect_spool(&primary_spool).map(|inspection| inspection.records());
+                let independent_records =
+                    inspect_spool(&independent_spool).map(|inspection| inspection.records());
+                cancellation.cancel();
+                let primary_result = primary.await;
+                let independent_result = independent.await;
+                panic!(
+                    "primary gap signal: {error}; primary_finished={primary_finished}; \
+                     independent_finished={independent_finished}; primary_records={primary_records:?}; \
+                     independent_records={independent_records:?}; primary_result={primary_result:?}; \
+                     independent_result={independent_result:?}"
+                );
+            }
+        };
         assert_eq!(
             gap,
             SourceNotification::VisibleGap {
