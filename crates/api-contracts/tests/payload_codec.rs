@@ -1,29 +1,33 @@
 use api_contracts::{
-    PayloadCodecError, WireAssetContextUpdated, WireDepositCredited, WireDexCreated,
-    WireFundingRateUpdated, WireMarginTableChanged, WireMarketCreated, WireMarketHalted,
-    WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated,
-    WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
-    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
-    WireOutcomeResolved, WirePerpTransfer, WireSpotTransfer, WireSubaccountTransfer,
-    WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited,
-    decode_asset_context_updated, decode_deposit_credited, decode_dex_created,
-    decode_funding_rate_updated, decode_margin_table_changed, decode_market_created,
-    decode_market_halted, decode_market_metadata_changed, decode_market_resumed,
-    decode_open_interest_cap_changed, decode_oracle_updated, decode_order_accepted,
-    decode_order_cancelled, decode_order_filled, decode_order_modified,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAssetContextUpdated,
+    WireDepositCredited, WireDexCreated, WireFundingRateUpdated, WireMarginTableChanged,
+    WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed,
+    WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted, WireOrderCancelled,
+    WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected,
+    WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer, WireSpotTransfer,
+    WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal,
+    WireWithdrawalDebited, decode_asset_context_updated, decode_deposit_credited,
+    decode_dex_created, decode_funding_rate_updated, decode_margin_table_changed,
+    decode_market_created, decode_market_halted, decode_market_metadata_changed,
+    decode_market_resumed, decode_open_interest_cap_changed, decode_oracle_updated,
+    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
     decode_order_partially_filled, decode_order_rejected, decode_order_rested,
     decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_spot_transfer,
     decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
     decode_vault_withdrawal, decode_withdrawal_debited, encode_asset_context_updated,
-    encode_deposit_credited, encode_dex_created, encode_funding_rate_updated,
-    encode_margin_table_changed, encode_market_created, encode_market_halted,
-    encode_market_metadata_changed, encode_market_resumed, encode_open_interest_cap_changed,
-    encode_oracle_updated, encode_order_accepted, encode_order_cancelled, encode_order_filled,
-    encode_order_modified, encode_order_partially_filled, encode_order_rejected,
-    encode_order_rested, encode_outcome_created, encode_outcome_resolved, encode_perp_transfer,
-    encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
-    encode_vault_withdrawal, encode_withdrawal_debited,
+    encode_default_event_payload, encode_deposit_credited, encode_dex_created,
+    encode_funding_rate_updated, encode_margin_table_changed, encode_market_created,
+    encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
+    encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
+    encode_order_cancelled, encode_order_filled, encode_order_modified,
+    encode_order_partially_filled, encode_order_rejected, encode_order_rested,
+    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_spot_transfer,
+    encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
+    encode_vault_withdrawal, encode_withdrawal_debited, validate_event_payload,
 };
+
+const ACCOUNT_PAYLOAD_LIMIT: usize = MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES;
+const ACCOUNT_PAYLOAD_SIZE_REASON: &str = "canonical account payload exceeds the 16384-byte limit";
 
 fn trade() -> WireTradeMatched {
     WireTradeMatched {
@@ -34,6 +38,35 @@ fn trade() -> WireTradeMatched {
         price: "65000".to_owned(),
         quantity: "0.01".to_owned(),
         deterministic_seed: 7,
+    }
+}
+
+fn deposit_with_asset_bytes(asset_bytes: usize) -> WireDepositCredited {
+    WireDepositCredited {
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        asset_id: "A".repeat(asset_bytes),
+        amount: "1".to_owned(),
+        deposit_reference: "deposit-42".to_owned(),
+    }
+}
+
+fn assert_account_payload_size_error(error: PayloadCodecError, kind: &str) {
+    assert!(matches!(
+        error,
+        PayloadCodecError::Invalid {
+            kind: actual_kind,
+            reason,
+        } if actual_kind == kind && reason == ACCOUNT_PAYLOAD_SIZE_REASON
+    ));
+}
+
+fn assert_account_payload_size_result(result: Result<Vec<u8>, PayloadCodecError>, kind: &str) {
+    match result {
+        Err(error) => assert_account_payload_size_error(error, kind),
+        Ok(bytes) => panic!(
+            "{kind} oversized encoder unexpectedly returned {} bytes",
+            bytes.len()
+        ),
     }
 }
 
@@ -234,6 +267,171 @@ fn account_cash_flow_wire_payloads_reject_missing_padded_and_unsafe_fields() {
         decode_withdrawal_debited(&encoded),
         Err(PayloadCodecError::KindMismatch { .. })
     ));
+}
+
+#[test]
+fn account_cash_flow_payload_bound_is_inclusive_and_stable() {
+    let seed_asset_bytes = ACCOUNT_PAYLOAD_LIMIT - 1_024;
+    let seed = encode_deposit_credited(&deposit_with_asset_bytes(seed_asset_bytes)).unwrap();
+    assert!(seed.len() < ACCOUNT_PAYLOAD_LIMIT);
+
+    let exact_asset_bytes = seed_asset_bytes + ACCOUNT_PAYLOAD_LIMIT - seed.len();
+    let exact_value = deposit_with_asset_bytes(exact_asset_bytes);
+    let exact = encode_deposit_credited(&exact_value).unwrap();
+    assert_eq!(exact.len(), ACCOUNT_PAYLOAD_LIMIT);
+    assert_eq!(decode_deposit_credited(&exact).unwrap(), exact_value);
+
+    assert_account_payload_size_result(
+        encode_deposit_credited(&deposit_with_asset_bytes(exact_asset_bytes + 1)),
+        "DepositCredited",
+    );
+
+    let huge_probe =
+        std::panic::catch_unwind(|| encode_deposit_credited(&deposit_with_asset_bytes(70_000)));
+    let huge_probe_error = huge_probe
+        .expect("the public encoder must return an error rather than panic")
+        .unwrap_err();
+    assert_account_payload_size_error(huge_probe_error, "DepositCredited");
+
+    let oversized_malformed = vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1];
+    let decode_error = decode_deposit_credited(&oversized_malformed).unwrap_err();
+    assert_account_payload_size_error(decode_error, "DepositCredited");
+}
+
+#[test]
+fn every_account_cash_flow_codec_enforces_the_shared_payload_bound() {
+    let account = "0x1111111111111111111111111111111111111111".to_owned();
+    let other_account = "0x2222222222222222222222222222222222222222".to_owned();
+    let oversized = "X".repeat(70_000);
+
+    let encoder_results = [
+        (
+            "DepositCredited",
+            encode_deposit_credited(&WireDepositCredited {
+                account_id: account.clone(),
+                asset_id: oversized.clone(),
+                amount: "1".to_owned(),
+                deposit_reference: "deposit-42".to_owned(),
+            }),
+        ),
+        (
+            "WithdrawalDebited",
+            encode_withdrawal_debited(&WireWithdrawalDebited {
+                account_id: account.clone(),
+                asset_id: oversized.clone(),
+                amount: "1".to_owned(),
+                withdrawal_reference: "withdrawal-42".to_owned(),
+            }),
+        ),
+        (
+            "SpotTransfer",
+            encode_spot_transfer(&WireSpotTransfer {
+                from_account_id: account.clone(),
+                to_account_id: other_account.clone(),
+                asset_id: oversized.clone(),
+                amount: "1".to_owned(),
+            }),
+        ),
+        (
+            "PerpTransfer",
+            encode_perp_transfer(&WirePerpTransfer {
+                from_account_id: account.clone(),
+                to_account_id: other_account.clone(),
+                quote_amount: oversized.clone(),
+            }),
+        ),
+        (
+            "SubaccountTransfer",
+            encode_subaccount_transfer(&WireSubaccountTransfer {
+                master_account_id: account.clone(),
+                from_account_id: account.clone(),
+                to_account_id: other_account.clone(),
+                asset_id: oversized.clone(),
+                amount: "1".to_owned(),
+            }),
+        ),
+        (
+            "VaultDeposit",
+            encode_vault_deposit(&WireVaultDeposit {
+                vault_id: oversized.clone(),
+                account_id: account.clone(),
+                amount: "1".to_owned(),
+                shares_issued: "1".to_owned(),
+            }),
+        ),
+        (
+            "VaultWithdrawal",
+            encode_vault_withdrawal(&WireVaultWithdrawal {
+                vault_id: oversized,
+                account_id: account,
+                amount: "1".to_owned(),
+                shares_redeemed: "1".to_owned(),
+            }),
+        ),
+    ];
+    for (kind, result) in encoder_results {
+        assert_account_payload_size_result(result, kind);
+    }
+
+    let oversized_malformed = vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1];
+    let decoder_results = [
+        (
+            "DepositCredited",
+            decode_deposit_credited(&oversized_malformed).map(|_| ()),
+        ),
+        (
+            "WithdrawalDebited",
+            decode_withdrawal_debited(&oversized_malformed).map(|_| ()),
+        ),
+        (
+            "SpotTransfer",
+            decode_spot_transfer(&oversized_malformed).map(|_| ()),
+        ),
+        (
+            "PerpTransfer",
+            decode_perp_transfer(&oversized_malformed).map(|_| ()),
+        ),
+        (
+            "SubaccountTransfer",
+            decode_subaccount_transfer(&oversized_malformed).map(|_| ()),
+        ),
+        (
+            "VaultDeposit",
+            decode_vault_deposit(&oversized_malformed).map(|_| ()),
+        ),
+        (
+            "VaultWithdrawal",
+            decode_vault_withdrawal(&oversized_malformed).map(|_| ()),
+        ),
+    ];
+    for (kind, result) in decoder_results {
+        match result {
+            Err(error) => assert_account_payload_size_error(error, kind),
+            Ok(()) => panic!("{kind} oversized decoder unexpectedly succeeded"),
+        }
+    }
+}
+
+#[test]
+fn strict_account_default_payloads_validate_deterministically() {
+    for kind in [
+        "DepositCredited",
+        "WithdrawalDebited",
+        "SpotTransfer",
+        "PerpTransfer",
+        "SubaccountTransfer",
+        "VaultDeposit",
+        "VaultWithdrawal",
+    ] {
+        let first = encode_default_event_payload(kind).unwrap();
+        let second = encode_default_event_payload(kind).unwrap();
+        assert_eq!(
+            first, second,
+            "{kind} default payload must be deterministic"
+        );
+        validate_event_payload(kind, &first)
+            .unwrap_or_else(|error| panic!("{kind} default payload must validate: {error}"));
+    }
 }
 
 #[test]

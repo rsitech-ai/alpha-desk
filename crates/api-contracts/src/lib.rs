@@ -33,6 +33,7 @@ mod generated {
 
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/alpha-desk-v1.pb"));
+pub const MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES: usize = 16 * 1024;
 
 const GENERATED_RUST_ARTIFACTS: &[(&str, &[u8])] = &[
     (
@@ -55,6 +56,8 @@ const GENERATED_RUST_ARTIFACTS: &[(&str, &[u8])] = &[
 
 const SCHEMA_MATERIAL_HEADER: &[u8] = b"alpha-desk-schema-material-v1\n";
 const SCHEMA_MATERIAL_LINE_BYTES: usize = 60;
+const CANONICAL_ACCOUNT_PAYLOAD_SIZE_REASON: &str =
+    "canonical account payload exceeds the 16384-byte limit";
 const MAX_SCHEMA_FILES: usize = 4_096;
 const MAX_SCHEMA_MATERIAL_BYTES: usize = 64 * 1024 * 1024;
 
@@ -978,7 +981,7 @@ pub fn decode_order_rejected(bytes: &[u8]) -> Result<WireOrderRejected, PayloadC
 
 pub fn encode_deposit_credited(value: &WireDepositCredited) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_deposit_credited(value.clone())?;
-    Ok(wrap_payload(
+    bounded_account_payload(
         "DepositCredited",
         generated::hl::canonical::v1::DepositCredited {
             account_id: value.account_id,
@@ -987,10 +990,11 @@ pub fn encode_deposit_credited(value: &WireDepositCredited) -> Result<Vec<u8>, P
             deposit_reference: value.deposit_reference,
         }
         .encode_to_vec(),
-    ))
+    )
 }
 
 pub fn decode_deposit_credited(bytes: &[u8]) -> Result<WireDepositCredited, PayloadCodecError> {
+    validate_account_payload_size("DepositCredited", bytes)?;
     let message = generated::hl::canonical::v1::DepositCredited::decode(
         unwrap_payload("DepositCredited", bytes)?.as_slice(),
     )
@@ -1010,7 +1014,7 @@ pub fn encode_withdrawal_debited(
     value: &WireWithdrawalDebited,
 ) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_withdrawal_debited(value.clone())?;
-    Ok(wrap_payload(
+    bounded_account_payload(
         "WithdrawalDebited",
         generated::hl::canonical::v1::WithdrawalDebited {
             account_id: value.account_id,
@@ -1019,10 +1023,11 @@ pub fn encode_withdrawal_debited(
             withdrawal_reference: value.withdrawal_reference,
         }
         .encode_to_vec(),
-    ))
+    )
 }
 
 pub fn decode_withdrawal_debited(bytes: &[u8]) -> Result<WireWithdrawalDebited, PayloadCodecError> {
+    validate_account_payload_size("WithdrawalDebited", bytes)?;
     let message = generated::hl::canonical::v1::WithdrawalDebited::decode(
         unwrap_payload("WithdrawalDebited", bytes)?.as_slice(),
     )
@@ -1040,7 +1045,7 @@ pub fn decode_withdrawal_debited(bytes: &[u8]) -> Result<WireWithdrawalDebited, 
 
 pub fn encode_spot_transfer(value: &WireSpotTransfer) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_spot_transfer(value.clone())?;
-    Ok(wrap_payload(
+    bounded_account_payload(
         "SpotTransfer",
         generated::hl::canonical::v1::SpotTransfer {
             from_account_id: value.from_account_id,
@@ -1049,10 +1054,11 @@ pub fn encode_spot_transfer(value: &WireSpotTransfer) -> Result<Vec<u8>, Payload
             amount: value.amount,
         }
         .encode_to_vec(),
-    ))
+    )
 }
 
 pub fn decode_spot_transfer(bytes: &[u8]) -> Result<WireSpotTransfer, PayloadCodecError> {
+    validate_account_payload_size("SpotTransfer", bytes)?;
     let message = generated::hl::canonical::v1::SpotTransfer::decode(
         unwrap_payload("SpotTransfer", bytes)?.as_slice(),
     )
@@ -1070,7 +1076,7 @@ pub fn decode_spot_transfer(bytes: &[u8]) -> Result<WireSpotTransfer, PayloadCod
 
 pub fn encode_perp_transfer(value: &WirePerpTransfer) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_perp_transfer(value.clone())?;
-    Ok(wrap_payload(
+    bounded_account_payload(
         "PerpTransfer",
         generated::hl::canonical::v1::PerpTransfer {
             from_account_id: value.from_account_id,
@@ -1078,10 +1084,11 @@ pub fn encode_perp_transfer(value: &WirePerpTransfer) -> Result<Vec<u8>, Payload
             quote_amount: value.quote_amount,
         }
         .encode_to_vec(),
-    ))
+    )
 }
 
 pub fn decode_perp_transfer(bytes: &[u8]) -> Result<WirePerpTransfer, PayloadCodecError> {
+    validate_account_payload_size("PerpTransfer", bytes)?;
     let message = generated::hl::canonical::v1::PerpTransfer::decode(
         unwrap_payload("PerpTransfer", bytes)?.as_slice(),
     )
@@ -1100,7 +1107,7 @@ pub fn encode_subaccount_transfer(
     value: &WireSubaccountTransfer,
 ) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_subaccount_transfer(value.clone())?;
-    Ok(wrap_payload(
+    bounded_account_payload(
         "SubaccountTransfer",
         generated::hl::canonical::v1::SubaccountTransfer {
             master_account_id: value.master_account_id,
@@ -1110,12 +1117,13 @@ pub fn encode_subaccount_transfer(
             amount: value.amount,
         }
         .encode_to_vec(),
-    ))
+    )
 }
 
 pub fn decode_subaccount_transfer(
     bytes: &[u8],
 ) -> Result<WireSubaccountTransfer, PayloadCodecError> {
+    validate_account_payload_size("SubaccountTransfer", bytes)?;
     let message = generated::hl::canonical::v1::SubaccountTransfer::decode(
         unwrap_payload("SubaccountTransfer", bytes)?.as_slice(),
     )
@@ -1134,7 +1142,7 @@ pub fn decode_subaccount_transfer(
 
 pub fn encode_vault_deposit(value: &WireVaultDeposit) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_vault_deposit(value.clone())?;
-    Ok(wrap_payload(
+    bounded_account_payload(
         "VaultDeposit",
         generated::hl::canonical::v1::VaultDeposit {
             vault_id: value.vault_id,
@@ -1143,10 +1151,11 @@ pub fn encode_vault_deposit(value: &WireVaultDeposit) -> Result<Vec<u8>, Payload
             shares_issued: value.shares_issued,
         }
         .encode_to_vec(),
-    ))
+    )
 }
 
 pub fn decode_vault_deposit(bytes: &[u8]) -> Result<WireVaultDeposit, PayloadCodecError> {
+    validate_account_payload_size("VaultDeposit", bytes)?;
     let message = generated::hl::canonical::v1::VaultDeposit::decode(
         unwrap_payload("VaultDeposit", bytes)?.as_slice(),
     )
@@ -1164,7 +1173,7 @@ pub fn decode_vault_deposit(bytes: &[u8]) -> Result<WireVaultDeposit, PayloadCod
 
 pub fn encode_vault_withdrawal(value: &WireVaultWithdrawal) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_vault_withdrawal(value.clone())?;
-    Ok(wrap_payload(
+    bounded_account_payload(
         "VaultWithdrawal",
         generated::hl::canonical::v1::VaultWithdrawal {
             vault_id: value.vault_id,
@@ -1173,10 +1182,11 @@ pub fn encode_vault_withdrawal(value: &WireVaultWithdrawal) -> Result<Vec<u8>, P
             shares_redeemed: value.shares_redeemed,
         }
         .encode_to_vec(),
-    ))
+    )
 }
 
 pub fn decode_vault_withdrawal(bytes: &[u8]) -> Result<WireVaultWithdrawal, PayloadCodecError> {
+    validate_account_payload_size("VaultWithdrawal", bytes)?;
     let message = generated::hl::canonical::v1::VaultWithdrawal::decode(
         unwrap_payload("VaultWithdrawal", bytes)?.as_slice(),
     )
@@ -1582,15 +1592,62 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
                 deterministic_seed: 0,
             });
         }
-        "DepositCredited" => default_message::<generated::hl::canonical::v1::DepositCredited>(),
-        "WithdrawalDebited" => default_message::<generated::hl::canonical::v1::WithdrawalDebited>(),
-        "SpotTransfer" => default_message::<generated::hl::canonical::v1::SpotTransfer>(),
-        "PerpTransfer" => default_message::<generated::hl::canonical::v1::PerpTransfer>(),
-        "SubaccountTransfer" => {
-            default_message::<generated::hl::canonical::v1::SubaccountTransfer>()
+        "DepositCredited" => {
+            return encode_deposit_credited(&WireDepositCredited {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                deposit_reference: "synthetic-default-deposit".to_owned(),
+            });
         }
-        "VaultDeposit" => default_message::<generated::hl::canonical::v1::VaultDeposit>(),
-        "VaultWithdrawal" => default_message::<generated::hl::canonical::v1::VaultWithdrawal>(),
+        "WithdrawalDebited" => {
+            return encode_withdrawal_debited(&WireWithdrawalDebited {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                withdrawal_reference: "synthetic-default-withdrawal".to_owned(),
+            });
+        }
+        "SpotTransfer" => {
+            return encode_spot_transfer(&WireSpotTransfer {
+                from_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                to_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            });
+        }
+        "PerpTransfer" => {
+            return encode_perp_transfer(&WirePerpTransfer {
+                from_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                to_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+                quote_amount: "1".to_owned(),
+            });
+        }
+        "SubaccountTransfer" => {
+            return encode_subaccount_transfer(&WireSubaccountTransfer {
+                master_account_id: "0x3333333333333333333333333333333333333333".to_owned(),
+                from_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                to_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            });
+        }
+        "VaultDeposit" => {
+            return encode_vault_deposit(&WireVaultDeposit {
+                vault_id: "synthetic-default-vault".to_owned(),
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                amount: "1".to_owned(),
+                shares_issued: "1".to_owned(),
+            });
+        }
+        "VaultWithdrawal" => {
+            return encode_vault_withdrawal(&WireVaultWithdrawal {
+                vault_id: "synthetic-default-vault".to_owned(),
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                amount: "1".to_owned(),
+                shares_redeemed: "1".to_owned(),
+            });
+        }
         "FeeCharged" => default_message::<generated::hl::canonical::v1::FeeCharged>(),
         "BuilderFeeCharged" => default_message::<generated::hl::canonical::v1::BuilderFeeCharged>(),
         "FundingPaid" => default_message::<generated::hl::canonical::v1::FundingPaid>(),
@@ -2255,6 +2312,22 @@ fn wrap_payload(kind: &str, message: Vec<u8>) -> Vec<u8> {
         message,
     }
     .encode_to_vec()
+}
+
+fn bounded_account_payload(kind: &str, message: Vec<u8>) -> Result<Vec<u8>, PayloadCodecError> {
+    let payload = wrap_payload(kind, message);
+    validate_account_payload_size(kind, &payload)?;
+    Ok(payload)
+}
+
+fn validate_account_payload_size(kind: &str, bytes: &[u8]) -> Result<(), PayloadCodecError> {
+    if bytes.len() > MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: CANONICAL_ACCOUNT_PAYLOAD_SIZE_REASON.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn unwrap_payload(kind: &str, bytes: &[u8]) -> Result<Vec<u8>, PayloadCodecError> {

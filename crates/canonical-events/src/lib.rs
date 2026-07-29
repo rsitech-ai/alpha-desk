@@ -16,21 +16,21 @@ pub use node_mapping::{
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
-    WireAssetContextUpdated, WireCanonicalEventEnvelope, WireDepositCredited, WireDexCreated,
-    WireFundingRateUpdated, WireMarginTableChanged, WireMarketCreated, WireMarketHalted,
-    WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated,
-    WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
-    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
-    WireOutcomeResolved, WirePerpTransfer, WireSourceEvidence, WireSpotTransfer,
-    WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal,
-    WireWithdrawalDebited, decode_asset_context_updated, decode_deposit_credited,
-    decode_dex_created, decode_funding_rate_updated, decode_margin_table_changed,
-    decode_market_created, decode_market_halted, decode_market_metadata_changed,
-    decode_market_resumed, decode_open_interest_cap_changed, decode_oracle_updated,
-    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
-    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
-    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_spot_transfer,
-    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireAssetContextUpdated, WireCanonicalEventEnvelope,
+    WireDepositCredited, WireDexCreated, WireFundingRateUpdated, WireMarginTableChanged,
+    WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed,
+    WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted, WireOrderCancelled,
+    WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected,
+    WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer, WireSourceEvidence,
+    WireSpotTransfer, WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit,
+    WireVaultWithdrawal, WireWithdrawalDebited, decode_asset_context_updated,
+    decode_deposit_credited, decode_dex_created, decode_funding_rate_updated,
+    decode_margin_table_changed, decode_market_created, decode_market_halted,
+    decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
+    decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
+    decode_order_modified, decode_order_partially_filled, decode_order_rejected,
+    decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_perp_transfer,
+    decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
     decode_vault_withdrawal, decode_withdrawal_debited, encode_asset_context_updated,
     encode_default_event_payload, encode_deposit_credited, encode_dex_created,
     encode_funding_rate_updated, encode_margin_table_changed, encode_market_created,
@@ -503,7 +503,7 @@ macro_rules! opaque_payloads {
             }
 
             pub fn encode_to_vec(&self) -> Result<Vec<u8>, ContractError> {
-                match self {
+                let bytes = match self {
                     $(
                         Self::$kind(value) => {
                             validate_payload(EventKind::$kind, &value.encoded)?;
@@ -763,7 +763,9 @@ macro_rules! opaque_payloads {
                         deterministic_seed: value.deterministic_seed,
                     })
                     .map_err(payload_error),
-                }
+                }?;
+                validate_account_payload_size(self.kind(), &bytes)?;
+                Ok(bytes)
             }
 
             pub fn decode(kind: EventKind, bytes: &[u8]) -> Result<Self, ContractError> {
@@ -784,6 +786,7 @@ macro_rules! opaque_payloads {
                 kind: EventKind,
                 bytes: &[u8],
             ) -> Result<Self, ContractError> {
+                validate_account_payload_size(kind, bytes)?;
                 required_payload(bytes)?;
                 match kind {
                     EventKind::OrderAccepted => {
@@ -2269,6 +2272,26 @@ fn fixed_hash(value: Vec<u8>, field: &'static str) -> Result<[u8; HASH_LENGTH], 
 
 fn validate_payload(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
     validate_event_payload(kind.as_wire_name(), bytes).map_err(payload_error)
+}
+
+fn validate_account_payload_size(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
+    if matches!(
+        kind,
+        EventKind::DepositCredited
+            | EventKind::WithdrawalDebited
+            | EventKind::SpotTransfer
+            | EventKind::PerpTransfer
+            | EventKind::SubaccountTransfer
+            | EventKind::VaultDeposit
+            | EventKind::VaultWithdrawal
+    ) && bytes.len() > MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES
+    {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "canonical account payload exceeds the 16384-byte limit".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn payload_error(error: api_contracts::PayloadCodecError) -> ContractError {
