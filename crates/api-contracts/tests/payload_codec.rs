@@ -70,6 +70,41 @@ fn assert_account_payload_size_result(result: Result<Vec<u8>, PayloadCodecError>
     }
 }
 
+fn append_test_varint(bytes: &mut Vec<u8>, mut value: usize) {
+    loop {
+        let byte = u8::try_from(value & 0x7f).unwrap();
+        value >>= 7;
+        if value == 0 {
+            bytes.push(byte);
+            return;
+        }
+        bytes.push(byte | 0x80);
+    }
+}
+
+fn append_outer_unknown_padding(encoded: &[u8], padding_bytes: usize) -> Vec<u8> {
+    let mut padded = encoded.to_vec();
+    padded.push(0x1a);
+    append_test_varint(&mut padded, padding_bytes);
+    padded.resize(padded.len() + padding_bytes, 0);
+    padded
+}
+
+fn pad_outer_unknown_to_exact_size(encoded: &[u8], target_bytes: usize) -> Vec<u8> {
+    let mut padding_bytes = target_bytes
+        .checked_sub(encoded.len() + 4)
+        .expect("target must leave room for the unknown field");
+    for _ in 0..8 {
+        let candidate = append_outer_unknown_padding(encoded, padding_bytes);
+        match candidate.len().cmp(&target_bytes) {
+            std::cmp::Ordering::Equal => return candidate,
+            std::cmp::Ordering::Less => padding_bytes += target_bytes - candidate.len(),
+            std::cmp::Ordering::Greater => padding_bytes -= candidate.len() - target_bytes,
+        }
+    }
+    panic!("could not construct exact-size outer payload fixture");
+}
+
 #[test]
 fn trade_identities_round_trip_when_full_partial_or_absent() {
     let absent = trade();
@@ -410,6 +445,64 @@ fn every_account_cash_flow_codec_enforces_the_shared_payload_bound() {
             Ok(()) => panic!("{kind} oversized decoder unexpectedly succeeded"),
         }
     }
+}
+
+#[test]
+fn generic_validator_preflights_every_account_payload_size() {
+    for kind in [
+        "DepositCredited",
+        "WithdrawalDebited",
+        "SpotTransfer",
+        "PerpTransfer",
+        "SubaccountTransfer",
+        "VaultDeposit",
+        "VaultWithdrawal",
+    ] {
+        let default = encode_default_event_payload(kind).unwrap();
+
+        let exact = pad_outer_unknown_to_exact_size(&default, ACCOUNT_PAYLOAD_LIMIT);
+        assert_eq!(exact.len(), ACCOUNT_PAYLOAD_LIMIT);
+        validate_event_payload(kind, &exact)
+            .unwrap_or_else(|error| panic!("{kind} exact-bound payload failed: {error}"));
+
+        let one_over_well_formed =
+            pad_outer_unknown_to_exact_size(&default, ACCOUNT_PAYLOAD_LIMIT + 1);
+        assert_eq!(one_over_well_formed.len(), ACCOUNT_PAYLOAD_LIMIT + 1);
+        let error = validate_event_payload(kind, &one_over_well_formed).unwrap_err();
+        assert_account_payload_size_error(error, kind);
+
+        let one_over_malformed = vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1];
+        let error = validate_event_payload(kind, &one_over_malformed).unwrap_err();
+        assert_account_payload_size_error(error, kind);
+
+        for probe in [
+            pad_outer_unknown_to_exact_size(&default, 70_000),
+            vec![0xff; 70_000],
+        ] {
+            let outcome =
+                std::panic::catch_unwind(|| validate_event_payload(kind, probe.as_slice()));
+            let error = outcome
+                .unwrap_or_else(|_| panic!("{kind} generic validator panicked on a 70k probe"))
+                .unwrap_err();
+            assert_account_payload_size_error(error, kind);
+        }
+    }
+}
+
+#[test]
+fn generic_validator_preserves_unrelated_kind_behavior() {
+    let kind = "FeeCharged";
+    let valid = encode_default_event_payload(kind).unwrap();
+    validate_event_payload(kind, &valid).unwrap();
+
+    let oversized_malformed = vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1];
+    assert!(matches!(
+        validate_event_payload(kind, &oversized_malformed),
+        Err(PayloadCodecError::Decode {
+            kind: decode_kind,
+            ..
+        }) if decode_kind == "TypedPayloadEnvelope"
+    ));
 }
 
 #[test]
