@@ -1694,6 +1694,18 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
 }
 
 pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCodecError> {
+    if matches!(
+        kind,
+        "DepositCredited"
+            | "WithdrawalDebited"
+            | "SpotTransfer"
+            | "PerpTransfer"
+            | "SubaccountTransfer"
+            | "VaultDeposit"
+            | "VaultWithdrawal"
+    ) {
+        validate_account_payload_size(kind, bytes)?;
+    }
     let message = unwrap_payload(kind, bytes)?;
     macro_rules! decode {
         ($type:ty) => {
