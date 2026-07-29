@@ -180,6 +180,10 @@ impl CanonicalArchive for LocalParquetArchive {
     fn verify_manifest(&self, manifest: &ManifestId) -> Result<VerifiedManifest, ArchiveError> {
         reader::verify_block_manifest(self, manifest)
     }
+
+    fn read_manifest_blocks(&self, manifest: &ManifestId) -> Result<BlockIterator, ArchiveError> {
+        reader::read_manifest_blocks(self, manifest)
+    }
 }
 
 impl RawObservationArchive for LocalParquetArchive {

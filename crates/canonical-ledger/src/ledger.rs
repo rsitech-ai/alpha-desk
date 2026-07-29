@@ -226,6 +226,18 @@ impl<R: EventReducer> CanonicalLedger<R> {
             .map(|watermark| self.checkpoint_from(watermark, self.state_hash))
     }
 
+    pub fn next_height(&self) -> Result<BlockHeight, LedgerError> {
+        match self.state.watermark() {
+            Some(watermark) => watermark
+                .block_height
+                .get()
+                .checked_add(1)
+                .map(BlockHeight::new)
+                .ok_or(LedgerError::HeightExhausted),
+            None => Ok(self.state.first_height()),
+        }
+    }
+
     pub fn apply_block(&mut self, block: &BlockEnvelope) -> Result<ApplyOutcome, LedgerError> {
         if self.reducer.reducer_set_version() != self.state.reducer_set_version() {
             return Err(LedgerError::ReducerVersionDrift);
@@ -322,15 +334,7 @@ impl<R: EventReducer> CanonicalLedger<R> {
     }
 
     fn validate_next_height(&self, actual: BlockHeight) -> Result<(), LedgerError> {
-        let expected = match self.state.watermark() {
-            Some(watermark) => watermark
-                .block_height
-                .get()
-                .checked_add(1)
-                .map(BlockHeight::new)
-                .ok_or(LedgerError::HeightExhausted)?,
-            None => self.state.first_height(),
-        };
+        let expected = self.next_height()?;
         if actual != expected {
             return Err(LedgerError::HeightDiscontinuity { expected, actual });
         }
