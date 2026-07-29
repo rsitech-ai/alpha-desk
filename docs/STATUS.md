@@ -100,7 +100,10 @@ receipt cannot advance the visible ledger. No action-bearing production reducer,
 RocksDB adapter, production archive/replay service, or reconciliation result
 exists yet. A bounded `state-replay fixture-e2e` process now generates explicit
 synthetic evidence for repeated rebuild, local checkpoint resume, and
-poison-block atomicity.
+poison-block atomicity. `state-replay archive-e2e` runs the same repeat/resume
+proof read-only against an operator-selected canonical archive range after
+freezing the current catalog into verified immutable manifests; it remains
+watermark-only with source qualification explicitly unassessed.
 Stage 2 remains unqualified. The exact current contract and limitations are
 recorded in
 [`docs/contracts/deterministic-state-v1.md`](contracts/deterministic-state-v1.md).

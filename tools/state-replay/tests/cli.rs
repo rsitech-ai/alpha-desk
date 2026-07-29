@@ -9,7 +9,7 @@ fn cli_emits_stable_exit_codes_and_runs_the_fixture_evidence_path() {
     assert!(missing.stdout.is_empty());
     assert_eq!(
         String::from_utf8(missing.stderr).expect("UTF-8"),
-        "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n"
+        "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay archive-e2e --archive PATH --output PATH --chain ID --start-height N --end-height N --checkpoint-height N --iterations N\n"
     );
 
     let temporary = tempfile::tempdir().expect("temporary root");

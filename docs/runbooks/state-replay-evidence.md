@@ -53,8 +53,63 @@ just state-replay-soak 2000 1000 500
 
 The runner rejects fewer than two blocks, a checkpoint outside the range, zero
 iterations, more than 100,000 blocks or iterations, or more than 100,000,000
-total replayed blocks. Disk use is driven mainly by the one-time Parquet
-archive; runtime grows approximately with `blocks * iterations`.
+total replayed blocks across the repeated and checkpoint-equivalence passes.
+Disk use is driven mainly by the one-time Parquet archive; runtime grows
+approximately with `blocks * (iterations + 1)`.
+
+## Existing operator archive
+
+Run the same deterministic rebuild and checkpoint-resume proof against an
+existing local canonical archive:
+
+```bash
+just state-replay-archive-e2e \
+  /absolute/path/to/archive \
+  mainnet \
+  1000000 \
+  1000999 \
+  1000499 \
+  3
+```
+
+For a longer release-profile run, use the same arguments with:
+
+```bash
+just state-replay-archive-soak \
+  /absolute/path/to/archive \
+  mainnet \
+  1000000 \
+  1000999 \
+  1000499 \
+  100
+```
+
+Before creating the private evidence directory, this mode:
+
+1. requires an existing, non-symlink archive directory;
+2. verifies the selected range through the current archive catalog;
+3. freezes the range into ordered immutable manifest IDs and hashes;
+4. requires contiguous manifest ranges, one chain, and one canonical schema
+   fingerprint;
+5. requires the checkpoint height to be an exact manifest boundary; and
+6. rejects evidence output inside or above the archive.
+
+Replay then reads only the frozen immutable manifests. It does not append,
+compact, repair, or otherwise mutate the operator archive. The evidence
+directory contains only the private checkpoint generations and report.
+
+The operator report records every immutable manifest ID, manifest hash, range,
+and row count. It also declares:
+
+- `evidence_class = "operator_archive"`;
+- `state_semantics = "watermark_only"`;
+- `source_qualification = "unassessed"`;
+- `stage_2_qualified = false`; and
+- `live_source_qualified = false`.
+
+An action-bearing block is expected to stop with
+`replay.block_quarantined`/`ledger.unsupported_event` until its reducer is
+qualified. Do not relabel such a stop as archive corruption.
 
 ## Interpreting the result
 
@@ -66,3 +121,9 @@ compatibility, reconciliation, service readiness, or the Stage 2 gate.
 Retain the complete evidence directory when comparing runs. The archive,
 checkpoint generation, and report belong together; do not copy only the JSON
 and call it reproducible evidence.
+
+A successful operator-archive report is stronger evidence about that exact
+archive range, but it is still not live-source qualification: the tool does not
+know how the archive was captured, reviewed, or reconciled. Preserve the
+operator archive immutably alongside the report and independently verify it
+with `just archive-verify /absolute/path/to/archive`.

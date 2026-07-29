@@ -806,6 +806,12 @@ pub trait CanonicalArchive: Send + Sync {
     fn read_range(&self, chain: &ChainId, range: BlockRange)
     -> Result<BlockIterator, ArchiveError>;
 
+    fn plan_range(
+        &self,
+        chain: &ChainId,
+        range: BlockRange,
+    ) -> Result<Vec<VerifiedManifest>, ArchiveError>;
+
     fn verify_manifest(&self, manifest: &ManifestId) -> Result<VerifiedManifest, ArchiveError>;
 
     fn read_manifest_blocks(&self, manifest: &ManifestId) -> Result<BlockIterator, ArchiveError>;

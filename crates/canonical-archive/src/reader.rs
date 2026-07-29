@@ -212,6 +212,79 @@ pub fn read_range(
     chain: &ChainId,
     range: BlockRange,
 ) -> Result<BlockIterator, ArchiveError> {
+    let references = range_references(archive, chain, range)?;
+    let mut total_bytes = 0_u64;
+    let mut blocks = Vec::with_capacity(references.len());
+    let mut verified_bundles: BTreeMap<[u8; 32], Vec<BlockEnvelope>> = BTreeMap::new();
+    for reference in &references {
+        let manifest = load_block_manifest_ref(archive, reference)?;
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            verified_bundles.entry(manifest.hash)
+        {
+            total_bytes = total_bytes
+                .checked_add(manifest.value.object.size_bytes)
+                .ok_or(ArchiveError::InvalidInput(
+                    "archive read byte count overflows",
+                ))?;
+            if total_bytes > archive.config().max_read_bytes() {
+                return Err(ArchiveError::InvalidInput(
+                    "archive read range exceeds configured byte limit",
+                ));
+            }
+            let (bundle, _) = verify_and_decode_bundle(archive, &manifest.value)?;
+            entry.insert(bundle);
+        }
+        let block = verified_bundles
+            .get(&manifest.hash)
+            .and_then(|bundle| {
+                bundle
+                    .iter()
+                    .find(|block| block.block_height().get() == reference.block_height)
+            })
+            .ok_or(ArchiveError::ManifestVerification(
+                "verified bundle does not contain referenced block",
+            ))?;
+        blocks.push(block.clone());
+    }
+    Ok(Box::new(blocks.into_iter().map(Ok)))
+}
+
+pub fn plan_range(
+    archive: &LocalParquetArchive,
+    chain: &ChainId,
+    range: BlockRange,
+) -> Result<Vec<VerifiedManifest>, ArchiveError> {
+    let references = range_references(archive, chain, range)?;
+    let mut seen = BTreeSet::new();
+    let mut manifests = Vec::new();
+    let mut total_bytes = 0_u64;
+    for reference in references {
+        let hash = manifest::parse_hash(&reference.manifest_sha256)?;
+        if !seen.insert(hash) {
+            continue;
+        }
+        let loaded = load_block_manifest_ref(archive, &reference)?;
+        total_bytes = total_bytes
+            .checked_add(loaded.value.object.size_bytes)
+            .ok_or(ArchiveError::InvalidInput(
+                "archive plan byte count overflows",
+            ))?;
+        if total_bytes > archive.config().max_read_bytes() {
+            return Err(ArchiveError::InvalidInput(
+                "archive plan exceeds configured byte limit",
+            ));
+        }
+        let manifest_id = manifest::manifest_id(hash)?;
+        manifests.push(verify_block_manifest(archive, &manifest_id)?);
+    }
+    Ok(manifests)
+}
+
+fn range_references(
+    archive: &LocalParquetArchive,
+    chain: &ChainId,
+    range: BlockRange,
+) -> Result<Vec<BlockManifestRefV1>, ArchiveError> {
     let block_count = range
         .end_inclusive
         .get()
@@ -252,41 +325,7 @@ pub fn read_range(
             return Err(ArchiveError::RangeUnavailable);
         }
     }
-
-    let mut total_bytes = 0_u64;
-    let mut blocks = Vec::with_capacity(references.len());
-    let mut verified_bundles: BTreeMap<[u8; 32], Vec<BlockEnvelope>> = BTreeMap::new();
-    for reference in &references {
-        let manifest = load_block_manifest_ref(archive, reference)?;
-        if let std::collections::btree_map::Entry::Vacant(entry) =
-            verified_bundles.entry(manifest.hash)
-        {
-            total_bytes = total_bytes
-                .checked_add(manifest.value.object.size_bytes)
-                .ok_or(ArchiveError::InvalidInput(
-                    "archive read byte count overflows",
-                ))?;
-            if total_bytes > archive.config().max_read_bytes() {
-                return Err(ArchiveError::InvalidInput(
-                    "archive read range exceeds configured byte limit",
-                ));
-            }
-            let (bundle, _) = verify_and_decode_bundle(archive, &manifest.value)?;
-            entry.insert(bundle);
-        }
-        let block = verified_bundles
-            .get(&manifest.hash)
-            .and_then(|bundle| {
-                bundle
-                    .iter()
-                    .find(|block| block.block_height().get() == reference.block_height)
-            })
-            .ok_or(ArchiveError::ManifestVerification(
-                "verified bundle does not contain referenced block",
-            ))?;
-        blocks.push(block.clone());
-    }
-    Ok(Box::new(blocks.into_iter().map(Ok)))
+    Ok(references)
 }
 
 pub(crate) fn inspect_chain(

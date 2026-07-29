@@ -221,6 +221,13 @@ identity/range in canonical bytes. The receipt hash uses BLAKE3 derive-key
 context `hyperliquid-alpha-desk/replay-receipt-hash/v1`; a fixed completed
 receipt vector protects the V1 framing.
 
+For operator-selected archive ranges, `CanonicalArchive::plan_range` resolves
+the current catalog once, verifies the selected object bounds, and returns an
+ordered immutable manifest plan. `state-replay archive-e2e` validates contiguous
+manifest boundaries, chain and schema identity before creating evidence output,
+then repeats rebuild and checkpoint resume using only that frozen plan. It does
+not mutate the source archive.
+
 ## Current evidence and limitations
 
 Focused tests prove:
@@ -248,7 +255,10 @@ Focused tests prove:
 - two byte-identical clean replays, checkpoint-equivalent resume, immutable
   manifest reads after `CURRENT` advances, preflight rejection without
   mutation, wrong-chain and wrong-start-state rejection, block-boundary
-  cancellation, poison-block quarantine, and a fixed replay-receipt hash.
+  cancellation, poison-block quarantine, and a fixed replay-receipt hash; and
+- read-only operator-archive planning, repeated rebuild, exact-boundary
+  checkpoint resume, explicit unqualified evidence, and unchanged archive
+  inspection before/after.
 
 This does not prove action-bearing account or order state, RocksDB durability,
 reconciliation, live-source compatibility, a production replay service, or
