@@ -183,9 +183,11 @@ Parquet archive, private local checkpoints.
 
   Reject unknown/case-folded/padded values, same previous/new modes, same
   previous/new leverage, non-positive amounts or leverage, a nonnegative
-  `maker_rebate` rate, a nonpositive charged fee rate, account/envelope
-  identity mismatch, duplicate account endpoints, and missing market
-  identities for funding/margin/leverage events.
+  `maker_rebate` rate, a nonpositive charged fee rate, duplicate
+  builder/referrer endpoints, malformed addresses/IDs, and noncanonical direct
+  payload bytes. Cross-checking payload identities against enclosing
+  account/market identities belongs to the block-atomic reducer in Task 4,
+  not the payload codec.
 
 - [ ] **Step 2: Run red**
 
@@ -376,8 +378,9 @@ Parquet archive, private local checkpoints.
   Assert one immutable fact per accepted event; exact debit/credit symmetry;
   fee/funding direction; builder/referrer counterpart totals; vault principal
   and share conservation; non-overlapping subaccount ownership; previous mode
-  and leverage binding; market/asset prerequisite checks; identity collision;
-  strict unknown-field-denying key-bound codecs; 16 KiB record bounds; 64 KiB
+  and leverage binding; exact payload/envelope account and market identities;
+  market/asset prerequisite checks; identity collision; strict
+  unknown-field-denying key-bound codecs; 16 KiB record bounds; 64 KiB
   pre-allocation key bounds; unsupported schema denial; and whole-block
   rollback after a late invalid transfer.
 
