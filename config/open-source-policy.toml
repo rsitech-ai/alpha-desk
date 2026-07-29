@@ -48,6 +48,11 @@ forbidden_path_prefixes = [
 ]
 
 allowed_binary_paths = [
+  "fixtures/archive/valid-v1/chain=mainnet/dataset=canonical_events/date=2024-07-24/hour=00/objects/block_start=700/block_end=700/part-1325c84bed0ecf04c3d1ad7949f4bfb9d41b6eeb617d154ccabfcf249b44e688.parquet",
+  "fixtures/archive/valid-v1/chain=mainnet/dataset=canonical_events/date=2024-07-24/hour=00/objects/block_start=700/block_end=702/part-b1b794d50b08c869f05520d0c9142b48731eaeb257842f90d25ede11b95c1231.parquet",
+  "fixtures/archive/valid-v1/chain=mainnet/dataset=canonical_events/date=2024-07-24/hour=00/objects/block_start=701/block_end=701/part-7ca0ff137f90fcff4c096c6c638b71fc8ef5ad5275cdb62096e2d94c49505ae6.parquet",
+  "fixtures/archive/valid-v1/chain=mainnet/dataset=canonical_events/date=2024-07-24/hour=00/objects/block_start=702/block_end=702/part-c97309bcb804c2ccfd8961047960723d2645ce08e9394be91b2ea90c04bb5b63.parquet",
+  "fixtures/archive/valid-v1/chain=mainnet/dataset=raw_source_observations/source=primary-node/date=2024-07-24/hour=00/objects/epoch=node-session-fixture/offsets=700-702/part-2050ff7301773273ca4c3cbdfacdf650c1ad4b255baca3f686119095d6bb9efd.parquet",
   "fixtures/spool/valid-v1/segment-0000000001.hlsp",
   "schemas/proto/baseline/v1.pb",
 ]

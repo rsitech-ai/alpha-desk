@@ -17,7 +17,7 @@ This is the evidence ledger for the current working repository. The approved des
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
-| 1 — Truth layer | Tasks 1–3, the Task 4 trust/admission boundary, part of Task 5, and the pure Task 6 sequencer foundation are implemented on the hardening branch; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, offline inspection, primary-node per-height and line-file adapters, exhaustive source-trust admission, deterministic source-independent event IDs and block hashes, production canonical-event construction, presence-aware source sub-indexes, a conservative public block-batched trade mapping, a byte-preserving V1.0.x upcast boundary, bounded gap/duplicate/divergence sequencing with deterministic quarantine, deterministic fixtures, and parser fuzz target | Real-node/operator-corpus qualification, independent/recovery/operator/public/historical transports, remaining source-to-canonical mappings, historical upcast steps when real versions exist, PostgreSQL/archive-bound durable cursor integration, immutable archive, JetStream publication, long-running capture service, runtime evidence, and signed gate |
+| 1 — Truth layer | Tasks 1–7 have substantial library/tool foundations; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, primary-node file adapters, exhaustive source-trust admission, deterministic canonical identity and public trade mapping, V1 upcast validation, bounded gap/duplicate/divergence sequencing, chain-scoped canonical/raw Parquet archive, atomic verified manifest chains, corruption-before-yield replay reads, idempotent retained-generation compaction, DataFusion inspection/count tooling, deterministic fixtures, and parser fuzz target | Real-node/operator-corpus qualification, independent/recovery/operator/public/historical transports, remaining source mappings, real historical upcasts, archive-before-PostgreSQL-cursor coordination, JetStream publication, long-running capture service, runtime/restart/soak evidence, and signed gate |
 | 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
@@ -34,6 +34,7 @@ The currently useful runnable components are engineering tools:
 - `fixture-inspect`
 - `spool-inspect`
 - `canonical-inspect`
+- `archive-inspect`
 - `architecture-check`
 - `build-info`
 
@@ -44,7 +45,11 @@ construct an adapter, open a source, or
 remain running. The adapters are
 focused-test proven against normalized official examples, not qualified against operator node
 recordings. `spool-inspect` can verify retained segments, manifests, and one complete open tail; it
-is an operator tool, not a capture service. `just dev-up` starts dependencies only. The Swift
+is an operator tool, not a capture service. `hl-analytics` exports the local
+immutable archive, verified compaction, and full-chain inspection libraries;
+`archive-inspect` verifies reachable canonical/raw objects and independently
+counts canonical Parquet rows through DataFusion. Neither is wired into a
+long-running service or durable capture cursor. `just dev-up` starts dependencies only. The Swift
 package exports foundation libraries and has no application executable. Therefore there is not
 yet a product E2E or long-running soak path to claim.
 
@@ -57,7 +62,7 @@ It does not establish committed history or production node compatibility.
 - `blocked:license-decision` — Apache-2.0 is current; any dual-license change requires owner/legal approval.
 - `blocked:external` — trusted identities, signed approvals, a second builder, hosted CI evidence, tags, canonical organization repository creation, and publication.
 - `blocked:public-history` — the current recovery/engineering history contains transport refs and author metadata that require a deliberate sanitized export decision.
-- `blocked:runtime-evidence` — capture, replay, restart, archive, API, UI, load, soak, restore, canary, and rollback evidence do not exist yet.
+- `blocked:runtime-evidence` — archive storage behavior has focused local evidence, but capture coordination, replay service, restart, API, UI, load, soak, restore, canary, and rollback evidence do not exist yet.
 
 No validated secret exposure was found by the 2026-07-28 local audit, but normal secret scanning is not sufficient to approve encoded archives or every remote ref for publication.
 
@@ -84,6 +89,8 @@ prove a running Alpha Desk product:
 - `cargo +1.97.1 test -p canonical-events --test node_mapping --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test upcast --locked --offline`
 - `cargo +1.97.1 test -p hl-capture --test sequencer --locked --offline`
+- `cargo +1.97.1 test -p hl-analytics --test archive --locked --offline`
+- `cargo +1.97.1 test -p archive-inspect --locked --offline`
 - `just postgres-migration-smoke`
 - `just spool-verify`
 - `cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time=60`

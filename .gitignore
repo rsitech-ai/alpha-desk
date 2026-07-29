@@ -26,6 +26,7 @@ state/
 *.sqlite
 *.sqlite3
 *.parquet
+!fixtures/archive/valid-v1/**/*.parquet
 *.tar
 *.tar.gz
 *.tgz
