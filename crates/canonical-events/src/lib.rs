@@ -388,6 +388,7 @@ pub struct SourceEvidence {
     source_version: String,
     source_offset: String,
     content_hash: [u8; HASH_LENGTH],
+    source_event_index: Option<u32>,
 }
 
 impl SourceEvidence {
@@ -402,6 +403,20 @@ impl SourceEvidence {
             source_version: required(source_version.into(), "source_evidence.source_version")?,
             source_offset: required(source_offset.into(), "source_evidence.source_offset")?,
             content_hash,
+            source_event_index: None,
+        })
+    }
+
+    pub fn try_new_indexed(
+        source_id: SourceId,
+        source_version: impl Into<String>,
+        source_offset: impl Into<String>,
+        content_hash: [u8; HASH_LENGTH],
+        source_event_index: u32,
+    ) -> Result<Self, ContractError> {
+        Self::try_new(source_id, source_version, source_offset, content_hash).map(|mut evidence| {
+            evidence.source_event_index = Some(source_event_index);
+            evidence
         })
     }
 
@@ -423,6 +438,11 @@ impl SourceEvidence {
     #[must_use]
     pub const fn content_hash(&self) -> [u8; HASH_LENGTH] {
         self.content_hash
+    }
+
+    #[must_use]
+    pub const fn source_event_index(&self) -> Option<u32> {
+        self.source_event_index
     }
 }
 
@@ -563,6 +583,7 @@ impl CanonicalEventEnvelope {
             source_version: "v1".to_owned(),
             source_offset,
             content_hash: payload_hash,
+            source_event_index: None,
         }];
 
         Ok(Self {
@@ -866,6 +887,7 @@ impl TryFrom<WireSourceEvidence> for SourceEvidence {
             source_version: required(value.source_version, "source_evidence.source_version")?,
             source_offset: required(value.source_offset, "source_evidence.source_offset")?,
             content_hash: fixed_hash(value.content_hash, "source_evidence.content_hash")?,
+            source_event_index: value.source_event_index,
         })
     }
 }
@@ -877,6 +899,7 @@ impl From<&SourceEvidence> for WireSourceEvidence {
             source_version: value.source_version.clone(),
             source_offset: value.source_offset.clone(),
             content_hash: value.content_hash.to_vec(),
+            source_event_index: value.source_event_index,
         }
     }
 }
