@@ -166,8 +166,10 @@ Parquet archive, private local checkpoints.
   `FundingReceived`, `ReferralReward`, `AccountModeChanged`,
   `MarginModeChanged`, and `LeverageChanged`.
 - Produces: `FeeTypeV1`, `AccountAbstractionModeV1`, `MarginModeV1`, and strict
-  typed payloads. `FundingRate` remains signed; charged/paid/received amounts
-  are positive and the event kind supplies direction.
+  typed payloads. `FundingRate` remains signed; paid/received amounts are
+  positive and their event kind supplies direction. `FeeRate` remains signed:
+  `maker_rebate` requires a negative rate and credits the account, while every
+  charged fee type requires a positive rate and debits the account.
 
 - [ ] **Step 1: Write the failing domain and payload tests**
 
@@ -180,9 +182,10 @@ Parquet archive, private local checkpoints.
   ```
 
   Reject unknown/case-folded/padded values, same previous/new modes, same
-  previous/new leverage, non-positive amounts or leverage, negative fee rates,
-  account/envelope identity mismatch, duplicate account endpoints, and missing
-  market identities for funding/margin/leverage events.
+  previous/new leverage, non-positive amounts or leverage, a nonnegative
+  `maker_rebate` rate, a nonpositive charged fee rate, account/envelope
+  identity mismatch, duplicate account endpoints, and missing market
+  identities for funding/margin/leverage events.
 
 - [ ] **Step 2: Run red**
 
@@ -427,10 +430,13 @@ Parquet archive, private local checkpoints.
   Deposits/withdrawals affect external-asset flow only. Spot and perp
   transfers create equal debit/credit facts in their exact scopes.
   Subaccount transfers additionally create one master relation; conflicting
-  masters fail. Fees, builder fees, rewards, and funding have direction fixed
-  by event kind. First mode/leverage transition establishes its asserted
-  predecessor; later transitions must match current state exactly. Funding,
-  margin-mode, and leverage events require an exact current market record.
+  masters fail. Builder fees and funding have direction fixed by event kind.
+  `FeeCharged` direction is fixed by `FeeTypeV1`: `maker_rebate` is a credit
+  and every other frozen fee type is a debit. Rewards credit the explicit
+  referrer/reward recipient recorded by the typed payload. First
+  mode/leverage transition establishes its asserted predecessor; later
+  transitions must match current state exactly. Funding, margin-mode, and
+  leverage events require an exact current market record.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -683,6 +689,9 @@ Parquet archive, private local checkpoints.
   remain a separate versioned margin-model plan. Current official protocol
   documentation is discovery input, not a substitute for immutable reviewed
   rule fixtures and source snapshots.
+- 2026-07-29: Preserve signed fee rates. A frozen `maker_rebate` is a credit
+  with a negative rate; charged fee types require positive rates. Do not erase
+  the documented rebate sign by coercing every fee rate nonnegative.
 
 ## Progress Log
 
