@@ -4,9 +4,11 @@ set -euo pipefail
 repository_root="$(git rev-parse --show-toplevel)"
 readonly repository_root
 readonly postgres_image='docker.io/library/postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15'
-readonly run_id="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+run_id="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+readonly run_id
 readonly evidence_root="${repository_root}/target/evidence/capture-e2e/${run_id}"
-readonly secret_root="$(mktemp -d /tmp/alpha-desk-capture-e2e.XXXXXX)"
+secret_root="$(mktemp -d /tmp/alpha-desk-capture-e2e.XXXXXX)"
+readonly secret_root
 readonly postgres_url_file="${secret_root}/postgres-url"
 readonly postgres_container="alpha-desk-capture-e2e-$$"
 readonly nats_container="alpha-desk-capture-e2e-nats-$$"
@@ -14,6 +16,8 @@ readonly docker_network="alpha-desk-capture-e2e-$$"
 readonly config_path="${evidence_root}/capture.toml"
 readonly status_path="${evidence_root}/capture-status.json"
 readonly archive_path="${evidence_root}/archive"
+readonly source_root="${evidence_root}/node-source"
+readonly source_leaf="${source_root}/1721000000/20260728"
 readonly service_stdout="${evidence_root}/service.stdout"
 readonly service_stderr="${evidence_root}/service.stderr"
 readonly report_path="${evidence_root}/report.json"
@@ -25,6 +29,7 @@ readonly first_height="$((9001000000 + ($$ % 100000)))"
 readonly last_height="$((first_height + block_count - 1))"
 readonly chain_id="fixture-e2e-${run_id}"
 capture_pid=''
+source_writer_pid=''
 process_started_at_epoch=''
 max_rss_kib=0
 nats_client_port=''
@@ -36,6 +41,10 @@ cleanup() {
   if [[ -n "$capture_pid" ]] && kill -0 "$capture_pid" >/dev/null 2>&1; then
     kill -TERM "$capture_pid" >/dev/null 2>&1 || true
     wait "$capture_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$source_writer_pid" ]] && kill -0 "$source_writer_pid" >/dev/null 2>&1; then
+    kill -TERM "$source_writer_pid" >/dev/null 2>&1 || true
+    wait "$source_writer_pid" >/dev/null 2>&1 || true
   fi
   docker rm -f "$postgres_container" >/dev/null 2>&1 || true
   docker rm -f "$nats_container" >/dev/null 2>&1 || true
@@ -59,20 +68,23 @@ for command_name in cargo curl docker git jq mktemp; do
     exit 2
   }
 done
-[[ "$block_count" =~ ^[0-9]+$ ]] && ((block_count >= 1 && block_count <= 10000000)) || {
+if ! [[ "$block_count" =~ ^[0-9]+$ ]] ||
+  ! ((block_count >= 1 && block_count <= 10000000)); then
   printf '%s\n' 'capture-e2e:error CAPTURE_E2E_BLOCKS must be between 1 and 10000000' >&2
   exit 2
-}
-[[ "$block_delay_millis" =~ ^[0-9]+$ ]] && ((block_delay_millis <= 60000)) || {
+fi
+if ! [[ "$block_delay_millis" =~ ^[0-9]+$ ]] ||
+  ! ((block_delay_millis <= 60000)); then
   printf '%s\n' 'capture-e2e:error CAPTURE_E2E_BLOCK_DELAY_MILLIS must be at most 60000' >&2
   exit 2
-}
-[[ "$minimum_runtime_seconds" =~ ^[0-9]+$ ]] && ((minimum_runtime_seconds <= 86400)) || {
+fi
+if ! [[ "$minimum_runtime_seconds" =~ ^[0-9]+$ ]] ||
+  ! ((minimum_runtime_seconds <= 86400)); then
   printf '%s\n' 'capture-e2e:error CAPTURE_E2E_MIN_RUNTIME_SECONDS must be at most 86400' >&2
   exit 2
-}
+fi
 
-mkdir -p "$evidence_root" "$archive_path"
+mkdir -p "$evidence_root" "$archive_path" "$source_leaf"
 "${repository_root}/tools/dev/ensure-nats-dev-credentials.sh" >/dev/null
 set -a
 # shellcheck disable=SC1091
@@ -215,30 +227,61 @@ max_delay_millis = 100
 
 [[sources]]
 id = "synthetic-fixture"
+source_version = "synthetic-node-v1"
 trust = "locally-verified-committed"
 class = "committed-block"
 queue_capacity = 4096
 max_payload_bytes = 8388608
-adapter = { kind = "node-block-directory", path = "${repository_root}/fixtures/source/node-v1", stream_name = "synthetic-fixture", start_height = ${first_height}, poll_interval_millis = 25 }
+adapter = { kind = "node-block-directory", path = "${source_root}", stream_name = "synthetic-fixture", start_height = ${first_height}, poll_interval_millis = 25 }
 EOF
 chmod 600 "$config_path"
 
-cargo +1.97.1 build -p hl-capture -p archive-inspect --locked --offline
+cargo +1.97.1 build -p hl-capture -p archive-inspect -p spool-inspect --locked --offline
 : >"$service_stdout"
 : >"$service_stderr"
 
+write_source_block() {
+  local height="$1"
+  local parent_height="$((height - 1))"
+  local staging="${source_leaf}/.${height}.tmp"
+  jq -n \
+    --argjson height "$height" \
+    --argjson parent_height "$parent_height" \
+    '{
+      abci_block: {
+        time: "2026-07-28T12:00:00.000000000",
+        round: $height,
+        parent_round: $parent_height,
+        proposer: "0x5ac99df645f3414876c816caa18b2d234024b487"
+      },
+      signed_action_bundles: []
+    }' >"$staging"
+  mv "$staging" "${source_leaf}/${height}"
+}
+
 start_capture() {
-  local phase_blocks="$1"
   "${repository_root}/target/debug/hl-capture" \
-    fixture-replay \
+    run \
     --config "$config_path" \
-    --blocks "$phase_blocks" \
-    --block-delay-millis "$block_delay_millis" \
     >>"$service_stdout" 2>>"$service_stderr" &
   capture_pid=$!
   if [[ -z "$process_started_at_epoch" ]]; then
     process_started_at_epoch="$(date -u '+%s')"
   fi
+}
+
+start_source_writer() {
+  local start_height="$1"
+  local end_height="$2"
+  (
+    local height="$start_height"
+    while ((height <= end_height)); do
+      sleep "$(awk -v millis="$block_delay_millis" 'BEGIN { printf "%.3f", millis / 1000 }')"
+      write_source_block "$height"
+      height="$((height + 1))"
+    done
+  ) &
+  source_writer_pid=$!
 }
 
 sample_process() {
@@ -295,16 +338,25 @@ stop_capture() {
     "$status_path" >/dev/null
 }
 
+write_source_block "$first_height"
 if ((block_count >= 2)); then
-  start_capture 1
+  start_capture
   wait_for_durable_height "$first_height"
   stop_capture "$first_height"
   restart_count=1
-  start_capture "$((block_count - 1))"
+  write_source_block "$((first_height + 1))"
+  start_capture
+  if ((block_count >= 3)); then
+    start_source_writer "$((first_height + 2))" "$last_height"
+  fi
 else
-  start_capture "$block_count"
+  start_capture
 fi
 wait_for_durable_height "$last_height"
+if [[ -n "$source_writer_pid" ]]; then
+  wait "$source_writer_pid"
+  source_writer_pid=''
+fi
 
 while (( $(date -u '+%s') - process_started_at_epoch < minimum_runtime_seconds )); do
   if ! kill -0 "$capture_pid" >/dev/null 2>&1; then
@@ -328,6 +380,12 @@ archive_summary="$("${repository_root}/target/debug/archive-inspect" verify "$ar
   printf '%s\n' 'capture-e2e:error archive block count mismatch' >&2
   exit 1
 }
+spool_summary="$("${repository_root}/target/debug/spool-inspect" \
+  verify "${evidence_root}/spool/synthetic-fixture")"
+[[ "$spool_summary" == *"records=${block_count}"* ]] || {
+  printf '%s\n' 'capture-e2e:error spool record count mismatch' >&2
+  exit 1
+}
 archived_blocks="$(docker exec "$postgres_container" \
   psql -U alpha -d alpha -Atqc \
   "SELECT count(*) FROM capture_archived_blocks WHERE chain_id = '${chain_id}' AND state = 'acknowledged'")"
@@ -337,9 +395,18 @@ acknowledged_publications="$(docker exec "$postgres_container" \
 durable_height="$(docker exec "$postgres_container" \
   psql -U alpha -d alpha -Atqc \
   "SELECT committed_block_height::text FROM capture_sequencer_cursors WHERE chain_id = '${chain_id}'")"
-[[ "$archived_blocks" == "$block_count" ]]
-[[ "$acknowledged_publications" == "$((block_count * 2))" ]]
-[[ "$durable_height" == "$last_height" ]]
+[[ "$archived_blocks" == "$block_count" ]] || {
+  printf '%s\n' 'capture-e2e:error acknowledged archive count mismatch' >&2
+  exit 1
+}
+[[ "$acknowledged_publications" == "$block_count" ]] || {
+  printf '%s\n' 'capture-e2e:error publication count mismatch' >&2
+  exit 1
+}
+[[ "$durable_height" == "$last_height" ]] || {
+  printf '%s\n' 'capture-e2e:error durable cursor mismatch' >&2
+  exit 1
+}
 
 binary_sha256="$(shasum -a 256 "${repository_root}/target/debug/hl-capture" | awk '{print $1}')"
 postgres_version="$(docker exec "$postgres_container" postgres --version)"
@@ -364,13 +431,14 @@ jq -n \
   --argjson service_stdout_bytes "$service_stdout_bytes" \
   --argjson service_stderr_bytes "$service_stderr_bytes" \
   --arg archive_summary "$archive_summary" \
+  --arg spool_summary "$spool_summary" \
   --arg binary_sha256 "$binary_sha256" \
   --arg postgres_version "$postgres_version" \
   --arg nats_version "$nats_version" \
   '{
     schema_version: $schema_version,
     run_id: $run_id,
-    mode: "synthetic-fixture",
+    mode: "synthetic-node-source",
     live_source_qualified: false,
     chain_id: $chain_id,
     first_height: $first_height,
@@ -385,6 +453,7 @@ jq -n \
     service_stdout_bytes: $service_stdout_bytes,
     service_stderr_bytes: $service_stderr_bytes,
     archive_summary: $archive_summary,
+    spool_summary: $spool_summary,
     binary_sha256: $binary_sha256,
     postgres_version: $postgres_version,
     nats_version: $nats_version,

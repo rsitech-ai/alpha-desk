@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::manifest::ClosedSegmentManifestV1;
-use super::{SpoolError, SpoolReader, io_error};
+use super::{RecoveryReport, SpoolError, SpoolReader, io_error, recover_open_segment};
+
+type SegmentPaths = BTreeMap<u64, PathBuf>;
+type CollectedEntries = (SegmentPaths, SegmentPaths);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpoolInspection {
@@ -12,6 +15,9 @@ pub struct SpoolInspection {
     open_segments: u64,
     records: u64,
     chain_tip: Option<[u8; 32]>,
+    segment_paths: Vec<PathBuf>,
+    open_segment_path: Option<PathBuf>,
+    last_sequence: Option<u64>,
 }
 
 impl SpoolInspection {
@@ -34,6 +40,21 @@ impl SpoolInspection {
     pub const fn chain_tip(&self) -> Option<[u8; 32]> {
         self.chain_tip
     }
+
+    #[must_use]
+    pub fn segment_paths(&self) -> &[PathBuf] {
+        &self.segment_paths
+    }
+
+    #[must_use]
+    pub fn open_segment_path(&self) -> Option<&Path> {
+        self.open_segment_path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn last_sequence(&self) -> Option<u64> {
+        self.last_sequence
+    }
 }
 
 pub fn inspect_spool(path: impl AsRef<Path>) -> Result<SpoolInspection, SpoolError> {
@@ -51,6 +72,9 @@ pub fn inspect_spool(path: impl AsRef<Path>) -> Result<SpoolInspection, SpoolErr
             open_segments: 1,
             records: u64::try_from(records.len()).map_err(|_| SpoolError::SizeOverflow)?,
             chain_tip: None,
+            segment_paths: vec![path.to_owned()],
+            open_segment_path: Some(path.to_owned()),
+            last_sequence: Some(reader.header().segment_sequence()),
         });
     }
     if !metadata.is_dir() {
@@ -59,7 +83,34 @@ pub fn inspect_spool(path: impl AsRef<Path>) -> Result<SpoolInspection, SpoolErr
     inspect_directory(path)
 }
 
+pub fn recover_spool_tail(
+    directory: impl AsRef<Path>,
+) -> Result<Option<RecoveryReport>, SpoolError> {
+    match inspect_spool(directory.as_ref()) {
+        Ok(_) => return Ok(None),
+        Err(SpoolError::IncompleteTail { .. }) => {}
+        Err(error) => return Err(error),
+    }
+    let (segments, manifests) = collect_entries(directory.as_ref())?;
+    let open = segments
+        .iter()
+        .filter(|(sequence, _)| !manifests.contains_key(sequence))
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
+    let [open] = open.as_slice() else {
+        return Err(SpoolError::UnexpectedOpenSegment);
+    };
+    let report = recover_open_segment(open)?;
+    inspect_spool(directory.as_ref())?;
+    Ok(Some(report))
+}
+
 fn inspect_directory(directory: &Path) -> Result<SpoolInspection, SpoolError> {
+    let (segments, manifests) = collect_entries(directory)?;
+    inspect_directory_entries(segments, manifests)
+}
+
+fn collect_entries(directory: &Path) -> Result<CollectedEntries, SpoolError> {
     let mut segments = BTreeMap::new();
     let mut manifests = BTreeMap::new();
     for entry in
@@ -94,7 +145,13 @@ fn inspect_directory(directory: &Path) -> Result<SpoolInspection, SpoolError> {
             return Err(SpoolError::DuplicateSegmentSequence);
         }
     }
+    Ok((segments, manifests))
+}
 
+fn inspect_directory_entries(
+    segments: SegmentPaths,
+    manifests: SegmentPaths,
+) -> Result<SpoolInspection, SpoolError> {
     let mut closed_sequences = BTreeSet::new();
     let mut previous_sequence: Option<u64> = None;
     let mut previous_manifest_hash = None;
@@ -161,6 +218,12 @@ fn inspect_directory(directory: &Path) -> Result<SpoolInspection, SpoolError> {
         open_segments: u64::try_from(open_segments.len()).map_err(|_| SpoolError::SizeOverflow)?,
         records: total_records,
         chain_tip: previous_manifest_hash,
+        segment_paths: segments.values().cloned().collect(),
+        open_segment_path: open_segments
+            .first()
+            .and_then(|sequence| segments.get(sequence))
+            .cloned(),
+        last_sequence: segments.keys().next_back().copied(),
     })
 }
 

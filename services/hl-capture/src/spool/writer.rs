@@ -150,6 +150,16 @@ impl SpoolWriter {
         &self.segment_path
     }
 
+    #[must_use]
+    pub const fn header(&self) -> &SegmentHeaderV1 {
+        &self.header
+    }
+
+    #[must_use]
+    pub const fn record_count(&self) -> u64 {
+        self.record_count
+    }
+
     pub fn append(
         &mut self,
         observation: &SourceObservation,

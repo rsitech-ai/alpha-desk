@@ -2,7 +2,12 @@
 
 Hyperliquid Alpha Desk is a local-first, read-only market-intelligence and research workstation under active development by RSI Tech. Its production design centers on byte-preserving source capture, a deterministic canonical ledger, reproducible research, evidence-linked signals, and native Apple clients.
 
-This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation, unreleased Stage 1 capture, canonical-identity, continuity, and immutable-archive foundations, and the approved staged design. The Stage 0 release gate remains on `HOLD`; archive-before-cursor runtime orchestration, independent sources, complete source mapping, APIs, research workflows, and native UI are planned work.
+This repository is not yet a complete desk application. It contains a runnable
+read-only capture service for the currently qualified empty committed-block
+mapping, plus substantial Stage 0 foundations, canonical identity, continuity,
+durable publication, and immutable archive work. The Stage 0 release gate
+remains on `HOLD`; action-bearing source mapping, independent recovery sources,
+canonical state, APIs, research workflows, and native UI remain planned work.
 
 ## Current state
 
@@ -12,9 +17,9 @@ This repository is not yet a runnable desk application. It currently contains a 
 | Rust workspace, exact domain types, schemas, fixtures, telemetry, and provenance | Implemented and locally tested | [`docs/STATUS.md`](docs/STATUS.md) |
 | Stage 0 gate tooling | Implemented; gate outcome `HOLD` | [`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml) |
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
-| Source observation, strict spool, primary-node adapters, source-trust admission, canonical event/block identity, conservative public trade mapping, and V1 upcast validation | Implemented and locally tested as libraries/tools; no service runtime or real-node qualification yet | [`docs/STATUS.md`](docs/STATUS.md) |
-| Immutable canonical/raw Parquet archive, verified compaction, replay reads, and offline inspection | Implemented and locally tested as libraries/tools; not wired to a service cursor or JetStream | [`docs/formats/archive-manifest-v1.md`](docs/formats/archive-manifest-v1.md) |
-| Complete durable capture and canonical truth-layer runtime | Partially implemented; independent sources, runtime orchestration, archive-before-cursor coordination, replay service, and publication remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Source observation, strict recoverable spool, primary-node adapter, source-trust admission, conservative committed mapper, and canonical sequencing | Runnable and locally restart/soak tested with synthetic empty node-format blocks; not live-source qualified | [`docs/STATUS.md`](docs/STATUS.md) |
+| Immutable canonical/raw Parquet archive, verified compaction, replay reads, and offline inspection | Canonical block archive is wired before publication/cursor advancement; raw-observation Parquet archival remains unconnected | [`docs/formats/archive-manifest-v1.md`](docs/formats/archive-manifest-v1.md) |
+| Complete durable capture and canonical truth-layer runtime | Partially implemented; action mappings, independent sources, raw archival, gap recovery, canonical state, and replay service remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |
 
@@ -79,9 +84,8 @@ For focused commands and development conventions, read [docs/DEVELOPMENT.md](doc
 ## Repository map
 
 - `crates/` — domain contracts, stable canonical event/block identity, storage ports, telemetry, and research foundations
-- `services/` — service boundaries; `hl-capture` contains observation, spool,
-  primary-node adapter, and bounded canonical-sequencer libraries, while
-  service binaries remain bootstrap-only
+- `services/` — service boundaries; `hl-capture` contains the runnable
+  raw-first primary-node/spool/canonical-publication path
 - `apps/AlphaDesk/` — Swift package foundations; currently no application target
 - `schemas/` — versioned Protobuf and JSON contracts
 - `fixtures/` — deterministic synthetic fixtures and provenance-labeled normalized public schema examples

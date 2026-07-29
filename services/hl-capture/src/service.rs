@@ -15,6 +15,7 @@ use crate::coordinator::{
 };
 use crate::progress::PostgresProgressStore;
 use crate::secret::read_protected_secret;
+use crate::source_runtime::primary_node_task;
 use crate::{
     AppError, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError, OwnedTask,
     StatusWriter, synthetic_fixture_block,
@@ -26,6 +27,7 @@ const MAX_FIXTURE_BLOCKS: u64 = 10_000_000;
 const MAX_FIXTURE_DELAY: Duration = Duration::from_secs(60);
 
 pub struct ConnectedCapture {
+    config: CaptureConfig,
     runtime: CaptureRuntime,
     coordinator: Arc<CaptureCoordinator>,
     progress: Arc<dyn CaptureProgressStore>,
@@ -45,6 +47,20 @@ impl std::fmt::Debug for ConnectedCapture {
 }
 
 impl ConnectedCapture {
+    pub async fn run(mut self, cancellation: CancellationToken) -> Result<(), CaptureRuntimeError> {
+        let source_task = primary_node_task(
+            &self.config,
+            Arc::clone(&self.progress),
+            Arc::clone(&self.coordinator),
+            cancellation.child_token(),
+        )
+        .map_err(|_| CaptureRuntimeError::InvalidConfig)?;
+        self.infrastructure_tasks.push(source_task);
+        self.runtime
+            .run(cancellation, self.infrastructure_tasks)
+            .await
+    }
+
     pub async fn run_fixture(
         mut self,
         cancellation: CancellationToken,
@@ -187,6 +203,7 @@ pub async fn connect_capture(
         status_writer,
     );
     Ok(ConnectedCapture {
+        config: config.clone(),
         runtime,
         coordinator,
         progress,

@@ -114,7 +114,7 @@ fn status_outputs_the_validated_atomic_snapshot_without_config_secrets() {
 }
 
 #[test]
-fn production_run_fails_closed_until_the_committed_source_mapper_is_available() {
+fn production_run_reaches_the_protected_infrastructure_boundary_without_leaking_secrets() {
     let directory = tempdir().expect("temporary directory");
     let config_path = directory.path().join("capture.toml");
     fs::write(
@@ -132,9 +132,7 @@ fn production_run_fails_closed_until_the_committed_source_mapper_is_available() 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
-    assert!(
-        stderr.contains("\"reason_code\":\"capture_runtime.committed_source_mapper_unavailable\"")
-    );
+    assert!(stderr.contains("\"reason_code\":\"capture_connect.secret\""));
     assert!(!stderr.contains("postgresql://"));
 }
 

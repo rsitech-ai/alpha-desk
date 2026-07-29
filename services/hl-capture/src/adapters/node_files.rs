@@ -6,14 +6,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use domain_types::SourceId;
-use hl_protocol::node::v1::NodeStreamKind;
 use hl_protocol::{
     BlockSource, ParseWarning, SourceCursor, SourceError, SourceObservation, SourceRequestContext,
 };
 
-use super::node_stream::{
-    NodeQuarantineRecord, NodeReceiveClock, SystemNodeClock, parse_off_thread, valid_identity,
-};
+use super::node_stream::{NodeReceiveClock, SystemNodeClock, valid_identity};
 
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_NODE_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
@@ -264,12 +261,6 @@ impl NodeBlockDirectoryConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PendingBlockQuarantine {
-    record: NodeQuarantineRecord,
-    error: SourceError,
-}
-
 #[derive(Debug)]
 pub struct NodeBlockDirectorySource<C = SystemNodeClock> {
     config: NodeBlockDirectoryConfig,
@@ -278,7 +269,6 @@ pub struct NodeBlockDirectorySource<C = SystemNodeClock> {
     last_read_height: Option<u64>,
     durable_cursor: Option<SourceCursor>,
     pending_emitted_cursor: Option<SourceCursor>,
-    pending_quarantine: Option<PendingBlockQuarantine>,
     clock: C,
 }
 
@@ -322,7 +312,6 @@ impl<C: NodeReceiveClock> NodeBlockDirectorySource<C> {
             last_read_height,
             durable_cursor,
             pending_emitted_cursor: None,
-            pending_quarantine: None,
             clock,
         })
     }
@@ -334,29 +323,6 @@ impl<C: NodeReceiveClock> NodeBlockDirectorySource<C> {
         self.durable_cursor = Some(cursor.clone());
         self.pending_emitted_cursor = None;
         Ok(())
-    }
-
-    pub fn acknowledge_quarantine_durable(
-        &mut self,
-        cursor: &SourceCursor,
-    ) -> Result<(), SourceError> {
-        let Some(pending) = &self.pending_quarantine else {
-            return Err(SourceError::CursorRegression);
-        };
-        if pending.record.cursor() != cursor {
-            return Err(SourceError::CursorRegression);
-        }
-        self.last_read_height = Some(cursor.offset());
-        self.durable_cursor = Some(cursor.clone());
-        self.pending_quarantine = None;
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn pending_quarantine(&self) -> Option<&NodeQuarantineRecord> {
-        self.pending_quarantine
-            .as_ref()
-            .map(|pending| &pending.record)
     }
 
     async fn wait_for_progress(&self, context: &SourceRequestContext) -> Result<(), SourceError> {
@@ -398,27 +364,14 @@ impl<C: NodeReceiveClock> NodeBlockDirectorySource<C> {
         let cursor = SourceCursor::new(self.epoch.clone(), height)
             .map_err(|_| SourceError::MalformedPayload("node block cursor is invalid".into()))?;
         let bytes = Bytes::from(payload);
-        let parsed = parse_off_thread(NodeStreamKind::TransactionBlocks, bytes.clone()).await;
-        context.check()?;
-        let parsed = match parsed {
-            Ok(parsed) => parsed,
-            Err(error @ (SourceError::MalformedPayload(_) | SourceError::SchemaDrift(_))) => {
-                self.pending_quarantine = Some(PendingBlockQuarantine {
-                    record: NodeQuarantineRecord::new(cursor, bytes, error.reason_code()),
-                    error: error.clone(),
-                });
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
         let observation = SourceObservation::new(
             self.config.source_id.clone(),
             self.config.source_version.clone(),
-            parsed.observation_class(),
+            hl_protocol::ObservationClass::CommittedBlock,
             cursor.clone(),
             self.clock.now()?,
             self.config.parser_schema_version.clone(),
-            parsed.into_payload(),
+            bytes,
             Vec::<ParseWarning>::new(),
             self.config.max_payload_bytes,
         )
@@ -437,9 +390,6 @@ impl<C: NodeReceiveClock> BlockSource for NodeBlockDirectorySource<C> {
     ) -> Result<SourceObservation, SourceError> {
         loop {
             context.check()?;
-            if let Some(pending) = &self.pending_quarantine {
-                return Err(pending.error.clone());
-            }
             if self.pending_emitted_cursor.is_some() {
                 return Err(SourceError::BackpressureTimeout);
             }

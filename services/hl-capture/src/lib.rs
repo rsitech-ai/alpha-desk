@@ -3,6 +3,7 @@
 pub mod adapters;
 mod app;
 pub mod bus;
+mod committed_pipeline;
 mod config;
 pub mod coordinator;
 mod fixture;
@@ -12,10 +13,12 @@ mod secret;
 mod sequencer;
 mod service;
 mod shutdown;
+mod source_runtime;
 pub mod spool;
 mod status;
 
 pub use app::{CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError};
+pub use committed_pipeline::*;
 pub use config::*;
 pub use fixture::{FixtureError, synthetic_fixture_block};
 pub use quarantine::*;

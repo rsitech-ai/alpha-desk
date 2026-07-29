@@ -80,7 +80,7 @@ impl AppError {
     #[must_use]
     pub const fn reason_code(&self) -> &'static str {
         match self {
-            Self::TaskFailed { .. } => "capture_app.task_failed",
+            Self::TaskFailed { reason_code, .. } => reason_code,
             Self::TaskExited { .. } => "capture_app.task_exited",
             Self::TaskPanicked { .. } => "capture_app.task_panicked",
             Self::InvalidTaskSet => "capture_app.invalid_task_set",
