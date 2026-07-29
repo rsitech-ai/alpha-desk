@@ -23,21 +23,27 @@
 ### Task 1: Type admission and modification payloads
 
 **Files:**
+- Modify: `crates/domain-types/src/shared.rs`
+- Modify: `crates/domain-types/src/lib.rs`
+- Modify: `crates/domain-types/tests/shared.rs`
+- Modify: `crates/api-contracts/src/lib.rs`
+- Modify: `crates/api-contracts/tests/payload_codec.rs`
 - Modify: `crates/canonical-events/src/lib.rs`
-- Modify: `crates/canonical-events/src/payload_codec.rs`
 - Create: `crates/canonical-events/tests/order_payloads.rs`
 
 **Interfaces:**
 - Consumes: V1 `OrderAccepted`, `OrderRested`, and `OrderModified` Protobuf.
-- Produces: public typed payloads using `OrderId`, `Address`, `MarketId`, `Direction`, `Price`, and `Quantity`.
+- Produces: public typed payloads using `OrderId`, `Address`, `MarketId`,
+  `OrderSide::{Buy,Sell}`, `Price`, and `Quantity`; exact wire encode/decode
+  helpers remain owned by `api-contracts`.
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
   Assert exact round-trip; reject blank/padded IDs, unknown side values,
   non-positive prices/quantities, unchanged modifications, and kind mismatch.
   Assert an enclosing wire event with an unknown field remains byte-preserving.
 
-- [ ] **Step 2: Run the red tests**
+- [x] **Step 2: Run the red tests**
 
   ```bash
   cargo +1.97.1 test -p canonical-events --test order_payloads --locked --offline
@@ -45,23 +51,26 @@
 
   Expected: compile failure because the typed payloads do not exist.
 
-- [ ] **Step 3: Implement strict codecs**
+- [x] **Step 3: Implement strict codecs**
 
-  Remove only these three variants from `opaque_payloads!`; decode exact domain
-  values; accept only lowercase `buy` and `sell`; encode deterministically; keep
-  the existing enclosing-envelope forward-compatible byte path.
+  Add `OrderSide::{Buy,Sell}` rather than reusing positional
+  `Direction::{Long,Short,Flat}`. Add exact wire structs and decode/encode
+  helpers in `api-contracts`. Remove only these three variants from
+  `opaque_payloads!`; decode exact domain values; accept only lowercase `buy`
+  and `sell`; encode deterministically; keep the existing enclosing-envelope
+  forward-compatible byte path.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
   ```bash
-  cargo +1.97.1 test -p canonical-events --test order_payloads --locked --offline
-  cargo +1.97.1 clippy -p canonical-events --all-targets --locked --offline -- -D warnings
+  cargo +1.97.1 test -p domain-types -p api-contracts -p canonical-events --locked --offline
+  cargo +1.97.1 clippy -p domain-types -p api-contracts -p canonical-events --all-targets --locked --offline -- -D warnings
   ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
-  git add crates/canonical-events
+  git add crates/domain-types crates/api-contracts crates/canonical-events
   git commit -m "feat(events): type canonical order admission payloads"
   ```
 
@@ -70,8 +79,9 @@
 ### Task 2: Type fill and terminal payloads
 
 **Files:**
+- Modify: `crates/api-contracts/src/lib.rs`
+- Modify: `crates/api-contracts/tests/payload_codec.rs`
 - Modify: `crates/canonical-events/src/lib.rs`
-- Modify: `crates/canonical-events/src/payload_codec.rs`
 - Modify: `crates/canonical-events/tests/order_payloads.rs`
 
 **Interfaces:**
@@ -92,16 +102,17 @@
 
 - [ ] **Step 3: Implement the four typed codecs**
 
-  Remove only these variants from `opaque_payloads!`; parse exact identifiers
-  and decimals; cap reason code at 128 bytes and reason at 1,024 bytes; reject
-  controls and noncanonical re-encoding.
+  Add exact wire encode/decode helpers in `api-contracts`. Remove only these
+  variants from `opaque_payloads!`; parse exact identifiers and decimals; cap
+  reason code at 128 bytes and reason at 1,024 bytes; reject controls and
+  noncanonical re-encoding.
 
 - [ ] **Step 4: Verify and commit**
 
   ```bash
-  cargo +1.97.1 test -p canonical-events --locked --offline
-  cargo +1.97.1 clippy -p canonical-events --all-targets --locked --offline -- -D warnings
-  git add crates/canonical-events
+  cargo +1.97.1 test -p api-contracts -p canonical-events --locked --offline
+  cargo +1.97.1 clippy -p api-contracts -p canonical-events --all-targets --locked --offline -- -D warnings
+  git add crates/api-contracts crates/canonical-events
   git commit -m "feat(events): type canonical order outcome payloads"
   ```
 

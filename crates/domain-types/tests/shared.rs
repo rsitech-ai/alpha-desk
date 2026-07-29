@@ -1,6 +1,6 @@
 use domain_types::{
-    BlockHeight, BlockRange, ClosedInterval, KnownTime, LatencyDistribution, ProtocolTime,
-    ValueError,
+    BlockHeight, BlockRange, ClosedInterval, KnownTime, LatencyDistribution, OrderSide,
+    ProtocolTime, ValueError,
 };
 use proptest::prelude::*;
 
@@ -49,6 +49,17 @@ fn protocol_timestamp_serde_round_trips() {
         serde_json::from_str::<ProtocolTime>(&serde_json::to_string(&time).unwrap()).unwrap(),
         time
     );
+}
+
+#[test]
+fn order_side_has_an_exact_wire_contract_distinct_from_position_direction() {
+    assert_eq!(OrderSide::Buy.as_wire_name(), "buy");
+    assert_eq!(OrderSide::Sell.as_wire_name(), "sell");
+    assert_eq!(OrderSide::parse_wire("buy"), Ok(OrderSide::Buy));
+    assert_eq!(OrderSide::parse_wire("sell"), Ok(OrderSide::Sell));
+    for invalid in ["Buy", "SELL", "long", "short", " buy", "sell ", ""] {
+        assert_eq!(OrderSide::parse_wire(invalid), Err(ValueError::Invalid));
+    }
 }
 
 proptest! {

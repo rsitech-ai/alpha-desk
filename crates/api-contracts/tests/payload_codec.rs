@@ -1,5 +1,7 @@
 use api_contracts::{
-    PayloadCodecError, WireTradeMatched, decode_trade_matched, encode_trade_matched,
+    PayloadCodecError, WireOrderAccepted, WireOrderModified, WireOrderRested, WireTradeMatched,
+    decode_order_accepted, decode_order_modified, decode_order_rested, decode_trade_matched,
+    encode_order_accepted, encode_order_modified, encode_order_rested, encode_trade_matched,
 };
 
 fn trade() -> WireTradeMatched {
@@ -66,5 +68,76 @@ fn empty_or_surrounding_whitespace_identities_are_rejected() {
     assert!(matches!(
         decode_trade_matched(&encoded),
         Err(PayloadCodecError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn order_admission_wire_payloads_round_trip_exactly() {
+    let accepted = WireOrderAccepted {
+        order_id: "order-17".to_owned(),
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        market_id: "perp:BTC".to_owned(),
+        side: "buy".to_owned(),
+        limit_price: "65000.125000".to_owned(),
+        quantity: "0.75000000".to_owned(),
+    };
+    assert_eq!(
+        decode_order_accepted(&encode_order_accepted(&accepted).unwrap()).unwrap(),
+        accepted
+    );
+
+    let rested = WireOrderRested {
+        order_id: "order-17".to_owned(),
+        market_id: "perp:BTC".to_owned(),
+        remaining_quantity: "0.75000000".to_owned(),
+        limit_price: "65000.125000".to_owned(),
+    };
+    assert_eq!(
+        decode_order_rested(&encode_order_rested(&rested).unwrap()).unwrap(),
+        rested
+    );
+
+    let modified = WireOrderModified {
+        order_id: "order-17".to_owned(),
+        previous_price: "65000.125000".to_owned(),
+        new_price: "65001.000000".to_owned(),
+        previous_quantity: "0.75000000".to_owned(),
+        new_quantity: "0.50000000".to_owned(),
+    };
+    assert_eq!(
+        decode_order_modified(&encode_order_modified(&modified).unwrap()).unwrap(),
+        modified
+    );
+}
+
+#[test]
+fn order_wire_payloads_reject_missing_padded_and_wrong_kind_fields() {
+    let accepted = WireOrderAccepted {
+        order_id: "order-17".to_owned(),
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        market_id: "perp:BTC".to_owned(),
+        side: "buy".to_owned(),
+        limit_price: "65000.125000".to_owned(),
+        quantity: "0.75000000".to_owned(),
+    };
+    for mutate in [
+        |value: &mut WireOrderAccepted| value.order_id.clear(),
+        |value: &mut WireOrderAccepted| value.account_id = " account".to_owned(),
+        |value: &mut WireOrderAccepted| value.market_id = "perp:BTC ".to_owned(),
+        |value: &mut WireOrderAccepted| value.side.clear(),
+        |value: &mut WireOrderAccepted| value.limit_price.clear(),
+        |value: &mut WireOrderAccepted| value.quantity.clear(),
+    ] {
+        let mut invalid = accepted.clone();
+        mutate(&mut invalid);
+        assert!(matches!(
+            encode_order_accepted(&invalid),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
+    let encoded = encode_order_accepted(&accepted).unwrap();
+    assert!(matches!(
+        decode_order_rested(&encoded),
+        Err(PayloadCodecError::KindMismatch { .. })
     ));
 }
