@@ -1199,7 +1199,8 @@ fn compose_smoke_has_bounded_health_and_non_destructive_cleanup_contract() {
 
     assert!(source.contains("ps --all --quiet"));
     assert!(!source.contains("ps -q"));
-    assert!(source.contains("up -d --wait --wait-timeout 120"));
+    assert!(source.contains("\"${compose[@]}\" up -d"));
+    assert!(!source.contains("up -d --wait"));
     assert!(source.contains("wait-for-dev-stack.sh"));
     assert!(source.contains("down --timeout 60 --volumes --remove-orphans"));
     assert!(source.contains("stage-0.override.yaml"));
