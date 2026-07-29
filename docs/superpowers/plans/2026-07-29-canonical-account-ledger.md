@@ -292,11 +292,13 @@ Parquet archive, private local checkpoints.
 
 - [ ] **Step 1: Write failing risk tests**
 
-  Cover valid exact round trips and reject malformed addresses/IDs, account or
-  market envelope mismatches, zero/negative price or quantity, negative margin
-  values, equal liquidated/backstop accounts, and a settled quantity of zero.
+  Cover valid exact round trips and reject malformed addresses/IDs,
+  zero/negative fill price or quantity, negative margin values, equal
+  liquidated/backstop accounts, and a settled quantity of zero.
   `PositionSettled.realized_pnl` remains signed. Settlement price is
-  nonnegative so an outcome may settle at zero.
+  nonnegative so an outcome may settle at zero. Cross-checking payload
+  identities against enclosing account/market identities remains a single
+  block-atomic reducer responsibility in Task 4.
 
 - [ ] **Step 2: Run red**
 
