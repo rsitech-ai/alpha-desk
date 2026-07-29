@@ -73,6 +73,7 @@ string_id!(SourceId);
 string_id!(EvidenceId);
 string_id!(ScenarioId);
 string_id!(ManifestId);
+string_id!(CheckpointId);
 string_id!(LabelDefinitionId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

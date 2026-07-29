@@ -607,6 +607,9 @@ dependencies = [
  "blake3",
  "canonical-events",
  "domain-types",
+ "hex",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 
