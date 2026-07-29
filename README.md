@@ -6,10 +6,10 @@ This repository is not yet a complete desk application. It contains a runnable
 read-only capture service for the currently qualified empty committed-block
 mapping, plus substantial Stage 0 foundations, canonical identity, continuity,
 durable publication, immutable archive work, deterministic watermark-only
-state, private local checkpoints, and a synthetic replay evidence runner. The
-Stage 0 release gate remains on `HOLD`; action-bearing source mapping and state
-reducers, production hot-state storage, APIs, research workflows, and native UI
-remain incomplete.
+state, an exact canonical trade-fact reducer, private local checkpoints, and a
+synthetic replay evidence runner. The Stage 0 release gate remains on `HOLD`;
+action-bearing source mapping and full account/order state, production hot-state
+storage, APIs, research workflows, and native UI remain incomplete.
 
 ## Current state
 
@@ -21,7 +21,7 @@ remain incomplete.
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
 | Source observation, strict recoverable spool, primary-node adapter, source-trust admission, conservative committed mapper, and canonical sequencing | Runnable and locally restart/soak tested with synthetic empty node-format blocks; not live-source qualified | [`docs/STATUS.md`](docs/STATUS.md) |
 | Immutable canonical/raw Parquet archive, verified compaction, replay reads, and offline inspection | Canonical blocks and verified closed-spool raw observations are wired; compaction remains an offline operation | [`docs/formats/archive-manifest-v1.md`](docs/formats/archive-manifest-v1.md) |
-| Deterministic state, local checkpoints, and serial replay | Watermark-only reducer and synthetic replay/checkpoint evidence are runnable; action-bearing state and production RocksDB remain unqualified | [`docs/runbooks/state-replay-evidence.md`](docs/runbooks/state-replay-evidence.md) |
+| Deterministic state, local checkpoints, and serial replay | Watermark-only operation is runnable; exact canonical trade facts and stored quantity-symmetry assessments are reducer/replay tested; full action state and production RocksDB remain unqualified | [`docs/contracts/deterministic-state-v1.md`](docs/contracts/deterministic-state-v1.md) |
 | Complete durable capture and canonical truth-layer runtime | Partially implemented; action mappings, real independent-source qualification, overlap reconciliation, and production replay service remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |

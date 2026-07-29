@@ -22,6 +22,29 @@ The production `WatermarkOnlyReducerV1` freezes that boundary under reducer-set
 version `hyperliquid-alpha-desk-watermark-only@1.0.0`; its qualified
 action-bearing event registry is deliberately empty.
 
+`CanonicalTradeReducerV1` is a narrower canonical-semantic reducer under
+version `hyperliquid-alpha-desk-canonical-trade@1.0.0`. It owns only
+`TradeMatched` schema `1.0.0` and requires:
+
+- one payload market that exactly matches the sole envelope market;
+- a stable trade identity;
+- exactly two distinct observed participant addresses; and
+- strictly positive fixed-point price and quantity.
+
+It stores one immutable trade fact, two ordinal participant legs carrying the
+same exact quantity, and one passed `trade-quantity-symmetry@1.0.0`
+reconciliation record. Participant ordinals preserve canonical evidence order;
+they are not buyer/seller or maker/taker labels. The reducer does not infer
+position direction, order effects, fees, PnL, funding, transfer, margin, or
+liquidation semantics. A duplicate trade identity or malformed contract
+rejects the complete candidate block.
+
+Each trade-state value is bounded to 16 KiB, encoded as strict field-ordered
+JSON with a versioned schema, and accepted on restore or inspection only when
+decode and canonical re-encode reproduce the exact bytes. State keys bind the
+trade identity and participant ordinal; typed `decode_at` helpers reject a
+record presented under another key.
+
 ## Block atomicity
 
 The ledger:
@@ -258,8 +281,14 @@ Focused tests prove:
   cancellation, poison-block quarantine, and a fixed replay-receipt hash; and
 - read-only operator-archive planning, repeated rebuild, exact-boundary
   checkpoint resume, explicit unqualified evidence, and unchanged archive
-  inspection before/after.
+  inspection before/after; and
+- exact canonical trade fact, two-leg, and stored symmetry records; malformed
+  late-event whole-block rollback; duplicate trade-identity rejection; bounded
+  canonical codec/key binding; and archive replay/checkpoint equivalence for a
+  three-block synthetic trade sequence.
 
-This does not prove action-bearing account or order state, RocksDB durability,
-reconciliation, live-source compatibility, a production replay service, or
-Stage 2 readiness. The runnable replay CLI remains synthetic-fixture evidence.
+This proves one stored canonical trade-fact reconciliation contract. It does
+not prove deployed action-bearing source compatibility, buyer/seller or
+maker/taker roles, account/order/position state, external snapshot
+reconciliation, RocksDB durability, a production replay service, or Stage 2
+readiness. The runnable replay CLI remains synthetic-fixture evidence.

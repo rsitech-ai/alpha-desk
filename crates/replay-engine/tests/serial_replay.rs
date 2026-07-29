@@ -5,10 +5,13 @@ use canonical_events::{
     BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, EventPayload,
     SourceEvidence, TradeMatched,
 };
-use canonical_ledger::{CanonicalLedger, LedgerLimits, WatermarkOnlyReducerV1};
+use canonical_ledger::{
+    CanonicalLedger, CanonicalTradeReducerV1, LedgerLimits, TradeReconciliationRecordV1,
+    WatermarkOnlyReducerV1,
+};
 use domain_types::{
     Address, BlockHeight, BlockRange, ChainId, KnownTime, ManifestId, MarketId, Price,
-    ProtocolTime, Quantity, SourceId, TransactionId,
+    ProtocolTime, Quantity, SourceId, TradeId, TransactionId,
 };
 use replay_engine::{
     ReplayCancellation, ReplayLimits, ReplayOutcome, ReplayRequest, SerialReplayEngine,
@@ -133,6 +136,68 @@ fn checkpoint_resume_equals_uninterrupted_replay() {
         resumed.state_image().canonical_bytes(),
         uninterrupted.state_image().canonical_bytes()
     );
+}
+
+#[test]
+fn canonical_trade_state_and_reconciliation_replay_identically_from_checkpoint() {
+    let fixture =
+        ReplayFixture::with_blocks(vec![trade_block(513), trade_block(514), trade_block(515)]);
+    let mut uninterrupted = trade_ledger(513);
+    let full_request = fixture.request(
+        513,
+        515,
+        fixture.manifests.clone(),
+        uninterrupted.state_hash(),
+    );
+    SerialReplayEngine::new(
+        &fixture.archive,
+        &mut uninterrupted,
+        ReplayLimits::production(),
+    )
+    .run(&full_request, &NeverCancel)
+    .expect("full trade replay");
+
+    let mut partial = trade_ledger(513);
+    let partial_request = fixture.request(
+        513,
+        514,
+        fixture.manifests[..2].to_vec(),
+        partial.state_hash(),
+    );
+    SerialReplayEngine::new(&fixture.archive, &mut partial, ReplayLimits::production())
+        .run(&partial_request, &NeverCancel)
+        .expect("partial trade replay");
+    let mut resumed = CanonicalLedger::try_from_state_image(
+        partial.state_image().clone(),
+        CanonicalTradeReducerV1,
+        LedgerLimits::production(),
+    )
+    .expect("restored trade state");
+    let resume_request = fixture.request(
+        515,
+        515,
+        fixture.manifests[2..].to_vec(),
+        resumed.state_hash(),
+    );
+    SerialReplayEngine::new(&fixture.archive, &mut resumed, ReplayLimits::production())
+        .run(&resume_request, &NeverCancel)
+        .expect("resumed trade replay");
+
+    assert_eq!(resumed.state_hash(), uninterrupted.state_hash());
+    assert_eq!(
+        resumed.state_image().canonical_bytes(),
+        uninterrupted.state_image().canonical_bytes()
+    );
+    assert_eq!(resumed.state_image().entries().len(), 12);
+    let trade_id = TradeId::new("trd-515").unwrap();
+    let key = TradeReconciliationRecordV1::state_key(&trade_id).unwrap();
+    let assessment = TradeReconciliationRecordV1::decode_at(
+        &key,
+        resumed.state_image().entries().get(&key).unwrap(),
+    )
+    .unwrap();
+    assert!(assessment.passed());
+    assert_eq!(assessment.block_height(), BlockHeight::new(515));
 }
 
 #[test]
@@ -345,6 +410,16 @@ fn ledger(first_height: u64) -> CanonicalLedger<WatermarkOnlyReducerV1> {
     .expect("ledger")
 }
 
+fn trade_ledger(first_height: u64) -> CanonicalLedger<CanonicalTradeReducerV1> {
+    CanonicalLedger::try_new(
+        ChainId::new("mainnet").expect("chain"),
+        BlockHeight::new(first_height),
+        CanonicalTradeReducerV1,
+        LedgerLimits::production(),
+    )
+    .expect("trade ledger")
+}
+
 fn empty_block(height: u64) -> BlockEnvelope {
     empty_block_on("mainnet", height)
 }
@@ -363,11 +438,16 @@ fn empty_block_on(chain: &str, height: u64) -> BlockEnvelope {
 
 fn trade_block(height: u64) -> BlockEnvelope {
     let time = ProtocolTime::from_unix_micros(height as i64).expect("time");
-    let payload = EventPayload::TradeMatched(TradeMatched::without_identities(
-        Price::parse_at_scale("65000", 6).expect("price"),
-        Quantity::parse_at_scale("0.01", 8).expect("quantity"),
-        1,
-    ));
+    let market_id = MarketId::new("perp:BTC").expect("market");
+    let payload = EventPayload::TradeMatched(TradeMatched {
+        trade_id: Some(TradeId::new(format!("trd-{height}")).expect("trade")),
+        market_id: Some(market_id.clone()),
+        maker_order_id: None,
+        taker_order_id: None,
+        price: Price::parse_at_scale("65000", 6).expect("price"),
+        quantity: Quantity::parse_at_scale("0.01", 8).expect("quantity"),
+        deterministic_seed: 1,
+    });
     let payload_hash = *blake3::hash(&payload.encode_to_vec().expect("payload")).as_bytes();
     let event = CanonicalEventEnvelope::from_input(CanonicalEventInput {
         schema_version: "1.0.0".to_owned(),
@@ -377,7 +457,7 @@ fn trade_block(height: u64) -> BlockEnvelope {
         transaction_id: TransactionId::new(format!("tx-{height}")).expect("transaction"),
         transaction_index: 0,
         canonical_event_index: 0,
-        market_ids: vec![MarketId::new("perp:BTC").expect("market")],
+        market_ids: vec![market_id],
         account_ids: vec![
             Address::from_bytes([0x11; 20]),
             Address::from_bytes([0x22; 20]),
