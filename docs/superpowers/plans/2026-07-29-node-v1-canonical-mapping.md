@@ -254,6 +254,12 @@
 - 2026-07-29: Next: pin the complete public trade/transaction mapping contract
   and implement mapping dispositions without promoting incomplete fill
   evidence.
+- 2026-07-29: Pinned the complete public `--write-trades` example inside the
+  documented block wrapper, added it to the hashed non-production corpus, and
+  implemented the conservative trade mapper. Market resolution is catalog-only;
+  buyer/seller order is preserved; maker/taker IDs are intentionally absent;
+  standalone and unsupported records have explicit evidence-only
+  dispositions; mapped auxiliary trades remain `ProvisionalSource`.
 
 ## Rollback / Recovery
 

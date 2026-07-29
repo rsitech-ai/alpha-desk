@@ -11,6 +11,7 @@ type EventObjects<'a> = (Vec<&'a Map<String, Value>>, Option<u64>);
 #[serde(rename_all = "kebab-case")]
 pub enum NodeStreamKind {
     TransactionBlocks,
+    Trades,
     Fills,
     OrderStatuses,
     RawBookDiffs,
@@ -23,7 +24,7 @@ impl NodeStreamKind {
     pub const fn observation_class(self) -> ObservationClass {
         match self {
             Self::TransactionBlocks => ObservationClass::CommittedBlock,
-            Self::Fills | Self::MiscEvents => ObservationClass::AuxiliaryLedger,
+            Self::Trades | Self::Fills | Self::MiscEvents => ObservationClass::AuxiliaryLedger,
             Self::OrderStatuses => ObservationClass::AuxiliaryOrderStatus,
             Self::RawBookDiffs => ObservationClass::AuxiliaryBookDiff,
             Self::MarketMetadata => ObservationClass::Snapshot,
@@ -36,6 +37,7 @@ impl NodeStreamKind {
 pub enum NodeRecordKind {
     EmptyBatch,
     TransactionBlock,
+    Trade,
     Fill,
     OrderStatus,
     RawBookDiff,
@@ -175,6 +177,41 @@ fn classify_event(
             require_object(event, "abci_block")?;
             Ok(NodeRecordKind::TransactionBlock)
         }
+        NodeStreamKind::Trades => {
+            for field in [
+                "coin",
+                "side",
+                "time",
+                "px",
+                "sz",
+                "hash",
+                "trade_dir_override",
+            ] {
+                require_string(event, field)?;
+            }
+            let side_info = event
+                .get("side_info")
+                .and_then(Value::as_array)
+                .filter(|value| value.len() == 2)
+                .ok_or_else(|| {
+                    SourceError::MalformedPayload(
+                        "node trade side_info must contain buyer and seller".to_owned(),
+                    )
+                })?;
+            for side in side_info {
+                let side = side.as_object().ok_or_else(|| {
+                    SourceError::MalformedPayload(
+                        "node trade side_info entry must be an object".to_owned(),
+                    )
+                })?;
+                require_string(side, "user")?;
+                require_string(side, "start_pos")?;
+                require_u64(side, "oid")?;
+                require_optional_u64(side, "twap_id")?;
+                require_optional_string(side, "cloid")?;
+            }
+            Ok(NodeRecordKind::Trade)
+        }
         NodeStreamKind::Fills => {
             for field in ["coin", "px", "sz", "hash"] {
                 require_string(event, field)?;
@@ -307,6 +344,25 @@ fn require_u64(object: &Map<String, Value>, field: &str) -> Result<u64, SourceEr
     object.get(field).and_then(Value::as_u64).ok_or_else(|| {
         SourceError::MalformedPayload(format!("node record has no unsigned integer field {field}"))
     })
+}
+
+fn require_optional_u64(object: &Map<String, Value>, field: &str) -> Result<(), SourceError> {
+    match object.get(field) {
+        Some(Value::Null) => Ok(()),
+        Some(Value::Number(value)) if value.as_u64().is_some() => Ok(()),
+        _ => Err(SourceError::MalformedPayload(format!(
+            "node record field {field} must be null or an unsigned integer"
+        ))),
+    }
+}
+
+fn require_optional_string(object: &Map<String, Value>, field: &str) -> Result<(), SourceError> {
+    match object.get(field) {
+        Some(Value::Null | Value::String(_)) => Ok(()),
+        _ => Err(SourceError::MalformedPayload(format!(
+            "node record field {field} must be null or a string"
+        ))),
+    }
 }
 
 fn require_object<'a>(

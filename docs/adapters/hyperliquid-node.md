@@ -28,8 +28,8 @@ The implementation follows the current public contracts:
 
 The node writes transaction blocks below
 `hl/data/replica_cmds/{start_time}/{date}/{height}`. With the corresponding
-flags, it writes hourly fills, order statuses, raw book diffs, and miscellaneous
-events. `--batch-by-block` wraps auxiliary events in
+flags, it writes hourly trades, fills, order statuses, raw book diffs, and
+miscellaneous events. `--batch-by-block` wraps auxiliary events in
 `{local_time, block_time, block_number, events}`. Low-latency operators should
 also evaluate the node's `--disable-output-file-buffering` trade-off.
 
@@ -104,7 +104,7 @@ adapter = { kind = "node-block-directory", path = "/var/lib/hyperliquid/hl/data/
 ```
 
 `node-line` adapters additionally require a `stream` value:
-`fills`, `order-statuses`, `raw-book-diffs`, `misc-events`, or
+`trades`, `fills`, `order-statuses`, `raw-book-diffs`, `misc-events`, or
 `market-metadata`. The configured observation class must match the stream.
 The per-height adapter requires an explicit initial `start_height`; it never
 guesses a truth boundary from whichever historical file happens to sort first.
@@ -133,6 +133,11 @@ These fixtures are normalized from public schema examples. They are not
 byte-exact operator node recordings. The official historical node archive is
 requester-pays and requires billing authority; this implementation did not
 purchase or download it.
+
+The pinned block-batched public trade example has a conservative deterministic
+mapping documented in
+[`node-v1-trade-mapping.md`](../formats/node-v1-trade-mapping.md). It remains
+auxiliary reconciliation evidence and cannot advance the committed watermark.
 
 Production qualification still requires a non-secret, redistribution-reviewed
 corpus captured from the exact deployed node version. The corpus must cover

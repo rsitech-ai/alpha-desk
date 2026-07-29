@@ -63,6 +63,7 @@ fn node_v1_maps_each_stream_to_the_required_observation_class() {
             NodeStreamKind::TransactionBlocks,
             ObservationClass::CommittedBlock,
         ),
+        (NodeStreamKind::Trades, ObservationClass::AuxiliaryLedger),
         (NodeStreamKind::Fills, ObservationClass::AuxiliaryLedger),
         (
             NodeStreamKind::OrderStatuses,
@@ -114,4 +115,31 @@ fn empty_block_batch_retains_its_height_and_is_not_treated_as_corruption() {
     assert_eq!(parsed.kind(), NodeRecordKind::EmptyBatch);
     assert_eq!(parsed.block_number(), Some(42));
     assert_eq!(parsed.payload(), &payload);
+}
+
+#[test]
+fn complete_public_trade_batch_retains_block_and_two_sided_trade_contract() {
+    let payload = fs::read(fixture_root().join("trade-batch.json")).expect("trade fixture");
+    let parsed = parse_node_record(NodeStreamKind::Trades, Bytes::from(payload.clone()))
+        .expect("complete documented trade");
+
+    assert_eq!(parsed.kind(), NodeRecordKind::Trade);
+    assert_eq!(parsed.block_number(), Some(42));
+    assert_eq!(
+        parsed.observation_class(),
+        ObservationClass::AuxiliaryLedger
+    );
+    assert_eq!(parsed.payload().as_ref(), payload);
+}
+
+#[test]
+fn trade_requires_exactly_one_buyer_and_one_seller() {
+    let payload = Bytes::from_static(
+        br#"{"coin":"COMP","side":"B","time":"2024-07-26T08:26:25.899","px":"51.367","sz":"0.31","hash":"0xad8e0566e813bdf98176040e6d51bd011100efa789e89430cdf17964235f55d8","trade_dir_override":"Na","side_info":[{"user":"0xc64cc00b46101bd40aa1c3121195e85c0b0918d8","start_pos":"996.67","oid":12212201265,"twap_id":null,"cloid":null}]}"#,
+    );
+    let error = parse_node_record(NodeStreamKind::Trades, payload)
+        .expect_err("one-sided trade must fail closed");
+
+    assert!(matches!(error, SourceError::MalformedPayload(_)));
+    assert_eq!(error.reason_code(), "source.malformed_payload");
 }
