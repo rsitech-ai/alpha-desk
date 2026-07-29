@@ -14,7 +14,7 @@ and does not by itself authenticate the producer.
   runtime must call `flush_due` from its timer at or before that instant. An explicit `flush`
   follows the same receipt rule.
 - A segment contains observations from exactly one source ID, source version, and cursor epoch.
-  Cursor offsets may advance or repeat but must not regress.
+  Cursor offsets must strictly advance; duplicates, regressions, and epoch changes are rejected.
 - An incomplete final frame is recoverable. A malformed header, invalid length, checksum failure,
   payload-hash failure, or corruption in any complete frame fails closed without truncating the
   evidence.
@@ -105,6 +105,11 @@ with the payload are complete-record corruption.
 
 Recovery is only for an open segment. A segment with a published close manifest is immutable and
 must be quarantined rather than repaired when verification fails.
+
+`SpoolWriter::open_recovered` applies this recovery policy, reconstructs the
+strict cursor boundary and manifest accounting from all surviving records, and
+then resumes appends at the validated file tail. A duplicate or regressing
+first post-restart cursor is rejected before any bytes are appended.
 
 ## Closed-segment manifest
 

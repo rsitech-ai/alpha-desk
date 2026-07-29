@@ -10,8 +10,8 @@ use hl_protocol::node::v1::{NodeRecordKind, NodeRecordV1, NodeStreamKind};
 use serde::Deserialize;
 
 use crate::{
-    CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, ContractError, EventPayload,
-    SourceEvidence, TradeMatched,
+    BlockEnvelope, BlockError, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass,
+    ContractError, EventPayload, SourceEvidence, TradeMatched,
 };
 
 const TRADE_ID_CONTEXT: &str = "hyperliquid-alpha-desk/trade-id/node-v1";
@@ -39,6 +39,16 @@ pub struct NodeV1MappingContext {
     pub ingested_at: KnownTime,
     pub canonicalized_at: KnownTime,
     pub mapper_version: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommittedNodeV1MappingContext {
+    pub chain_id: ChainId,
+    pub source_id: SourceId,
+    pub source_version: String,
+    pub source_offset: String,
+    pub expected_height: BlockHeight,
+    pub confirmation_class: ConfirmationClass,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,8 +122,23 @@ pub enum MappingError {
     NonContiguousTransaction,
     #[error("node trade batch contains more events than the V1 index supports")]
     EventIndexOverflow,
+    #[error(
+        "committed node block height does not match the source cursor: expected {expected:?}, received {actual:?}"
+    )]
+    BlockHeightMismatch {
+        expected: BlockHeight,
+        actual: BlockHeight,
+    },
+    #[error("committed node block parent is not contiguous")]
+    InvalidParentHeight,
+    #[error("committed node block contains {action_bundles} unsupported action bundles")]
+    UnsupportedCommittedActions { action_bundles: usize },
+    #[error("committed node mapping requires a committed confirmation class")]
+    InvalidCommittedConfirmation,
     #[error("canonical event contract rejected mapped source: {0}")]
     Contract(#[from] ContractError),
+    #[error("canonical block contract rejected mapped source: {0}")]
+    Block(#[from] BlockError),
 }
 
 impl MappingError {
@@ -128,7 +153,16 @@ impl MappingError {
             Self::InvalidDecimal { .. } => "canonical_mapping.invalid_decimal",
             Self::NonContiguousTransaction => "canonical_mapping.non_contiguous_transaction",
             Self::EventIndexOverflow => "canonical_mapping.event_index_overflow",
+            Self::BlockHeightMismatch { .. } => "canonical_mapping.block_height_mismatch",
+            Self::InvalidParentHeight => "canonical_mapping.invalid_parent_height",
+            Self::UnsupportedCommittedActions { .. } => {
+                "canonical_mapping.unsupported_committed_actions"
+            }
+            Self::InvalidCommittedConfirmation => {
+                "canonical_mapping.invalid_committed_confirmation"
+            }
             Self::Contract(_) => "canonical_mapping.contract_rejected",
+            Self::Block(_) => "canonical_mapping.block_rejected",
         }
     }
 }
@@ -151,6 +185,77 @@ struct NodeTrade {
 #[derive(Debug, Deserialize)]
 struct TradeSide {
     user: String,
+}
+
+pub fn map_committed_node_v1_block(
+    record: &NodeRecordV1,
+    context: &CommittedNodeV1MappingContext,
+) -> Result<BlockEnvelope, MappingError> {
+    if record.stream() != NodeStreamKind::TransactionBlocks
+        || record.kind() != NodeRecordKind::TransactionBlock
+    {
+        return Err(MappingError::MalformedRecord {
+            reason: "committed mapping requires a transaction-block record".to_owned(),
+        });
+    }
+    if !matches!(
+        context.confirmation_class,
+        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent
+    ) {
+        return Err(MappingError::InvalidCommittedConfirmation);
+    }
+
+    let root: serde_json::Value = serde_json::from_slice(record.payload()).map_err(|error| {
+        MappingError::MalformedRecord {
+            reason: error.to_string(),
+        }
+    })?;
+    let root = root
+        .as_object()
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "transaction block root must be an object".to_owned(),
+        })?;
+    let abci_block = root
+        .get("abci_block")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "transaction block has no abci_block object".to_owned(),
+        })?;
+    let round = required_u64(abci_block, "round")?;
+    let block_height = BlockHeight::new(round);
+    if block_height != context.expected_height {
+        return Err(MappingError::BlockHeightMismatch {
+            expected: context.expected_height,
+            actual: block_height,
+        });
+    }
+    let parent_round = required_u64(abci_block, "parent_round")?;
+    if round.checked_sub(1) != Some(parent_round) {
+        return Err(MappingError::InvalidParentHeight);
+    }
+    let time = abci_block
+        .get("time")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "transaction block has no string time".to_owned(),
+        })?;
+    let block_time = parse_block_time(time)?;
+    let action_bundles = select_action_bundles(root, abci_block)?;
+    if !action_bundles.is_empty() {
+        return Err(MappingError::UnsupportedCommittedActions {
+            action_bundles: action_bundles.len(),
+        });
+    }
+
+    BlockEnvelope::try_new(
+        context.chain_id.clone(),
+        block_height,
+        block_time,
+        context.confirmation_class,
+        Vec::new(),
+        BTreeMap::from([(context.source_id.clone(), *record.content_hash().as_bytes())]),
+    )
+    .map_err(Into::into)
 }
 
 pub fn map_node_v1_record(
@@ -226,6 +331,54 @@ pub fn map_node_v1_record(
     }
 
     Ok(MappingDisposition::Mapped(events))
+}
+
+fn required_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<u64, MappingError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: format!("transaction block has no unsigned {field}"),
+        })
+}
+
+fn select_action_bundles<'a>(
+    root: &'a serde_json::Map<String, serde_json::Value>,
+    abci_block: &'a serde_json::Map<String, serde_json::Value>,
+) -> Result<&'a Vec<serde_json::Value>, MappingError> {
+    let root_bundles = root
+        .get("signed_action_bundles")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "top-level signed_action_bundles must be an array".to_owned(),
+                })
+        })
+        .transpose()?;
+    let nested_bundles = abci_block
+        .get("signed_action_bundles")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "abci_block signed_action_bundles must be an array".to_owned(),
+                })
+        })
+        .transpose()?;
+    match (root_bundles, nested_bundles) {
+        (Some(_), Some(_)) => Err(MappingError::MalformedRecord {
+            reason: "transaction block contains ambiguous action bundle locations".to_owned(),
+        }),
+        (Some(root), _) => Ok(root),
+        (_, Some(nested)) => Ok(nested),
+        (None, None) => Err(MappingError::MalformedRecord {
+            reason: "transaction block has no signed_action_bundles array".to_owned(),
+        }),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

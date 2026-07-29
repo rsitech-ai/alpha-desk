@@ -25,3 +25,17 @@ must not use observation or ingestion time as a tie-breaker.
 Source evidence is excluded from canonical event and block identity
 projections. It remains required provenance for reconciliation, quarantine,
 incident reproduction, and archive audit.
+
+## Current committed-node mapping boundary
+
+The `node-v1` committed mapper currently accepts transaction-block records
+whose `abci_block` has a contiguous `round`/`parent_round`, a valid protocol
+timestamp, and exactly one unambiguous `signed_action_bundles` array. It maps
+only an empty bundle array to an empty committed `BlockEnvelope`, retaining the
+complete source-record BLAKE3 hash as block evidence.
+
+Any action-bearing committed block fails closed with
+`canonical_mapping.unsupported_committed_actions`. This is intentional: the
+complete signed-action and response corpus has not yet been qualified into a
+versioned canonical mapping contract. Neither fixture replay nor an empty-block
+mapping qualifies the live action-bearing source path for production.

@@ -81,6 +81,7 @@ pub fn validate_segment_bytes(input: &[u8]) -> Result<u64, SpoolError> {
 pub(crate) struct ScanResult {
     pub records: Vec<SpoolRecord>,
     pub last_valid_offset: u64,
+    pub last_record_offset: Option<u64>,
     pub incomplete_tail: Option<u64>,
 }
 
@@ -89,6 +90,7 @@ pub(crate) fn scan_records(file: &mut File, records_offset: u64) -> Result<ScanR
         .map_err(|source| io_error("seeking to spool records", source))?;
     let mut records = Vec::new();
     let mut last_valid_offset = records_offset;
+    let mut last_record_offset = None;
     loop {
         let record_offset = file
             .stream_position()
@@ -99,6 +101,7 @@ pub(crate) fn scan_records(file: &mut File, records_offset: u64) -> Result<ScanR
             return Ok(ScanResult {
                 records,
                 last_valid_offset,
+                last_record_offset,
                 incomplete_tail: None,
             });
         }
@@ -106,6 +109,7 @@ pub(crate) fn scan_records(file: &mut File, records_offset: u64) -> Result<ScanR
             return Ok(ScanResult {
                 records,
                 last_valid_offset,
+                last_record_offset,
                 incomplete_tail: Some(record_offset),
             });
         }
@@ -120,10 +124,12 @@ pub(crate) fn scan_records(file: &mut File, records_offset: u64) -> Result<ScanR
             return Ok(ScanResult {
                 records,
                 last_valid_offset,
+                last_record_offset,
                 incomplete_tail: Some(record_offset),
             });
         }
         records.push(decode_record(&framed, record_offset)?);
+        last_record_offset = Some(record_offset);
         last_valid_offset = file
             .stream_position()
             .map_err(|source| io_error("reading the spool position", source))?;

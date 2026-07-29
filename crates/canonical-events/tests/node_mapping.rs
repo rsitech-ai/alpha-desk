@@ -2,10 +2,11 @@ use std::fs;
 use std::path::Path;
 
 use canonical_events::{
-    ConfirmationClass, EventPayload, EvidenceOnlyReason, MappingDisposition, MappingError,
-    MarketCatalogV1, NodeV1MappingContext, map_node_v1_record,
+    CommittedNodeV1MappingContext, ConfirmationClass, EventPayload, EvidenceOnlyReason,
+    MappingDisposition, MappingError, MarketCatalogV1, NodeV1MappingContext,
+    map_committed_node_v1_block, map_node_v1_record,
 };
-use domain_types::{KnownTime, MarketId, SourceId};
+use domain_types::{BlockHeight, ChainId, KnownTime, MarketId, SourceId};
 use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -37,6 +38,121 @@ fn context() -> NodeV1MappingContext {
         canonicalized_at: KnownTime::from_unix_micros(1_721_982_386_200_000).unwrap(),
         mapper_version: "node-v1-mapper-1".to_owned(),
     }
+}
+
+fn committed_context() -> CommittedNodeV1MappingContext {
+    CommittedNodeV1MappingContext {
+        chain_id: ChainId::new("hyperliquid-mainnet").unwrap(),
+        source_id: SourceId::new("primary-node").unwrap(),
+        source_version: "node-public-docs-2026-07-29".to_owned(),
+        source_offset: "992814678".to_owned(),
+        expected_height: BlockHeight::new(992_814_678),
+        confirmation_class: ConfirmationClass::CommittedPrimary,
+    }
+}
+
+#[test]
+fn empty_transaction_block_maps_to_a_committed_source_bound_block() {
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        fixture("transaction-block.json").into(),
+    )
+    .unwrap();
+
+    let first = map_committed_node_v1_block(&record, &committed_context()).unwrap();
+    let repeated = map_committed_node_v1_block(&record, &committed_context()).unwrap();
+
+    assert_eq!(first, repeated);
+    assert_eq!(first.chain_id().as_str(), "hyperliquid-mainnet");
+    assert_eq!(first.block_height(), BlockHeight::new(992_814_678));
+    assert_eq!(first.block_time().unix_micros(), 1_785_240_000_000_000);
+    assert_eq!(
+        first.confirmation_class(),
+        ConfirmationClass::CommittedPrimary
+    );
+    assert!(first.events().is_empty());
+    assert_eq!(
+        first.source_block_hashes()[&SourceId::new("primary-node").unwrap()],
+        *record.content_hash().as_bytes()
+    );
+}
+
+#[test]
+fn committed_mapper_rejects_height_discontinuity_and_unmapped_actions() {
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        fixture("transaction-block.json").into(),
+    )
+    .unwrap();
+    let mut mismatched = committed_context();
+    mismatched.expected_height = BlockHeight::new(992_814_679);
+    let error = map_committed_node_v1_block(&record, &mismatched).unwrap_err();
+    assert!(matches!(error, MappingError::BlockHeightMismatch { .. }));
+    assert_eq!(
+        error.reason_code(),
+        "canonical_mapping.block_height_mismatch"
+    );
+
+    let payload = serde_json::json!({
+        "abci_block": {
+            "time": "2026-07-28T12:00:00.000000000",
+            "round": 992814678,
+            "parent_round": 992814677,
+            "proposer": "0x5ac99df645f3414876c816caa18b2d234024b487"
+        },
+        "signed_action_bundles": [["0xbundle", {"signed_actions": []}]]
+    });
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        serde_json::to_vec(&payload).unwrap().into(),
+    )
+    .unwrap();
+    let error = map_committed_node_v1_block(&record, &committed_context()).unwrap_err();
+    assert!(matches!(
+        error,
+        MappingError::UnsupportedCommittedActions { action_bundles: 1 }
+    ));
+    assert_eq!(
+        error.reason_code(),
+        "canonical_mapping.unsupported_committed_actions"
+    );
+}
+
+#[test]
+fn committed_mapper_accepts_the_current_nested_empty_bundle_shape_only_when_unambiguous() {
+    let nested = serde_json::json!({
+        "abci_block": {
+            "time": "2026-07-28T12:00:00.000000000",
+            "round": 992814678,
+            "parent_round": 992814677,
+            "proposer": "0x5ac99df645f3414876c816caa18b2d234024b487",
+            "signed_action_bundles": []
+        }
+    });
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        serde_json::to_vec(&nested).unwrap().into(),
+    )
+    .unwrap();
+    map_committed_node_v1_block(&record, &committed_context()).unwrap();
+
+    let ambiguous = serde_json::json!({
+        "abci_block": {
+            "time": "2026-07-28T12:00:00.000000000",
+            "round": 992814678,
+            "parent_round": 992814677,
+            "proposer": "0x5ac99df645f3414876c816caa18b2d234024b487",
+            "signed_action_bundles": []
+        },
+        "signed_action_bundles": []
+    });
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        serde_json::to_vec(&ambiguous).unwrap().into(),
+    )
+    .unwrap();
+    let error = map_committed_node_v1_block(&record, &committed_context()).unwrap_err();
+    assert_eq!(error.reason_code(), "canonical_mapping.malformed_record");
 }
 
 #[test]
