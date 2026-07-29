@@ -644,6 +644,62 @@ pub struct WireMarketMetadataChanged {
     pub metadata_hash: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMarketHalted {
+    pub market_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMarketResumed {
+    pub market_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOpenInterestCapChanged {
+    pub market_id: String,
+    pub previous_cap: String,
+    pub new_cap: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMarginTableChanged {
+    pub market_id: String,
+    pub previous_table_hash: String,
+    pub new_table_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOracleUpdated {
+    pub market_id: String,
+    pub oracle_price: String,
+    pub source: String,
+    pub effective_at_micros: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireFundingRateUpdated {
+    pub market_id: String,
+    pub funding_rate: String,
+    pub effective_at_micros: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOutcomeCreated {
+    pub market_id: String,
+    pub outcome_id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOutcomeResolved {
+    pub market_id: String,
+    pub outcome_id: String,
+    pub settlement_value: String,
+    pub resolved_at_micros: i64,
+}
+
 pub fn encode_order_accepted(value: &WireOrderAccepted) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_order_accepted(value.clone())?;
     Ok(wrap_payload(
@@ -990,6 +1046,242 @@ pub fn decode_market_metadata_changed(
     })
 }
 
+pub fn encode_market_halted(value: &WireMarketHalted) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_market_halted(value.clone())?;
+    Ok(wrap_payload(
+        "MarketHalted",
+        generated::hl::canonical::v1::MarketHalted {
+            market_id: value.market_id,
+            reason: value.reason,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_market_halted(bytes: &[u8]) -> Result<WireMarketHalted, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::MarketHalted::decode(
+        unwrap_payload("MarketHalted", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "MarketHalted".to_owned(),
+        source,
+    })?;
+    validate_market_halted(WireMarketHalted {
+        market_id: message.market_id,
+        reason: message.reason,
+    })
+}
+
+pub fn encode_market_resumed(value: &WireMarketResumed) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_market_resumed(value.clone())?;
+    Ok(wrap_payload(
+        "MarketResumed",
+        generated::hl::canonical::v1::MarketResumed {
+            market_id: value.market_id,
+            reason: value.reason,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_market_resumed(bytes: &[u8]) -> Result<WireMarketResumed, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::MarketResumed::decode(
+        unwrap_payload("MarketResumed", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "MarketResumed".to_owned(),
+        source,
+    })?;
+    validate_market_resumed(WireMarketResumed {
+        market_id: message.market_id,
+        reason: message.reason,
+    })
+}
+
+pub fn encode_open_interest_cap_changed(
+    value: &WireOpenInterestCapChanged,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_open_interest_cap_changed(value.clone())?;
+    Ok(wrap_payload(
+        "OpenInterestCapChanged",
+        generated::hl::canonical::v1::OpenInterestCapChanged {
+            market_id: value.market_id,
+            previous_cap: value.previous_cap,
+            new_cap: value.new_cap,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_open_interest_cap_changed(
+    bytes: &[u8],
+) -> Result<WireOpenInterestCapChanged, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OpenInterestCapChanged::decode(
+        unwrap_payload("OpenInterestCapChanged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OpenInterestCapChanged".to_owned(),
+        source,
+    })?;
+    validate_open_interest_cap_changed(WireOpenInterestCapChanged {
+        market_id: message.market_id,
+        previous_cap: message.previous_cap,
+        new_cap: message.new_cap,
+    })
+}
+
+pub fn encode_margin_table_changed(
+    value: &WireMarginTableChanged,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_margin_table_changed(value.clone())?;
+    Ok(wrap_payload(
+        "MarginTableChanged",
+        generated::hl::canonical::v1::MarginTableChanged {
+            market_id: value.market_id,
+            previous_table_hash: value.previous_table_hash,
+            new_table_hash: value.new_table_hash,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_margin_table_changed(
+    bytes: &[u8],
+) -> Result<WireMarginTableChanged, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::MarginTableChanged::decode(
+        unwrap_payload("MarginTableChanged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "MarginTableChanged".to_owned(),
+        source,
+    })?;
+    validate_margin_table_changed(WireMarginTableChanged {
+        market_id: message.market_id,
+        previous_table_hash: message.previous_table_hash,
+        new_table_hash: message.new_table_hash,
+    })
+}
+
+pub fn encode_oracle_updated(value: &WireOracleUpdated) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_oracle_updated(value.clone())?;
+    Ok(wrap_payload(
+        "OracleUpdated",
+        generated::hl::canonical::v1::OracleUpdated {
+            market_id: value.market_id,
+            oracle_price: value.oracle_price,
+            source: value.source,
+            effective_at_micros: value.effective_at_micros,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_oracle_updated(bytes: &[u8]) -> Result<WireOracleUpdated, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OracleUpdated::decode(
+        unwrap_payload("OracleUpdated", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OracleUpdated".to_owned(),
+        source,
+    })?;
+    validate_oracle_updated(WireOracleUpdated {
+        market_id: message.market_id,
+        oracle_price: message.oracle_price,
+        source: message.source,
+        effective_at_micros: message.effective_at_micros,
+    })
+}
+
+pub fn encode_funding_rate_updated(
+    value: &WireFundingRateUpdated,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_funding_rate_updated(value.clone())?;
+    Ok(wrap_payload(
+        "FundingRateUpdated",
+        generated::hl::canonical::v1::FundingRateUpdated {
+            market_id: value.market_id,
+            funding_rate: value.funding_rate,
+            effective_at_micros: value.effective_at_micros,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_funding_rate_updated(
+    bytes: &[u8],
+) -> Result<WireFundingRateUpdated, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::FundingRateUpdated::decode(
+        unwrap_payload("FundingRateUpdated", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "FundingRateUpdated".to_owned(),
+        source,
+    })?;
+    validate_funding_rate_updated(WireFundingRateUpdated {
+        market_id: message.market_id,
+        funding_rate: message.funding_rate,
+        effective_at_micros: message.effective_at_micros,
+    })
+}
+
+pub fn encode_outcome_created(value: &WireOutcomeCreated) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_outcome_created(value.clone())?;
+    Ok(wrap_payload(
+        "OutcomeCreated",
+        generated::hl::canonical::v1::OutcomeCreated {
+            market_id: value.market_id,
+            outcome_id: value.outcome_id,
+            description: value.description,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_outcome_created(bytes: &[u8]) -> Result<WireOutcomeCreated, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OutcomeCreated::decode(
+        unwrap_payload("OutcomeCreated", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OutcomeCreated".to_owned(),
+        source,
+    })?;
+    validate_outcome_created(WireOutcomeCreated {
+        market_id: message.market_id,
+        outcome_id: message.outcome_id,
+        description: message.description,
+    })
+}
+
+pub fn encode_outcome_resolved(value: &WireOutcomeResolved) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_outcome_resolved(value.clone())?;
+    Ok(wrap_payload(
+        "OutcomeResolved",
+        generated::hl::canonical::v1::OutcomeResolved {
+            market_id: value.market_id,
+            outcome_id: value.outcome_id,
+            settlement_value: value.settlement_value,
+            resolved_at_micros: value.resolved_at_micros,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_outcome_resolved(bytes: &[u8]) -> Result<WireOutcomeResolved, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OutcomeResolved::decode(
+        unwrap_payload("OutcomeResolved", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OutcomeResolved".to_owned(),
+        source,
+    })?;
+    validate_outcome_resolved(WireOutcomeResolved {
+        market_id: message.market_id,
+        outcome_id: message.outcome_id,
+        settlement_value: message.settlement_value,
+        resolved_at_micros: message.resolved_at_micros,
+    })
+}
+
 pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecError> {
     let message = match kind {
         "OrderAccepted" => default_message::<generated::hl::canonical::v1::OrderAccepted>(),
@@ -1116,18 +1408,18 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "LiquidationFill" => decode!(generated::hl::canonical::v1::LiquidationFill),
         "BackstopLiquidation" => decode!(generated::hl::canonical::v1::BackstopLiquidation),
         "PositionSettled" => decode!(generated::hl::canonical::v1::PositionSettled),
-        "MarketHalted" => decode!(generated::hl::canonical::v1::MarketHalted),
-        "MarketResumed" => decode!(generated::hl::canonical::v1::MarketResumed),
-        "OpenInterestCapChanged" => decode!(generated::hl::canonical::v1::OpenInterestCapChanged),
-        "MarginTableChanged" => decode!(generated::hl::canonical::v1::MarginTableChanged),
+        "MarketHalted" => decode_market_halted(bytes).map(|_| ()),
+        "MarketResumed" => decode_market_resumed(bytes).map(|_| ()),
+        "OpenInterestCapChanged" => decode_open_interest_cap_changed(bytes).map(|_| ()),
+        "MarginTableChanged" => decode_margin_table_changed(bytes).map(|_| ()),
         "MarketCreated" => decode_market_created(bytes).map(|_| ()),
         "MarketMetadataChanged" => decode_market_metadata_changed(bytes).map(|_| ()),
-        "OracleUpdated" => decode!(generated::hl::canonical::v1::OracleUpdated),
-        "FundingRateUpdated" => decode!(generated::hl::canonical::v1::FundingRateUpdated),
+        "OracleUpdated" => decode_oracle_updated(bytes).map(|_| ()),
+        "FundingRateUpdated" => decode_funding_rate_updated(bytes).map(|_| ()),
         "AssetContextUpdated" => decode_asset_context_updated(bytes).map(|_| ()),
         "DexCreated" => decode_dex_created(bytes).map(|_| ()),
-        "OutcomeCreated" => decode!(generated::hl::canonical::v1::OutcomeCreated),
-        "OutcomeResolved" => decode!(generated::hl::canonical::v1::OutcomeResolved),
+        "OutcomeCreated" => decode_outcome_created(bytes).map(|_| ()),
+        "OutcomeResolved" => decode_outcome_resolved(bytes).map(|_| ()),
         other => Err(PayloadCodecError::UnknownKind(other.to_owned())),
     }
 }
@@ -1347,6 +1639,131 @@ fn validate_market_metadata_changed(
         &value.metadata_hash,
     )?;
     Ok(value)
+}
+
+fn validate_market_halted(
+    mut value: WireMarketHalted,
+) -> Result<WireMarketHalted, PayloadCodecError> {
+    value.market_id = required_payload_field("MarketHalted", "market_id", value.market_id)?;
+    value.reason = required_bounded_text("MarketHalted", "reason", value.reason, 1_024)?;
+    Ok(value)
+}
+
+fn validate_market_resumed(
+    mut value: WireMarketResumed,
+) -> Result<WireMarketResumed, PayloadCodecError> {
+    value.market_id = required_payload_field("MarketResumed", "market_id", value.market_id)?;
+    value.reason = required_bounded_text("MarketResumed", "reason", value.reason, 1_024)?;
+    Ok(value)
+}
+
+fn validate_open_interest_cap_changed(
+    mut value: WireOpenInterestCapChanged,
+) -> Result<WireOpenInterestCapChanged, PayloadCodecError> {
+    value.market_id =
+        required_payload_field("OpenInterestCapChanged", "market_id", value.market_id)?;
+    value.previous_cap =
+        required_payload_field("OpenInterestCapChanged", "previous_cap", value.previous_cap)?;
+    value.new_cap = required_payload_field("OpenInterestCapChanged", "new_cap", value.new_cap)?;
+    if value.previous_cap == value.new_cap {
+        return Err(PayloadCodecError::Invalid {
+            kind: "OpenInterestCapChanged".to_owned(),
+            reason: "previous_cap and new_cap must differ".to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+fn validate_margin_table_changed(
+    mut value: WireMarginTableChanged,
+) -> Result<WireMarginTableChanged, PayloadCodecError> {
+    value.market_id = required_payload_field("MarginTableChanged", "market_id", value.market_id)?;
+    value.previous_table_hash = required_bounded_text(
+        "MarginTableChanged",
+        "previous_table_hash",
+        value.previous_table_hash,
+        256,
+    )?;
+    value.new_table_hash = required_bounded_text(
+        "MarginTableChanged",
+        "new_table_hash",
+        value.new_table_hash,
+        256,
+    )?;
+    if value.previous_table_hash == value.new_table_hash {
+        return Err(PayloadCodecError::Invalid {
+            kind: "MarginTableChanged".to_owned(),
+            reason: "previous_table_hash and new_table_hash must differ".to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+fn validate_oracle_updated(
+    mut value: WireOracleUpdated,
+) -> Result<WireOracleUpdated, PayloadCodecError> {
+    value.market_id = required_payload_field("OracleUpdated", "market_id", value.market_id)?;
+    value.oracle_price =
+        required_payload_field("OracleUpdated", "oracle_price", value.oracle_price)?;
+    value.source = required_bounded_text("OracleUpdated", "source", value.source, 256)?;
+    validate_nonnegative_time(
+        "OracleUpdated",
+        "effective_at_micros",
+        value.effective_at_micros,
+    )?;
+    Ok(value)
+}
+
+fn validate_funding_rate_updated(
+    mut value: WireFundingRateUpdated,
+) -> Result<WireFundingRateUpdated, PayloadCodecError> {
+    value.market_id = required_payload_field("FundingRateUpdated", "market_id", value.market_id)?;
+    value.funding_rate =
+        required_payload_field("FundingRateUpdated", "funding_rate", value.funding_rate)?;
+    validate_nonnegative_time(
+        "FundingRateUpdated",
+        "effective_at_micros",
+        value.effective_at_micros,
+    )?;
+    Ok(value)
+}
+
+fn validate_outcome_created(
+    mut value: WireOutcomeCreated,
+) -> Result<WireOutcomeCreated, PayloadCodecError> {
+    value.market_id = required_payload_field("OutcomeCreated", "market_id", value.market_id)?;
+    value.outcome_id = required_payload_field("OutcomeCreated", "outcome_id", value.outcome_id)?;
+    value.description =
+        required_bounded_text("OutcomeCreated", "description", value.description, 2_048)?;
+    Ok(value)
+}
+
+fn validate_outcome_resolved(
+    mut value: WireOutcomeResolved,
+) -> Result<WireOutcomeResolved, PayloadCodecError> {
+    value.market_id = required_payload_field("OutcomeResolved", "market_id", value.market_id)?;
+    value.outcome_id = required_payload_field("OutcomeResolved", "outcome_id", value.outcome_id)?;
+    value.settlement_value = required_payload_field(
+        "OutcomeResolved",
+        "settlement_value",
+        value.settlement_value,
+    )?;
+    validate_nonnegative_time(
+        "OutcomeResolved",
+        "resolved_at_micros",
+        value.resolved_at_micros,
+    )?;
+    Ok(value)
+}
+
+fn validate_nonnegative_time(kind: &str, field: &str, value: i64) -> Result<(), PayloadCodecError> {
+    if value < 0 {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be nonnegative"),
+        });
+    }
+    Ok(())
 }
 
 fn validate_hash_bytes(kind: &str, field: &str, value: &[u8]) -> Result<(), PayloadCodecError> {

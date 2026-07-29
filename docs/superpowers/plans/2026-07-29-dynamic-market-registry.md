@@ -63,13 +63,13 @@ forward old values as if they belonged to the new hash.
 - `OutcomeCreated`
 - `OutcomeResolved`
 
-- [ ] Write strict red tests for all values and transitions.
-- [ ] Add positive/nonnegative fixed-point validation, bounded reasons/sources,
+- [x] Write strict red tests for all values and transitions.
+- [x] Add positive/nonnegative fixed-point validation, bounded reasons/sources,
       nonnegative protocol timestamps, exact previous/new values, and immutable
       outcome identity.
-- [ ] Preserve enclosing unknown fields on decode/re-encode.
-- [ ] Run affected crate suites, strict Clippy, and OSS audit.
-- [ ] Commit `feat(events): type canonical market state payloads`.
+- [x] Preserve enclosing unknown fields on decode/re-encode.
+- [x] Run affected crate suites, strict Clippy, and OSS audit.
+- [x] Commit `feat(events): type canonical market state payloads`.
 
 ## Milestone 3: Implement the versioned market registry
 
