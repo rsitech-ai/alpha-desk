@@ -72,10 +72,11 @@ It does not establish committed history or production node compatibility.
 - `blocked:license-decision` — Apache-2.0 is current; any dual-license change requires owner/legal approval.
 - `blocked:external` — trusted identities, signed approvals, a second builder, hosted CI evidence, tags, canonical organization repository creation, and publication.
 - `blocked:public-history` — the current recovery/engineering history contains transport refs and author metadata that require a deliberate sanitized export decision.
-- `blocked:live-runtime` — synthetic capture coordination, one clean restart,
-  and bounded soak are locally proven; committed-source ingestion, source-spool
-  integration, crash-boundary process restarts, multi-hour/load/restore
-  evidence, API, and UI are still absent.
+- `blocked:live-qualification` — the committed node-directory/source-spool
+  runtime, one clean restart, and bounded synthetic node-format soak are locally
+  proven. Action-bearing source semantics, raw-observation Parquet archival,
+  independent-source recovery, disk-reserve enforcement, multi-hour/load/host
+  restart evidence, API, and UI are still absent.
 
 No validated secret exposure was found by the 2026-07-28 local audit, but normal secret scanning is not sufficient to approve encoded archives or every remote ref for publication.
 
@@ -96,6 +97,8 @@ prove a running Alpha Desk product:
 - `cargo +1.97.1 test -p hl-protocol --test node_golden --locked --offline`
 - `cargo +1.97.1 test -p hl-protocol --test source_trust --locked --offline`
 - `cargo +1.97.1 test -p hl-capture --test node_adapter --locked --offline`
+- `cargo +1.97.1 test -p hl-capture --test committed_pipeline --locked --offline`
+- `cargo +1.97.1 test -p hl-capture --test source_spool --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test event_id --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test input --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test block --locked --offline`
@@ -106,16 +109,21 @@ prove a running Alpha Desk product:
 - `cargo +1.97.1 test -p hl-analytics --test archive --locked --offline`
 - `cargo +1.97.1 test -p archive-inspect --locked --offline`
 - `just postgres-migration-smoke`
-- `just capture-e2e` — fresh PostgreSQL/NATS, three blocks, six acknowledged
-  publications, one clean restart, verified archive, clean shutdown
-- `just capture-soak 10s` — ten blocks, twenty acknowledged publications,
-  one restart, 16 seconds elapsed, 24.9 MiB peak RSS, clean shutdown
+- `just capture-e2e` — fresh PostgreSQL/NATS, three raw node-format
+  observations, three committed empty blocks/publications, two verified closed
+  spool segments across one clean restart, verified archive, clean shutdown
+- `just capture-soak 10s` — ten drip-fed raw node-format observations, ten
+  committed empty blocks/publications, one restart, verified spool/archive,
+  clean shutdown
 - `just spool-verify`
 - `cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time=60`
 
 The capture reports are retained under ignored
 `target/evidence/capture-e2e/`; both declare
-`"live_source_qualified": false`. The Compose smoke verified NATS, ClickHouse, PostgreSQL, MinIO, the OpenTelemetry
+`"mode": "synthetic-node-source"` and `"live_source_qualified": false`.
+The archive summaries currently report zero raw observations because the
+long-term raw Parquet writer is not connected yet; the verified local spool is
+the retained raw evidence in this lane. The Compose smoke verified NATS, ClickHouse, PostgreSQL, MinIO, the OpenTelemetry
 Collector, and VictoriaMetrics, then removed its uniquely owned containers,
 volumes, and network.
 

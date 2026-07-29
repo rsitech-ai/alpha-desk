@@ -4,16 +4,18 @@ mod manifest;
 mod reader;
 mod record;
 mod recovery;
+mod source_spool;
 mod writer;
 
 use std::io;
 
 pub use header::SegmentHeaderV1;
-pub use inspection::{SpoolInspection, inspect_spool};
+pub use inspection::{SpoolInspection, inspect_spool, recover_spool_tail};
 pub use manifest::{CloseReceipt, ClosedSegmentManifestV1, MANIFEST_SCHEMA_V1};
 pub use reader::{SpoolReader, validate_segment_bytes};
 pub use record::SpoolRecord;
 pub use recovery::{RecoveryReport, recover_open_segment};
+pub use source_spool::{SourceSpool, SourceSpoolConfig, SpoolRotationPolicy};
 pub use writer::{AppendReceipt, DurabilityPolicy, SpoolWriter};
 
 pub(crate) const MAX_IDENTITY_BYTES: usize = 256;

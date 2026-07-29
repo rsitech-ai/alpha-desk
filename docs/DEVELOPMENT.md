@@ -174,10 +174,11 @@ cargo +1.97.1 run -p hl-capture --locked --offline -- \
 
 The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
-archives and publishes deterministic synthetic blocks, performs one clean
-process restart against the same durable state, verifies the PostgreSQL cursor
-and publication acknowledgements, verifies the Parquet archive, and proves a
-final bounded SIGTERM shutdown:
+drip-feeds deterministic, empty transaction-block records through the real
+node-directory adapter and `hl-capture run`, verifies raw spool durability,
+archives and publishes committed blocks, performs one clean process restart
+against the same spool/archive/journal state, verifies PostgreSQL and
+JetStream acknowledgements, and proves a final bounded SIGTERM shutdown:
 
 ```sh
 just capture-e2e
@@ -187,16 +188,19 @@ just capture-soak 10m
 Each run retains an atomic report and non-secret diagnostic artifacts under
 `target/evidence/capture-e2e/<run-id>/`. The report records the binary hash,
 dependency versions, block/publication counts, restart count, runtime,
-resource high-water marks, archive summary, log byte counts, and shutdown
-result. The test removes only its disposable containers, network, and temporary
-secret directory.
+resource high-water marks, spool/archive summaries, log byte counts, and
+shutdown result. The test removes only its disposable containers, network, and
+temporary secret directory.
 
-This is a synthetic runtime-mechanics lane. Its report deliberately contains
-`"live_source_qualified": false`. The production `run` command currently fails
-closed with `capture_runtime.committed_source_mapper_unavailable`; a real
-committed node-block mapper/source loop is still required before live capture
-can be claimed. One-node loopback password authentication and tmpfs JetStream
-also do not qualify production TLS, identity, or three-replica durability.
+This is a synthetic node-format runtime-mechanics lane. Its report deliberately
+contains `"mode": "synthetic-node-source"` and
+`"live_source_qualified": false`. The production `run` command is connected,
+but the committed mapper accepts only structurally valid blocks with no action
+bundles. Action-bearing records fail closed with
+`canonical_mapping.unsupported_committed_actions`. Raw observations are
+verified in the spool but are not yet copied into the long-term raw Parquet
+archive. One-node loopback password authentication and tmpfs JetStream also do
+not qualify production TLS, identity, or three-replica durability.
 See [`runbooks/capture-restart.md`](runbooks/capture-restart.md) for retained
 evidence and restart diagnosis.
 

@@ -79,7 +79,7 @@ async fn task_failure_cancels_and_joins_its_peers() {
         .await
         .expect_err("task failure must fail the service");
 
-    assert_eq!(error.reason_code(), "capture_app.task_failed");
+    assert_eq!(error.reason_code(), "fixture.failure");
     assert_eq!(peer_joined.load(Ordering::SeqCst), 1);
 }
 

@@ -315,6 +315,7 @@ impl DurabilityPolicy {
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     id: String,
+    source_version: String,
     trust: SourceTrust,
     #[serde(rename = "class")]
     observation_class: ObservationClass,
@@ -332,6 +333,7 @@ impl SourceConfig {
         if self.id.len() > MAX_IDENTITY_BYTES || self.id.chars().any(char::is_control) {
             return Err(ConfigError::InvalidSourceId);
         }
+        validate_identity(&self.source_version).map_err(|_| ConfigError::InvalidSourceVersion)?;
         if !(1..=MAX_QUEUE_CAPACITY).contains(&self.queue_capacity) {
             return Err(ConfigError::InvalidQueueCapacity);
         }
@@ -352,6 +354,11 @@ impl SourceConfig {
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    #[must_use]
+    pub fn source_version(&self) -> &str {
+        &self.source_version
     }
 
     #[must_use]
@@ -462,6 +469,8 @@ pub enum ConfigError {
     InvalidSourceId,
     #[error("capture source identifier is duplicated")]
     DuplicateSource,
+    #[error("capture source version is invalid")]
+    InvalidSourceVersion,
     #[error("capture queue capacity is outside the supported range")]
     InvalidQueueCapacity,
     #[error("capture payload limit is outside the supported range")]
@@ -502,6 +511,7 @@ impl ConfigError {
             Self::InvalidDurabilityPolicy => "capture_config.invalid_durability_policy",
             Self::InvalidSourceId => "capture_config.invalid_source_id",
             Self::DuplicateSource => "capture_config.duplicate_source",
+            Self::InvalidSourceVersion => "capture_config.invalid_source_version",
             Self::InvalidQueueCapacity => "capture_config.invalid_queue_capacity",
             Self::InvalidPayloadLimit => "capture_config.invalid_payload_limit",
             Self::InvalidSourceTrust => "capture_config.invalid_source_trust",

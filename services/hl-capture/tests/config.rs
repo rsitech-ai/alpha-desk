@@ -47,6 +47,13 @@ fn example_configuration_is_strict_valid_and_complete() {
         config
             .source("primary-node")
             .expect("primary source")
+            .source_version(),
+        "hyperliquid-node-v1"
+    );
+    assert_eq!(
+        config
+            .source("primary-node")
+            .expect("primary source")
             .observation_class(),
         ObservationClass::CommittedBlock
     );
@@ -238,6 +245,11 @@ fn parser_source_and_spool_identity_are_canonical() {
             "id = \"primary-node\"",
             "id = \" primary-node\"",
             "capture_config.invalid_source_id",
+        ),
+        (
+            "source_version = \"hyperliquid-node-v1\"",
+            "source_version = \" hyperliquid-node-v1\"",
+            "capture_config.invalid_source_version",
         ),
         (
             "path = \"state/capture-spool\"",

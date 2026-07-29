@@ -11,7 +11,8 @@ use hl_capture::adapters::{
 };
 use hl_protocol::node::v1::NodeStreamKind;
 use hl_protocol::{
-    BlockSource, ReceiveTimestamps, SourceCursor, SourceError, SourceRequestContext,
+    BlockSource, ObservationClass, ReceiveTimestamps, SourceCursor, SourceError,
+    SourceRequestContext,
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -410,6 +411,32 @@ async fn per_height_block_directory_restarts_from_durable_height() {
         .await
         .expect("height 101");
     assert_eq!(next.cursor().offset(), 101);
+}
+
+#[tokio::test]
+async fn per_height_block_directory_emits_unparsed_bytes_for_raw_first_durability() {
+    let directory = TempDir::new().expect("temp directory");
+    let payload = b"{not-yet-valid-json";
+    write_block(directory.path(), "1721000000", 100, payload);
+    let cancellation = CancellationToken::new();
+    let mut source = NodeBlockDirectorySource::open_with_clock(
+        block_directory_config(directory.path().to_path_buf()),
+        None,
+        TestClock::new(),
+    )
+    .expect("open block source");
+
+    let observation = source
+        .next_observation(&context(cancellation, Duration::from_secs(1)))
+        .await
+        .expect("raw block observation");
+
+    assert_eq!(observation.cursor().offset(), 100);
+    assert_eq!(observation.payload().as_ref(), payload);
+    assert_eq!(
+        observation.observation_class(),
+        ObservationClass::CommittedBlock
+    );
 }
 
 #[tokio::test]

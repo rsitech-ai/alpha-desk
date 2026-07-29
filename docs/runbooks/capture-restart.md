@@ -2,7 +2,8 @@
 
 ## Current qualification boundary
 
-The qualified restart lane is deterministic and synthetic:
+The qualified restart lane is deterministic and uses synthetic node-format
+records:
 
 ```sh
 just capture-e2e
@@ -10,14 +11,16 @@ just capture-soak 10m
 ```
 
 `capture-e2e` owns fresh PostgreSQL and authenticated NATS containers, writes
-one block, sends SIGTERM, restarts the same binary against the same archive,
-publication journal, stream, and chain, then writes the remaining blocks. It
-does not qualify a live Hyperliquid source, crash failpoints, host reboot, or a
-multi-node production deployment.
+one per-height raw observation through the real node adapter and spool, sends
+SIGTERM, restarts the same binary against the same spool, archive, publication
+journal, stream, and chain, then drip-feeds the remaining blocks. It does not
+qualify action-bearing Hyperliquid semantics, a live source, crash failpoints,
+host reboot, raw Parquet archival, or a multi-node production deployment.
 
-The production `hl-capture run` command remains fail-closed until the committed
-node-block mapper is implemented. Do not substitute `fixture-replay` for a live
-service or change the report's `live_source_qualified` field.
+`hl-capture run` is the tested command. The committed mapper deliberately
+rejects non-empty action bundles until a qualified corpus and response mapping
+exist. Do not treat empty synthetic records as live qualification or change the
+report's `live_source_qualified` field.
 
 ## Verify a retained run
 
@@ -27,6 +30,8 @@ Use the report path printed by the command:
 jq . target/evidence/capture-e2e/<run-id>/report.json
 cargo +1.97.1 run -p archive-inspect --locked --offline -- \
   verify target/evidence/capture-e2e/<run-id>/archive
+cargo +1.97.1 run -p spool-inspect --locked --offline -- \
+  verify target/evidence/capture-e2e/<run-id>/spool/synthetic-fixture
 cargo +1.97.1 run -p hl-capture --locked --offline -- \
   status \
   --config target/evidence/capture-e2e/<run-id>/capture.toml \
@@ -35,11 +40,12 @@ cargo +1.97.1 run -p hl-capture --locked --offline -- \
 
 A successful default run has:
 
-- `mode` equal to `synthetic-fixture`;
+- `mode` equal to `synthetic-node-source`;
 - `live_source_qualified` equal to `false`;
 - `restart_count` equal to `1`;
 - `clean_shutdown` equal to `true`;
-- three archived blocks and six acknowledged publications;
+- three raw spool records, three archived empty blocks, and three acknowledged
+  block publications;
 - a terminal status with `ready=false`, `health=yellow`, no pending blocks,
   and the expected durable height.
 

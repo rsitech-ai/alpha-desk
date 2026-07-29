@@ -36,6 +36,7 @@ max_delay_millis = 100
 
 [[sources]]
 id = "primary-node"
+source_version = "hyperliquid-node-v1"
 trust = "locally-verified-committed"
 class = "committed-block"
 queue_capacity = 4096
@@ -45,6 +46,7 @@ adapter = { kind = "node-block-directory", path = "/var/lib/hyperliquid/hl/data/
 
 [[sources]]
 id = "public-market"
+source_version = "public-market-v1"
 trust = "third-party-provisional"
 class = "public-market-data"
 queue_capacity = 1024

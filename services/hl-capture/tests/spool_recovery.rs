@@ -7,7 +7,7 @@ use bytes::Bytes;
 use domain_types::SourceId;
 use hl_capture::spool::{
     DurabilityPolicy, SegmentHeaderV1, SpoolError, SpoolReader, SpoolWriter, recover_open_segment,
-    validate_segment_bytes,
+    recover_spool_tail, validate_segment_bytes,
 };
 use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
 use tempfile::TempDir;
@@ -475,6 +475,30 @@ fn recovered_writer_resumes_cursor_and_manifest_accounting() {
             .map(|record| record.cursor().offset())
             .collect::<Vec<_>>(),
         vec![90, 91, 92]
+    );
+}
+
+#[test]
+fn directory_tail_recovery_repairs_only_the_verified_open_segment() {
+    let fixture = TempDir::new().expect("fixture");
+    let (segment, offsets) = write_three_records(fixture.path());
+    OpenOptions::new()
+        .write(true)
+        .open(&segment)
+        .expect("open segment")
+        .set_len(offsets[2] + 3)
+        .expect("truncate final record");
+
+    let report = recover_spool_tail(fixture.path())
+        .expect("recover directory tail")
+        .expect("tail was repaired");
+
+    assert_eq!(report.valid_records, 2);
+    assert_eq!(report.final_size, offsets[2]);
+    assert!(
+        recover_spool_tail(fixture.path())
+            .expect("complete tail")
+            .is_none()
     );
 }
 

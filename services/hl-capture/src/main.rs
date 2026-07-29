@@ -59,10 +59,8 @@ async fn execute(arguments: Vec<OsString>) -> Result<(), CliError> {
         }
         Command::Status { json: false, .. } => Err(CliError::Usage),
         Command::Run { config_path } => {
-            load_config(&config_path)?;
-            Err(CliError::Stable(
-                "capture_runtime.committed_source_mapper_unavailable",
-            ))
+            let config = load_config(&config_path)?;
+            run_capture(&config).await
         }
         Command::FixtureReplay {
             config_path,
@@ -186,6 +184,25 @@ async fn run_fixture(
         .await
         .map_err(|error| CliError::Stable(error.reason_code()))?;
     let run = connected.run_fixture(cancellation.clone(), block_count, block_delay);
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => {
+            result.map_err(|error| CliError::Stable(error.reason_code()))
+        }
+        result = wait_for_shutdown_signal() => {
+            result?;
+            cancellation.cancel();
+            run.await.map_err(|error| CliError::Stable(error.reason_code()))
+        }
+    }
+}
+
+async fn run_capture(config: &CaptureConfig) -> Result<(), CliError> {
+    let cancellation = CancellationToken::new();
+    let connected = connect_capture(config, &cancellation)
+        .await
+        .map_err(|error| CliError::Stable(error.reason_code()))?;
+    let run = connected.run(cancellation.clone());
     tokio::pin!(run);
     tokio::select! {
         result = &mut run => {
