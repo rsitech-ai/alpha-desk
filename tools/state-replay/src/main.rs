@@ -3,11 +3,11 @@
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
 use state_replay::{
-    ArchiveRunConfig, FixtureRunConfig, FixtureRunError, OrderRunConfig, TradeRunConfig,
-    run_archive_e2e, run_fixture_e2e, run_order_e2e, run_trade_e2e,
+    ArchiveRunConfig, FixtureRunConfig, FixtureRunError, MarketRunConfig, OrderRunConfig,
+    TradeRunConfig, run_archive_e2e, run_fixture_e2e, run_market_e2e, run_order_e2e, run_trade_e2e,
 };
 
-const USAGE: &str = "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay trade-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay order-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay archive-e2e --archive PATH --output PATH --chain ID --start-height N --end-height N --checkpoint-height N --iterations N";
+const USAGE: &str = "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay trade-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay order-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay market-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay archive-e2e --archive PATH --output PATH --chain ID --start-height N --end-height N --checkpoint-height N --iterations N";
 
 fn main() -> ExitCode {
     match run(std::env::args_os().collect()) {
@@ -34,6 +34,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
         "fixture-e2e" => run_fixture(arguments),
         "trade-e2e" => run_trade(arguments),
         "order-e2e" => run_order(arguments),
+        "market-e2e" => run_market(arguments),
         "archive-e2e" => run_archive(arguments),
         _ => Err(CliError::Usage),
     }
@@ -65,6 +66,16 @@ fn run_order(arguments: impl Iterator<Item = OsString>) -> Result<(), CliError> 
     let _evidence = run_order_e2e(&config)?;
     println!(
         "PASS evidence_class=synthetic_canonical_order state_semantics=exact_order_lifecycle synthetic_order_contract_proven=true stage_1_qualified=false stage_2_qualified=false live_source_qualified=false deployed_source_qualified=false position_state_qualified=false margin_state_qualified=false execution_qualified=false"
+    );
+    Ok(())
+}
+
+fn run_market(arguments: impl Iterator<Item = OsString>) -> Result<(), CliError> {
+    let (output, blocks, checkpoint_after, iterations) = parse_replay_arguments(arguments)?;
+    let config = MarketRunConfig::new(output, blocks, checkpoint_after, iterations);
+    let _evidence = run_market_e2e(&config)?;
+    println!(
+        "PASS evidence_class=synthetic_canonical_market state_semantics=exact_market_registry synthetic_market_contract_proven=true stage_1_qualified=false stage_2_qualified=false live_source_qualified=false deployed_source_qualified=false authoritative_metadata_qualified=false external_oracle_reconciliation_qualified=false account_state_qualified=false position_state_qualified=false margin_state_qualified=false book_state_qualified=false signal_state_qualified=false execution_qualified=false"
     );
     Ok(())
 }
