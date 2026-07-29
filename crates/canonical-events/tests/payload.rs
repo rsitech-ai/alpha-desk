@@ -1,10 +1,14 @@
-use api_contracts::{WireCanonicalEventEnvelope, WireOrderAccepted, encode_order_accepted};
+use api_contracts::{
+    WireCanonicalEventEnvelope, WireMarketCreated, WireOrderAccepted, encode_market_created,
+    encode_order_accepted,
+};
 use canonical_events::{
-    CanonicalEventEnvelope, ConfirmationClass, ContractError, EventKind, EventPayload, TradeMatched,
+    AssetContextUpdated, CanonicalEventEnvelope, ConfirmationClass, ContractError, DexCreated,
+    EventKind, EventPayload, MarketCreated, MarketMetadataChanged, TradeMatched,
 };
 use domain_types::{
-    Address, BlockHeight, EventId, KnownTime, MarketId, OrderId, Price, ProtocolTime, Quantity,
-    TradeId, TransactionId,
+    Address, AssetId, BlockHeight, DexId, EventId, KnownTime, MarketId, OrderId, Price,
+    ProtocolTime, Quantity, TradeId, TransactionId,
 };
 
 fn task_4_envelope(schema_version: &str) -> Result<CanonicalEventEnvelope, ContractError> {
@@ -115,6 +119,81 @@ fn all_43_typed_payload_variants_encode_decode_and_preserve_kind() {
         assert_eq!(decoded.kind(), kind);
     }
     assert_eq!(kinds.len(), 43);
+}
+
+#[test]
+fn market_metadata_payloads_are_typed_and_round_trip_exactly() {
+    let payloads = [
+        EventPayload::DexCreated(DexCreated {
+            dex_id: DexId::new("validator").unwrap(),
+            name: "Hyperliquid Validator Perpetuals".to_owned(),
+            operator_account_id: Address::from_bytes([0x11; 20]),
+        }),
+        EventPayload::AssetContextUpdated(AssetContextUpdated {
+            asset_id: AssetId::new("USDC").unwrap(),
+            context_version: "asset-context-7".to_owned(),
+            context_hash: [0x22; 32],
+        }),
+        EventPayload::MarketCreated(MarketCreated {
+            market_id: MarketId::new("perp:BTC").unwrap(),
+            dex_id: DexId::new("validator").unwrap(),
+            base_asset_id: AssetId::new("BTC").unwrap(),
+            quote_asset_id: AssetId::new("USDC").unwrap(),
+            tick_size: Price::parse_at_scale("0.1", 6).unwrap(),
+            lot_size: Quantity::parse_at_scale("0.00001", 8).unwrap(),
+        }),
+        EventPayload::MarketMetadataChanged(MarketMetadataChanged {
+            market_id: MarketId::new("perp:BTC").unwrap(),
+            metadata_version: "market-metadata-8".to_owned(),
+            metadata_hash: [0x33; 32],
+        }),
+    ];
+
+    for payload in payloads {
+        let kind = payload.kind();
+        let encoded = payload.encode_to_vec().unwrap();
+        assert_eq!(EventPayload::decode(kind, &encoded).unwrap(), payload);
+    }
+}
+
+#[test]
+fn market_metadata_payloads_reject_semantically_invalid_direct_values() {
+    let invalid_market = EventPayload::MarketCreated(MarketCreated {
+        market_id: MarketId::new("perp:BTC").unwrap(),
+        dex_id: DexId::new("validator").unwrap(),
+        base_asset_id: AssetId::new("BTC").unwrap(),
+        quote_asset_id: AssetId::new("USDC").unwrap(),
+        tick_size: Price::from_raw(0, 6).unwrap(),
+        lot_size: Quantity::parse_at_scale("0.00001", 8).unwrap(),
+    });
+    assert!(matches!(
+        invalid_market.encode_to_vec(),
+        Err(ContractError::Invalid { .. })
+    ));
+
+    let invalid_dex = EventPayload::DexCreated(DexCreated {
+        dex_id: DexId::new("validator").unwrap(),
+        name: "Validator\nPerpetuals".to_owned(),
+        operator_account_id: Address::from_bytes([0x11; 20]),
+    });
+    assert!(matches!(
+        invalid_dex.encode_to_vec(),
+        Err(ContractError::Invalid { .. })
+    ));
+
+    let invalid_wire = encode_market_created(&WireMarketCreated {
+        market_id: "perp:BTC".to_owned(),
+        dex_id: "validator".to_owned(),
+        base_asset_id: "BTC".to_owned(),
+        quote_asset_id: "BTC".to_owned(),
+        tick_size: "0.100000".to_owned(),
+        lot_size: "0.00001000".to_owned(),
+    })
+    .unwrap();
+    assert!(matches!(
+        EventPayload::decode(EventKind::MarketCreated, &invalid_wire),
+        Err(ContractError::Invalid { .. })
+    ));
 }
 
 #[test]

@@ -613,6 +613,37 @@ pub struct WireOrderRejected {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireDexCreated {
+    pub dex_id: String,
+    pub name: String,
+    pub operator_account_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireAssetContextUpdated {
+    pub asset_id: String,
+    pub context_version: String,
+    pub context_hash: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMarketCreated {
+    pub market_id: String,
+    pub dex_id: String,
+    pub base_asset_id: String,
+    pub quote_asset_id: String,
+    pub tick_size: String,
+    pub lot_size: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMarketMetadataChanged {
+    pub market_id: String,
+    pub metadata_version: String,
+    pub metadata_hash: Vec<u8>,
+}
+
 pub fn encode_order_accepted(value: &WireOrderAccepted) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_order_accepted(value.clone())?;
     Ok(wrap_payload(
@@ -833,6 +864,132 @@ pub fn decode_order_rejected(bytes: &[u8]) -> Result<WireOrderRejected, PayloadC
     })
 }
 
+pub fn encode_dex_created(value: &WireDexCreated) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_dex_created(value.clone())?;
+    Ok(wrap_payload(
+        "DexCreated",
+        generated::hl::canonical::v1::DexCreated {
+            dex_id: value.dex_id,
+            name: value.name,
+            operator_account_id: value.operator_account_id,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_dex_created(bytes: &[u8]) -> Result<WireDexCreated, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::DexCreated::decode(
+        unwrap_payload("DexCreated", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "DexCreated".to_owned(),
+        source,
+    })?;
+    validate_dex_created(WireDexCreated {
+        dex_id: message.dex_id,
+        name: message.name,
+        operator_account_id: message.operator_account_id,
+    })
+}
+
+pub fn encode_asset_context_updated(
+    value: &WireAssetContextUpdated,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_asset_context_updated(value.clone())?;
+    Ok(wrap_payload(
+        "AssetContextUpdated",
+        generated::hl::canonical::v1::AssetContextUpdated {
+            asset_id: value.asset_id,
+            context_version: value.context_version,
+            context_hash: value.context_hash,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_asset_context_updated(
+    bytes: &[u8],
+) -> Result<WireAssetContextUpdated, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::AssetContextUpdated::decode(
+        unwrap_payload("AssetContextUpdated", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "AssetContextUpdated".to_owned(),
+        source,
+    })?;
+    validate_asset_context_updated(WireAssetContextUpdated {
+        asset_id: message.asset_id,
+        context_version: message.context_version,
+        context_hash: message.context_hash,
+    })
+}
+
+pub fn encode_market_created(value: &WireMarketCreated) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_market_created(value.clone())?;
+    Ok(wrap_payload(
+        "MarketCreated",
+        generated::hl::canonical::v1::MarketCreated {
+            market_id: value.market_id,
+            dex_id: value.dex_id,
+            base_asset_id: value.base_asset_id,
+            quote_asset_id: value.quote_asset_id,
+            tick_size: value.tick_size,
+            lot_size: value.lot_size,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_market_created(bytes: &[u8]) -> Result<WireMarketCreated, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::MarketCreated::decode(
+        unwrap_payload("MarketCreated", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "MarketCreated".to_owned(),
+        source,
+    })?;
+    validate_market_created(WireMarketCreated {
+        market_id: message.market_id,
+        dex_id: message.dex_id,
+        base_asset_id: message.base_asset_id,
+        quote_asset_id: message.quote_asset_id,
+        tick_size: message.tick_size,
+        lot_size: message.lot_size,
+    })
+}
+
+pub fn encode_market_metadata_changed(
+    value: &WireMarketMetadataChanged,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_market_metadata_changed(value.clone())?;
+    Ok(wrap_payload(
+        "MarketMetadataChanged",
+        generated::hl::canonical::v1::MarketMetadataChanged {
+            market_id: value.market_id,
+            metadata_version: value.metadata_version,
+            metadata_hash: value.metadata_hash,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_market_metadata_changed(
+    bytes: &[u8],
+) -> Result<WireMarketMetadataChanged, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::MarketMetadataChanged::decode(
+        unwrap_payload("MarketMetadataChanged", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "MarketMetadataChanged".to_owned(),
+        source,
+    })?;
+    validate_market_metadata_changed(WireMarketMetadataChanged {
+        market_id: message.market_id,
+        metadata_version: message.metadata_version,
+        metadata_hash: message.metadata_hash,
+    })
+}
+
 pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecError> {
     let message = match kind {
         "OrderAccepted" => default_message::<generated::hl::canonical::v1::OrderAccepted>(),
@@ -963,12 +1120,12 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "MarketResumed" => decode!(generated::hl::canonical::v1::MarketResumed),
         "OpenInterestCapChanged" => decode!(generated::hl::canonical::v1::OpenInterestCapChanged),
         "MarginTableChanged" => decode!(generated::hl::canonical::v1::MarginTableChanged),
-        "MarketCreated" => decode!(generated::hl::canonical::v1::MarketCreated),
-        "MarketMetadataChanged" => decode!(generated::hl::canonical::v1::MarketMetadataChanged),
+        "MarketCreated" => decode_market_created(bytes).map(|_| ()),
+        "MarketMetadataChanged" => decode_market_metadata_changed(bytes).map(|_| ()),
         "OracleUpdated" => decode!(generated::hl::canonical::v1::OracleUpdated),
         "FundingRateUpdated" => decode!(generated::hl::canonical::v1::FundingRateUpdated),
-        "AssetContextUpdated" => decode!(generated::hl::canonical::v1::AssetContextUpdated),
-        "DexCreated" => decode!(generated::hl::canonical::v1::DexCreated),
+        "AssetContextUpdated" => decode_asset_context_updated(bytes).map(|_| ()),
+        "DexCreated" => decode_dex_created(bytes).map(|_| ()),
         "OutcomeCreated" => decode!(generated::hl::canonical::v1::OutcomeCreated),
         "OutcomeResolved" => decode!(generated::hl::canonical::v1::OutcomeResolved),
         other => Err(PayloadCodecError::UnknownKind(other.to_owned())),
@@ -1045,53 +1202,54 @@ fn encode_optional_identity(
 fn validate_order_accepted(
     mut value: WireOrderAccepted,
 ) -> Result<WireOrderAccepted, PayloadCodecError> {
-    value.order_id = required_order_field("OrderAccepted", "order_id", value.order_id)?;
-    value.account_id = required_order_field("OrderAccepted", "account_id", value.account_id)?;
-    value.market_id = required_order_field("OrderAccepted", "market_id", value.market_id)?;
-    value.side = required_order_field("OrderAccepted", "side", value.side)?;
-    value.limit_price = required_order_field("OrderAccepted", "limit_price", value.limit_price)?;
-    value.quantity = required_order_field("OrderAccepted", "quantity", value.quantity)?;
+    value.order_id = required_payload_field("OrderAccepted", "order_id", value.order_id)?;
+    value.account_id = required_payload_field("OrderAccepted", "account_id", value.account_id)?;
+    value.market_id = required_payload_field("OrderAccepted", "market_id", value.market_id)?;
+    value.side = required_payload_field("OrderAccepted", "side", value.side)?;
+    value.limit_price = required_payload_field("OrderAccepted", "limit_price", value.limit_price)?;
+    value.quantity = required_payload_field("OrderAccepted", "quantity", value.quantity)?;
     Ok(value)
 }
 
 fn validate_order_rested(mut value: WireOrderRested) -> Result<WireOrderRested, PayloadCodecError> {
-    value.order_id = required_order_field("OrderRested", "order_id", value.order_id)?;
-    value.market_id = required_order_field("OrderRested", "market_id", value.market_id)?;
-    value.remaining_quantity = required_order_field(
+    value.order_id = required_payload_field("OrderRested", "order_id", value.order_id)?;
+    value.market_id = required_payload_field("OrderRested", "market_id", value.market_id)?;
+    value.remaining_quantity = required_payload_field(
         "OrderRested",
         "remaining_quantity",
         value.remaining_quantity,
     )?;
-    value.limit_price = required_order_field("OrderRested", "limit_price", value.limit_price)?;
+    value.limit_price = required_payload_field("OrderRested", "limit_price", value.limit_price)?;
     Ok(value)
 }
 
 fn validate_order_modified(
     mut value: WireOrderModified,
 ) -> Result<WireOrderModified, PayloadCodecError> {
-    value.order_id = required_order_field("OrderModified", "order_id", value.order_id)?;
+    value.order_id = required_payload_field("OrderModified", "order_id", value.order_id)?;
     value.previous_price =
-        required_order_field("OrderModified", "previous_price", value.previous_price)?;
-    value.new_price = required_order_field("OrderModified", "new_price", value.new_price)?;
-    value.previous_quantity = required_order_field(
+        required_payload_field("OrderModified", "previous_price", value.previous_price)?;
+    value.new_price = required_payload_field("OrderModified", "new_price", value.new_price)?;
+    value.previous_quantity = required_payload_field(
         "OrderModified",
         "previous_quantity",
         value.previous_quantity,
     )?;
-    value.new_quantity = required_order_field("OrderModified", "new_quantity", value.new_quantity)?;
+    value.new_quantity =
+        required_payload_field("OrderModified", "new_quantity", value.new_quantity)?;
     Ok(value)
 }
 
 fn validate_order_partially_filled(
     mut value: WireOrderPartiallyFilled,
 ) -> Result<WireOrderPartiallyFilled, PayloadCodecError> {
-    value.order_id = required_order_field("OrderPartiallyFilled", "order_id", value.order_id)?;
-    value.trade_id = required_order_field("OrderPartiallyFilled", "trade_id", value.trade_id)?;
+    value.order_id = required_payload_field("OrderPartiallyFilled", "order_id", value.order_id)?;
+    value.trade_id = required_payload_field("OrderPartiallyFilled", "trade_id", value.trade_id)?;
     value.fill_price =
-        required_order_field("OrderPartiallyFilled", "fill_price", value.fill_price)?;
+        required_payload_field("OrderPartiallyFilled", "fill_price", value.fill_price)?;
     value.fill_quantity =
-        required_order_field("OrderPartiallyFilled", "fill_quantity", value.fill_quantity)?;
-    value.remaining_quantity = required_order_field(
+        required_payload_field("OrderPartiallyFilled", "fill_quantity", value.fill_quantity)?;
+    value.remaining_quantity = required_payload_field(
         "OrderPartiallyFilled",
         "remaining_quantity",
         value.remaining_quantity,
@@ -1100,20 +1258,20 @@ fn validate_order_partially_filled(
 }
 
 fn validate_order_filled(mut value: WireOrderFilled) -> Result<WireOrderFilled, PayloadCodecError> {
-    value.order_id = required_order_field("OrderFilled", "order_id", value.order_id)?;
-    value.trade_id = required_order_field("OrderFilled", "trade_id", value.trade_id)?;
-    value.fill_price = required_order_field("OrderFilled", "fill_price", value.fill_price)?;
+    value.order_id = required_payload_field("OrderFilled", "order_id", value.order_id)?;
+    value.trade_id = required_payload_field("OrderFilled", "trade_id", value.trade_id)?;
+    value.fill_price = required_payload_field("OrderFilled", "fill_price", value.fill_price)?;
     value.fill_quantity =
-        required_order_field("OrderFilled", "fill_quantity", value.fill_quantity)?;
+        required_payload_field("OrderFilled", "fill_quantity", value.fill_quantity)?;
     Ok(value)
 }
 
 fn validate_order_cancelled(
     mut value: WireOrderCancelled,
 ) -> Result<WireOrderCancelled, PayloadCodecError> {
-    value.order_id = required_order_field("OrderCancelled", "order_id", value.order_id)?;
+    value.order_id = required_payload_field("OrderCancelled", "order_id", value.order_id)?;
     value.reason = required_bounded_text("OrderCancelled", "reason", value.reason, 1_024)?;
-    value.remaining_quantity = required_order_field(
+    value.remaining_quantity = required_payload_field(
         "OrderCancelled",
         "remaining_quantity",
         value.remaining_quantity,
@@ -1125,15 +1283,83 @@ fn validate_order_rejected(
     mut value: WireOrderRejected,
 ) -> Result<WireOrderRejected, PayloadCodecError> {
     value.client_order_id =
-        required_order_field("OrderRejected", "client_order_id", value.client_order_id)?;
-    value.account_id = required_order_field("OrderRejected", "account_id", value.account_id)?;
+        required_payload_field("OrderRejected", "client_order_id", value.client_order_id)?;
+    value.account_id = required_payload_field("OrderRejected", "account_id", value.account_id)?;
     value.reason_code =
         required_bounded_text("OrderRejected", "reason_code", value.reason_code, 128)?;
     value.reason = required_bounded_text("OrderRejected", "reason", value.reason, 1_024)?;
     Ok(value)
 }
 
-fn required_order_field(
+fn validate_dex_created(mut value: WireDexCreated) -> Result<WireDexCreated, PayloadCodecError> {
+    value.dex_id = required_payload_field("DexCreated", "dex_id", value.dex_id)?;
+    value.name = required_bounded_text("DexCreated", "name", value.name, 256)?;
+    value.operator_account_id = required_payload_field(
+        "DexCreated",
+        "operator_account_id",
+        value.operator_account_id,
+    )?;
+    Ok(value)
+}
+
+fn validate_asset_context_updated(
+    mut value: WireAssetContextUpdated,
+) -> Result<WireAssetContextUpdated, PayloadCodecError> {
+    value.asset_id = required_payload_field("AssetContextUpdated", "asset_id", value.asset_id)?;
+    value.context_version = required_bounded_text(
+        "AssetContextUpdated",
+        "context_version",
+        value.context_version,
+        128,
+    )?;
+    validate_hash_bytes("AssetContextUpdated", "context_hash", &value.context_hash)?;
+    Ok(value)
+}
+
+fn validate_market_created(
+    mut value: WireMarketCreated,
+) -> Result<WireMarketCreated, PayloadCodecError> {
+    value.market_id = required_payload_field("MarketCreated", "market_id", value.market_id)?;
+    value.dex_id = required_payload_field("MarketCreated", "dex_id", value.dex_id)?;
+    value.base_asset_id =
+        required_payload_field("MarketCreated", "base_asset_id", value.base_asset_id)?;
+    value.quote_asset_id =
+        required_payload_field("MarketCreated", "quote_asset_id", value.quote_asset_id)?;
+    value.tick_size = required_payload_field("MarketCreated", "tick_size", value.tick_size)?;
+    value.lot_size = required_payload_field("MarketCreated", "lot_size", value.lot_size)?;
+    Ok(value)
+}
+
+fn validate_market_metadata_changed(
+    mut value: WireMarketMetadataChanged,
+) -> Result<WireMarketMetadataChanged, PayloadCodecError> {
+    value.market_id =
+        required_payload_field("MarketMetadataChanged", "market_id", value.market_id)?;
+    value.metadata_version = required_bounded_text(
+        "MarketMetadataChanged",
+        "metadata_version",
+        value.metadata_version,
+        128,
+    )?;
+    validate_hash_bytes(
+        "MarketMetadataChanged",
+        "metadata_hash",
+        &value.metadata_hash,
+    )?;
+    Ok(value)
+}
+
+fn validate_hash_bytes(kind: &str, field: &str, value: &[u8]) -> Result<(), PayloadCodecError> {
+    if value.len() != 32 {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must contain exactly 32 bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn required_payload_field(
     kind: &str,
     field: &str,
     value: String,
@@ -1153,7 +1379,7 @@ fn required_bounded_text(
     value: String,
     max_bytes: usize,
 ) -> Result<String, PayloadCodecError> {
-    let value = required_order_field(kind, field, value)?;
+    let value = required_payload_field(kind, field, value)?;
     if value.len() > max_bytes || value.chars().any(char::is_control) {
         return Err(PayloadCodecError::Invalid {
             kind: kind.to_owned(),
