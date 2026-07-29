@@ -33,8 +33,8 @@ The ledger:
 4. enforces per-event and per-block mutation bounds;
 5. runs block-wide reducer invariants;
 6. hashes the complete candidate state; and
-7. swaps the candidate into the visible ledger only after every prior step
-   succeeds.
+7. returns an opaque prepared transition without changing visible state; and
+8. swaps that candidate into the visible ledger only after an explicit commit.
 
 A reducer error, unsupported event, invalid deletion, duplicate mutation key,
 limit violation, or invariant failure discards the candidate. The prior state
@@ -43,6 +43,35 @@ bytes, state hash, and checkpoint remain unchanged.
 An exact redelivery of the latest block returns `AlreadyApplied` with the
 existing checkpoint. The same height with a different canonical block hash
 returns `ledger.canonical_divergence`.
+
+### Durable commit handoff
+
+`storage-ports::AtomicStateCommit` binds one prepared `StateDelta` to its exact
+complete `StateImage`. Construction verifies the chain, block height, canonical
+block hash, reducer-set version, and after-state hash. The request exposes the
+before-state hash so an adapter can reject a store that is ahead, behind, or on
+a divergent transition.
+
+`hl-core::apply_block_durably` enforces the visibility order:
+
+1. prepare the domain transition without changing the ledger;
+2. validate the storage-neutral atomic commit request;
+3. ask the state adapter to persist all mutations and the block checkpoint as
+   one operation;
+4. validate that the adapter receipt names the exact height, canonical block
+   hash, and state hash; and
+5. commit the already-durable prepared transition to the visible ledger.
+
+A storage error or mismatched receipt leaves the in-memory ledger unchanged.
+The port requires restart loading to return only the latest complete state
+image and to reject partial, corrupt, or oversized state. It also gives stable
+errors for lock contention, corruption, conflicting history, resource limits,
+and I/O failure. Vendor types do not enter the ledger, replay, or service
+contracts.
+
+This freezes the atomicity seam; it does not implement the production store.
+The exact RocksDB 11.1.x adapter, column-family mapping, WAL/compaction policy,
+lock ownership, crash recovery, and corruption qualification remain required.
 
 ## State key and mutation rules
 
@@ -201,6 +230,10 @@ Focused tests prove:
 - identical output across independent ledger instances;
 - independence from reducer mutation emission order;
 - whole-block rollback after a late event or invariant failure;
+- invisible prepare followed by explicit commit and stale-preparation
+  rejection;
+- durable-store-before-visibility ordering, including unchanged visible state
+  on storage failure or receipt mismatch;
 - exact duplicate idempotence and same-height divergence;
 - chain, height, confirmation, reducer-version, and support gates; and
 - mutation bounds and ambiguous key rejection; and
@@ -218,5 +251,5 @@ Focused tests prove:
   cancellation, poison-block quarantine, and a fixed replay-receipt hash.
 
 This does not prove action-bearing account or order state, RocksDB durability,
-reconciliation, live-source compatibility, a production replay process or CLI,
-or Stage 2 readiness.
+reconciliation, live-source compatibility, a production replay service, or
+Stage 2 readiness. The runnable replay CLI remains synthetic-fixture evidence.

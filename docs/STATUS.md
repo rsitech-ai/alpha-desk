@@ -89,14 +89,17 @@ desk application.
 storage-neutral, synchronous block-atomic reducer boundary with a frozen
 reducer-set identity, deterministic sorted state image, domain-separated state
 hash, committed-height continuity, duplicate idempotence, and default-deny
-event/schema support; a private descriptor-relative local checkpoint store; and
-bounded serial replay over explicitly ordered immutable archive manifests.
+event/schema support; an invisible prepare/explicit-commit boundary; a
+storage-neutral atomic state port and `hl-core` store-before-visibility
+coordinator; a private descriptor-relative local checkpoint store; and bounded
+serial replay over explicitly ordered immutable archive manifests.
 Replay preflights chain, range, schema, count, and starting-state compatibility,
 applies only at block boundaries, and emits deterministic completed/cancelled
-receipts. These paths are focused-test proven only. No action-bearing production
-reducer, RocksDB adapter, production archive/replay service, or reconciliation
-result exists yet. A bounded `state-replay fixture-e2e` process now generates
-explicit synthetic evidence for repeated rebuild, local checkpoint resume, and
+receipts. Focused tests prove that storage failure or a mismatched durable
+receipt cannot advance the visible ledger. No action-bearing production reducer,
+RocksDB adapter, production archive/replay service, or reconciliation result
+exists yet. A bounded `state-replay fixture-e2e` process now generates explicit
+synthetic evidence for repeated rebuild, local checkpoint resume, and
 poison-block atomicity.
 Stage 2 remains unqualified. The exact current contract and limitations are
 recorded in

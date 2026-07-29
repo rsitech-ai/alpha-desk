@@ -3,6 +3,7 @@
 mod archive;
 mod capture_progress;
 mod checkpoint;
+mod state_store;
 
 pub use archive::{
     ARCHIVE_MANIFEST_SCHEMA_V1, ArchiveError, ArchiveObject, ArchiveReceipt, BlockIterator,
@@ -16,6 +17,10 @@ pub use capture_progress::{
 };
 pub use checkpoint::{
     CheckpointPublishDisposition, CheckpointReceipt, CheckpointStoreError, StateCheckpointStore,
+};
+pub use state_store::{
+    AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateCommitReceipt,
+    StateStoreError,
 };
 
 pub const CRATE_BOOTSTRAPPED: bool = true;

@@ -38,7 +38,9 @@ Hyperliquid Alpha Desk is designed as an evidence-first, event-sourced research 
 - `canonical-state-store` implements private descriptor-relative local
   checkpoint publication for the deterministic reference state image. It is
   separate from the future RocksDB hot-state adapter.
-- `hl-core` owns deterministic canonical state reconstruction.
+- `hl-core` owns deterministic canonical state reconstruction and the
+  store-before-visibility handoff through the storage-neutral atomic state
+  port. The production RocksDB adapter is not implemented.
 - `hl-analytics` owns evidence-linked feature and intelligence computation.
 - `hl-research` owns reproducible experiment and model evaluation.
 - `hl-api` exposes read-only versioned contracts to clients.
