@@ -258,7 +258,7 @@ Parquet archive, private local checkpoints.
   ```
 
   Remove only these eight variants from `opaque_payloads!`. Keep builder and
-  referrer accounts distinct from the charged/rewarded account.
+  referrer counterpart identities distinct from the primary account.
 
 - [x] **Step 4: Verify and commit**
 
@@ -375,6 +375,13 @@ Parquet archive, private local checkpoints.
   cash-flow totals, vault/subaccount relations, and current account,
   margin-mode, and leverage settings.
 
+**Execution split:** implement and independently review this task in two serial
+slices. Slice A freezes bounded key-bound records and codecs without event
+reduction. Slice B adds the reducer, prerequisite checks, transitions, and
+block-atomic tests. The final review covers the complete Task 4 range. This
+keeps unit/storage contracts reviewable before state-machine behavior depends
+on them.
+
 - [ ] **Step 1: Write failing reducer and codec tests**
 
   Assert one immutable fact per accepted event; exact debit/credit symmetry;
@@ -395,53 +402,107 @@ Parquet archive, private local checkpoints.
 - [ ] **Step 3: Implement bounded records**
 
   Freeze reducer version
-  `hyperliquid-alpha-desk-canonical-account@1.0.0` and these record families:
+  `hyperliquid-alpha-desk-canonical-account@1.0.0`. Use two flow record
+  families so asset/share `Quantity` values can never be interchanged with
+  quote-denominated `QuoteAmount` values:
 
   ```rust
-  pub enum AccountFlowScopeV1 {
+  pub enum AccountQuantityFlowScopeV1 {
       ExternalAsset { asset_id: AssetId },
-      SpotAsset { asset_id: AssetId },
-      DefaultPerpQuote,
-      MarketFunding { market_id: MarketId },
-      VaultPrincipal { vault_id: VaultId },
+      SpotTransferAsset { asset_id: AssetId },
+      SubaccountTransferAsset { asset_id: AssetId },
+      FeeAsset { asset_id: AssetId },
+      BuilderFeeAsset { asset_id: AssetId },
+      ReferralRewardAsset { asset_id: AssetId },
       VaultShares { vault_id: VaultId },
   }
 
-  pub struct AccountFlowCurrentRecordV1 {
+  pub struct AccountQuantityFlowCurrentRecordV1 {
       pub account_id: Address,
-      pub scope: AccountFlowScopeV1,
+      pub scope: AccountQuantityFlowScopeV1,
       pub credits: Quantity,
       pub debits: Quantity,
       pub last_event_id: EventId,
       pub last_block_height: BlockHeight,
   }
 
+  pub enum AccountQuoteFlowScopeV1 {
+      DefaultPerpQuote,
+      MarketFunding { market_id: MarketId },
+      VaultPrincipal { vault_id: VaultId },
+  }
+
+  pub struct AccountQuoteFlowCurrentRecordV1 {
+      pub account_id: Address,
+      pub scope: AccountQuoteFlowScopeV1,
+      pub credits: QuoteAmount,
+      pub debits: QuoteAmount,
+      pub last_event_id: EventId,
+      pub last_block_height: BlockHeight,
+  }
+
   pub struct AccountModeCurrentRecordV1 {
       pub account_id: Address,
+      pub initial_previous: AccountAbstractionModeV1,
       pub current: AccountAbstractionModeV1,
+      pub first_event_id: EventId,
       pub last_event_id: EventId,
       pub last_block_height: BlockHeight,
   }
   ```
 
-  Use separate exact amount types internally where the wire uses
-  `QuoteAmount`; do not coerce them into `Quantity`. Normalize addition only
-  by rescaling both operands upward to the larger scale. Name these records
-  `flow`, never `balance`: V1 lacks an opening snapshot and cannot prove venue
-  balance.
+  Add analogous key-bound margin-mode and leverage records retaining their
+  initial asserted predecessor, plus `AccountFactRecordV1`,
+  `SubaccountMasterCurrentRecordV1`, and
+  `AccountVaultRelationCurrentRecordV1`. Relation records mean only “observed
+  by an accepted canonical event”; they do not claim active ownership,
+  current balance, or a complete venue hierarchy.
+
+  Every record is strict field-ordered JSON with unknown fields denied,
+  canonical byte re-encoding, a 16 KiB value ceiling, and typed `decode_at`
+  key binding. Keys frame account, scope discriminator, and optional
+  asset/market/vault identity; builders compute the complete size against the
+  64 KiB absolute ceiling and use fallible exact reservation before copying.
+  Normalize additions only upward to the greatest observed scale, which is
+  exact and requires no rounding. Name all totals `flow`, never `balance`: V1
+  lacks an opening snapshot and cannot prove venue balance.
 
 - [ ] **Step 4: Implement transitions and invariants**
 
+  Enforce exact ordered payload/envelope identity lists for every owned event.
   Deposits/withdrawals affect external-asset flow only. Spot and perp
   transfers create equal debit/credit facts in their exact scopes.
-  Subaccount transfers additionally create one master relation; conflicting
-  masters fail. Builder fees and funding have direction fixed by event kind.
+  Subaccount transfers use their own asset scope and create exactly one direct
+  master relation only when `master_account_id` equals exactly one endpoint;
+  the other endpoint is the subaccount. Three-distinct-account payloads fail
+  closed as relationship-ambiguous, and a subaccount cannot acquire a second
+  master. Do not infer transitive hierarchy or acyclicity.
+
+  Vault deposits atomically debit quote principal and credit shares for the
+  account; withdrawals credit quote principal and debit shares. The two typed
+  legs and observed account/vault relation are the conservation evidence;
+  principal and shares are never compared or presented as current holdings.
+
+  Builder fees debit the charged account and credit the builder in the same
+  asset scope. Referral rewards credit `referrer_account_id` only; the payload
+  does not identify a debit source, so never debit `account_id` or invent a
+  protocol counterparty. This freezes the documented builder/referrer
+  recipient meaning while leaving deployed source mapping separately
+  unqualified.
+
+  Funding direction is fixed by event kind.
   `FeeCharged` direction is fixed by `FeeTypeV1`: `maker_rebate` is a credit
   and every other frozen fee type is a debit. Rewards credit the explicit
   referrer/reward recipient recorded by the typed payload. First
-  mode/leverage transition establishes its asserted predecessor; later
-  transitions must match current state exactly. Funding, margin-mode, and
-  leverage events require an exact current market record.
+  account-mode, margin-mode, and leverage transitions retain their asserted
+  predecessor; later transitions must match current state exactly.
+
+  Every payload carrying `asset_id` requires a valid current asset-context
+  record. Funding, margin-mode, and leverage events require a current market
+  record whose metadata resolution is exact. Perp transfers and vault events
+  carry no authoritative asset/market identity, so do not synthesize a
+  prerequisite. Tests seed market/asset prerequisites through a test-only
+  fixed dispatcher; the production composite remains Task 5.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -697,6 +758,19 @@ Parquet archive, private local checkpoints.
 - 2026-07-29: Preserve signed fee rates. A frozen `maker_rebate` is a credit
   with a negative rate; charged fee types require positive rates. Do not erase
   the documented rebate sign by coercing every fee rate nonnegative.
+- 2026-07-30: Split account flows into `Quantity` and `QuoteAmount` record
+  families with event-proven scopes. A single generic flow record or a
+  catch-all “spot” scope would permit unit coercion or invent venue routing.
+- 2026-07-30: A referral reward credits `referrer_account_id` only and never
+  debits the primary account because the payload omits the protocol reward
+  source. Builder fees retain explicit payer-to-builder symmetry. This matches
+  Hyperliquid's documented
+  [referral](https://hyperliquid.gitbook.io/hyperliquid-docs/referrals) and
+  [builder-code](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes)
+  recipient semantics while deployed-source mapping remains unqualified.
+- 2026-07-30: A subaccount relation is derived only when the declared master
+  is exactly one transfer endpoint. Three-distinct-account payloads remain
+  valid typed facts but fail state reduction as relationship-ambiguous.
 
 ## Progress Log
 
