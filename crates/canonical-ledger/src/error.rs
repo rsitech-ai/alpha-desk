@@ -20,6 +20,69 @@ impl StateKeyError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StateImageError {
+    #[error("state-image limits must all be nonzero")]
+    InvalidLimits,
+    #[error("state image exceeds a configured deterministic bound")]
+    LimitExceeded,
+    #[error("state image is truncated")]
+    Truncated,
+    #[error("state image schema is unsupported")]
+    InvalidSchema,
+    #[error("state image field is invalid: {0}")]
+    InvalidField(&'static str),
+    #[error("state image keys are not in strict canonical order")]
+    NonCanonicalOrder,
+    #[error("state image contains trailing bytes")]
+    TrailingBytes,
+}
+
+impl StateImageError {
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::InvalidLimits => "state_image.invalid_limits",
+            Self::LimitExceeded => "state_image.limit_exceeded",
+            Self::Truncated => "state_image.truncated",
+            Self::InvalidSchema => "state_image.invalid_schema",
+            Self::InvalidField(_) => "state_image.invalid_field",
+            Self::NonCanonicalOrder => "state_image.noncanonical_order",
+            Self::TrailingBytes => "state_image.trailing_bytes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CheckpointError {
+    #[error("checkpoint input is invalid")]
+    InvalidInput,
+    #[error("checkpoint manifest cannot be decoded")]
+    InvalidManifest,
+    #[error("checkpoint manifest bytes are not canonical")]
+    NonCanonicalManifest,
+    #[error("checkpoint state image is invalid: {0}")]
+    StateImage(#[from] StateImageError),
+    #[error("checkpoint integrity validation failed")]
+    Integrity,
+    #[error("checkpoint is incompatible with the requested runtime")]
+    Incompatible,
+}
+
+impl CheckpointError {
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::InvalidInput => "checkpoint.invalid_input",
+            Self::InvalidManifest => "checkpoint.invalid_manifest",
+            Self::NonCanonicalManifest => "checkpoint.noncanonical_manifest",
+            Self::StateImage(_) => "checkpoint.invalid_state_image",
+            Self::Integrity => "checkpoint.integrity",
+            Self::Incompatible => "checkpoint.incompatible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{reason_code}: {message}")]
 pub struct ReducerError {
     reason_code: String,

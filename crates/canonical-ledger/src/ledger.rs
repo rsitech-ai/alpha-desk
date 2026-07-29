@@ -76,6 +76,22 @@ pub struct StateCheckpoint {
 }
 
 impl StateCheckpoint {
+    pub(crate) fn from_parts(
+        chain_id: ChainId,
+        block_height: BlockHeight,
+        canonical_block_hash: [u8; 32],
+        state_hash: [u8; 32],
+        reducer_set_version: String,
+    ) -> Self {
+        Self {
+            chain_id,
+            block_height,
+            canonical_block_hash,
+            state_hash,
+            reducer_set_version,
+        }
+    }
+
     #[must_use]
     pub const fn chain_id(&self) -> &ChainId {
         &self.chain_id
@@ -163,6 +179,27 @@ impl<R: EventReducer> CanonicalLedger<R> {
             return Err(LedgerError::InvalidReducerVersion);
         }
         let state = StateImage::empty(chain_id, first_height, reducer_set_version.to_owned());
+        let state_hash = state.state_hash();
+        Ok(Self {
+            reducer,
+            limits,
+            state,
+            state_hash,
+        })
+    }
+
+    pub fn try_from_state_image(
+        state: StateImage,
+        reducer: R,
+        limits: LedgerLimits,
+    ) -> Result<Self, LedgerError> {
+        let reducer_set_version = reducer.reducer_set_version();
+        if !valid_reducer_version(reducer_set_version) {
+            return Err(LedgerError::InvalidReducerVersion);
+        }
+        if reducer_set_version != state.reducer_set_version() {
+            return Err(LedgerError::ReducerVersionDrift);
+        }
         let state_hash = state.state_hash();
         Ok(Self {
             reducer,

@@ -2,12 +2,54 @@ use std::collections::BTreeMap;
 
 use domain_types::{BlockHeight, ChainId};
 
-use crate::{LedgerError, StateKeyError};
+use crate::{LedgerError, StateImageError, StateKeyError, error::valid_reducer_version};
 
 const STATE_IMAGE_SCHEMA: &[u8] = b"hyperliquid-alpha-desk/state-image/v1";
 const STATE_HASH_CONTEXT: &str = "hyperliquid-alpha-desk/state-hash/v1";
 const MAX_ABSOLUTE_KEY_BYTES: usize = 64 * 1024;
 const MAX_NAMESPACE_BYTES: usize = 96;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateImageLimits {
+    max_state_bytes: usize,
+    max_entries: usize,
+    max_key_bytes: usize,
+    max_value_bytes: usize,
+}
+
+impl StateImageLimits {
+    pub const fn try_new(
+        max_state_bytes: usize,
+        max_entries: usize,
+        max_key_bytes: usize,
+        max_value_bytes: usize,
+    ) -> Result<Self, StateImageError> {
+        if max_state_bytes == 0
+            || max_entries == 0
+            || max_key_bytes == 0
+            || max_value_bytes == 0
+            || max_key_bytes > MAX_ABSOLUTE_KEY_BYTES
+        {
+            return Err(StateImageError::InvalidLimits);
+        }
+        Ok(Self {
+            max_state_bytes,
+            max_entries,
+            max_key_bytes,
+            max_value_bytes,
+        })
+    }
+
+    #[must_use]
+    pub const fn production() -> Self {
+        Self {
+            max_state_bytes: 4 * 1_024 * 1_024 * 1_024,
+            max_entries: 50_000_000,
+            max_key_bytes: 4 * 1_024,
+            max_value_bytes: 16 * 1_024 * 1_024,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StateKey {
@@ -203,6 +245,70 @@ impl StateImage {
         *hasher.finalize().as_bytes()
     }
 
+    pub fn decode_canonical(
+        bytes: &[u8],
+        limits: StateImageLimits,
+    ) -> Result<Self, StateImageError> {
+        if bytes.len() > limits.max_state_bytes {
+            return Err(StateImageError::LimitExceeded);
+        }
+        let mut cursor = StateCursor::new(bytes);
+        if cursor.frame(128)? != STATE_IMAGE_SCHEMA {
+            return Err(StateImageError::InvalidSchema);
+        }
+        let chain_id = decode_text(cursor.frame(256)?, "chain_id").and_then(|value| {
+            ChainId::new(value).map_err(|_| StateImageError::InvalidField("chain_id"))
+        })?;
+        let first_height = BlockHeight::new(cursor.u64()?);
+        let reducer_set_version = decode_text(cursor.frame(128)?, "reducer_set_version")?;
+        if !valid_reducer_version(&reducer_set_version) {
+            return Err(StateImageError::InvalidField("reducer_set_version"));
+        }
+        let watermark = match cursor.byte()? {
+            0 => None,
+            1 => {
+                let block_height = BlockHeight::new(cursor.u64()?);
+                if block_height < first_height {
+                    return Err(StateImageError::InvalidField("block_height"));
+                }
+                Some(StateWatermark {
+                    block_height,
+                    canonical_block_hash: cursor.hash()?,
+                })
+            }
+            _ => return Err(StateImageError::InvalidField("watermark_present")),
+        };
+        let entry_count = cursor.count(limits.max_entries)?;
+        if watermark.is_none() && entry_count != 0 {
+            return Err(StateImageError::InvalidField(
+                "uncheckpointed state entries",
+            ));
+        }
+        let mut entries = BTreeMap::new();
+        let mut previous: Option<StateKey> = None;
+        for _ in 0..entry_count {
+            let namespace = decode_text(cursor.frame(MAX_NAMESPACE_BYTES)?, "state namespace")?;
+            let key = StateKey::try_new(namespace, cursor.frame(limits.max_key_bytes)?.to_vec())
+                .map_err(|_| StateImageError::InvalidField("state key"))?;
+            if previous.as_ref().is_some_and(|prior| prior >= &key) {
+                return Err(StateImageError::NonCanonicalOrder);
+            }
+            let value = cursor.frame(limits.max_value_bytes)?.to_vec();
+            previous = Some(key.clone());
+            entries.insert(key, value);
+        }
+        if !cursor.is_finished() {
+            return Err(StateImageError::TrailingBytes);
+        }
+        Ok(Self {
+            chain_id,
+            first_height,
+            reducer_set_version,
+            watermark,
+            entries,
+        })
+    }
+
     pub(crate) fn candidate_entries(&self) -> BTreeMap<StateKey, Vec<u8>> {
         self.entries.clone()
     }
@@ -219,6 +325,72 @@ impl StateImage {
     pub(crate) const fn watermark(&self) -> Option<StateWatermark> {
         self.watermark
     }
+}
+
+struct StateCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> StateCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], StateImageError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(StateImageError::LimitExceeded)?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(StateImageError::Truncated)?;
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn byte(&mut self) -> Result<u8, StateImageError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u64(&mut self) -> Result<u64, StateImageError> {
+        let mut encoded = [0_u8; 8];
+        encoded.copy_from_slice(self.take(8)?);
+        Ok(u64::from_be_bytes(encoded))
+    }
+
+    fn hash(&mut self) -> Result<[u8; 32], StateImageError> {
+        let mut hash = [0_u8; 32];
+        hash.copy_from_slice(self.take(32)?);
+        Ok(hash)
+    }
+
+    fn frame(&mut self, max_bytes: usize) -> Result<&'a [u8], StateImageError> {
+        let length = usize::try_from(self.u64()?).map_err(|_| StateImageError::LimitExceeded)?;
+        if length > max_bytes {
+            return Err(StateImageError::LimitExceeded);
+        }
+        self.take(length)
+    }
+
+    fn count(&mut self, max_count: usize) -> Result<usize, StateImageError> {
+        let count = usize::try_from(self.u64()?).map_err(|_| StateImageError::LimitExceeded)?;
+        if count > max_count {
+            return Err(StateImageError::LimitExceeded);
+        }
+        Ok(count)
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
+
+fn decode_text(bytes: &[u8], field: &'static str) -> Result<String, StateImageError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| StateImageError::InvalidField(field))
 }
 
 #[derive(Debug, Clone, Copy)]

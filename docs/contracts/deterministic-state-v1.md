@@ -99,19 +99,35 @@ The state hash is BLAKE3 derive-key hashing with context
 Changing the state-image schema or hash framing requires a new explicit
 version. A golden empty-range vector is checked in the canonical-ledger tests.
 
-## Checkpoint identity
+## Checkpoint identity and restore
 
-The in-memory checkpoint binds:
+The checkpoint contract binds:
 
 - chain ID;
 - applied block height;
 - canonical block hash;
 - deterministic state hash; and
-- reducer-set version.
+- reducer-set version;
+- archive manifest ID and SHA-256;
+- canonical schema fingerprint;
+- domain-separated state-image file hash and byte count; and
+- a domain-separated content-derived `CheckpointId`.
 
-It is not yet a durable checkpoint. The filesystem manifest, state-image
-encoding/decoder, archive manifest binding, schema fingerprint, atomic
-publication, restore validation, and RocksDB adapter remain later milestones.
+The V1 JSON manifest has a fixed field order, denies unknown or duplicate
+fields, uses lowercase 32-byte hexadecimal hashes, and must re-encode to the
+exact input bytes. Whitespace, alternate field order, or other semantically
+equivalent JSON is rejected as noncanonical.
+
+Restore first decodes the bounded state image, then recomputes its state hash
+and file hash, rebuilds the checkpoint identity, verifies the canonical
+manifest bytes, and finally compares the complete chain/reducer/archive/schema
+compatibility contract. A restored `CanonicalLedger` must use the exact reducer
+set recorded in the image.
+
+The filesystem store, atomic publication, RocksDB checkpoint adapter, and
+archive replay runtime remain later milestones. The current in-memory state
+image is a deterministic reference representation, not a claim that a
+multi-gigabyte production state should be materialized in one allocation.
 
 ## Current evidence and limitations
 
@@ -126,7 +142,10 @@ Focused tests prove:
 - chain, height, confirmation, reducer-version, and support gates; and
 - mutation bounds and ambiguous key rejection; and
 - the production watermark-only reducer accepting empty primary/independent
-  committed blocks while quarantining a typed trade block without state effects.
+  committed blocks while quarantining a typed trade block without state
+  effects; and
+- exact state-image decode/resume, canonical checkpoint manifest round-trip,
+  state tamper detection, and all bound compatibility identities.
 
 This does not prove action-bearing account or order state, checkpoint crash
 safety, archive replay, RocksDB durability, reconciliation, live-source
