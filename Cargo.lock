@@ -212,6 +212,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "canonical-inspect"
+version = "0.1.0"
+dependencies = [
+ "canonical-events",
+ "domain-types",
+ "hex",
+ "hl-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "canonical-ledger"
 version = "0.1.0"
 

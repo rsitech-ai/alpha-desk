@@ -28,6 +28,12 @@ All notable changes will be documented in this file. The format follows [Keep a 
   source-to-canonical trade mapping with versioned market resolution, stable
   derived trade identity, explicit evidence-only dispositions, and fail-closed
   semantic validation.
+- Byte-preserving canonical V1.0.x semantic upcast boundary with strict
+  version parsing, full current-envelope validation, and stable rejection
+  reason codes.
+- Deterministic `canonical-inspect` CLI with strict qualified-corpus input,
+  create-new atomic output, source/event/payload/block hashes, and a committed
+  reproducibility manifest.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 
