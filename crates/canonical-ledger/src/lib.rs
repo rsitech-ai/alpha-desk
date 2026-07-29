@@ -3,6 +3,7 @@
 mod checkpoint;
 mod error;
 mod ledger;
+mod order;
 mod reducer;
 mod state;
 mod trade;
@@ -13,6 +14,10 @@ pub use error::{CheckpointError, LedgerError, ReducerError, StateImageError, Sta
 pub use ledger::{
     ApplyOutcome, CanonicalLedger, LedgerLimits, PrepareOutcome, PreparedBlock, StateCheckpoint,
     StateDelta,
+};
+pub use order::{
+    CanonicalOrderReducerV1, OrderCurrentRecordV1, OrderFactRecordV1, OrderLifecycleV1,
+    OrderStateError, OrderTransitionRecordV1, OrderTransitionStatusV1,
 };
 pub use reducer::{ApplyContext, EventReducer};
 pub use state::{

@@ -130,7 +130,7 @@
 - Consumes: exact typed order payloads and envelope account/market identities.
 - Produces: `CanonicalOrderReducerV1`, immutable facts, current order state, and stored transition assessments.
 
-- [ ] **Step 1: Write failing reducer tests**
+- [x] **Step 1: Write failing reducer tests**
 
   Prove `Accepted -> Rested -> PartiallyFilled -> Filled`,
   `Accepted -> Cancelled`, and rejection histories. Reject fill before
@@ -138,13 +138,13 @@
   modification after terminal state, collision, unsupported schema, and a late
   invalid event without changing pre-block bytes/hash.
 
-- [ ] **Step 2: Run red**
+- [x] **Step 2: Run red**
 
   ```bash
   cargo +1.97.1 test -p canonical-ledger --test order_state --locked --offline
   ```
 
-- [ ] **Step 3: Implement bounded key-bound records**
+- [x] **Step 3: Implement bounded key-bound records**
 
   Use namespaces `order-fact.v1`, `order-current.v1`, and
   `order-transition.v1`; strict canonical JSON capped at 16 KiB; market/order
@@ -152,14 +152,14 @@
   lifecycle; transition records binding prior hash, event/payload identity,
   result hash, rule version, and status.
 
-- [ ] **Step 4: Implement default-deny transitions**
+- [x] **Step 4: Implement default-deny transitions**
 
   Freeze `hyperliquid-alpha-desk-canonical-order@1.0.0`; own only the seven
   exact `1.0.0` kinds; require exact envelope identities; use checked
   fixed-point arithmetic; never resurrect terminal state. Rejections create
   immutable facts but no active order.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
   ```bash
   cargo +1.97.1 test -p canonical-ledger --test order_state --locked --offline

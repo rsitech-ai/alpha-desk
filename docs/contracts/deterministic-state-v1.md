@@ -45,6 +45,42 @@ decode and canonical re-encode reproduce the exact bytes. State keys bind the
 trade identity and participant ordinal; typed `decode_at` helpers reject a
 record presented under another key.
 
+`CanonicalOrderReducerV1` freezes the exact V1 order lifecycle under reducer-set
+version `hyperliquid-alpha-desk-canonical-order@1.0.0`. It owns only exact
+schema `1.0.0` events for `OrderAccepted`, `OrderRested`, `OrderModified`,
+`OrderPartiallyFilled`, `OrderFilled`, `OrderCancelled`, and `OrderRejected`.
+Every action-bearing order event requires one envelope market and one account
+that exactly match the payload or current state. A rejection requires no market
+and exactly its payload account.
+
+The reducer stores:
+
+- an immutable `order-fact.v1` record for every owned event;
+- one key-bound `order-current.v1` record for each accepted order; and
+- an immutable `order-transition.v1` assessment binding the event and payload
+  hash, prior current-record hash, result current-record hash, rule version, and
+  applied or recorded-rejection status.
+
+Order and transition keys frame the exact market, order, and event identities.
+Rejection keys instead frame the account, client-order, and event identities.
+All three record families are bounded to 16 KiB, use strict field-ordered JSON,
+deny unknown fields, and require byte-exact canonical re-encoding plus
+key-bound decoding.
+
+The lifecycle table defaults to denial. Resting is allowed only after
+acceptance or modification; modification is allowed only before terminal state;
+partial and terminal fills use checked fixed-point arithmetic; a partial fill
+must leave a positive remainder; a terminal fill must consume the exact
+remainder; and cancellation must report the exact current remainder. Filled or
+cancelled orders never transition again. Modification updates the active
+accepted quantity to exact filled plus new remaining quantity. A rejection
+creates a fact and assessment but never an active order.
+
+This reducer does not infer maker/taker, venue execution role, position,
+balance, fee, funding, margin, liquidation, or order-book state. Its inputs are
+canonical-event contracts, not evidence that any deployed source emits those
+contracts correctly.
+
 ## Block atomicity
 
 The ledger:
@@ -289,11 +325,16 @@ Focused tests prove:
 - a bounded operator-visible synthetic trade runner proving repeated rebuild,
   decoded record cardinality, private checkpoint resume, malformed-trade
   reducer failure, unsupported-schema quarantine, and private evidence
-  publication.
+  publication; and
+- exact order acceptance, resting, modification, partial fill, terminal fill,
+  cancellation, and rejection state; immutable fact and hash-linked transition
+  records; strict identity/key/codec binding; checked overfill and remainder
+  rejection; terminal-state non-resurrection; and whole-block rollback after a
+  late invalid order transition.
 
-This proves one stored canonical trade-fact reconciliation contract. It does
-not prove deployed action-bearing source compatibility, buyer/seller or
-maker/taker roles, account/order/position state, external snapshot
-reconciliation, RocksDB durability, a production replay service, or Stage 2
-readiness. The runnable trade replay CLI remains generated canonical-event
-evidence with source qualification explicitly unassessed.
+This proves stored canonical trade-fact reconciliation and exact synthetic
+order-lifecycle contracts. It does not prove deployed action-bearing source
+compatibility, buyer/seller or maker/taker roles, position or balance state,
+external snapshot reconciliation, RocksDB durability, a production replay
+service, or Stage 2 readiness. Runnable replay evidence remains generated
+canonical-event evidence with source qualification explicitly unassessed.
