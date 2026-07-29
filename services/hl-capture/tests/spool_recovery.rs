@@ -426,6 +426,59 @@ fn recovery_refuses_to_modify_a_segment_with_a_published_manifest() {
 }
 
 #[test]
+fn recovered_writer_resumes_cursor_and_manifest_accounting() {
+    let fixture = TempDir::new().expect("fixture");
+    let mut original = SpoolWriter::create(
+        fixture.path(),
+        header(24),
+        DurabilityPolicy::FsyncEveryRecord,
+    )
+    .expect("create writer");
+    original
+        .append(&observation(90, Bytes::from_static(b"before-crash-a")), 320)
+        .expect("append first record");
+    original
+        .append(&observation(91, Bytes::from_static(b"before-crash-b")), 321)
+        .expect("append second record");
+    let segment = original.segment_path().to_owned();
+    drop(original);
+
+    let (mut recovered, report) =
+        SpoolWriter::open_recovered(&segment, DurabilityPolicy::FsyncEveryRecord)
+            .expect("recover writer");
+    assert_eq!(report.valid_records, 2);
+    assert_eq!(report.truncated_bytes, 0);
+
+    let regression = recovered
+        .append(
+            &observation(91, Bytes::from_static(b"duplicate-after-restart")),
+            322,
+        )
+        .expect_err("recovered cursor must reject duplicates");
+    assert!(matches!(regression, SpoolError::CursorRegression));
+
+    recovered
+        .append(&observation(92, Bytes::from_static(b"after-restart")), 323)
+        .expect("append successor");
+    let closed = recovered.close(324, None).expect("close recovered segment");
+
+    assert_eq!(closed.manifest().record_count(), 3);
+    assert_eq!(closed.manifest().min_cursor().offset(), 90);
+    assert_eq!(closed.manifest().max_cursor().offset(), 92);
+    let records = SpoolReader::open(&segment)
+        .expect("open segment")
+        .read_all()
+        .expect("read segment");
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.cursor().offset())
+            .collect::<Vec<_>>(),
+        vec![90, 91, 92]
+    );
+}
+
+#[test]
 fn bounded_in_memory_validation_matches_the_file_reader_failure_modes() {
     let fixture = TempDir::new().expect("fixture");
     let (segment, offsets) = write_three_records(fixture.path());

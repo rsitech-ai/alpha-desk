@@ -7,7 +7,9 @@ use hl_protocol::{CursorTransition, SourceCursor, SourceObservation};
 
 use super::header::SegmentHeaderV1;
 use super::manifest::{CloseReceipt, ClosedSegmentManifestV1, ManifestFields, publish_manifest};
+use super::reader::scan_records;
 use super::record::encode_record;
+use super::recovery::{RecoveryReport, recover_open_segment};
 use super::{SpoolError, io_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,62 @@ impl SpoolWriter {
         })
     }
 
+    pub fn open_recovered(
+        segment_path: impl AsRef<Path>,
+        durability: DurabilityPolicy,
+    ) -> Result<(Self, RecoveryReport), SpoolError> {
+        validate_durability(durability)?;
+        let segment_path = segment_path.as_ref().to_owned();
+        let report = recover_open_segment(&segment_path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&segment_path)
+            .map_err(|source| io_error("opening a recovered spool segment", source))?;
+        let (header, records_offset) = SegmentHeaderV1::read_from(&mut file)?;
+        if segment_path.file_name().and_then(std::ffi::OsStr::to_str)
+            != Some(segment_name(header.segment_sequence()).as_str())
+        {
+            return Err(SpoolError::InvalidHeader);
+        }
+        let scan = scan_records(&mut file, records_offset)?;
+        if let Some(record_offset) = scan.incomplete_tail {
+            return Err(SpoolError::IncompleteTail { record_offset });
+        }
+        let mut previous = None;
+        for record in &scan.records {
+            if let Some(previous) = &previous {
+                validate_cursor_successor(record.cursor(), previous)?;
+            }
+            previous = Some(record.cursor().clone());
+        }
+        let record_count =
+            u64::try_from(scan.records.len()).map_err(|_| SpoolError::SizeOverflow)?;
+        if record_count != report.valid_records {
+            return Err(SpoolError::SizeOverflow);
+        }
+        let min_cursor = scan.records.first().map(|record| record.cursor().clone());
+        let last_cursor = scan.records.last().map(|record| record.cursor().clone());
+        file.seek(SeekFrom::End(0))
+            .map_err(|source| io_error("seeking to the recovered spool tail", source))?;
+        Ok((
+            Self {
+                file,
+                segment_path,
+                header,
+                durability,
+                pending_records: 0,
+                pending_since: None,
+                last_cursor,
+                min_cursor,
+                last_record_offset: scan.last_record_offset,
+                record_count,
+                closed: false,
+            },
+            report,
+        ))
+    }
+
     #[must_use]
     pub fn segment_path(&self) -> &Path {
         &self.segment_path
@@ -106,16 +164,8 @@ impl SpoolWriter {
         {
             return Err(SpoolError::SourceMismatch);
         }
-        if let Some(previous) = &self.last_cursor
-            && matches!(
-                observation
-                    .cursor()
-                    .validate_successor_of(previous)
-                    .map_err(|_| SpoolError::CursorRegression)?,
-                CursorTransition::EpochChanged
-            )
-        {
-            return Err(SpoolError::CursorRegression);
+        if let Some(previous) = &self.last_cursor {
+            validate_cursor_successor(observation.cursor(), previous)?;
         }
         let encoded = encode_record(observation)?;
         let record_offset = self
@@ -260,6 +310,21 @@ impl SpoolWriter {
             durable_cursor: self.last_cursor.clone().ok_or(SpoolError::SizeOverflow)?,
             durable_at_micros,
         }))
+    }
+}
+
+fn validate_cursor_successor(
+    cursor: &SourceCursor,
+    previous: &SourceCursor,
+) -> Result<(), SpoolError> {
+    match cursor
+        .validate_successor_of(previous)
+        .map_err(|_| SpoolError::CursorRegression)?
+    {
+        CursorTransition::Advanced { .. } => Ok(()),
+        CursorTransition::Duplicate | CursorTransition::EpochChanged => {
+            Err(SpoolError::CursorRegression)
+        }
     }
 }
 

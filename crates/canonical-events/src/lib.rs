@@ -10,8 +10,8 @@ pub use block::{BlockEnvelope, BlockError};
 pub use event_id::{EventIdentityInput, compute_event_id};
 pub use input::CanonicalEventInput;
 pub use node_mapping::{
-    EvidenceOnlyReason, MappingDisposition, MappingError, MarketCatalogV1, NodeV1MappingContext,
-    map_node_v1_record,
+    CommittedNodeV1MappingContext, EvidenceOnlyReason, MappingDisposition, MappingError,
+    MarketCatalogV1, NodeV1MappingContext, map_committed_node_v1_block, map_node_v1_record,
 };
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
