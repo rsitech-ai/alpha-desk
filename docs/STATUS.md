@@ -124,6 +124,15 @@ private checkpoint resume, checked overfill rollback, terminal lifecycle
 counts, and unsupported-schema quarantine. Its report marks only the synthetic
 order contract proven; Stage 1/2, deployed/live source, position, margin, and
 execution qualification remain false.
+`state-replay market-e2e` generates the complete twelve-kind V1 market family
+in valid prerequisite order and proves repeated exact registry rebuild,
+strictly decoded fact/current/version/status/resolution cardinalities, private
+checkpoint resume, hash-only metadata interval closure and value suppression,
+late invalid-transition rollback, unsupported-schema quarantine, and
+owner-only evidence permissions. Its report marks only the synthetic market
+contract proven; Stage 1/2, deployed/live source, authoritative metadata,
+external oracle reconciliation, account, position, margin, book, signal, and
+execution qualification remain false.
 Stage 2 remains unqualified. The exact current contract and limitations are
 recorded in
 [`docs/contracts/deterministic-state-v1.md`](contracts/deterministic-state-v1.md).
@@ -168,6 +177,13 @@ prove a running Alpha Desk product:
   facts and transitions, 20 current orders, exact terminal counts, and atomic
   overfill/unsupported-schema rejection; it does not qualify Stage 1, Stage 2,
   deployed/live source, position, margin, or execution semantics.
+- `just state-replay-market-e2e 20 8 4` — retained private report
+  `target/evidence/state-replay-market/20260729T202402Z-10401/report.json`
+  proves four identical rebuilds, checkpoint-equivalent resume, 124 immutable
+  facts, exact registry cardinalities, hash-only metadata suppression, and
+  atomic invalid/unsupported rejection. Every retained directory is `0700`,
+  every file is `0600`, and only `synthetic_market_contract_proven` is true;
+  Stage 1/2 and all deployed/live or downstream qualifications remain false.
 - `just oss-audit`
 - `gitleaks detect --source . --no-banner --redact --exit-code 1`
 - `cargo +1.97.1 test -p hl-capture --test spool_recovery --locked --offline`

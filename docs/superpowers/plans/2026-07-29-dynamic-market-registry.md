@@ -161,15 +161,15 @@ not amend, rebase, push, or discard user work.
 - Create: `tools/state-replay/tests/market_e2e.rs`
 - Modify: replay CLI/library, `justfile`, README, status, and runbook.
 
-- [ ] Write failing runner and CLI tests.
-- [ ] Generate all typed market events in valid prerequisite order.
-- [ ] Prove repeated/resumed hash equality, decoded exact state, unresolved
+- [x] Write failing runner and CLI tests.
+- [x] Generate all typed market events in valid prerequisite order.
+- [x] Prove repeated/resumed hash equality, decoded exact state, unresolved
       metadata suppression, malformed transition rollback, unsupported schema
       quarantine, and owner-only evidence.
-- [ ] Add bounded quick and release-profile soak recipes.
-- [ ] Run retained evidence, dependency policy, full verification, and OSS
+- [x] Add bounded quick and release-profile soak recipes.
+- [x] Run retained evidence, dependency policy, full verification, and OSS
       audit.
-- [ ] Commit `feat(replay): add canonical market evidence runner`.
+- [x] Commit `feat(replay): add canonical market evidence runner`.
 
 ## Completion boundary
 

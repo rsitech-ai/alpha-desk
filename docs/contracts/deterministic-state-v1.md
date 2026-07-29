@@ -388,15 +388,30 @@ Focused tests prove:
   decoded lifecycle cardinality, private checkpoint resume, late-overfill
   reducer failure, unsupported-schema quarantine, owner-only evidence
   permissions, and explicit false Stage 1/2, deployed/live source, position,
-  margin, and execution qualification.
+  margin, and execution qualification; and
+- a bounded operator-visible synthetic market runner proving prerequisite-
+  ordered creation, valuation, cap/table, halt/resume, and outcome transitions;
+  repeated state and receipt equality; strictly decoded fact/current/version
+  and status/resolution cardinalities; private checkpoint resume; exact-to-
+  unresolved metadata interval closure and cleared applicability; suppressed
+  value updates with `market_state.metadata_unresolved`; late invalid-
+  transition whole-block rollback; schema `1.1.0` quarantine; and recursively
+  owner-only evidence permissions.
 
 This proves stored canonical trade-fact reconciliation and exact synthetic
-order-lifecycle contracts. It does not prove deployed action-bearing source
-compatibility, buyer/seller or maker/taker roles, position or balance state,
-external snapshot reconciliation, RocksDB durability, a production replay
-service, or Stage 2 readiness. The retained local order report at
+order-lifecycle and market-registry contracts. It does not prove deployed
+action-bearing source compatibility, buyer/seller or maker/taker roles,
+authoritative market metadata, external oracle or snapshot reconciliation,
+account, position, margin, book, signal, or execution state, RocksDB
+durability, a production replay service, or Stage 2 readiness. The retained
+local order report at
 `target/evidence/state-replay-order/20260729T185537Z-82818/report.json` covers
 20 generated blocks, four independent rebuilds, a checkpoint after block 8,
 80 facts and transitions, 20 current orders, 10 filled orders, 10 cancelled
-orders, and 10 fact-only rejections. Runnable replay evidence remains generated
-canonical-event evidence with source qualification explicitly unassessed.
+orders, and 10 fact-only rejections. The retained local market report at
+`target/evidence/state-replay-market/20260729T202402Z-10401/report.json` covers
+20 generated blocks, four independent rebuilds, a checkpoint after block 8,
+124 facts, one DEX, two asset contexts, one exact active market/version, one
+resolved outcome, hash-only metadata suppression, and atomic invalid and
+unsupported rejection. Runnable replay evidence remains generated canonical-
+event evidence with source qualification explicitly unassessed.

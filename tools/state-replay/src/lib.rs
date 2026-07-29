@@ -2,6 +2,7 @@
 
 mod archive;
 mod fixture;
+mod market;
 mod order;
 mod shared;
 mod trade;
@@ -40,6 +41,7 @@ use shared::*;
 
 pub use archive::run_archive_e2e;
 pub use fixture::run_fixture_e2e;
+pub use market::{MarketEvidence, MarketRunConfig, run_market_e2e};
 pub use order::{OrderEvidence, OrderRunConfig, run_order_e2e};
 pub use trade::run_trade_e2e;
 
@@ -190,6 +192,8 @@ pub enum FixtureRunError {
     TradeState(#[from] canonical_ledger::TradeStateError),
     #[error("fixture replay order-state record is invalid")]
     OrderState(#[from] canonical_ledger::OrderStateError),
+    #[error("fixture replay market-state record is invalid")]
+    MarketState(#[from] canonical_ledger::MarketStateError),
     #[error("fixture replay report serialization failed")]
     Json(#[from] serde_json::Error),
     #[error("fixture replay invariant failed: {0}")]
@@ -215,6 +219,7 @@ impl FixtureRunError {
             Self::Domain(_) => "state_replay.domain",
             Self::TradeState(_) => "state_replay.trade_state",
             Self::OrderState(_) => "state_replay.order_state",
+            Self::MarketState(_) => "state_replay.market_state",
             Self::Json(_) => "state_replay.json",
             Self::Invariant(_) => "state_replay.invariant",
         }

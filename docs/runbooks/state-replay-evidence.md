@@ -140,6 +140,55 @@ Defaults are 1,000 order blocks, a checkpoint after 500 blocks, and 100
 independent rebuilds. Preserve the entire evidence directory, including both
 rejection archives and the checkpoint generation.
 
+## Canonical market evidence
+
+Run the exact canonical market registry through the immutable archive and
+private checkpoint path:
+
+```bash
+just state-replay-market-e2e
+```
+
+The command writes a new private directory under
+`target/evidence/state-replay-market/`. Generated V1 events create the DEX,
+base and quote asset contexts, market, and outcome before applying valuation,
+cap/table, halt/resume, and outcome transitions. The run requires:
+
+1. identical final state and replay receipt hashes across independent rebuilds;
+2. a published, verified, loaded, and resumed prefix checkpoint with the same
+   final state hash;
+3. strict decoding and exact cardinality for every market fact, DEX, asset,
+   current market, metadata version, and outcome namespace;
+4. exact active/halted, exact/unresolved, and resolved/unresolved counts plus a
+   deterministic market/outcome sample;
+5. a hash-only metadata change to close the exact interval, open an unresolved
+   interval, clear exact applicability, and suppress a later oracle value with
+   `market_state.metadata_unresolved` and no block effects;
+6. a valid oracle update followed by an invalid resume to roll back the whole
+   late block with `market_state.invalid_status_transition`; and
+7. schema `1.1.0` to quarantine with `ledger.unsupported_event` and no state
+   change.
+
+The report schema is
+`hyperliquid-alpha-desk/state-replay-market-e2e-report/v1`. It sets only
+`synthetic_market_contract_proven = true`; Stage 1, Stage 2, deployed/live
+source, authoritative metadata, external oracle reconciliation, account,
+position, margin, book, signal, and execution qualification remain false.
+Evidence is generated from synthetic canonical events, with source
+qualification explicitly `synthetic_unassessed`.
+
+For a longer bounded release-profile run:
+
+```bash
+just state-replay-market-soak
+```
+
+Defaults are 1,000 market blocks, a checkpoint after 500 blocks, and 100
+independent rebuilds. Override them with positional
+`blocks checkpoint_after iterations` arguments. Preserve the entire private
+evidence directory, including the primary, malformed, and unsupported
+archives, metadata-suppression block, checkpoint generations, and report.
+
 ## Existing operator archive
 
 Run the same deterministic rebuild and checkpoint-resume proof against an

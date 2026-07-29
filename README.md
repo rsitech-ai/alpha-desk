@@ -71,6 +71,7 @@ cargo +1.97.1 test -p archive-inspect --locked --offline
 just state-replay-e2e
 just state-replay-trade-e2e
 just state-replay-order-e2e
+just state-replay-market-e2e
 ```
 
 `just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
@@ -93,6 +94,15 @@ assessments, checkpoint resume, and atomic malformed/unsupported rejection.
 Use `just state-replay-order-soak` for the longer bounded profile. The report
 proves only the generated canonical order contract: Stage 1/2, deployed/live
 source, position, margin, and execution qualification remain false.
+`just state-replay-market-e2e` exercises all twelve exact canonical market
+event contracts in prerequisite order, strictly decodes every registry
+namespace, proves repeated and checkpoint-resumed state equality, and verifies
+hash-only metadata suppression plus atomic invalid/unsupported rejection. Use
+`just state-replay-market-soak` for the longer bounded release profile. The
+report proves only the generated canonical market contract: Stage 1/2,
+deployed/live source, authoritative metadata, external oracle reconciliation,
+account, position, margin, book, signal, and execution qualification remain
+false.
 For an existing canonical archive, use `just state-replay-archive-e2e` or
 `just state-replay-archive-soak` with an explicit chain, inclusive range, and
 manifest-boundary checkpoint height. Operator-archive evidence remains
