@@ -3,10 +3,15 @@
 mod block;
 mod event_id;
 mod input;
+mod node_mapping;
 
 pub use block::{BlockEnvelope, BlockError};
 pub use event_id::{EventIdentityInput, compute_event_id};
 pub use input::CanonicalEventInput;
+pub use node_mapping::{
+    EvidenceOnlyReason, MappingDisposition, MappingError, MarketCatalogV1, NodeV1MappingContext,
+    map_node_v1_record,
+};
 
 use api_contracts::{
     WireCanonicalEventEnvelope, WireSourceEvidence, WireTradeMatched, decode_trade_matched,

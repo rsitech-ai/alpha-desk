@@ -24,6 +24,10 @@ All notable changes will be documented in this file. The format follows [Keep a 
   ordering/boundary invariants.
 - Presence-aware source-event sub-index provenance for deterministic
   one-source-record-to-many-canonical-event mappings.
+- Hashed public Node V1 block-batched trade contract and conservative
+  source-to-canonical trade mapping with versioned market resolution, stable
+  derived trade identity, explicit evidence-only dispositions, and fail-closed
+  semantic validation.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 
@@ -35,7 +39,7 @@ All notable changes will be documented in this file. The format follows [Keep a 
 
 - Stage 0 gate remains on `HOLD`.
 - Independent/recovery transports, proprietary operator-feed integration,
-  real-node corpus qualification, the long-running capture runtime,
-  exhaustive source-to-canonical mapping, continuity, archive publication,
+  real-node corpus qualification, the long-running capture runtime, remaining
+  source-to-canonical mappings, continuity, archive publication,
   APIs, research workflows, and native applications are not yet implemented.
 - No public release, supported version, production deployment, or performance qualification exists.

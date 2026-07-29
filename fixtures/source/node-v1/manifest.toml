@@ -4,8 +4,14 @@ production_recording = false
 node_repository = "https://github.com/hyperliquid-dex/node"
 l1_schema_documentation = "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/nodes/l1-data-schemas"
 info_schema_documentation = "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
-captured_at = "2026-07-28"
-note = "Values are normalized public documentation examples, not operator node recordings. Exact payload bytes are retained once read."
+captured_at = "2026-07-29"
+note = "Values are normalized public documentation examples, not operator node recordings. The trade batch combines the documented trade object with the documented batch wrapper. Exact payload bytes are retained once read."
+
+[[fixture]]
+file = "trade-batch.json"
+stream = "trades"
+kind = "trade"
+sha256 = "b0a05225bb69e554fcfc838e7c6fde9f4888921d18c30148dc5aa148d375f9d5"
 
 [[fixture]]
 file = "transaction-block.json"

@@ -201,9 +201,13 @@ version = "0.1.0"
 dependencies = [
  "api-contracts",
  "blake3",
+ "chrono",
  "domain-types",
+ "hl-protocol",
  "prost",
  "semver",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 
