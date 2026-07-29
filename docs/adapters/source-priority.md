@@ -6,6 +6,15 @@ The source-trust admission policy is implemented and exhaustively tested. The
 operator-feed, independently complete secondary source, public network clients,
 historical client, and mempool transports are not implemented.
 
+Capture topology validation requires exactly one committed-block source with
+`locally-verified-committed` trust and permits at most one committed-block
+source with `independent-committed` trust. Both must use the strict
+node-block-directory adapter and the actions-and-responses replica profile.
+Missing, duplicate, or adapter-less committed roles fail configuration before
+any source path is opened. The dual-source runtime/failover orchestration is
+still in progress; accepting the topology is not evidence that the secondary
+transport has been operated or qualified.
+
 This distinction is deliberate. A transport proving that it can receive bytes
 does not prove completeness, finality, independence, or permission to advance
 canonical state.
