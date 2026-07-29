@@ -6,6 +6,7 @@ chain_id = "mainnet"
 first_height = 1
 archive_path = "state/canonical-archive"
 status_path = "state/capture-status.json"
+failover_state_path = "state/committed-source-failover.json"
 # Sensitive connection material is read from owner-only files at startup.
 postgres_url_path = "/run/secrets/alpha-desk-postgres-url"
 nats_server_url = "nats://127.0.0.1:4222"
