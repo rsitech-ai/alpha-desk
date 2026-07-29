@@ -41,6 +41,12 @@ All notable changes will be documented in this file. The format follows [Keep a 
   watermarks, gap recovery decisions, duplicate suppression, retained-history
   verification, source-evidence merging, and red-latched divergence
   quarantine.
+- Immutable chain-scoped canonical and raw Parquet archive with exact encoded
+  envelopes/payloads, atomic content-addressed catalog and per-hour partition
+  manifest chains, bounded corruption-before-yield reads, explicit archive
+  receipts, idempotent verified compaction, retained prior generations, a
+  deterministic mixed fixture, and independent DataFusion verification/count
+  tooling.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 
@@ -53,6 +59,7 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Stage 0 gate remains on `HOLD`.
 - Independent/recovery transports, proprietary operator-feed integration,
   real-node corpus qualification, the long-running capture runtime, remaining
-  source-to-canonical mappings, durable cursor/archive publication,
+  source-to-canonical mappings, archive-before-cursor coordination and
+  JetStream publication,
   APIs, research workflows, and native applications are not yet implemented.
 - No public release, supported version, production deployment, or performance qualification exists.

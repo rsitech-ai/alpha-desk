@@ -28,6 +28,7 @@ members = [
   "tools/schema-check",
   "tools/spool-inspect",
   "tools/canonical-inspect",
+  "tools/archive-inspect",
   "tools/build-info",
   "tools/architecture-check",
   "tools/stage-gate",
@@ -44,11 +45,13 @@ readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1.0"
+arrow = { version = "=58.4.0", default-features = false }
 async-trait = "0.1"
 blake3 = "1.8"
 bytes = "1.10"
 cargo_metadata = "=0.23.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+datafusion = { version = "=54.1.0", default-features = false, features = ["parquet"] }
 crc32c = "=0.6.8"
 hex = "0.4"
 http = "=1.4.2"
@@ -79,4 +82,5 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
+parquet = { version = "=58.4.0", default-features = false, features = ["arrow", "zstd"] }
 uuid = { version = "1.18", features = ["serde", "v7"] }

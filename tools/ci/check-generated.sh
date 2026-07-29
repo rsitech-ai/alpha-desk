@@ -58,6 +58,7 @@ readonly TARGET_TRUST="$TEMP_ROOT/target-trust"
 readonly TARGET_CANONICAL="$TEMP_ROOT/target-canonical"
 readonly TARGET_SEQUENCER="$TEMP_ROOT/target-sequencer"
 readonly TARGET_INSPECT="$TEMP_ROOT/target-inspect"
+readonly TARGET_ARCHIVE="$TEMP_ROOT/target-archive"
 readonly TARGET_MATERIAL="$TEMP_ROOT/target-material"
 readonly TARGET_CONTRACT_A="$TEMP_ROOT/target-contract-a"
 readonly TARGET_CONTRACT_B="$TEMP_ROOT/target-contract-b"
@@ -67,8 +68,13 @@ readonly TARGET_BUILD_B="$TEMP_ROOT/target-build-b"
 readonly CONTRACT_A="$TEMP_ROOT/contracts-a"
 readonly CONTRACT_B="$TEMP_ROOT/contracts-b"
 readonly GENERATED_SPOOL="$TEMP_ROOT/generated-spool"
+readonly GENERATED_ARCHIVE="$TEMP_ROOT/generated-archive"
 readonly GENERATED_CANONICAL="$TEMP_ROOT/generated-canonical.json"
-mkdir -p "$CONTRACT_A/rust" "$CONTRACT_B/rust" "$GENERATED_SPOOL"
+mkdir -p \
+  "$CONTRACT_A/rust" \
+  "$CONTRACT_B/rust" \
+  "$GENERATED_SPOOL" \
+  "$GENERATED_ARCHIVE"
 
 CARGO_TARGET_DIR="$TARGET_FIXTURES" \
   cargo +1.97.1 run -p fixture-inspect --frozen --offline -- \
@@ -106,6 +112,33 @@ CARGO_TARGET_DIR="$TARGET_INSPECT" \
   --manifest fixtures/canonical/node-v1/inspect.toml \
   --output "$GENERATED_CANONICAL"
 cmp fixtures/canonical/node-v1/expected.json "$GENERATED_CANONICAL"
+
+CARGO_TARGET_DIR="$TARGET_ARCHIVE" \
+  cargo +1.97.1 run -p archive-inspect --example generate-archive-fixture \
+  --frozen --offline -- "$GENERATED_ARCHIVE"
+diff -ru fixtures/archive/valid-v1 "$GENERATED_ARCHIVE"
+
+CARGO_TARGET_DIR="$TARGET_ARCHIVE" \
+  cargo +1.97.1 run -p archive-inspect --frozen --offline -- \
+  verify "$GENERATED_ARCHIVE" >"$TEMP_ROOT/archive-verify.txt"
+if ! diff -u - "$TEMP_ROOT/archive-verify.txt" <<'EXPECTED'
+PASS chains=1 raw_sources=1 blocks=3 canonical_events=3 raw_observations=3 objects=2
+EXPECTED
+then
+  printf 'generated-check:error archive verification summary changed\n' >&2
+  exit 1
+fi
+
+CARGO_TARGET_DIR="$TARGET_ARCHIVE" \
+  cargo +1.97.1 run -p archive-inspect --frozen --offline -- \
+  count "$GENERATED_ARCHIVE" >"$TEMP_ROOT/archive-count.txt"
+if ! diff -u - "$TEMP_ROOT/archive-count.txt" <<'EXPECTED'
+PASS canonical_events=3 canonical_objects=1
+EXPECTED
+then
+  printf 'generated-check:error archive count summary changed\n' >&2
+  exit 1
+fi
 
 CARGO_TARGET_DIR="$TARGET_MATERIAL" \
   cargo +1.97.1 run -p api-contracts --bin schema-generate --frozen --offline -- \

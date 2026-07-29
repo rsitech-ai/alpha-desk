@@ -15,6 +15,7 @@ cargo +1.97.1 metadata --format-version 1 --locked --offline
 cargo +1.97.1 test -p architecture-check --locked --offline
 cargo +1.97.1 run -p architecture-check --locked --offline -- check
 ./tools/ci/check-unsafe.sh
+./tools/ci/check-dependency-exceptions.sh
 cargo +1.97.1 deny --version # must print exactly: cargo-deny 0.20.2
 cargo +1.97.1 deny --locked --offline check bans licenses sources
 cargo +1.97.1 deny --locked --offline check advisories
@@ -64,25 +65,51 @@ The global allowlist contains only these exact SPDX identifiers or expressions:
 - `CDLA-Permissive-1.0`
 - `CDLA-Permissive-2.0`
 
-Zlib is not globally allowed. The only exception is `foldhash@0.1.5`, reached
-through the build-only
+Zlib is not globally allowed. The exact exceptions are `foldhash@0.1.5` on the
+build-only
 `api-contracts -> tonic-prost-build -> prost-build -> petgraph -> hashbrown`
-path. Remove the exception when that exact path stops resolving the package.
-Any other Zlib package fails the license check.
+path, `foldhash@0.2.0` on the
+`stage-gate -> jsonschema -> referencing -> hashbrown` path, and
+`zlib-rs@0.6.6` on the `DataFusion -> Parquet -> flate2` path. Remove each
+exception when its exact path stops resolving the package. Any other Zlib
+package fails the license check.
+
+CC0-1.0 is not globally allowed. The only exception is
+`tiny-keccak@2.0.2`, reached by the all-target
+`Arrow/Parquet -> ahash compile-time-rng -> const-random` path. CC0-1.0 is
+free/libre, but the exception remains exact so a new CC0 dependency requires
+review. Remove it when the pinned Arrow/Parquet line no longer resolves that
+package.
 
 License exceptions must name an exact package version, the otherwise rejected
 license, the dependency path, and a concrete removal condition. New global
 license identifiers require policy-owner review.
 
+## Advisory exceptions
+
+`RUSTSEC-2024-0436` is ignored only because the upstream Apache Parquet 58.4.0
+line still resolves `paste@1.0.15`, the advisory reports unmaintained status
+rather than a vulnerability, and no safe Parquet upgrade removes it. The
+archive implementation does not invoke `paste` directly. The committed
+lockfile and inverse dependency evidence bind the reviewed package and path.
+Remove the ignore immediately when the pinned Parquet/DataFusion-compatible
+line stops resolving `paste`; any vulnerability advisory remains a release
+blocker. The executable exception check accepts only Parquet 58.4.0, the exact
+DataFusion 54.1.0 crate family, `hl-analytics`, and `archive-inspect` in the
+inverse path; an unrelated consumer or version fails closed.
+
 ## Duplicate versions and dependency pins
 
 `multiple-versions = "deny"` and
-`multiple-versions-include-dev = true`. `skip-tree` is empty. The six current
+`multiple-versions-include-dev = true`. `skip-tree` is empty. The nine current
 transition exceptions are exact:
 
 | Exact skip | Verified transition path and removal trigger |
 |---|---|
+| `getrandom@0.2.17` | Arrow/Parquet all-target validation enables `ahash` compile-time RNG through `const-random`, while native `ahash` and workspace randomness use 0.3; remove when the all-target feature graph converges. |
 | `getrandom@0.4.3` | `tempfile 3.27.0` and `prost-build 0.14.4` use 0.4 while `rand_core 0.9.5` uses 0.3; remove after those consumers converge. |
+| `foldhash@0.2.0` | `jsonschema 0.48.5 -> referencing 0.48.5` uses 0.2 while the prost build path retains 0.1; remove after those consumers converge. |
+| `hashbrown@0.14.5` | `DataFusion 54.1.0 -> dashmap 6.2.1` uses 0.14 while Arrow 58.4.0 and `indexmap` use 0.17; remove after DashMap converges. |
 | `hashbrown@0.15.5` | `prost-build 0.14.4 -> petgraph 0.8.3` uses 0.15 while `indexmap 2.14.0` uses 0.17; remove after petgraph converges. |
 | `r-efi@6.0.0` | follows `getrandom 0.4.3`, while `getrandom 0.3.4` uses `r-efi 5.3.0`; remove with the getrandom transition. |
 | `syn@2.0.119` | prost/futures/tokio/tracing/wasm macro paths remain on syn 2 while serde/thiserror 2/async-trait use syn 3; remove after macro consumers converge. |

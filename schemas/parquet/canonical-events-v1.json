@@ -1,0 +1,23 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "canonical_events",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "canonical_event_envelope_pb"
+  ],
+  "fields": [
+    {"name": "chain_id", "type": "utf8", "nullable": false},
+    {"name": "block_height", "type": "uint64", "nullable": false},
+    {"name": "block_time_micros", "type": "int64", "nullable": false},
+    {"name": "canonical_block_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "confirmation_class", "type": "utf8", "nullable": false},
+    {"name": "transaction_id", "type": "utf8", "nullable": false},
+    {"name": "transaction_index", "type": "uint32", "nullable": false},
+    {"name": "canonical_event_index", "type": "uint32", "nullable": false},
+    {"name": "event_id", "type": "utf8", "nullable": false},
+    {"name": "event_kind", "type": "utf8", "nullable": false},
+    {"name": "schema_version", "type": "utf8", "nullable": false},
+    {"name": "payload_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "canonical_event_envelope_pb", "type": "binary", "nullable": false}
+  ]
+}

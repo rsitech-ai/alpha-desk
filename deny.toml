@@ -5,7 +5,13 @@ all-features = true
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
-ignore = []
+ignore = [
+  # Apache Parquet 58.4.0 still uses paste 1.0.15 internally. The advisory is
+  # unmaintained-only, with no reported vulnerability or safe upstream
+  # upgrade. Remove immediately when the pinned Parquet/DataFusion-compatible
+  # line no longer resolves paste.
+  "RUSTSEC-2024-0436",
+]
 
 [licenses]
 allow = [
@@ -34,6 +40,13 @@ exceptions = [
   # Stage-gate structural validation path: jsonschema -> referencing ->
   # hashbrown. Remove when referencing no longer resolves this foldhash line.
   { crate = "foldhash@0.2.0", allow = ["Zlib"] },
+  # DataFusion's Parquet feature enables flate2, whose Rust backend is zlib-rs.
+  # Remove when the exact DataFusion/Parquet path no longer resolves it.
+  { crate = "zlib-rs@0.6.6", allow = ["Zlib"] },
+  # All-target Arrow/Parquet path: ahash compile-time-rng -> const-random ->
+  # tiny-keccak. CC0-1.0 is FSF free/libre; keep it scoped to this exact
+  # package and remove when ahash's all-target feature graph no longer uses it.
+  { crate = "tiny-keccak@2.0.2", allow = ["CC0-1.0"] },
 ]
 
 [licenses.private]
@@ -50,8 +63,10 @@ deny = []
 # Exact transition exceptions only. Each is one side of a verified two-version
 # line; skip-tree is intentionally empty so no transitive crate is hidden.
 skip = [
+  { crate = "getrandom@0.2.17", reason = "Arrow/Parquet all-target validation reaches ahash compile-time-rng through const-random while native ahash and workspace randomness use getrandom 0.3" },
   { crate = "getrandom@0.4.3", reason = "tempfile 3.27.0 and prost-build 0.14.4 require getrandom 0.4 while rand_core 0.9.5 still requires 0.3" },
   { crate = "foldhash@0.2.0", reason = "jsonschema 0.48.5 reaches foldhash 0.2 through referencing 0.48.5 while prost-build 0.14.4 retains foldhash 0.1 through petgraph 0.8.3" },
+  { crate = "hashbrown@0.14.5", reason = "DataFusion 54.1.0 reaches hashbrown 0.14 through dashmap 6.2.1 while Arrow 58.4.0 and indexmap use 0.17" },
   { crate = "hashbrown@0.15.5", reason = "prost-build 0.14.4 reaches hashbrown 0.15 through petgraph 0.8.3 while indexmap 2.14.0 uses 0.17" },
   { crate = "r-efi@6.0.0", reason = "getrandom 0.4.3 requires r-efi 6 while the retained getrandom 0.3.4 branch requires r-efi 5" },
   { crate = "syn@2.0.119", reason = "prost, futures, tokio, tracing, and wasm macro paths remain on syn 2 while serde, thiserror 2, and async-trait have moved to syn 3" },

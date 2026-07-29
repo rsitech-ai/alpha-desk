@@ -784,9 +784,9 @@ fn approval_verifier_mutating_a_tracked_file_fails_final_snapshot_check() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let failure: serde_json::Value =
         serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
-    assert_eq!(failure["stage_outcome"], "HOLD");
-    assert_eq!(failure["overall_result"], "FAIL");
-    assert_eq!(failure["failure_phase"], "repository");
+    assert_eq!(failure["stage_outcome"], "HOLD", "{failure:#}");
+    assert_eq!(failure["overall_result"], "FAIL", "{failure:#}");
+    assert_eq!(failure["failure_phase"], "repository", "{failure:#}");
     assert!(
         fs::read_to_string(repository.join("design.md"))
             .unwrap()

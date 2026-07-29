@@ -118,6 +118,30 @@ PostgreSQL image in an isolated no-port container:
 just postgres-migration-smoke
 ```
 
+The focused immutable-archive checks are:
+
+```sh
+cargo +1.97.1 test -p hl-analytics --test archive --locked --offline
+cargo +1.97.1 test -p archive-inspect --locked --offline
+cargo +1.97.1 clippy -p storage-ports -p hl-analytics -p archive-inspect \
+  --all-targets --all-features --locked --offline -- -D warnings
+cargo +1.97.1 run -p archive-inspect --locked --offline -- verify <archive-root>
+cargo +1.97.1 run -p archive-inspect --locked --offline -- count <archive-root>
+just archive-verify
+just archive-count
+```
+
+The library preserves exact canonical Protobuf envelopes and raw source bytes,
+verifies complete manifest chains and all requested objects before yielding,
+and supports idempotent immutable compaction without deleting prior
+generations. `count` uses DataFusion as an independent Parquet readability and
+row-count check. The normative format and recovery boundary is
+[`formats/archive-manifest-v1.md`](formats/archive-manifest-v1.md). This is
+storage-layer evidence only: capture still lacks archive-before-cursor
+coordination, JetStream publication, and a long-running runtime.
+The default `just` commands use the byte-reproducible synthetic fixture under
+`fixtures/archive/valid-v1`; empty archive roots fail closed.
+
 ## Engineering rules
 
 - Write a focused failing test before behavior changes.

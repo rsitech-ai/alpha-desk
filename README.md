@@ -2,7 +2,7 @@
 
 Hyperliquid Alpha Desk is a local-first, read-only market-intelligence and research workstation under active development by RSI Tech. Its production design centers on byte-preserving source capture, a deterministic canonical ledger, reproducible research, evidence-linked signals, and native Apple clients.
 
-This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation, unreleased Stage 1 capture and canonical-identity foundations, and the approved staged design. The Stage 0 release gate remains on `HOLD`; a long-running capture service, independent sources, complete source mapping and sequencing, APIs, research workflows, and native UI are planned work.
+This repository is not yet a runnable desk application. It currently contains a substantial Stage 0 engineering foundation, unreleased Stage 1 capture, canonical-identity, continuity, and immutable-archive foundations, and the approved staged design. The Stage 0 release gate remains on `HOLD`; archive-before-cursor runtime orchestration, independent sources, complete source mapping, APIs, research workflows, and native UI are planned work.
 
 ## Current state
 
@@ -13,7 +13,8 @@ This repository is not yet a runnable desk application. It currently contains a 
 | Stage 0 gate tooling | Implemented; gate outcome `HOLD` | [`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml) |
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
 | Source observation, strict spool, primary-node adapters, source-trust admission, canonical event/block identity, conservative public trade mapping, and V1 upcast validation | Implemented and locally tested as libraries/tools; no service runtime or real-node qualification yet | [`docs/STATUS.md`](docs/STATUS.md) |
-| Complete durable capture and canonical truth-layer runtime | Partially implemented; independent sources, runtime orchestration, continuity, archive, replay, and publication remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Immutable canonical/raw Parquet archive, verified compaction, replay reads, and offline inspection | Implemented and locally tested as libraries/tools; not wired to a service cursor or JetStream | [`docs/formats/archive-manifest-v1.md`](docs/formats/archive-manifest-v1.md) |
+| Complete durable capture and canonical truth-layer runtime | Partially implemented; independent sources, runtime orchestration, archive-before-cursor coordination, replay service, and publication remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |
 
@@ -57,6 +58,8 @@ Run the normal local verification:
 just verify
 just generated
 just spool-verify
+cargo +1.97.1 test -p hl-analytics --test archive --locked --offline
+cargo +1.97.1 test -p archive-inspect --locked --offline
 ```
 
 `just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
@@ -83,7 +86,7 @@ For focused commands and development conventions, read [docs/DEVELOPMENT.md](doc
 - `schemas/` — versioned Protobuf and JSON contracts
 - `fixtures/` — deterministic synthetic fixtures and provenance-labeled normalized public schema examples
 - `infra/` — local dependency and future deployment scaffolding
-- `tools/` — schema, architecture, provenance, fixture, spool inspection, and stage-gate tooling
+- `tools/` — schema, architecture, provenance, fixture, spool/archive inspection, and stage-gate tooling
 - `docs/superpowers/` — approved design, stage plans, traceability, and reviews
 
 ## Safety boundary
