@@ -124,9 +124,8 @@ manifest bytes, and finally compares the complete chain/reducer/archive/schema
 compatibility contract. A restored `CanonicalLedger` must use the exact reducer
 set recorded in the image.
 
-The filesystem store, atomic publication, RocksDB checkpoint adapter, and
-archive replay runtime remain later milestones. The current in-memory state
-image is a deterministic reference representation, not a claim that a
+The RocksDB checkpoint adapter remains a later milestone. The current in-memory
+state image is a deterministic reference representation, not a claim that a
 multi-gigabyte production state should be materialized in one allocation.
 
 ### Local checkpoint store
@@ -162,6 +161,37 @@ the domain artifact, compare the directory ID, and only then validate runtime
 compatibility. This store is crash-safe local reference checkpoint evidence;
 the RocksDB-native hot-state/checkpoint implementation remains M5.
 
+## Serial immutable-manifest replay
+
+`replay-engine` is the serial reference implementation. A replay request binds
+the chain, inclusive height range, ordered immutable block-manifest IDs,
+expected starting state hash, canonical dataset name, and expected schema
+fingerprint. Production defaults reject requests above 10,000,000 blocks or
+100,000 manifests.
+
+Before mutating the ledger, the engine verifies every manifest and rejects:
+
+- a manifest for another chain;
+- a manifest ID/content mismatch;
+- a gap, overlap, reordering, duplicate ID, or incomplete requested range;
+- a schema fingerprint mismatch;
+- a range/count overflow; or
+- a starting state hash or height incompatible with the current ledger.
+
+Replay never follows mutable `CURRENT` archive pointers. Each verified
+manifest is read by its content-derived identity after preflight. Blocks are
+then applied serially through the same block-atomic ledger path. Archive
+content divergence stops replay, while an unsupported or invalid block returns
+the exact quarantine height and reducer reason after preserving all previously
+committed blocks and rejecting the failing block.
+
+Cancellation is observed only between blocks. Completed and cancelled receipts
+bind the status, chain, planned range, start/final state hashes, reducer-set
+version, applied count, last committed block identity, and every manifest
+identity/range in canonical bytes. The receipt hash uses BLAKE3 derive-key
+context `hyperliquid-alpha-desk/replay-receipt-hash/v1`; a fixed completed
+receipt vector protects the V1 framing.
+
 ## Current evidence and limitations
 
 Focused tests prove:
@@ -178,8 +208,15 @@ Focused tests prove:
   committed blocks while quarantining a typed trade block without state
   effects; and
 - exact state-image decode/resume, canonical checkpoint manifest round-trip,
-  state tamper detection, and all bound compatibility identities.
+  state tamper detection, and all bound compatibility identities;
+- private descriptor-relative checkpoint publication/load, including symlink,
+  permission, truncation, incomplete-generation, and parent-path-retarget
+  rejection; and
+- two byte-identical clean replays, checkpoint-equivalent resume, immutable
+  manifest reads after `CURRENT` advances, preflight rejection without
+  mutation, wrong-chain and wrong-start-state rejection, block-boundary
+  cancellation, poison-block quarantine, and a fixed replay-receipt hash.
 
-This does not prove action-bearing account or order state, checkpoint crash
-safety, archive replay, RocksDB durability, reconciliation, live-source
-compatibility, or Stage 2 readiness.
+This does not prove action-bearing account or order state, RocksDB durability,
+reconciliation, live-source compatibility, a production replay process or CLI,
+or Stage 2 readiness.

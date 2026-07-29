@@ -648,6 +648,7 @@ impl ArchiveObject {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedManifest {
     manifest_id: ManifestId,
+    chain_id: ChainId,
     object_count: u64,
     row_count: u64,
     block_range: BlockRange,
@@ -662,6 +663,7 @@ impl VerifiedManifest {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         manifest_id: ManifestId,
+        chain_id: ChainId,
         row_count: u64,
         block_range: BlockRange,
         manifest_sha256: [u8; 32],
@@ -679,6 +681,7 @@ impl VerifiedManifest {
             .map_err(|_| ArchiveError::InvalidInput("archive object count exceeds u64"))?;
         Ok(Self {
             manifest_id,
+            chain_id,
             object_count,
             row_count,
             block_range,
@@ -693,6 +696,11 @@ impl VerifiedManifest {
     #[must_use]
     pub const fn manifest_id(&self) -> &ManifestId {
         &self.manifest_id
+    }
+
+    #[must_use]
+    pub const fn chain_id(&self) -> &ChainId {
+        &self.chain_id
     }
 
     #[must_use]
@@ -799,6 +807,8 @@ pub trait CanonicalArchive: Send + Sync {
     -> Result<BlockIterator, ArchiveError>;
 
     fn verify_manifest(&self, manifest: &ManifestId) -> Result<VerifiedManifest, ArchiveError>;
+
+    fn read_manifest_blocks(&self, manifest: &ManifestId) -> Result<BlockIterator, ArchiveError>;
 }
 
 pub trait CanonicalArchiveMaintenance: Send + Sync {

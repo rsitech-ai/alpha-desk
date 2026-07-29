@@ -180,6 +180,7 @@ pub fn verify_block_manifest(
     let schema_fingerprint = schema::canonical_schema_fingerprint()?;
     VerifiedManifest::try_new(
         manifest_id.clone(),
+        first.chain_id().clone(),
         loaded.value.object.row_count,
         range,
         hash,
@@ -188,6 +189,22 @@ pub fn verify_block_manifest(
         Vec::new(),
         vec![object],
     )
+}
+
+pub fn read_manifest_blocks(
+    archive: &LocalParquetArchive,
+    manifest_id: &ManifestId,
+) -> Result<BlockIterator, ArchiveError> {
+    let hash = manifest::hash_from_manifest_id(manifest_id)?;
+    let relative = global_block_manifest_relative(hash);
+    let loaded = load_block_at(archive.root(), &relative)?;
+    if loaded.hash != hash {
+        return Err(ArchiveError::ManifestVerification(
+            "manifest ID does not match block manifest bytes",
+        ));
+    }
+    let (blocks, _) = verify_and_decode_bundle(archive, &loaded.value)?;
+    Ok(Box::new(blocks.into_iter().map(Ok)))
 }
 
 pub fn read_range(
