@@ -1,9 +1,9 @@
 use api_contracts::{
-    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireAccountModeChanged, WireBuilderFeeCharged,
-    WireCanonicalEventEnvelope, WireDepositCredited, WireFeeCharged, WireFundingPaid,
-    WireFundingReceived, WireLeverageChanged, WireMarginModeChanged, WirePerpTransfer,
-    WireReferralReward, WireSpotTransfer, WireSubaccountTransfer, WireVaultDeposit,
-    WireVaultWithdrawal, WireWithdrawalDebited, decode_deposit_credited,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAccountModeChanged,
+    WireBuilderFeeCharged, WireCanonicalEventEnvelope, WireDepositCredited, WireFeeCharged,
+    WireFundingPaid, WireFundingReceived, WireLeverageChanged, WireMarginModeChanged,
+    WirePerpTransfer, WireReferralReward, WireSpotTransfer, WireSubaccountTransfer,
+    WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited, decode_deposit_credited,
     encode_account_mode_changed, encode_builder_fee_charged, encode_default_event_payload,
     encode_deposit_credited, encode_fee_charged, encode_funding_paid, encode_funding_received,
     encode_leverage_changed, encode_margin_mode_changed, encode_perp_transfer,
@@ -124,6 +124,20 @@ fn valid_deposit_bytes() -> Vec<u8> {
         deposit_reference: "deposit-42".to_owned(),
     })
     .unwrap()
+}
+
+fn assert_wire_or_canonical_rejects(
+    kind: EventKind,
+    result: Result<Vec<u8>, PayloadCodecError>,
+    field: &str,
+    invalid: &str,
+) {
+    if let Ok(bytes) = result {
+        assert!(
+            EventPayload::decode(kind, &bytes).is_err(),
+            "{field} accepted {invalid:?}"
+        );
+    }
 }
 
 fn deposit_envelope() -> CanonicalEventEnvelope {
@@ -722,6 +736,443 @@ fn fee_funding_reward_and_mode_payloads_reject_financially_invalid_values() {
     .unwrap();
     let noncanonical = mutate_inner_message(&valid, |message| append_varint_field(message, 100, 1));
     assert!(EventPayload::decode(EventKind::ReferralReward, &noncanonical).is_err());
+}
+
+#[test]
+fn every_task2_positive_amount_field_rejects_zero_negative_malformed_and_overprecision() {
+    let account_id = account(0x11).to_api_string();
+    let other_account_id = account(0x22).to_api_string();
+
+    for invalid in [
+        "0".to_owned(),
+        "-1".to_owned(),
+        "not-a-decimal".to_owned(),
+        format!("0.{}", "1".repeat(39)),
+    ] {
+        let cases = [
+            (
+                EventKind::FeeCharged,
+                encode_fee_charged(&WireFeeCharged {
+                    account_id: account_id.clone(),
+                    asset_id: "USDC".to_owned(),
+                    amount: invalid.clone(),
+                    fee_rate: "0.0001".to_owned(),
+                    fee_type: "maker".to_owned(),
+                }),
+                "FeeCharged.amount",
+            ),
+            (
+                EventKind::BuilderFeeCharged,
+                encode_builder_fee_charged(&WireBuilderFeeCharged {
+                    account_id: account_id.clone(),
+                    builder_account_id: other_account_id.clone(),
+                    asset_id: "USDC".to_owned(),
+                    amount: invalid.clone(),
+                }),
+                "BuilderFeeCharged.amount",
+            ),
+            (
+                EventKind::FundingPaid,
+                encode_funding_paid(&WireFundingPaid {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    amount: invalid.clone(),
+                    funding_rate: "-0.0001".to_owned(),
+                }),
+                "FundingPaid.amount",
+            ),
+            (
+                EventKind::FundingReceived,
+                encode_funding_received(&WireFundingReceived {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    amount: invalid.clone(),
+                    funding_rate: "0.0001".to_owned(),
+                }),
+                "FundingReceived.amount",
+            ),
+            (
+                EventKind::ReferralReward,
+                encode_referral_reward(&WireReferralReward {
+                    account_id: account_id.clone(),
+                    referrer_account_id: other_account_id.clone(),
+                    asset_id: "USDC".to_owned(),
+                    amount: invalid.clone(),
+                }),
+                "ReferralReward.amount",
+            ),
+        ];
+
+        for (kind, result, field) in cases {
+            assert_wire_or_canonical_rejects(kind, result, field, &invalid);
+        }
+    }
+}
+
+#[test]
+fn both_leverage_fields_reject_zero_negative_malformed_and_overprecision() {
+    let account_id = account(0x11).to_api_string();
+
+    for invalid in [
+        "0".to_owned(),
+        "-1".to_owned(),
+        "not-a-decimal".to_owned(),
+        format!("0.{}", "1".repeat(39)),
+    ] {
+        for (result, field) in [
+            (
+                encode_leverage_changed(&WireLeverageChanged {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    previous_leverage: invalid.clone(),
+                    new_leverage: "5".to_owned(),
+                }),
+                "LeverageChanged.previous_leverage",
+            ),
+            (
+                encode_leverage_changed(&WireLeverageChanged {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    previous_leverage: "3".to_owned(),
+                    new_leverage: invalid.clone(),
+                }),
+                "LeverageChanged.new_leverage",
+            ),
+        ] {
+            assert_wire_or_canonical_rejects(EventKind::LeverageChanged, result, field, &invalid);
+        }
+    }
+}
+
+#[test]
+fn fee_and_funding_rates_enforce_the_domain_max_precision_independently() {
+    let account_id = account(0x11).to_api_string();
+
+    for invalid in ["not-a-rate".to_owned(), format!("0.{}", "1".repeat(39))] {
+        for (kind, result, field) in [
+            (
+                EventKind::FeeCharged,
+                encode_fee_charged(&WireFeeCharged {
+                    account_id: account_id.clone(),
+                    asset_id: "USDC".to_owned(),
+                    amount: "1".to_owned(),
+                    fee_rate: invalid.clone(),
+                    fee_type: "maker".to_owned(),
+                }),
+                "FeeCharged.fee_rate",
+            ),
+            (
+                EventKind::FundingPaid,
+                encode_funding_paid(&WireFundingPaid {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    amount: "1".to_owned(),
+                    funding_rate: invalid.clone(),
+                }),
+                "FundingPaid.funding_rate",
+            ),
+            (
+                EventKind::FundingReceived,
+                encode_funding_received(&WireFundingReceived {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    amount: "1".to_owned(),
+                    funding_rate: invalid.clone(),
+                }),
+                "FundingReceived.funding_rate",
+            ),
+        ] {
+            assert_wire_or_canonical_rejects(kind, result, field, &invalid);
+        }
+    }
+
+    let at_domain_max = format!("0.{}1", "0".repeat(37));
+    let cases = [
+        (
+            EventKind::FeeCharged,
+            encode_fee_charged(&WireFeeCharged {
+                account_id: account_id.clone(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                fee_rate: at_domain_max.clone(),
+                fee_type: "maker".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::FundingPaid,
+            encode_funding_paid(&WireFundingPaid {
+                account_id: account_id.clone(),
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: at_domain_max.clone(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::FundingReceived,
+            encode_funding_received(&WireFundingReceived {
+                account_id,
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: at_domain_max,
+            })
+            .unwrap(),
+        ),
+    ];
+    for (kind, bytes) in cases {
+        EventPayload::decode(kind, &bytes).unwrap_or_else(|error| {
+            panic!("{kind:?} rejected the 38-digit domain maximum: {error}")
+        });
+    }
+}
+
+#[test]
+fn every_task2_family_rejects_malformed_addresses_markets_and_assets() {
+    let account_id = account(0x11).to_api_string();
+    let other_account_id = account(0x22).to_api_string();
+    let invalid_account = "0X1111111111111111111111111111111111111111";
+    let invalid_asset = " USDC";
+    let invalid_market = " perp:BTC";
+
+    let cases = [
+        (
+            EventKind::FeeCharged,
+            encode_fee_charged(&WireFeeCharged {
+                account_id: invalid_account.to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                fee_rate: "0.0001".to_owned(),
+                fee_type: "maker".to_owned(),
+            }),
+            "FeeCharged.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::FeeCharged,
+            encode_fee_charged(&WireFeeCharged {
+                account_id: account_id.clone(),
+                asset_id: invalid_asset.to_owned(),
+                amount: "1".to_owned(),
+                fee_rate: "0.0001".to_owned(),
+                fee_type: "maker".to_owned(),
+            }),
+            "FeeCharged.asset_id",
+            invalid_asset,
+        ),
+        (
+            EventKind::BuilderFeeCharged,
+            encode_builder_fee_charged(&WireBuilderFeeCharged {
+                account_id: invalid_account.to_owned(),
+                builder_account_id: other_account_id.clone(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            }),
+            "BuilderFeeCharged.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::BuilderFeeCharged,
+            encode_builder_fee_charged(&WireBuilderFeeCharged {
+                account_id: account_id.clone(),
+                builder_account_id: invalid_account.to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            }),
+            "BuilderFeeCharged.builder_account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::BuilderFeeCharged,
+            encode_builder_fee_charged(&WireBuilderFeeCharged {
+                account_id: account_id.clone(),
+                builder_account_id: other_account_id.clone(),
+                asset_id: invalid_asset.to_owned(),
+                amount: "1".to_owned(),
+            }),
+            "BuilderFeeCharged.asset_id",
+            invalid_asset,
+        ),
+        (
+            EventKind::FundingPaid,
+            encode_funding_paid(&WireFundingPaid {
+                account_id: invalid_account.to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "-0.0001".to_owned(),
+            }),
+            "FundingPaid.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::FundingPaid,
+            encode_funding_paid(&WireFundingPaid {
+                account_id: account_id.clone(),
+                market_id: invalid_market.to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "-0.0001".to_owned(),
+            }),
+            "FundingPaid.market_id",
+            invalid_market,
+        ),
+        (
+            EventKind::FundingReceived,
+            encode_funding_received(&WireFundingReceived {
+                account_id: invalid_account.to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "0.0001".to_owned(),
+            }),
+            "FundingReceived.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::FundingReceived,
+            encode_funding_received(&WireFundingReceived {
+                account_id: account_id.clone(),
+                market_id: invalid_market.to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "0.0001".to_owned(),
+            }),
+            "FundingReceived.market_id",
+            invalid_market,
+        ),
+        (
+            EventKind::ReferralReward,
+            encode_referral_reward(&WireReferralReward {
+                account_id: invalid_account.to_owned(),
+                referrer_account_id: other_account_id.clone(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            }),
+            "ReferralReward.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::ReferralReward,
+            encode_referral_reward(&WireReferralReward {
+                account_id: account_id.clone(),
+                referrer_account_id: invalid_account.to_owned(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            }),
+            "ReferralReward.referrer_account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::ReferralReward,
+            encode_referral_reward(&WireReferralReward {
+                account_id: account_id.clone(),
+                referrer_account_id: other_account_id.clone(),
+                asset_id: invalid_asset.to_owned(),
+                amount: "1".to_owned(),
+            }),
+            "ReferralReward.asset_id",
+            invalid_asset,
+        ),
+        (
+            EventKind::AccountModeChanged,
+            encode_account_mode_changed(&WireAccountModeChanged {
+                account_id: invalid_account.to_owned(),
+                previous_mode: "standard".to_owned(),
+                new_mode: "unified".to_owned(),
+            }),
+            "AccountModeChanged.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::MarginModeChanged,
+            encode_margin_mode_changed(&WireMarginModeChanged {
+                account_id: invalid_account.to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                previous_mode: "cross".to_owned(),
+                new_mode: "isolated".to_owned(),
+            }),
+            "MarginModeChanged.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::MarginModeChanged,
+            encode_margin_mode_changed(&WireMarginModeChanged {
+                account_id: account_id.clone(),
+                market_id: invalid_market.to_owned(),
+                previous_mode: "cross".to_owned(),
+                new_mode: "isolated".to_owned(),
+            }),
+            "MarginModeChanged.market_id",
+            invalid_market,
+        ),
+        (
+            EventKind::LeverageChanged,
+            encode_leverage_changed(&WireLeverageChanged {
+                account_id: invalid_account.to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                previous_leverage: "3".to_owned(),
+                new_leverage: "5".to_owned(),
+            }),
+            "LeverageChanged.account_id",
+            invalid_account,
+        ),
+        (
+            EventKind::LeverageChanged,
+            encode_leverage_changed(&WireLeverageChanged {
+                account_id,
+                market_id: invalid_market.to_owned(),
+                previous_leverage: "3".to_owned(),
+                new_leverage: "5".to_owned(),
+            }),
+            "LeverageChanged.market_id",
+            invalid_market,
+        ),
+    ];
+
+    for (kind, result, field, invalid) in cases {
+        assert_wire_or_canonical_rejects(kind, result, field, invalid);
+    }
+}
+
+#[test]
+fn funding_paid_and_received_accept_negative_zero_and_positive_rates() {
+    let account_id = account(0x11);
+    let market_id = MarketId::new("perp:BTC").unwrap();
+
+    for funding_rate in ["-0.0001", "0", "0.0001"] {
+        let expected_rate = FundingRate::parse_at_scale(funding_rate, 6).unwrap();
+        for (kind, bytes) in [
+            (
+                EventKind::FundingPaid,
+                encode_funding_paid(&WireFundingPaid {
+                    account_id: account_id.to_api_string(),
+                    market_id: market_id.to_string(),
+                    amount: "1".to_owned(),
+                    funding_rate: funding_rate.to_owned(),
+                })
+                .unwrap(),
+            ),
+            (
+                EventKind::FundingReceived,
+                encode_funding_received(&WireFundingReceived {
+                    account_id: account_id.to_api_string(),
+                    market_id: market_id.to_string(),
+                    amount: "1".to_owned(),
+                    funding_rate: funding_rate.to_owned(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            let payload = EventPayload::decode(kind, &bytes).unwrap();
+            assert_eq!(payload.encode_to_vec().unwrap(), bytes);
+            match payload {
+                EventPayload::FundingPaid(value) => {
+                    assert_eq!(value.funding_rate, expected_rate);
+                }
+                EventPayload::FundingReceived(value) => {
+                    assert_eq!(value.funding_rate, expected_rate);
+                }
+                other => panic!("decoded {kind:?} as {:?}", other.kind()),
+            }
+        }
+    }
 }
 
 #[test]

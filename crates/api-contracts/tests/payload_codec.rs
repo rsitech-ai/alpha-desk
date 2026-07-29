@@ -56,6 +56,78 @@ fn deposit_with_asset_bytes(asset_bytes: usize) -> WireDepositCredited {
     }
 }
 
+fn primary_account() -> String {
+    "0x1111111111111111111111111111111111111111".to_owned()
+}
+
+fn secondary_account() -> String {
+    "0x2222222222222222222222222222222222222222".to_owned()
+}
+
+fn encode_fee_with_asset_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_fee_charged(&WireFeeCharged {
+        account_id: primary_account(),
+        asset_id: "A".repeat(bytes),
+        amount: "1".to_owned(),
+        fee_rate: "-0.0001".to_owned(),
+        fee_type: "maker_rebate".to_owned(),
+    })
+}
+
+fn encode_builder_fee_with_asset_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_builder_fee_charged(&WireBuilderFeeCharged {
+        account_id: primary_account(),
+        builder_account_id: secondary_account(),
+        asset_id: "A".repeat(bytes),
+        amount: "1".to_owned(),
+    })
+}
+
+fn encode_funding_paid_with_market_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_funding_paid(&WireFundingPaid {
+        account_id: primary_account(),
+        market_id: "M".repeat(bytes),
+        amount: "1".to_owned(),
+        funding_rate: "-0.0001".to_owned(),
+    })
+}
+
+fn encode_funding_received_with_market_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_funding_received(&WireFundingReceived {
+        account_id: primary_account(),
+        market_id: "M".repeat(bytes),
+        amount: "1".to_owned(),
+        funding_rate: "0.0001".to_owned(),
+    })
+}
+
+fn encode_referral_reward_with_asset_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_referral_reward(&WireReferralReward {
+        account_id: primary_account(),
+        referrer_account_id: secondary_account(),
+        asset_id: "A".repeat(bytes),
+        amount: "1".to_owned(),
+    })
+}
+
+fn encode_margin_mode_with_market_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_margin_mode_changed(&WireMarginModeChanged {
+        account_id: primary_account(),
+        market_id: "M".repeat(bytes),
+        previous_mode: "cross".to_owned(),
+        new_mode: "isolated".to_owned(),
+    })
+}
+
+fn encode_leverage_with_market_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_leverage_changed(&WireLeverageChanged {
+        account_id: primary_account(),
+        market_id: "M".repeat(bytes),
+        previous_leverage: "3".to_owned(),
+        new_leverage: "5".to_owned(),
+    })
+}
+
 fn assert_account_payload_size_error(error: PayloadCodecError, kind: &str) {
     assert!(matches!(
         error,
@@ -64,6 +136,30 @@ fn assert_account_payload_size_error(error: PayloadCodecError, kind: &str) {
             reason,
         } if actual_kind == kind && reason == ACCOUNT_PAYLOAD_SIZE_REASON
     ));
+}
+
+fn assert_encoder_exact_one_over_and_70k(
+    kind: &str,
+    encoder: fn(usize) -> Result<Vec<u8>, PayloadCodecError>,
+) {
+    let seed_field_bytes = ACCOUNT_PAYLOAD_LIMIT - 1_024;
+    let seed = encoder(seed_field_bytes).unwrap();
+    assert!(seed.len() < ACCOUNT_PAYLOAD_LIMIT);
+
+    let exact_field_bytes = seed_field_bytes + ACCOUNT_PAYLOAD_LIMIT - seed.len();
+    let exact = encoder(exact_field_bytes).unwrap();
+    assert_eq!(
+        exact.len(),
+        ACCOUNT_PAYLOAD_LIMIT,
+        "{kind} encoder rejected the inclusive boundary"
+    );
+
+    assert_account_payload_size_result(encoder(exact_field_bytes + 1), kind);
+    let outcome = std::panic::catch_unwind(|| encoder(70_000));
+    let error = outcome
+        .unwrap_or_else(|_| panic!("{kind} public encoder panicked on a 70k probe"))
+        .unwrap_err();
+    assert_account_payload_size_error(error, kind);
 }
 
 fn assert_account_payload_size_result(result: Result<Vec<u8>, PayloadCodecError>, kind: &str) {
@@ -543,7 +639,7 @@ fn account_cash_flow_payload_bound_is_inclusive_and_stable() {
 }
 
 #[test]
-fn every_account_cash_flow_codec_enforces_the_shared_payload_bound() {
+fn every_task1_account_codec_enforces_the_shared_payload_bound() {
     let account = "0x1111111111111111111111111111111111111111".to_owned();
     let other_account = "0x2222222222222222222222222222222222222222".to_owned();
     let oversized = "X".repeat(70_000);
@@ -652,6 +748,119 @@ fn every_account_cash_flow_codec_enforces_the_shared_payload_bound() {
         match result {
             Err(error) => assert_account_payload_size_error(error, kind),
             Ok(()) => panic!("{kind} oversized decoder unexpectedly succeeded"),
+        }
+    }
+}
+
+#[test]
+fn every_task2_public_encoder_and_direct_decoder_enforces_the_shared_payload_bound() {
+    for (kind, encoder) in [
+        (
+            "FeeCharged",
+            encode_fee_with_asset_bytes as fn(usize) -> Result<Vec<u8>, PayloadCodecError>,
+        ),
+        ("BuilderFeeCharged", encode_builder_fee_with_asset_bytes),
+        ("FundingPaid", encode_funding_paid_with_market_bytes),
+        ("FundingReceived", encode_funding_received_with_market_bytes),
+        ("ReferralReward", encode_referral_reward_with_asset_bytes),
+        ("MarginModeChanged", encode_margin_mode_with_market_bytes),
+        ("LeverageChanged", encode_leverage_with_market_bytes),
+    ] {
+        assert_encoder_exact_one_over_and_70k(kind, encoder);
+    }
+
+    let account_modes = ["standard", "unified", "portfolio", "dex_abstraction"];
+    // AccountModeChanged is structurally bounded: the address validator admits
+    // exactly 42 bytes and both modes come from this frozen four-value set.
+    // Exhausting every valid transition therefore covers every encodable size.
+    for previous_mode in account_modes {
+        for new_mode in account_modes {
+            if previous_mode == new_mode {
+                continue;
+            }
+            let value = WireAccountModeChanged {
+                account_id: primary_account(),
+                previous_mode: previous_mode.to_owned(),
+                new_mode: new_mode.to_owned(),
+            };
+            let encoded = encode_account_mode_changed(&value).unwrap();
+            assert!(
+                encoded.len() < ACCOUNT_PAYLOAD_LIMIT,
+                "the fixed-width AccountModeChanged encoder exceeded the account bound"
+            );
+            assert_eq!(decode_account_mode_changed(&encoded).unwrap(), value);
+        }
+    }
+    for probe_bytes in [ACCOUNT_PAYLOAD_LIMIT, ACCOUNT_PAYLOAD_LIMIT + 1, 70_000] {
+        let outcome = std::panic::catch_unwind(|| {
+            encode_account_mode_changed(&WireAccountModeChanged {
+                account_id: primary_account(),
+                previous_mode: "standard".to_owned(),
+                new_mode: "X".repeat(probe_bytes),
+            })
+        });
+        assert!(matches!(
+            outcome.unwrap_or_else(|_| {
+                panic!("AccountModeChanged public encoder panicked on malformed input")
+            }),
+            Err(PayloadCodecError::Invalid { kind, .. }) if kind == "AccountModeChanged"
+        ));
+    }
+
+    type Decoder = fn(&[u8]) -> Result<(), PayloadCodecError>;
+    let decoders: [(&str, Decoder); 8] = [
+        ("FeeCharged", |bytes| decode_fee_charged(bytes).map(|_| ())),
+        ("BuilderFeeCharged", |bytes| {
+            decode_builder_fee_charged(bytes).map(|_| ())
+        }),
+        ("FundingPaid", |bytes| {
+            decode_funding_paid(bytes).map(|_| ())
+        }),
+        ("FundingReceived", |bytes| {
+            decode_funding_received(bytes).map(|_| ())
+        }),
+        ("ReferralReward", |bytes| {
+            decode_referral_reward(bytes).map(|_| ())
+        }),
+        ("AccountModeChanged", |bytes| {
+            decode_account_mode_changed(bytes).map(|_| ())
+        }),
+        ("MarginModeChanged", |bytes| {
+            decode_margin_mode_changed(bytes).map(|_| ())
+        }),
+        ("LeverageChanged", |bytes| {
+            decode_leverage_changed(bytes).map(|_| ())
+        }),
+    ];
+    for (kind, decode) in decoders {
+        let default = encode_default_event_payload(kind).unwrap();
+
+        let exact = pad_outer_unknown_to_exact_size(&default, ACCOUNT_PAYLOAD_LIMIT);
+        assert_eq!(exact.len(), ACCOUNT_PAYLOAD_LIMIT);
+        decode(&exact).unwrap_or_else(|error| {
+            panic!("{kind} direct decoder rejected the inclusive boundary: {error}")
+        });
+
+        let exact_malformed = vec![0xff; ACCOUNT_PAYLOAD_LIMIT];
+        assert!(matches!(
+            decode(&exact_malformed),
+            Err(PayloadCodecError::Decode {
+                kind: decode_kind,
+                ..
+            }) if decode_kind == "TypedPayloadEnvelope"
+        ));
+
+        for probe in [
+            pad_outer_unknown_to_exact_size(&default, ACCOUNT_PAYLOAD_LIMIT + 1),
+            vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1],
+            pad_outer_unknown_to_exact_size(&default, 70_000),
+            vec![0xff; 70_000],
+        ] {
+            let outcome = std::panic::catch_unwind(|| decode(&probe));
+            let error = outcome
+                .unwrap_or_else(|_| panic!("{kind} public decoder panicked on oversized input"))
+                .unwrap_err();
+            assert_account_payload_size_error(error, kind);
         }
     }
 }
