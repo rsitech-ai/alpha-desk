@@ -3,10 +3,11 @@
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
 use state_replay::{
-    ArchiveRunConfig, FixtureRunConfig, FixtureRunError, run_archive_e2e, run_fixture_e2e,
+    ArchiveRunConfig, FixtureRunConfig, FixtureRunError, TradeRunConfig, run_archive_e2e,
+    run_fixture_e2e, run_trade_e2e,
 };
 
-const USAGE: &str = "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay archive-e2e --archive PATH --output PATH --chain ID --start-height N --end-height N --checkpoint-height N --iterations N";
+const USAGE: &str = "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay trade-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay archive-e2e --archive PATH --output PATH --chain ID --start-height N --end-height N --checkpoint-height N --iterations N";
 
 fn main() -> ExitCode {
     match run(std::env::args_os().collect()) {
@@ -31,12 +32,35 @@ fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
         .ok_or(CliError::Usage)?;
     match command.as_str() {
         "fixture-e2e" => run_fixture(arguments),
+        "trade-e2e" => run_trade(arguments),
         "archive-e2e" => run_archive(arguments),
         _ => Err(CliError::Usage),
     }
 }
 
-fn run_fixture(mut arguments: impl Iterator<Item = OsString>) -> Result<(), CliError> {
+fn run_fixture(arguments: impl Iterator<Item = OsString>) -> Result<(), CliError> {
+    let (output, blocks, checkpoint_after, iterations) = parse_replay_arguments(arguments)?;
+    let config = FixtureRunConfig::new(output, blocks, checkpoint_after, iterations);
+    let _evidence = run_fixture_e2e(&config)?;
+    println!(
+        "PASS evidence_class=synthetic_fixture stage_2_qualified=false live_source_qualified=false"
+    );
+    Ok(())
+}
+
+fn run_trade(arguments: impl Iterator<Item = OsString>) -> Result<(), CliError> {
+    let (output, blocks, checkpoint_after, iterations) = parse_replay_arguments(arguments)?;
+    let config = TradeRunConfig::new(output, blocks, checkpoint_after, iterations);
+    let _evidence = run_trade_e2e(&config)?;
+    println!(
+        "PASS evidence_class=synthetic_canonical_trade state_semantics=canonical_trade_facts stage_1_qualified=false stage_2_qualified=false live_source_qualified=false"
+    );
+    Ok(())
+}
+
+fn parse_replay_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<(PathBuf, u64, u64, u64), CliError> {
     let mut output = None;
     let mut blocks = None;
     let mut checkpoint_after = None;
@@ -54,17 +78,12 @@ fn run_fixture(mut arguments: impl Iterator<Item = OsString>) -> Result<(), CliE
             _ => return Err(CliError::Usage),
         }
     }
-    let config = FixtureRunConfig::new(
+    Ok((
         output.ok_or(CliError::Usage)?,
         blocks.ok_or(CliError::Usage)?,
         checkpoint_after.ok_or(CliError::Usage)?,
         iterations.ok_or(CliError::Usage)?,
-    );
-    let _evidence = run_fixture_e2e(&config)?;
-    println!(
-        "PASS evidence_class=synthetic_fixture stage_2_qualified=false live_source_qualified=false"
-    );
-    Ok(())
+    ))
 }
 
 fn run_archive(mut arguments: impl Iterator<Item = OsString>) -> Result<(), CliError> {

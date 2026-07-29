@@ -285,10 +285,15 @@ Focused tests prove:
 - exact canonical trade fact, two-leg, and stored symmetry records; malformed
   late-event whole-block rollback; duplicate trade-identity rejection; bounded
   canonical codec/key binding; and archive replay/checkpoint equivalence for a
-  three-block synthetic trade sequence.
+  three-block synthetic trade sequence; and
+- a bounded operator-visible synthetic trade runner proving repeated rebuild,
+  decoded record cardinality, private checkpoint resume, malformed-trade
+  reducer failure, unsupported-schema quarantine, and private evidence
+  publication.
 
 This proves one stored canonical trade-fact reconciliation contract. It does
 not prove deployed action-bearing source compatibility, buyer/seller or
 maker/taker roles, account/order/position state, external snapshot
 reconciliation, RocksDB durability, a production replay service, or Stage 2
-readiness. The runnable replay CLI remains synthetic-fixture evidence.
+readiness. The runnable trade replay CLI remains generated canonical-event
+evidence with source qualification explicitly unassessed.
