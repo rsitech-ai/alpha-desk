@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use domain_types::{BlockHeight, ChainId, KnownTime};
 use hl_capture::{
-    AppError, CaptureHealth, CaptureStatus, OwnedTask, StatusError, StatusWriter, run_owned_tasks,
+    AppError, CaptureHealth, CaptureSourceHealth, CaptureStatus, CommittedSourceClass,
+    FailoverReason, OwnedTask, StatusError, StatusWriter, run_owned_tasks,
 };
 use tempfile::tempdir;
 use tokio::time::{sleep, timeout};
@@ -164,6 +165,13 @@ fn status_snapshot_is_atomic_versioned_bounded_and_secret_free() {
         CaptureHealth::Green,
     )
     .with_readiness(true)
+    .with_source_state(
+        CommittedSourceClass::LocallyVerifiedCommitted,
+        CaptureSourceHealth::Healthy,
+        None,
+        None,
+        None,
+    )
     .with_durable_height(Some(BlockHeight::new(42)))
     .with_pending_blocks(0)
     .with_archive_manifest_id(Some("manifest-42".to_owned()));
@@ -176,13 +184,20 @@ fn status_snapshot_is_atomic_versioned_bounded_and_secret_free() {
     assert!(!text.contains("postgresql://"));
     assert!(!text.contains("nats://"));
     let decoded: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
-    assert_eq!(decoded["schema_version"], "hl.capture.status.v2");
+    assert_eq!(decoded["schema_version"], "hl.capture.status.v3");
     assert_eq!(decoded["snapshot_at_micros"], 200);
     assert_eq!(decoded["health"], "green");
     assert_eq!(decoded["ready"], true);
     assert_eq!(decoded["chain_id"], "mainnet");
     assert_eq!(decoded["durable_height"], 42);
     assert_eq!(decoded["pending_blocks"], 0);
+    assert_eq!(
+        decoded["active_committed_source"],
+        "locally-verified-committed"
+    );
+    assert_eq!(decoded["primary_source_health"], "healthy");
+    assert!(decoded.get("independent_source_health").is_none());
+    assert!(decoded.get("failover_height").is_none());
     assert_eq!(decoded["archive_manifest_id"], "manifest-42");
     assert!(decoded.get("last_error_reason").is_none());
 }
@@ -197,6 +212,13 @@ fn status_rejects_inconsistent_backlog_and_disk_capacity() {
         "build-123",
         ChainId::new("mainnet").expect("chain"),
         CaptureHealth::Green,
+    )
+    .with_source_state(
+        CommittedSourceClass::LocallyVerifiedCommitted,
+        CaptureSourceHealth::Healthy,
+        None,
+        None,
+        None,
     );
 
     let missing_backlog =
@@ -211,6 +233,25 @@ fn status_rejects_inconsistent_backlog_and_disk_capacity() {
         base.with_capture_capacity(1, Some(BlockHeight::new(42)), Some(10_001));
     assert!(matches!(
         writer.write(&invalid_percentage),
+        Err(StatusError::InvalidField)
+    ));
+
+    let green_failover = CaptureStatus::new(
+        KnownTime::from_unix_micros(2).expect("time"),
+        "build-123",
+        ChainId::new("mainnet").expect("chain"),
+        CaptureHealth::Green,
+    )
+    .with_readiness(true)
+    .with_source_state(
+        CommittedSourceClass::IndependentCommitted,
+        CaptureSourceHealth::RangeUnavailable,
+        Some(CaptureSourceHealth::Healthy),
+        Some(BlockHeight::new(42)),
+        Some(FailoverReason::PrimaryRangeUnavailable),
+    );
+    assert!(matches!(
+        writer.write(&green_failover),
         Err(StatusError::InvalidField)
     ));
 }

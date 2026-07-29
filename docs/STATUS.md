@@ -17,7 +17,7 @@ This is the evidence ledger for the current working repository. The approved des
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
-| 1 — Truth layer | Empty committed-block runtime is synthetic-source proven; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe hash-chained source spool, bounded one-record-at-a-time spool verification/replay and canonical backlog drain, primary-node file adapter, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive with bounded raw batches, raw-segment provenance and parity, archive-before-journal-before-JetStream-before-cursor coordination, reconnecting PostgreSQL/JetStream sessions, absolute and percentage disk gates, V2 backlog/capacity status, bounded staggered reconnect backoff, owned runtime lifecycle, one-restart process E2E, PostgreSQL/NATS outage-recovery E2E, and bounded synthetic soak evidence | Qualified action-bearing committed mapping and operator corpus, independent/recovery/operator/public/historical transports, real historical upcasts, crash-failpoint matrix, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
+| 1 — Truth layer | Empty committed-block runtime and one-way failover are synthetic-source proven; stage not passed | Validated byte-preserving observations, strict primary/independent topology, crash-safe hash-chained per-source spools, exact-height create-once failover state, bounded one-record-at-a-time spool verification/replay and central canonical drain, primary and independent node-directory adapters, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive with bounded raw batches, raw-segment provenance and parity, archive-before-journal-before-JetStream-before-cursor coordination, reconnecting PostgreSQL/JetStream sessions, absolute and percentage disk gates, V3 active-source/failover/backlog/capacity status, bounded staggered reconnect backoff, owned runtime lifecycle, restart and no-failback E2E, PostgreSQL/NATS outage-recovery E2E, and bounded synthetic soak evidence | Qualified action-bearing committed mapping and operator corpus, separately operated independent-source qualification, recovery/operator/public/historical transports, overlap reconciliation and explicit failback procedure, real historical upcasts, crash-failpoint matrix, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
 | 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
@@ -57,10 +57,13 @@ bounded batches, and capture configuration rejects segment targets above
 512 MiB. Local acquisition and canonical drain are independent owned tasks:
 PostgreSQL or NATS failure degrades readiness without stopping fsynced source
 capture, and the drain reconnects from durable PostgreSQL progress.
-The atomic V2 status distinguishes fsynced capture backlog from downstream
-publication plans, reports the oldest pending capture height and lowest
-spool/archive free-space percentage, warns below 20% free, and rejects new
-writes below 10% or the configured absolute reserve.
+The atomic V3 status distinguishes active-source fsynced capture backlog from
+downstream publication plans, reports source class and bounded source health,
+records the immutable failover height/reason without source paths or operator
+identity, reports the oldest pending capture height and lowest spool/archive
+free-space percentage, warns below 20% free, and rejects new writes below 10%
+or the configured absolute reserve. Independent operation can be yellow-ready
+but can never become green.
 
 `hl-capture fixture-replay` retains a deterministic coordinator-only lane. The
 self-contained production-entrypoint E2E uses `hl-capture run`, restarts it once
@@ -135,10 +138,14 @@ prove a running Alpha Desk product:
   restart, verified archive, clean shutdown
 - `just capture-outage-e2e` — the production entrypoint remains alive while
   disposable NATS and PostgreSQL containers are paused in turn; the verified
-  spool grows to three and then five records, V2 status reports two pending
+  spool grows to three and then five records, V3 status reports two pending
   capture records with the exact oldest height during each outage, health
   becomes non-ready yellow, and restoration catches up to five raw records,
   blocks, and acknowledged publications exactly once with zero final backlog
+- `just capture-failover-e2e` — two five-record source spools and ten raw
+  observations prove an exact second-height primary gap, create-once failover,
+  five contiguous blocks/publications, clean restart, repaired-primary capture,
+  zero final active backlog, and no automatic failback
 - `just capture-soak 30s` — thirty drip-fed raw node-format observations,
   thirty raw Parquet observations, thirty committed empty
   blocks/publications, one restart, zero final backlog, verified
@@ -146,12 +153,13 @@ prove a running Alpha Desk product:
 - `just spool-verify`
 - `cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time=60`
 
-The latest V2 reports are retained under ignored
+The latest V2 E2E reports are retained under ignored
 `target/evidence/capture-e2e/`; restart and soak reports declare
 `"mode": "synthetic-node-source"`, while the fault report declares
-`"mode": "synthetic-node-source-dependency-outage"`. Every report retains
-`"live_source_qualified": false`, the V2 status schema, final disk capacity,
-and final capture backlog.
+`"mode": "synthetic-node-source-dependency-outage"` and the failover report
+declares `"mode": "synthetic-dual-source-failover"`. Every report retains
+`"live_source_qualified": false`, the V3 status schema, final disk capacity,
+and final active-source backlog.
 The archive summaries require raw observation parity with the spool and
 canonical block count. The Compose smoke verified NATS, ClickHouse, PostgreSQL, MinIO, the OpenTelemetry
 Collector, and VictoriaMetrics, then removed its uniquely owned containers,

@@ -75,6 +75,9 @@ capture-e2e:
 capture-outage-e2e:
     CAPTURE_E2E_BLOCKS=5 CAPTURE_E2E_OUTAGE_MODE=nats-postgres ./tools/ci/capture-e2e.sh
 
+capture-failover-e2e:
+    CAPTURE_E2E_BLOCKS=5 CAPTURE_E2E_FAILOVER_MODE=1 ./tools/ci/capture-e2e.sh
+
 capture-soak duration="10m":
     DURATION={{quote(duration)}} ./tools/ci/capture-soak.sh
 

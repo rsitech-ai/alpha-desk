@@ -33,4 +33,7 @@ pub use raw_archive::*;
 pub use sequencer::*;
 pub use service::{ConnectedCapture, RuntimeConnectError, connect_capture};
 pub use shutdown::{AppError, OwnedTask, run_owned_tasks};
-pub use status::{CaptureHealth, CaptureStatus, StatusError, StatusWriter, read_status};
+pub use status::{
+    CaptureHealth, CaptureSourceHealth, CaptureStatus, CommittedSourceClass, StatusError,
+    StatusWriter, read_status,
+};

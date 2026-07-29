@@ -105,8 +105,6 @@ impl FailoverStore {
         validate_path(&path)?;
         let parent = path.parent().ok_or(FailoverError::UnsafePath)?;
         validate_existing_parent_chain(parent)?;
-        fs::create_dir_all(parent).map_err(|_| FailoverError::Io)?;
-        validate_parent(parent)?;
         Ok(Self { path })
     }
 
@@ -166,6 +164,8 @@ impl FailoverStore {
             };
         }
         let parent = self.path.parent().ok_or(FailoverError::UnsafePath)?;
+        validate_existing_parent_chain(parent)?;
+        fs::create_dir_all(parent).map_err(|_| FailoverError::Io)?;
         validate_parent(parent)?;
         let bytes = encode_stored(decision)?;
         let mut temporary =

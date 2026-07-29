@@ -28,8 +28,9 @@ verified.
    ```
 
 5. Request the exact missing range from an independently operated complete
-   committed source. If that is unavailable, use the qualified historical
-   adapter.
+   committed source. When that source is configured, `hl-capture` continuously
+   spools it and can perform the V1 one-way failover described below. If exact
+   independent evidence is unavailable, keep the canonical cursor stopped.
 
 ## Recovery order
 
@@ -68,7 +69,23 @@ contiguous.
 
 ## Current implementation boundary
 
-The repository currently implements the deterministic bounded sequencer and
-spool verification. Automated historical fetching, archive receipts, cursor
-persistence, product health propagation, and runtime restart replay remain
-later Stage 1 work; this runbook does not claim those integrations exist.
+The production entrypoint supports exactly one locally verified committed
+node-directory source and at most one independent committed node-directory
+source. Both are fsynced and raw-archived separately. A visible primary gap:
+
+1. parks only primary acquisition at the exact missing height;
+2. requires that height to be already durable in the independent spool;
+3. writes the private, checksummed, create-once
+   `hl.capture.failover.v1` decision before canonical commit;
+4. drains only the independent spool from that height onward; and
+5. restores the independent selection on restart, with no automatic failback.
+
+Status V3 remains yellow while the independent source is active. A missing
+exact independent height or a gap in the active independent source is red and
+non-ready. Repairing the primary does not clear the failover decision.
+
+Automated historical fetching, overlap reconciliation, and automatic failback
+are not implemented. Do not delete or edit the failover state to simulate
+either operation. Action-bearing committed mapping also remains fail-closed
+until a redistribution-approved operator corpus freezes the real node response
+contract.

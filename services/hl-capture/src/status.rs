@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use domain_types::{BlockHeight, ChainId, KnownTime};
 use serde::{Deserialize, Serialize};
 
-const STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v2";
+const STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v3";
 const MAX_STATUS_BYTES: usize = 16 * 1024;
 const MAX_STATUS_TEXT_BYTES: usize = 512;
 
@@ -17,6 +17,21 @@ pub enum CaptureHealth {
     Red,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommittedSourceClass {
+    LocallyVerifiedCommitted,
+    IndependentCommitted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureSourceHealth {
+    Starting,
+    Healthy,
+    RangeUnavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureStatus {
@@ -26,6 +41,14 @@ pub struct CaptureStatus {
     chain_id: String,
     health: CaptureHealth,
     ready: bool,
+    active_committed_source: CommittedSourceClass,
+    primary_source_health: CaptureSourceHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    independent_source_health: Option<CaptureSourceHealth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failover_height: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failover_reason: Option<crate::FailoverReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     durable_height: Option<u64>,
     pending_blocks: u64,
@@ -56,6 +79,11 @@ impl CaptureStatus {
             chain_id: chain_id.to_string(),
             health,
             ready: false,
+            active_committed_source: CommittedSourceClass::LocallyVerifiedCommitted,
+            primary_source_health: CaptureSourceHealth::Starting,
+            independent_source_health: None,
+            failover_height: None,
+            failover_reason: None,
             durable_height: None,
             pending_blocks: 0,
             capture_backlog_records: 0,
@@ -75,6 +103,23 @@ impl CaptureStatus {
     #[must_use]
     pub fn with_durable_height(mut self, height: Option<BlockHeight>) -> Self {
         self.durable_height = height.map(BlockHeight::get);
+        self
+    }
+
+    #[must_use]
+    pub fn with_source_state(
+        mut self,
+        active_source: CommittedSourceClass,
+        primary_health: CaptureSourceHealth,
+        independent_health: Option<CaptureSourceHealth>,
+        failover_height: Option<BlockHeight>,
+        failover_reason: Option<crate::FailoverReason>,
+    ) -> Self {
+        self.active_committed_source = active_source;
+        self.primary_source_health = primary_health;
+        self.independent_source_health = independent_health;
+        self.failover_height = failover_height.map(BlockHeight::get);
+        self.failover_reason = failover_reason;
         self
     }
 
@@ -144,6 +189,33 @@ impl CaptureStatus {
             .is_some_and(|basis_points| basis_points > 10_000)
             || (self.capture_backlog_records == 0 && self.oldest_pending_capture_height.is_some())
             || (self.capture_backlog_records > 0 && self.oldest_pending_capture_height.is_none())
+        {
+            return Err(StatusError::InvalidField);
+        }
+        match self.active_committed_source {
+            CommittedSourceClass::LocallyVerifiedCommitted
+                if self.failover_height.is_some() || self.failover_reason.is_some() =>
+            {
+                return Err(StatusError::InvalidField);
+            }
+            CommittedSourceClass::IndependentCommitted
+                if self.independent_source_health.is_none()
+                    || self.failover_height.is_none()
+                    || self.failover_reason.is_none()
+                    || self.health == CaptureHealth::Green =>
+            {
+                return Err(StatusError::InvalidField);
+            }
+            _ => {}
+        }
+        let active_source_health = match self.active_committed_source {
+            CommittedSourceClass::LocallyVerifiedCommitted => self.primary_source_health,
+            CommittedSourceClass::IndependentCommitted => self
+                .independent_source_health
+                .ok_or(StatusError::InvalidField)?,
+        };
+        if (self.ready || self.health == CaptureHealth::Green)
+            && active_source_health != CaptureSourceHealth::Healthy
         {
             return Err(StatusError::InvalidField);
         }
