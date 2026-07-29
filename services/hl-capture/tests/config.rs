@@ -46,6 +46,10 @@ fn example_configuration_is_strict_valid_and_complete() {
         Path::new("state/capture-status.json")
     );
     assert_eq!(
+        config.runtime().failover_state_path(),
+        Path::new("state/committed-source-failover.json")
+    );
+    assert_eq!(
         config.runtime().postgres_url_path(),
         Path::new("/run/secrets/alpha-desk-postgres-url")
     );
@@ -294,6 +298,11 @@ fn runtime_boundaries_reject_inline_credentials_unsafe_paths_and_unbounded_limit
         (
             "archive_path = \"state/canonical-archive\"",
             "archive_path = \"../canonical-archive\"",
+            "capture_config.invalid_runtime_path",
+        ),
+        (
+            "failover_state_path = \"state/committed-source-failover.json\"",
+            "failover_state_path = \"../committed-source-failover.json\"",
             "capture_config.invalid_runtime_path",
         ),
         (

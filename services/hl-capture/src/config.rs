@@ -130,6 +130,7 @@ pub struct RuntimeConfig {
     first_height: u64,
     archive_path: PathBuf,
     status_path: PathBuf,
+    failover_state_path: PathBuf,
     postgres_url_path: PathBuf,
     nats_server_url: String,
     nats_stream: String,
@@ -151,6 +152,7 @@ impl RuntimeConfig {
         ChainId::new(self.chain_id.clone()).map_err(|_| ConfigError::InvalidChainId)?;
         validate_runtime_path(&self.archive_path)?;
         validate_runtime_path(&self.status_path)?;
+        validate_runtime_path(&self.failover_state_path)?;
         validate_credential_path(&self.postgres_url_path)?;
         validate_nats_server(&self.nats_server_url)?;
         validate_identity(&self.nats_stream).map_err(|_| ConfigError::InvalidRuntimeIdentity)?;
@@ -193,6 +195,11 @@ impl RuntimeConfig {
     #[must_use]
     pub fn status_path(&self) -> &Path {
         &self.status_path
+    }
+
+    #[must_use]
+    pub fn failover_state_path(&self) -> &Path {
+        &self.failover_state_path
     }
 
     #[must_use]
