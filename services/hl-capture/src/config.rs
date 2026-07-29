@@ -418,39 +418,54 @@ pub enum SourceAdapterConfig {
         stream_name: String,
         start_height: u64,
         poll_interval_millis: u64,
+        replica_cmds_style: NodeReplicaCmdsStyle,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodeReplicaCmdsStyle {
+    Actions,
+    ActionsAndResponses,
+    RecentActions,
 }
 
 impl SourceAdapterConfig {
     fn validate(&self, observation_class: ObservationClass) -> Result<(), ConfigError> {
-        let (path, stream_name, poll_interval_millis, expected_class) = match self {
-            Self::NodeLine {
-                path,
-                stream_name,
-                stream,
-                poll_interval_millis,
-            } => (
-                path,
-                stream_name,
-                *poll_interval_millis,
-                stream.observation_class(),
-            ),
-            Self::NodeBlockDirectory {
-                path,
-                stream_name,
-                start_height: _,
-                poll_interval_millis,
-            } => (
-                path,
-                stream_name,
-                *poll_interval_millis,
-                ObservationClass::CommittedBlock,
-            ),
-        };
+        let (path, stream_name, poll_interval_millis, expected_class, replica_cmds_style) =
+            match self {
+                Self::NodeLine {
+                    path,
+                    stream_name,
+                    stream,
+                    poll_interval_millis,
+                } => (
+                    path,
+                    stream_name,
+                    *poll_interval_millis,
+                    stream.observation_class(),
+                    None,
+                ),
+                Self::NodeBlockDirectory {
+                    path,
+                    stream_name,
+                    start_height: _,
+                    poll_interval_millis,
+                    replica_cmds_style,
+                } => (
+                    path,
+                    stream_name,
+                    *poll_interval_millis,
+                    ObservationClass::CommittedBlock,
+                    Some(*replica_cmds_style),
+                ),
+            };
         validate_node_source_path(path)?;
         validate_identity(stream_name).map_err(|_| ConfigError::InvalidSourceAdapter)?;
         if !(1..=MAX_SOURCE_POLL_INTERVAL_MILLIS).contains(&poll_interval_millis)
             || observation_class != expected_class
+            || replica_cmds_style
+                .is_some_and(|style| style != NodeReplicaCmdsStyle::ActionsAndResponses)
         {
             return Err(ConfigError::InvalidSourceAdapter);
         }

@@ -26,7 +26,53 @@ const ACQUISITION_TASK_NAME: &str = "primary-node-acquisition";
 const DRAIN_TASK_NAME: &str = "primary-node-drain";
 const WRITE_HEADROOM_BYTES: u64 = 1024 * 1024;
 const RAW_ARCHIVE_BATCH_BYTES: u64 = 64 * 1024 * 1024;
-const DRAIN_RETRY_DELAY: Duration = Duration::from_millis(250);
+const BACKLOG_POLL_DELAY: Duration = Duration::from_millis(250);
+const RETRY_BACKOFF_BASE_MILLIS: u64 = 250;
+const RETRY_BACKOFF_CEILING_BASE_MILLIS: u64 = 25_000;
+const RETRY_JITTER_MIN_BPS: u64 = 8_000;
+const RETRY_JITTER_SPAN_BPS: u64 = 4_001;
+const BASIS_POINTS: u64 = 10_000;
+
+#[derive(Debug)]
+struct RetryBackoff {
+    source_seed: [u8; 32],
+    attempt: u32,
+}
+
+impl RetryBackoff {
+    fn new(source_id: &SourceId) -> Self {
+        Self {
+            source_seed: *blake3::hash(source_id.as_str().as_bytes()).as_bytes(),
+            attempt: 0,
+        }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let exponent = self.attempt.min(16);
+        let multiplier = 1_u64 << exponent;
+        let base_millis = RETRY_BACKOFF_BASE_MILLIS
+            .saturating_mul(multiplier)
+            .min(RETRY_BACKOFF_CEILING_BASE_MILLIS);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"hyperliquid-alpha-desk/capture-retry-jitter/v1");
+        hasher.update(&self.source_seed);
+        hasher.update(&self.attempt.to_le_bytes());
+        let digest = hasher.finalize();
+        let random = u64::from_le_bytes(
+            digest.as_bytes()[..8]
+                .try_into()
+                .expect("BLAKE3 digest has at least eight bytes"),
+        );
+        let jitter_bps = RETRY_JITTER_MIN_BPS + (random % RETRY_JITTER_SPAN_BPS);
+        let delay_millis = base_millis.saturating_mul(jitter_bps) / BASIS_POINTS;
+        self.attempt = self.attempt.saturating_add(1);
+        Duration::from_millis(delay_millis)
+    }
+
+    fn reset(&mut self) {
+        self.attempt = 0;
+    }
+}
 
 #[derive(Debug, Clone)]
 struct NodeSourceTaskConfig {
@@ -67,6 +113,7 @@ pub(crate) fn primary_node_tasks(
             stream_name,
             start_height,
             poll_interval_millis,
+            replica_cmds_style: _,
         }) = source.adapter()
         else {
             continue;
@@ -106,6 +153,7 @@ pub(crate) fn primary_node_tasks(
     let selected = selected.ok_or(SourceRuntimeError::InvalidConfig)?;
     let (notification, backlog_notifications) = mpsc::channel(selected.queue_capacity);
     let acquisition_config = selected.clone();
+    let acquisition_health = Arc::clone(&health);
     let acquisition_cancellation = cancellation.child_token();
     let drain_cancellation = cancellation.child_token();
     Ok(vec![
@@ -114,6 +162,7 @@ pub(crate) fn primary_node_tasks(
                 acquisition_config,
                 raw_archive,
                 notification,
+                acquisition_health,
                 acquisition_cancellation,
             )
             .await
@@ -144,6 +193,7 @@ async fn run_primary_node_acquisition(
     config: NodeSourceTaskConfig,
     raw_archive: Arc<dyn RawSegmentArchive>,
     notification: mpsc::Sender<()>,
+    health: Arc<CaptureRuntimeHealth>,
     cancellation: CancellationToken,
 ) -> Result<(), SourceRuntimeError> {
     let spool_config = SourceSpoolConfig::try_new(
@@ -173,7 +223,8 @@ async fn run_primary_node_acquisition(
         RAW_ARCHIVE_BATCH_BYTES,
     )
     .map_err(SourceRuntimeError::RawArchive)?;
-    disk_guard.ensure_write(WRITE_HEADROOM_BYTES)?;
+    let initial_capacity = disk_guard.ensure_write(WRITE_HEADROOM_BYTES)?;
+    health.record_disk_capacity(initial_capacity.free_basis_points());
     let (returned_spool, sealed) = tokio::task::spawn_blocking(move || {
         let mut owned = spool;
         let result = owned.seal_active(created_at);
@@ -240,7 +291,7 @@ async fn run_primary_node_acquisition(
             }
         };
         let anticipated_write = anticipated_write_bytes(observation.payload().len())?;
-        disk_guard.ensure_write(anticipated_write)?;
+        let disk_capacity = disk_guard.ensure_write(anticipated_write)?;
         let durable_at = now_micros()?;
         let observation_for_spool = observation.clone();
         let (returned_spool, append) = tokio::task::spawn_blocking(move || {
@@ -253,6 +304,10 @@ async fn run_primary_node_acquisition(
         spool = returned_spool;
         let (receipt, closed_segment) = append.map_err(SourceRuntimeError::Spool)?.into_parts();
         let receipt = receipt.ok_or(SourceRuntimeError::MissingDurabilityReceipt)?;
+        health.record_capture(
+            BlockHeight::new(receipt.durable_cursor.offset()),
+            disk_capacity.free_basis_points(),
+        );
         if let Some(segment) = closed_segment {
             archive_closed_segment(
                 raw_archive.as_ref(),
@@ -278,12 +333,21 @@ async fn run_primary_node_drain(
     health: Arc<CaptureRuntimeHealth>,
     cancellation: CancellationToken,
 ) -> Result<(), SourceRuntimeError> {
+    let mut retry_backoff = RetryBackoff::new(&config.source_id);
     loop {
         if cancellation.is_cancelled() {
             return Ok(());
         }
-        match drain_backlog_once(&config, progress.as_ref(), coordinator.as_ref()).await {
+        match drain_backlog_once(
+            &config,
+            progress.as_ref(),
+            coordinator.as_ref(),
+            health.as_ref(),
+        )
+        .await
+        {
             Ok(()) => {
+                retry_backoff.reset();
                 health.set_ready();
                 tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
@@ -292,19 +356,15 @@ async fn run_primary_node_drain(
                             return Err(SourceRuntimeError::NotificationClosed);
                         }
                     }
-                    () = tokio::time::sleep(DRAIN_RETRY_DELAY) => {}
+                    () = tokio::time::sleep(BACKLOG_POLL_DELAY) => {}
                 }
             }
             Err(DrainSessionError::Retryable(reason_code)) => {
                 health.set_retryable(reason_code);
+                let retry_delay = retry_backoff.next_delay();
                 tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
-                    notification = notifications.recv() => {
-                        if notification.is_none() {
-                            return Err(SourceRuntimeError::NotificationClosed);
-                        }
-                    }
-                    () = tokio::time::sleep(DRAIN_RETRY_DELAY) => {}
+                    () = tokio::time::sleep(retry_delay) => {}
                 }
             }
             Err(DrainSessionError::Latched(reason_code)) => {
@@ -324,6 +384,7 @@ async fn drain_backlog_once(
     config: &NodeSourceTaskConfig,
     progress: &dyn CaptureProgressStore,
     coordinator: &CaptureCoordinator,
+    health: &CaptureRuntimeHealth,
 ) -> Result<(), DrainSessionError> {
     match progress
         .initialize_chain(&config.chain_id, config.first_height)
@@ -366,6 +427,7 @@ async fn drain_backlog_once(
             )));
         }
     };
+    health.record_next_expected(first_height);
     let pipeline_config = CommittedNodePipelineConfig::try_new(
         config.chain_id.clone(),
         config.source_id.clone(),
@@ -414,6 +476,10 @@ async fn drain_backlog_once(
                 backlog.acknowledge(offset).map_err(|error| {
                     DrainSessionError::Fatal(SourceRuntimeError::Backlog(error))
                 })?;
+                let next_expected = offset
+                    .checked_add(1)
+                    .ok_or(DrainSessionError::Fatal(SourceRuntimeError::InvalidConfig))?;
+                health.record_next_expected(BlockHeight::new(next_expected));
             }
             Ok(PipelineOutcome::Gap { .. } | PipelineOutcome::AwaitingEvidence) => {
                 return Err(DrainSessionError::Latched(
@@ -571,5 +637,55 @@ impl SourceRuntimeError {
             Self::BlockingTask => "capture_source.blocking_task",
             Self::Clock => "capture_source.clock",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use domain_types::SourceId;
+
+    use super::RetryBackoff;
+
+    #[test]
+    fn retry_backoff_is_bounded_deterministic_and_source_staggered() {
+        let source_a = SourceId::new("primary-node").unwrap();
+        let source_b = SourceId::new("independent-node").unwrap();
+        let mut first = RetryBackoff::new(&source_a);
+        let mut repeated = RetryBackoff::new(&source_a);
+        let mut independent = RetryBackoff::new(&source_b);
+
+        let first_delays: Vec<_> = (0..32).map(|_| first.next_delay()).collect();
+        let repeated_delays: Vec<_> = (0..32).map(|_| repeated.next_delay()).collect();
+        let independent_delays: Vec<_> = (0..32).map(|_| independent.next_delay()).collect();
+
+        assert_eq!(first_delays, repeated_delays);
+        assert_ne!(first_delays, independent_delays);
+        assert!(
+            first_delays
+                .iter()
+                .all(|delay| *delay >= Duration::from_millis(200)
+                    && *delay <= Duration::from_secs(30))
+        );
+        assert!(
+            first_delays
+                .iter()
+                .skip(8)
+                .all(|delay| *delay >= Duration::from_secs(15))
+        );
+    }
+
+    #[test]
+    fn a_success_resets_the_retry_sequence() {
+        let source = SourceId::new("primary-node").unwrap();
+        let mut backoff = RetryBackoff::new(&source);
+        let first = backoff.next_delay();
+        let _ = backoff.next_delay();
+        let _ = backoff.next_delay();
+
+        backoff.reset();
+
+        assert_eq!(backoff.next_delay(), first);
     }
 }

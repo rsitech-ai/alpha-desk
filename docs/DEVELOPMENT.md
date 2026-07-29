@@ -63,6 +63,9 @@ The checked node corpus is made from normalized official documentation
 examples, not operator recordings. Read the exact cursor, quarantine, and
 qualification boundary in
 [`adapters/hyperliquid-node.md`](adapters/hyperliquid-node.md).
+Committed node-directory configurations must declare
+`replica_cmds_style = "actions-and-responses"`; `hl-capture check-config`
+rejects action-only or rolling-history node profiles.
 
 The deterministic public trade mapping and semantic-version boundary checks
 are:
@@ -172,6 +175,11 @@ cargo +1.97.1 run -p hl-capture --locked --offline -- \
   status --config <retained-capture-config> --json
 ```
 
+The V2 status contract separates downstream publication plans from fsynced
+source backlog, reports the oldest pending capture height, and exposes the
+lowest spool/archive filesystem free percentage in basis points. See
+[`contracts/capture-status-v2.md`](contracts/capture-status-v2.md).
+
 The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
 drip-feeds deterministic, empty transaction-block records through the real
@@ -190,18 +198,20 @@ just capture-soak 10m
 Each run retains an atomic report and non-secret diagnostic artifacts under
 `target/evidence/capture-e2e/<run-id>/`. The report records the binary hash,
 dependency versions, block/publication counts, restart count, runtime,
-resource high-water marks, spool/archive summaries, log byte counts, and
-shutdown result. The test removes only its disposable containers, network, and
-temporary secret directory.
+resource high-water marks, spool/archive summaries, log byte counts, status
+schema, outage backlog samples, final capture backlog, final disk-free basis
+points, and shutdown result. The test removes only its disposable containers,
+network, and temporary secret directory.
 
 `capture-outage-e2e` uses five records and pauses its test-owned NATS and
 PostgreSQL containers in turn. It requires the spool to grow during each
 outage, captures the degraded atomic status, restores the dependency, and
-requires exact raw/spool/block/publication parity at the final contiguous
+requires a positive visible capture backlog during both outages and exact
+raw/spool/block/publication parity with zero final backlog at the contiguous
 cursor. The test never stops or modifies host PostgreSQL, shared NATS, or
-unrelated containers. `runtime.postgres_operation_timeout_millis` independently
-bounds PostgreSQL connection and progress operations; it is not coupled to the
-JetStream publication timeout.
+unrelated containers. `runtime.postgres_operation_timeout_millis`
+independently bounds PostgreSQL connection and progress operations; it is not
+coupled to the JetStream publication timeout.
 
 This is a synthetic node-format runtime-mechanics lane. Its report deliberately
 uses `"mode": "synthetic-node-source"` for restart/soak and

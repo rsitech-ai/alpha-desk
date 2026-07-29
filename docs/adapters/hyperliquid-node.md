@@ -33,6 +33,15 @@ miscellaneous events. `--batch-by-block` wraps auxiliary events in
 `{local_time, block_time, block_number, events}`. Low-latency operators should
 also evaluate the node's `--disable-output-file-buffering` trade-off.
 
+The committed source must be operated with
+`--replica-cmds-style actions-and-responses`. The checked configuration makes
+that required profile explicit and rejects the node's `actions` and
+`recent-actions` modes. This is a deployment assertion, not remote process
+attestation: production qualification must still retain the exact node command
+line/build identity and demonstrate that action bundles and execution responses
+match the reviewed operator corpus. An action-only block may be retained as raw
+evidence, but it cannot establish canonical effects.
+
 Node output schemas evolve independently of this repository. Any new complete
 variant fails as `source.schema_drift`, retains its exact bytes for quarantine,
 and requires parser review. It is never silently skipped.
@@ -106,7 +115,7 @@ source_version = "hyperliquid-node-v1"
 class = "committed-block"
 queue_capacity = 4096
 max_payload_bytes = 8388608
-adapter = { kind = "node-block-directory", path = "/var/lib/hyperliquid/hl/data/replica_cmds", stream_name = "replica-cmds", start_height = 1, poll_interval_millis = 25 }
+adapter = { kind = "node-block-directory", path = "/var/lib/hyperliquid/hl/data/replica_cmds", stream_name = "replica-cmds", start_height = 1, poll_interval_millis = 25, replica_cmds_style = "actions-and-responses" }
 ```
 
 `node-line` adapters additionally require a `stream` value:
@@ -114,6 +123,8 @@ adapter = { kind = "node-block-directory", path = "/var/lib/hyperliquid/hl/data/
 `market-metadata`. The configured observation class must match the stream.
 The per-height adapter requires an explicit initial `start_height`; it never
 guesses a truth boundary from whichever historical file happens to sort first.
+It also requires `replica_cmds_style = "actions-and-responses"`; the
+configuration deliberately refuses action-only and rolling two-height modes.
 It directly probes expected height paths across session/date directories,
 rather than rescanning all historical block files for every observation.
 Paths must be absolute and canonical, poll intervals and payload sizes are

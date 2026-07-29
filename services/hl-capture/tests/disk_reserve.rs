@@ -5,22 +5,54 @@ use hl_capture::{DiskReserveError, DiskReserveGuard, DiskSpaceProbe, FilesystemD
 #[derive(Debug)]
 struct Probe {
     available: Mutex<Result<u64, DiskReserveError>>,
+    free_basis_points: Mutex<Result<u16, DiskReserveError>>,
 }
 
 impl DiskSpaceProbe for Probe {
     fn minimum_available_bytes(&self) -> Result<u64, DiskReserveError> {
         *self.available.lock().unwrap()
     }
+
+    fn minimum_free_basis_points(&self) -> Result<u16, DiskReserveError> {
+        *self.free_basis_points.lock().unwrap()
+    }
 }
 
 fn guard(available: Result<u64, DiskReserveError>) -> DiskReserveGuard<Probe> {
+    guard_with_percentage(available, Ok(2_500))
+}
+
+fn guard_with_percentage(
+    available: Result<u64, DiskReserveError>,
+    free_basis_points: Result<u16, DiskReserveError>,
+) -> DiskReserveGuard<Probe> {
     DiskReserveGuard::try_new(
         Probe {
             available: Mutex::new(available),
+            free_basis_points: Mutex::new(free_basis_points),
         },
         1_000,
     )
     .unwrap()
+}
+
+#[test]
+fn less_than_ten_percent_free_fails_even_when_absolute_reserve_fits() {
+    let error = guard_with_percentage(Ok(10_000), Ok(999))
+        .ensure_write(250)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DiskReserveError::InsufficientFreePercentage {
+            available_basis_points: 999,
+            required_basis_points: 1_000
+        }
+    ));
+    assert_eq!(
+        error.reason_code(),
+        "capture_disk.insufficient_free_percentage"
+    );
 }
 
 #[test]
@@ -29,6 +61,7 @@ fn exact_reserve_plus_write_boundary_is_allowed() {
 
     assert_eq!(capacity.available_bytes(), 1_250);
     assert_eq!(capacity.remaining_after_write_bytes(), 1_000);
+    assert_eq!(capacity.free_basis_points(), 2_500);
 }
 
 #[test]
@@ -63,6 +96,7 @@ fn filesystem_probe_reads_an_open_directory_without_following_a_symlink() {
     let root = tempfile::tempdir().unwrap();
     let probe = FilesystemDiskSpaceProbe::open([root.path().to_path_buf()]).unwrap();
     assert!(probe.minimum_available_bytes().unwrap() > 0);
+    assert!(probe.minimum_free_basis_points().unwrap() <= 10_000);
 
     let alias = root.path().join("alias");
     std::os::unix::fs::symlink(root.path(), &alias).unwrap();

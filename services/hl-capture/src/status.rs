@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use domain_types::{BlockHeight, ChainId, KnownTime};
 use serde::{Deserialize, Serialize};
 
-const STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v1";
+const STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v2";
 const MAX_STATUS_BYTES: usize = 16 * 1024;
 const MAX_STATUS_TEXT_BYTES: usize = 512;
 
@@ -29,6 +29,12 @@ pub struct CaptureStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     durable_height: Option<u64>,
     pending_blocks: u64,
+    #[serde(default)]
+    capture_backlog_records: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oldest_pending_capture_height: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_free_basis_points: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     archive_manifest_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,6 +58,9 @@ impl CaptureStatus {
             ready: false,
             durable_height: None,
             pending_blocks: 0,
+            capture_backlog_records: 0,
+            oldest_pending_capture_height: None,
+            disk_free_basis_points: None,
             archive_manifest_id: None,
             last_error_reason: None,
         }
@@ -72,6 +81,19 @@ impl CaptureStatus {
     #[must_use]
     pub const fn with_pending_blocks(mut self, pending_blocks: u64) -> Self {
         self.pending_blocks = pending_blocks;
+        self
+    }
+
+    #[must_use]
+    pub fn with_capture_capacity(
+        mut self,
+        backlog_records: u64,
+        oldest_pending_height: Option<BlockHeight>,
+        disk_free_basis_points: Option<u16>,
+    ) -> Self {
+        self.capture_backlog_records = backlog_records;
+        self.oldest_pending_capture_height = oldest_pending_height.map(BlockHeight::get);
+        self.disk_free_basis_points = disk_free_basis_points;
         self
     }
 
@@ -116,6 +138,14 @@ impl CaptureStatus {
         }
         if let Some(reason) = &self.last_error_reason {
             validate_reason_code(reason)?;
+        }
+        if self
+            .disk_free_basis_points
+            .is_some_and(|basis_points| basis_points > 10_000)
+            || (self.capture_backlog_records == 0 && self.oldest_pending_capture_height.is_some())
+            || (self.capture_backlog_records > 0 && self.oldest_pending_capture_height.is_none())
+        {
+            return Err(StatusError::InvalidField);
         }
         Ok(())
     }

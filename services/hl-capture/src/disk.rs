@@ -3,8 +3,12 @@ use std::path::PathBuf;
 
 use rustix::fs::{Mode, OFlags, fstatvfs, open};
 
+const MINIMUM_FREE_BASIS_POINTS: u16 = 1_000;
+
 pub trait DiskSpaceProbe: Send + Sync {
     fn minimum_available_bytes(&self) -> Result<u64, DiskReserveError>;
+
+    fn minimum_free_basis_points(&self) -> Result<u16, DiskReserveError>;
 }
 
 #[derive(Debug)]
@@ -53,6 +57,24 @@ impl DiskSpaceProbe for FilesystemDiskSpaceProbe {
             .min()
             .ok_or(DiskReserveError::InvalidConfig)
     }
+
+    fn minimum_free_basis_points(&self) -> Result<u16, DiskReserveError> {
+        self.directories
+            .iter()
+            .map(|directory| {
+                let statistics = fstatvfs(directory).map_err(|_| DiskReserveError::Probe)?;
+                if statistics.f_blocks == 0 {
+                    return Err(DiskReserveError::Probe);
+                }
+                let basis_points =
+                    u128::from(statistics.f_bavail) * 10_000 / u128::from(statistics.f_blocks);
+                u16::try_from(basis_points).map_err(|_| DiskReserveError::SizeOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .min()
+            .ok_or(DiskReserveError::InvalidConfig)
+    }
 }
 
 #[derive(Debug)]
@@ -87,9 +109,17 @@ impl<P: DiskSpaceProbe> DiskReserveGuard<P> {
                 required,
             });
         }
+        let free_basis_points = self.probe.minimum_free_basis_points()?;
+        if free_basis_points < MINIMUM_FREE_BASIS_POINTS {
+            return Err(DiskReserveError::InsufficientFreePercentage {
+                available_basis_points: free_basis_points,
+                required_basis_points: MINIMUM_FREE_BASIS_POINTS,
+            });
+        }
         Ok(DiskCapacity {
             available_bytes,
             remaining_after_write_bytes: available_bytes - anticipated_write_bytes,
+            free_basis_points,
         })
     }
 }
@@ -98,6 +128,7 @@ impl<P: DiskSpaceProbe> DiskReserveGuard<P> {
 pub struct DiskCapacity {
     available_bytes: u64,
     remaining_after_write_bytes: u64,
+    free_basis_points: u16,
 }
 
 impl DiskCapacity {
@@ -109,6 +140,11 @@ impl DiskCapacity {
     #[must_use]
     pub const fn remaining_after_write_bytes(self) -> u64 {
         self.remaining_after_write_bytes
+    }
+
+    #[must_use]
+    pub const fn free_basis_points(self) -> u16 {
+        self.free_basis_points
     }
 }
 
@@ -122,6 +158,11 @@ pub enum DiskReserveError {
     SizeOverflow,
     #[error("filesystem cannot preserve the configured disk reserve")]
     InsufficientSpace { available: u64, required: u64 },
+    #[error("filesystem cannot preserve the minimum free-space percentage")]
+    InsufficientFreePercentage {
+        available_basis_points: u16,
+        required_basis_points: u16,
+    },
 }
 
 impl DiskReserveError {
@@ -132,6 +173,7 @@ impl DiskReserveError {
             Self::Probe => "capture_disk.probe",
             Self::SizeOverflow => "capture_disk.size_overflow",
             Self::InsufficientSpace { .. } => "capture_disk.insufficient_space",
+            Self::InsufficientFreePercentage { .. } => "capture_disk.insufficient_free_percentage",
         }
     }
 }

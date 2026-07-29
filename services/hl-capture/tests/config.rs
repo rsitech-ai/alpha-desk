@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use hl_capture::{CaptureConfig, ConfigError, SourceAdapterConfig};
+use hl_capture::{CaptureConfig, ConfigError, NodeReplicaCmdsStyle, SourceAdapterConfig};
 use hl_protocol::{ObservationClass, SourceTrust};
 
 fn valid_config() -> String {
@@ -85,7 +85,10 @@ fn example_configuration_is_strict_valid_and_complete() {
             .source("primary-node")
             .expect("primary source")
             .adapter(),
-        Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+        Some(SourceAdapterConfig::NodeBlockDirectory {
+            replica_cmds_style: NodeReplicaCmdsStyle::ActionsAndResponses,
+            ..
+        })
     ));
     assert_eq!(
         config
@@ -365,6 +368,14 @@ fn node_adapter_path_poll_interval_and_class_are_validated() {
             "class = \"committed-block\"",
             "class = \"auxiliary-ledger\"",
         ),
+        (
+            "replica_cmds_style = \"actions-and-responses\"",
+            "replica_cmds_style = \"actions\"",
+        ),
+        (
+            "replica_cmds_style = \"actions-and-responses\"",
+            "replica_cmds_style = \"recent-actions\"",
+        ),
     ] {
         let error = CaptureConfig::from_toml(&replace_once(&valid_config(), from, to))
             .expect_err("invalid adapter configuration");
@@ -398,7 +409,7 @@ fn node_line_stream_class_must_match_the_configured_output() {
             "class = \"committed-block\"",
             "class = \"auxiliary-ledger\"",
         ),
-        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25 }",
+        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25, replica_cmds_style = \"actions-and-responses\" }",
         "adapter = { kind = \"node-line\", path = \"/var/lib/hyperliquid/hl/data/node_fills/hourly/20260728/12\", stream_name = \"node-fills\", stream = \"fills\", poll_interval_millis = 25 }",
     );
     let config = CaptureConfig::from_toml(&source).expect("valid node line source");

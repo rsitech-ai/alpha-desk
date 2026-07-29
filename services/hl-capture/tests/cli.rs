@@ -82,7 +82,8 @@ fn status_outputs_the_validated_atomic_snapshot_without_config_secrets() {
                 CaptureHealth::Green,
             )
             .with_readiness(true)
-            .with_durable_height(Some(BlockHeight::new(500))),
+            .with_durable_height(Some(BlockHeight::new(500)))
+            .with_capture_capacity(12, Some(BlockHeight::new(501)), Some(2_500)),
         )
         .expect("write status");
     let config_path = directory.path().join("capture.toml");
@@ -103,8 +104,11 @@ fn status_outputs_the_validated_atomic_snapshot_without_config_secrets() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("status JSON");
-    assert_eq!(value["schema_version"], "hl.capture.status.v1");
+    assert_eq!(value["schema_version"], "hl.capture.status.v2");
     assert_eq!(value["durable_height"], 500);
+    assert_eq!(value["capture_backlog_records"], 12);
+    assert_eq!(value["oldest_pending_capture_height"], 501);
+    assert_eq!(value["disk_free_basis_points"], 2_500);
     assert_eq!(value["ready"], true);
     assert!(
         !String::from_utf8(output.stdout)
