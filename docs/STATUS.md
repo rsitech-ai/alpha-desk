@@ -17,7 +17,7 @@ This is the evidence ledger for the current working repository. The approved des
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
-| 1 — Truth layer | Tasks 1–7 have substantial library/tool foundations; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, primary-node file adapters, exhaustive source-trust admission, deterministic canonical identity and public trade mapping, V1 upcast validation, bounded gap/duplicate/divergence sequencing, chain-scoped canonical/raw Parquet archive, atomic verified manifest chains, corruption-before-yield replay reads, idempotent retained-generation compaction, DataFusion inspection/count tooling, deterministic fixtures, and parser fuzz target | Real-node/operator-corpus qualification, independent/recovery/operator/public/historical transports, remaining source mappings, real historical upcasts, archive-before-PostgreSQL-cursor coordination, JetStream publication, long-running capture service, runtime/restart/soak evidence, and signed gate |
+| 1 — Truth layer | Durable synthetic runtime mechanics are locally proven; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, primary-node file adapters, exhaustive source-trust admission, deterministic canonical identity and public trade mapping, V1 upcast validation, bounded gap/duplicate/divergence sequencing, chain-scoped canonical/raw Parquet archive, atomic verified manifest chains, corruption-before-yield replay reads, idempotent retained-generation compaction, DataFusion inspection/count tooling, archive-before-journal-before-JetStream-before-cursor coordination, PostgreSQL recovery, owned runtime lifecycle, atomic status, deterministic fixture replay, one-restart process E2E, and bounded synthetic soak evidence | Real committed-node mapper and source loop, spool-to-runtime wiring, real-node/operator-corpus qualification, independent/recovery/operator/public/historical transports, remaining source mappings, real historical upcasts, crash-failpoint restart matrix, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
 | 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
@@ -27,7 +27,8 @@ This is the evidence ledger for the current working repository. The approved des
 
 ## Runnable surface
 
-The currently useful runnable components are engineering tools:
+The currently useful runnable components are engineering tools and one explicit
+synthetic capture runtime:
 
 - `stage-gate`
 - `schema-check` and `schema-generate`
@@ -37,21 +38,30 @@ The currently useful runnable components are engineering tools:
 - `archive-inspect`
 - `architecture-check`
 - `build-info`
+- `hl-capture check-config`
+- `hl-capture status --json`
+- `hl-capture fixture-replay`
 
-The five service packages compile but their binaries exit immediately. `hl-capture` now exports
-Stage 1 observation/configuration contracts, the durable spool, primary-node file adapters,
-source-trust admission, and a bounded deterministic canonical sequencer, but its binary does not
-construct an adapter, open a source, or
-remain running. The adapters are
-focused-test proven against normalized official examples, not qualified against operator node
-recordings. `spool-inspect` can verify retained segments, manifests, and one complete open tail; it
+`hl-capture fixture-replay` constructs the real local Parquet archive,
+PostgreSQL progress adapter, authenticated JetStream publisher, coordinator,
+status writer, cancellation tree, and signal handler. The self-contained E2E
+restarts that process once against the same durable state and the soak wrapper
+retains bounded JSON evidence. This lane is explicitly synthetic and does not
+exercise the configured primary-node adapter or source spool. The production
+`hl-capture run` command fails closed with
+`capture_runtime.committed_source_mapper_unavailable`; it does not silently
+substitute fixture or public data.
+
+The primary-node adapters remain focused-test proven against normalized
+official examples, not qualified against operator node recordings.
+`spool-inspect` can verify retained segments, manifests, and one complete open tail; it
 is an operator tool, not a capture service. `hl-analytics` exports the local
 immutable archive, verified compaction, and full-chain inspection libraries;
 `archive-inspect` verifies reachable canonical/raw objects and independently
-counts canonical Parquet rows through DataFusion. Neither is wired into a
-long-running service or durable capture cursor. `just dev-up` starts dependencies only. The Swift
-package exports foundation libraries and has no application executable. Therefore there is not
-yet a product E2E or long-running soak path to claim.
+counts canonical Parquet rows through DataFusion. `just dev-up` starts
+dependencies only. The Swift package exports foundation libraries and has no
+application executable. Therefore the repository has truth-layer runtime
+mechanics evidence, not a live-source product E2E or desk application.
 
 The block-batched public trade fixture now maps deterministically through a
 versioned market catalog, but remains auxiliary `ProvisionalSource` evidence.
@@ -62,7 +72,10 @@ It does not establish committed history or production node compatibility.
 - `blocked:license-decision` — Apache-2.0 is current; any dual-license change requires owner/legal approval.
 - `blocked:external` — trusted identities, signed approvals, a second builder, hosted CI evidence, tags, canonical organization repository creation, and publication.
 - `blocked:public-history` — the current recovery/engineering history contains transport refs and author metadata that require a deliberate sanitized export decision.
-- `blocked:runtime-evidence` — archive storage behavior has focused local evidence, but capture coordination, replay service, restart, API, UI, load, soak, restore, canary, and rollback evidence do not exist yet.
+- `blocked:live-runtime` — synthetic capture coordination, one clean restart,
+  and bounded soak are locally proven; committed-source ingestion, source-spool
+  integration, crash-boundary process restarts, multi-hour/load/restore
+  evidence, API, and UI are still absent.
 
 No validated secret exposure was found by the 2026-07-28 local audit, but normal secret scanning is not sufficient to approve encoded archives or every remote ref for publication.
 
@@ -89,13 +102,20 @@ prove a running Alpha Desk product:
 - `cargo +1.97.1 test -p canonical-events --test node_mapping --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test upcast --locked --offline`
 - `cargo +1.97.1 test -p hl-capture --test sequencer --locked --offline`
+- `cargo +1.97.1 test -p hl-capture --locked --offline`
 - `cargo +1.97.1 test -p hl-analytics --test archive --locked --offline`
 - `cargo +1.97.1 test -p archive-inspect --locked --offline`
 - `just postgres-migration-smoke`
+- `just capture-e2e` — fresh PostgreSQL/NATS, three blocks, six acknowledged
+  publications, one clean restart, verified archive, clean shutdown
+- `just capture-soak 10s` — ten blocks, twenty acknowledged publications,
+  one restart, 16 seconds elapsed, 24.9 MiB peak RSS, clean shutdown
 - `just spool-verify`
 - `cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time=60`
 
-The Compose smoke verified NATS, ClickHouse, PostgreSQL, MinIO, the OpenTelemetry
+The capture reports are retained under ignored
+`target/evidence/capture-e2e/`; both declare
+`"live_source_qualified": false`. The Compose smoke verified NATS, ClickHouse, PostgreSQL, MinIO, the OpenTelemetry
 Collector, and VictoriaMetrics, then removed its uniquely owned containers,
 volumes, and network.
 

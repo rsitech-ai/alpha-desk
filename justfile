@@ -69,6 +69,12 @@ stage-0-compose-smoke:
 postgres-migration-smoke:
     ./tools/ci/check-postgres-migrations.sh
 
+capture-e2e:
+    ./tools/ci/capture-e2e.sh
+
+capture-soak duration="10m":
+    DURATION={{quote(duration)}} ./tools/ci/capture-soak.sh
+
 dev-up:
     ./tools/dev/with-dev-secrets.sh docker compose -f infra/docker-compose/compose.yaml up -d
     ./tools/dev/with-dev-secrets.sh ./tools/ci/wait-for-dev-stack.sh

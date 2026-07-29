@@ -139,7 +139,7 @@ The focused immutable-archive checks are:
 ```sh
 cargo +1.97.1 test -p hl-analytics --test archive --locked --offline
 cargo +1.97.1 test -p archive-inspect --locked --offline
-cargo +1.97.1 clippy -p storage-ports -p hl-analytics -p archive-inspect \
+cargo +1.97.1 clippy -p storage-ports -p canonical-archive -p hl-analytics -p archive-inspect \
   --all-targets --all-features --locked --offline -- -D warnings
 cargo +1.97.1 run -p archive-inspect --locked --offline -- verify <archive-root>
 cargo +1.97.1 run -p archive-inspect --locked --offline -- count <archive-root>
@@ -147,17 +147,58 @@ just archive-verify
 just archive-count
 ```
 
-The library preserves exact canonical Protobuf envelopes and raw source bytes,
+The `canonical-archive` foundation preserves exact canonical Protobuf
+envelopes and raw source bytes,
 verifies complete manifest chains and all requested objects before yielding,
 and supports idempotent immutable compaction without deleting prior
 generations. `count` uses DataFusion as an independent Parquet readability and
 row-count check. The normative format and recovery boundary is
 [`formats/archive-manifest-v1.md`](formats/archive-manifest-v1.md). This is
-storage-layer evidence only. Capture now has independently tested JetStream
-publication and PostgreSQL progress primitives, but it still lacks their
-archive-before-publish coordinator and a long-running runtime.
+storage-layer evidence only. Capture now coordinates the archive, PostgreSQL
+publication journal, JetStream acknowledgement, and contiguous cursor in that
+order.
 The default `just` commands use the byte-reproducible synthetic fixture under
 `fixtures/archive/valid-v1`; empty archive roots fail closed.
+
+## Capture runtime evidence
+
+Validate the checked-in non-secret configuration and inspect an existing
+atomic status snapshot with:
+
+```sh
+cargo +1.97.1 run -p hl-capture --locked --offline -- \
+  check-config --config config/capture.example.toml
+cargo +1.97.1 run -p hl-capture --locked --offline -- \
+  status --config <retained-capture-config> --json
+```
+
+The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
+authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
+archives and publishes deterministic synthetic blocks, performs one clean
+process restart against the same durable state, verifies the PostgreSQL cursor
+and publication acknowledgements, verifies the Parquet archive, and proves a
+final bounded SIGTERM shutdown:
+
+```sh
+just capture-e2e
+just capture-soak 10m
+```
+
+Each run retains an atomic report and non-secret diagnostic artifacts under
+`target/evidence/capture-e2e/<run-id>/`. The report records the binary hash,
+dependency versions, block/publication counts, restart count, runtime,
+resource high-water marks, archive summary, log byte counts, and shutdown
+result. The test removes only its disposable containers, network, and temporary
+secret directory.
+
+This is a synthetic runtime-mechanics lane. Its report deliberately contains
+`"live_source_qualified": false`. The production `run` command currently fails
+closed with `capture_runtime.committed_source_mapper_unavailable`; a real
+committed node-block mapper/source loop is still required before live capture
+can be claimed. One-node loopback password authentication and tmpfs JetStream
+also do not qualify production TLS, identity, or three-replica durability.
+See [`runbooks/capture-restart.md`](runbooks/capture-restart.md) for retained
+evidence and restart diagnosis.
 
 ## Engineering rules
 
@@ -181,7 +222,9 @@ Stage 1 normally requires a verified signed `stage-0-foundations` tag. Work deve
 - Unit tests prove pure invariants and error semantics.
 - Boundary integration tests prove serialization, storage, process, and dependency contracts.
 - Runtime smokes prove real startup, readiness, shutdown, listener release, and owned-resource cleanup.
-- Long-running evidence becomes meaningful only after durable spool recovery, continuity, archive, replay, and source-health contracts exist.
+- Synthetic long-running evidence proves runtime mechanics only; live-source
+  qualification additionally requires the approved source authority, mapper,
+  corpus, and recovery gates.
 
 ## Sensitive material
 

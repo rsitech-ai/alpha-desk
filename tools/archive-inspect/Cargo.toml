@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 datafusion.workspace = true
-hl-analytics = { path = "../../services/hl-analytics", version = "=0.1.0" }
+canonical-archive = { path = "../../crates/canonical-archive", version = "=0.1.0" }
 storage-ports = { path = "../../crates/storage-ports", version = "=0.1.0" }
 thiserror.workspace = true
 tokio.workspace = true

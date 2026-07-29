@@ -95,8 +95,11 @@ lockfile and inverse dependency evidence bind the reviewed package and path.
 Remove the ignore immediately when the pinned Parquet/DataFusion-compatible
 line stops resolving `paste`; any vulnerability advisory remains a release
 blocker. The executable exception check accepts only Parquet 58.4.0, the exact
-DataFusion 54.1.0 crate family, `hl-analytics`, and `archive-inspect` in the
-inverse path; an unrelated consumer or version fails closed.
+DataFusion 54.1.0 crate family, the reusable `canonical-archive` foundation,
+and its reviewed `hl-capture`, `hl-analytics`, and `archive-inspect` consumers
+in the inverse path. `spool-inspect` is also an allowed inverse root because it
+uses the `hl-capture` library's spool contracts; it does not invoke the archive.
+An unrelated consumer or version fails closed.
 
 ## Duplicate versions and dependency pins
 

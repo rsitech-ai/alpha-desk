@@ -1,6 +1,26 @@
 # Safe local example. This starts no network source by itself.
 parser_version = "parser-v1"
 
+[runtime]
+chain_id = "mainnet"
+first_height = 1
+archive_path = "state/canonical-archive"
+status_path = "state/capture-status.json"
+# Sensitive connection material is read from owner-only files at startup.
+postgres_url_path = "/run/secrets/alpha-desk-postgres-url"
+nats_server_url = "nats://127.0.0.1:4222"
+nats_stream = "HL_CANONICAL"
+nats_username = "capture"
+nats_password_path = "/run/secrets/alpha-desk-nats-capture-password"
+max_pending_blocks = 4096
+retained_committed_blocks = 4096
+publisher_ledger_capacity = 100000
+nats_max_ack_inflight = 4096
+publish_timeout_millis = 5000
+backpressure_timeout_millis = 5000
+shutdown_grace_millis = 15000
+disk_reserve_bytes = 10737418240
+
 [spool]
 path = "state/capture-spool"
 segment_target_bytes = 67108864

@@ -19,6 +19,29 @@ fn example_configuration_is_strict_valid_and_complete() {
 
     assert_eq!(config.parser_version(), "parser-v1");
     assert_eq!(config.spool().path(), Path::new("state/capture-spool"));
+    assert_eq!(config.runtime().chain_id().as_str(), "mainnet");
+    assert_eq!(config.runtime().first_height().get(), 1);
+    assert_eq!(
+        config.runtime().archive_path(),
+        Path::new("state/canonical-archive")
+    );
+    assert_eq!(
+        config.runtime().status_path(),
+        Path::new("state/capture-status.json")
+    );
+    assert_eq!(
+        config.runtime().postgres_url_path(),
+        Path::new("/run/secrets/alpha-desk-postgres-url")
+    );
+    assert_eq!(config.runtime().nats_server_url(), "nats://127.0.0.1:4222");
+    assert_eq!(config.runtime().nats_stream(), "HL_CANONICAL");
+    assert_eq!(
+        config.runtime().nats_password_path(),
+        Path::new("/run/secrets/alpha-desk-nats-capture-password")
+    );
+    assert_eq!(config.runtime().max_pending_blocks(), 4_096);
+    assert_eq!(config.runtime().nats_max_ack_inflight(), 4_096);
+    assert_eq!(config.runtime().shutdown_grace_millis(), 15_000);
     assert_eq!(config.sources().len(), 2);
     assert_eq!(
         config
@@ -84,6 +107,10 @@ fn unknown_keys_fail_startup_at_every_configuration_level() {
             "mode = \"batched\"",
             "mode = \"batched\"\nunknown_durability = true",
         ),
+        (
+            "chain_id = \"mainnet\"",
+            "chain_id = \"mainnet\"\nunknown_runtime = true",
+        ),
     ] {
         let error = CaptureConfig::from_toml(&replace_once(&valid_config(), from, to))
             .expect_err("unknown key must fail");
@@ -129,6 +156,58 @@ fn queue_payload_segment_rotation_and_durability_limits_fail_closed() {
     for (from, to, reason_code) in cases {
         let error = CaptureConfig::from_toml(&replace_once(&valid_config(), from, to))
             .expect_err("invalid bound must fail");
+        assert_eq!(error.reason_code(), reason_code);
+    }
+}
+
+#[test]
+fn runtime_boundaries_reject_inline_credentials_unsafe_paths_and_unbounded_limits() {
+    let cases = [
+        (
+            "nats_server_url = \"nats://127.0.0.1:4222\"",
+            "nats_server_url = \"nats://capture:secret@127.0.0.1:4222\"",
+            "capture_config.invalid_nats_server",
+        ),
+        (
+            "nats_server_url = \"nats://127.0.0.1:4222\"",
+            "nats_server_url = \"nats://127.0.0.1.evil.example:4222\"",
+            "capture_config.invalid_nats_server",
+        ),
+        (
+            "archive_path = \"state/canonical-archive\"",
+            "archive_path = \"../canonical-archive\"",
+            "capture_config.invalid_runtime_path",
+        ),
+        (
+            "postgres_url_path = \"/run/secrets/alpha-desk-postgres-url\"",
+            "postgres_url_path = \"postgresql://alpha:secret@localhost/alpha\"",
+            "capture_config.invalid_credential_path",
+        ),
+        (
+            "publish_timeout_millis = 5000",
+            "publish_timeout_millis = 0",
+            "capture_config.invalid_runtime_limit",
+        ),
+        (
+            "nats_max_ack_inflight = 4096",
+            "nats_max_ack_inflight = 0",
+            "capture_config.invalid_runtime_limit",
+        ),
+        (
+            "nats_stream = \"HL_CANONICAL\"",
+            "nats_stream = \"HL_DATA\"",
+            "capture_config.invalid_nats_stream",
+        ),
+        (
+            "disk_reserve_bytes = 10737418240",
+            "disk_reserve_bytes = 0",
+            "capture_config.invalid_runtime_limit",
+        ),
+    ];
+
+    for (from, to, reason_code) in cases {
+        let error = CaptureConfig::from_toml(&replace_once(&valid_config(), from, to))
+            .expect_err("invalid runtime boundary must fail");
         assert_eq!(error.reason_code(), reason_code);
     }
 }

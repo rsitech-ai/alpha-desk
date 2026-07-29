@@ -31,6 +31,8 @@ Hyperliquid Alpha Desk is designed as an evidence-first, event-sourced research 
 ## Process boundaries
 
 - `hl-capture` owns asynchronous source I/O, spooling, source health, and canonical publication.
+- `canonical-archive` owns the reusable immutable Parquet archive mechanics
+  consumed by capture, analytics, and inspection tooling.
 - `hl-core` owns deterministic canonical state reconstruction.
 - `hl-analytics` owns evidence-linked feature and intelligence computation.
 - `hl-research` owns reproducible experiment and model evaluation.
