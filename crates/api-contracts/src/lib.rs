@@ -614,6 +614,62 @@ pub struct WireOrderRejected {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireDepositCredited {
+    pub account_id: String,
+    pub asset_id: String,
+    pub amount: String,
+    pub deposit_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireWithdrawalDebited {
+    pub account_id: String,
+    pub asset_id: String,
+    pub amount: String,
+    pub withdrawal_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireSpotTransfer {
+    pub from_account_id: String,
+    pub to_account_id: String,
+    pub asset_id: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WirePerpTransfer {
+    pub from_account_id: String,
+    pub to_account_id: String,
+    pub quote_amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireSubaccountTransfer {
+    pub master_account_id: String,
+    pub from_account_id: String,
+    pub to_account_id: String,
+    pub asset_id: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireVaultDeposit {
+    pub vault_id: String,
+    pub account_id: String,
+    pub amount: String,
+    pub shares_issued: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireVaultWithdrawal {
+    pub vault_id: String,
+    pub account_id: String,
+    pub amount: String,
+    pub shares_redeemed: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireDexCreated {
     pub dex_id: String,
     pub name: String,
@@ -917,6 +973,222 @@ pub fn decode_order_rejected(bytes: &[u8]) -> Result<WireOrderRejected, PayloadC
         account_id: message.account_id,
         reason_code: message.reason_code,
         reason: message.reason,
+    })
+}
+
+pub fn encode_deposit_credited(value: &WireDepositCredited) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_deposit_credited(value.clone())?;
+    Ok(wrap_payload(
+        "DepositCredited",
+        generated::hl::canonical::v1::DepositCredited {
+            account_id: value.account_id,
+            asset_id: value.asset_id,
+            amount: value.amount,
+            deposit_reference: value.deposit_reference,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_deposit_credited(bytes: &[u8]) -> Result<WireDepositCredited, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::DepositCredited::decode(
+        unwrap_payload("DepositCredited", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "DepositCredited".to_owned(),
+        source,
+    })?;
+    validate_deposit_credited(WireDepositCredited {
+        account_id: message.account_id,
+        asset_id: message.asset_id,
+        amount: message.amount,
+        deposit_reference: message.deposit_reference,
+    })
+}
+
+pub fn encode_withdrawal_debited(
+    value: &WireWithdrawalDebited,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_withdrawal_debited(value.clone())?;
+    Ok(wrap_payload(
+        "WithdrawalDebited",
+        generated::hl::canonical::v1::WithdrawalDebited {
+            account_id: value.account_id,
+            asset_id: value.asset_id,
+            amount: value.amount,
+            withdrawal_reference: value.withdrawal_reference,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_withdrawal_debited(bytes: &[u8]) -> Result<WireWithdrawalDebited, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::WithdrawalDebited::decode(
+        unwrap_payload("WithdrawalDebited", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "WithdrawalDebited".to_owned(),
+        source,
+    })?;
+    validate_withdrawal_debited(WireWithdrawalDebited {
+        account_id: message.account_id,
+        asset_id: message.asset_id,
+        amount: message.amount,
+        withdrawal_reference: message.withdrawal_reference,
+    })
+}
+
+pub fn encode_spot_transfer(value: &WireSpotTransfer) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_spot_transfer(value.clone())?;
+    Ok(wrap_payload(
+        "SpotTransfer",
+        generated::hl::canonical::v1::SpotTransfer {
+            from_account_id: value.from_account_id,
+            to_account_id: value.to_account_id,
+            asset_id: value.asset_id,
+            amount: value.amount,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_spot_transfer(bytes: &[u8]) -> Result<WireSpotTransfer, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::SpotTransfer::decode(
+        unwrap_payload("SpotTransfer", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "SpotTransfer".to_owned(),
+        source,
+    })?;
+    validate_spot_transfer(WireSpotTransfer {
+        from_account_id: message.from_account_id,
+        to_account_id: message.to_account_id,
+        asset_id: message.asset_id,
+        amount: message.amount,
+    })
+}
+
+pub fn encode_perp_transfer(value: &WirePerpTransfer) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_perp_transfer(value.clone())?;
+    Ok(wrap_payload(
+        "PerpTransfer",
+        generated::hl::canonical::v1::PerpTransfer {
+            from_account_id: value.from_account_id,
+            to_account_id: value.to_account_id,
+            quote_amount: value.quote_amount,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_perp_transfer(bytes: &[u8]) -> Result<WirePerpTransfer, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::PerpTransfer::decode(
+        unwrap_payload("PerpTransfer", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "PerpTransfer".to_owned(),
+        source,
+    })?;
+    validate_perp_transfer(WirePerpTransfer {
+        from_account_id: message.from_account_id,
+        to_account_id: message.to_account_id,
+        quote_amount: message.quote_amount,
+    })
+}
+
+pub fn encode_subaccount_transfer(
+    value: &WireSubaccountTransfer,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_subaccount_transfer(value.clone())?;
+    Ok(wrap_payload(
+        "SubaccountTransfer",
+        generated::hl::canonical::v1::SubaccountTransfer {
+            master_account_id: value.master_account_id,
+            from_account_id: value.from_account_id,
+            to_account_id: value.to_account_id,
+            asset_id: value.asset_id,
+            amount: value.amount,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_subaccount_transfer(
+    bytes: &[u8],
+) -> Result<WireSubaccountTransfer, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::SubaccountTransfer::decode(
+        unwrap_payload("SubaccountTransfer", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "SubaccountTransfer".to_owned(),
+        source,
+    })?;
+    validate_subaccount_transfer(WireSubaccountTransfer {
+        master_account_id: message.master_account_id,
+        from_account_id: message.from_account_id,
+        to_account_id: message.to_account_id,
+        asset_id: message.asset_id,
+        amount: message.amount,
+    })
+}
+
+pub fn encode_vault_deposit(value: &WireVaultDeposit) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_vault_deposit(value.clone())?;
+    Ok(wrap_payload(
+        "VaultDeposit",
+        generated::hl::canonical::v1::VaultDeposit {
+            vault_id: value.vault_id,
+            account_id: value.account_id,
+            amount: value.amount,
+            shares_issued: value.shares_issued,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_vault_deposit(bytes: &[u8]) -> Result<WireVaultDeposit, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::VaultDeposit::decode(
+        unwrap_payload("VaultDeposit", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "VaultDeposit".to_owned(),
+        source,
+    })?;
+    validate_vault_deposit(WireVaultDeposit {
+        vault_id: message.vault_id,
+        account_id: message.account_id,
+        amount: message.amount,
+        shares_issued: message.shares_issued,
+    })
+}
+
+pub fn encode_vault_withdrawal(value: &WireVaultWithdrawal) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_vault_withdrawal(value.clone())?;
+    Ok(wrap_payload(
+        "VaultWithdrawal",
+        generated::hl::canonical::v1::VaultWithdrawal {
+            vault_id: value.vault_id,
+            account_id: value.account_id,
+            amount: value.amount,
+            shares_redeemed: value.shares_redeemed,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_vault_withdrawal(bytes: &[u8]) -> Result<WireVaultWithdrawal, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::VaultWithdrawal::decode(
+        unwrap_payload("VaultWithdrawal", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "VaultWithdrawal".to_owned(),
+        source,
+    })?;
+    validate_vault_withdrawal(WireVaultWithdrawal {
+        vault_id: message.vault_id,
+        account_id: message.account_id,
+        amount: message.amount,
+        shares_redeemed: message.shares_redeemed,
     })
 }
 
@@ -1389,13 +1661,13 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "TwapSliceFilled" => decode!(generated::hl::canonical::v1::TwapSliceFilled),
         "TwapCompleted" => decode!(generated::hl::canonical::v1::TwapCompleted),
         "TradeMatched" => decode_trade_matched(bytes).map(|_| ()),
-        "DepositCredited" => decode!(generated::hl::canonical::v1::DepositCredited),
-        "WithdrawalDebited" => decode!(generated::hl::canonical::v1::WithdrawalDebited),
-        "SpotTransfer" => decode!(generated::hl::canonical::v1::SpotTransfer),
-        "PerpTransfer" => decode!(generated::hl::canonical::v1::PerpTransfer),
-        "SubaccountTransfer" => decode!(generated::hl::canonical::v1::SubaccountTransfer),
-        "VaultDeposit" => decode!(generated::hl::canonical::v1::VaultDeposit),
-        "VaultWithdrawal" => decode!(generated::hl::canonical::v1::VaultWithdrawal),
+        "DepositCredited" => decode_deposit_credited(bytes).map(|_| ()),
+        "WithdrawalDebited" => decode_withdrawal_debited(bytes).map(|_| ()),
+        "SpotTransfer" => decode_spot_transfer(bytes).map(|_| ()),
+        "PerpTransfer" => decode_perp_transfer(bytes).map(|_| ()),
+        "SubaccountTransfer" => decode_subaccount_transfer(bytes).map(|_| ()),
+        "VaultDeposit" => decode_vault_deposit(bytes).map(|_| ()),
+        "VaultWithdrawal" => decode_vault_withdrawal(bytes).map(|_| ()),
         "FeeCharged" => decode!(generated::hl::canonical::v1::FeeCharged),
         "BuilderFeeCharged" => decode!(generated::hl::canonical::v1::BuilderFeeCharged),
         "FundingPaid" => decode!(generated::hl::canonical::v1::FundingPaid),
@@ -1580,6 +1852,107 @@ fn validate_order_rejected(
     value.reason_code =
         required_bounded_text("OrderRejected", "reason_code", value.reason_code, 128)?;
     value.reason = required_bounded_text("OrderRejected", "reason", value.reason, 1_024)?;
+    Ok(value)
+}
+
+fn validate_deposit_credited(
+    mut value: WireDepositCredited,
+) -> Result<WireDepositCredited, PayloadCodecError> {
+    value.account_id = required_api_address("DepositCredited", "account_id", value.account_id)?;
+    value.asset_id = required_payload_field("DepositCredited", "asset_id", value.asset_id)?;
+    value.amount = required_payload_field("DepositCredited", "amount", value.amount)?;
+    value.deposit_reference = required_reference(
+        "DepositCredited",
+        "deposit_reference",
+        value.deposit_reference,
+    )?;
+    Ok(value)
+}
+
+fn validate_withdrawal_debited(
+    mut value: WireWithdrawalDebited,
+) -> Result<WireWithdrawalDebited, PayloadCodecError> {
+    value.account_id = required_api_address("WithdrawalDebited", "account_id", value.account_id)?;
+    value.asset_id = required_payload_field("WithdrawalDebited", "asset_id", value.asset_id)?;
+    value.amount = required_payload_field("WithdrawalDebited", "amount", value.amount)?;
+    value.withdrawal_reference = required_reference(
+        "WithdrawalDebited",
+        "withdrawal_reference",
+        value.withdrawal_reference,
+    )?;
+    Ok(value)
+}
+
+fn validate_spot_transfer(
+    mut value: WireSpotTransfer,
+) -> Result<WireSpotTransfer, PayloadCodecError> {
+    value.from_account_id =
+        required_api_address("SpotTransfer", "from_account_id", value.from_account_id)?;
+    value.to_account_id =
+        required_api_address("SpotTransfer", "to_account_id", value.to_account_id)?;
+    require_distinct_endpoints("SpotTransfer", &value.from_account_id, &value.to_account_id)?;
+    value.asset_id = required_payload_field("SpotTransfer", "asset_id", value.asset_id)?;
+    value.amount = required_payload_field("SpotTransfer", "amount", value.amount)?;
+    Ok(value)
+}
+
+fn validate_perp_transfer(
+    mut value: WirePerpTransfer,
+) -> Result<WirePerpTransfer, PayloadCodecError> {
+    value.from_account_id =
+        required_api_address("PerpTransfer", "from_account_id", value.from_account_id)?;
+    value.to_account_id =
+        required_api_address("PerpTransfer", "to_account_id", value.to_account_id)?;
+    require_distinct_endpoints("PerpTransfer", &value.from_account_id, &value.to_account_id)?;
+    value.quote_amount =
+        required_payload_field("PerpTransfer", "quote_amount", value.quote_amount)?;
+    Ok(value)
+}
+
+fn validate_subaccount_transfer(
+    mut value: WireSubaccountTransfer,
+) -> Result<WireSubaccountTransfer, PayloadCodecError> {
+    value.master_account_id = required_api_address(
+        "SubaccountTransfer",
+        "master_account_id",
+        value.master_account_id,
+    )?;
+    value.from_account_id = required_api_address(
+        "SubaccountTransfer",
+        "from_account_id",
+        value.from_account_id,
+    )?;
+    value.to_account_id =
+        required_api_address("SubaccountTransfer", "to_account_id", value.to_account_id)?;
+    require_distinct_endpoints(
+        "SubaccountTransfer",
+        &value.from_account_id,
+        &value.to_account_id,
+    )?;
+    value.asset_id = required_payload_field("SubaccountTransfer", "asset_id", value.asset_id)?;
+    value.amount = required_payload_field("SubaccountTransfer", "amount", value.amount)?;
+    Ok(value)
+}
+
+fn validate_vault_deposit(
+    mut value: WireVaultDeposit,
+) -> Result<WireVaultDeposit, PayloadCodecError> {
+    value.vault_id = required_payload_field("VaultDeposit", "vault_id", value.vault_id)?;
+    value.account_id = required_api_address("VaultDeposit", "account_id", value.account_id)?;
+    value.amount = required_payload_field("VaultDeposit", "amount", value.amount)?;
+    value.shares_issued =
+        required_payload_field("VaultDeposit", "shares_issued", value.shares_issued)?;
+    Ok(value)
+}
+
+fn validate_vault_withdrawal(
+    mut value: WireVaultWithdrawal,
+) -> Result<WireVaultWithdrawal, PayloadCodecError> {
+    value.vault_id = required_payload_field("VaultWithdrawal", "vault_id", value.vault_id)?;
+    value.account_id = required_api_address("VaultWithdrawal", "account_id", value.account_id)?;
+    value.amount = required_payload_field("VaultWithdrawal", "amount", value.amount)?;
+    value.shares_redeemed =
+        required_payload_field("VaultWithdrawal", "shares_redeemed", value.shares_redeemed)?;
     Ok(value)
 }
 
@@ -1804,6 +2177,56 @@ fn required_bounded_text(
         });
     }
     Ok(value)
+}
+
+fn required_reference(kind: &str, field: &str, value: String) -> Result<String, PayloadCodecError> {
+    let value = required_payload_field(kind, field, value)?;
+    if value.len() > 256 || value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must have 1..=256 bytes and no ASCII controls"),
+        });
+    }
+    Ok(value)
+}
+
+fn required_api_address(
+    kind: &str,
+    field: &str,
+    value: String,
+) -> Result<String, PayloadCodecError> {
+    let value = required_payload_field(kind, field, value)?;
+    let Some(hex) = value.strip_prefix("0x") else {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be a lowercase API address"),
+        });
+    };
+    if hex.len() != 40
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be a lowercase API address"),
+        });
+    }
+    Ok(value)
+}
+
+fn require_distinct_endpoints(
+    kind: &str,
+    from_account_id: &str,
+    to_account_id: &str,
+) -> Result<(), PayloadCodecError> {
+    if from_account_id == to_account_id {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: "from_account_id and to_account_id must differ".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn decode_optional_identity(

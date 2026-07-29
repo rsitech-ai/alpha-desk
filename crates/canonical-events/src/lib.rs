@@ -16,30 +16,36 @@ pub use node_mapping::{
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
-    WireAssetContextUpdated, WireCanonicalEventEnvelope, WireDexCreated, WireFundingRateUpdated,
-    WireMarginTableChanged, WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged,
-    WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted,
-    WireOrderCancelled, WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled,
-    WireOrderRejected, WireOrderRested, WireOutcomeCreated, WireOutcomeResolved,
-    WireSourceEvidence, WireTradeMatched, decode_asset_context_updated, decode_dex_created,
-    decode_funding_rate_updated, decode_margin_table_changed, decode_market_created,
-    decode_market_halted, decode_market_metadata_changed, decode_market_resumed,
-    decode_open_interest_cap_changed, decode_oracle_updated, decode_order_accepted,
-    decode_order_cancelled, decode_order_filled, decode_order_modified,
+    WireAssetContextUpdated, WireCanonicalEventEnvelope, WireDepositCredited, WireDexCreated,
+    WireFundingRateUpdated, WireMarginTableChanged, WireMarketCreated, WireMarketHalted,
+    WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated,
+    WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
+    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
+    WireOutcomeResolved, WirePerpTransfer, WireSourceEvidence, WireSpotTransfer,
+    WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal,
+    WireWithdrawalDebited, decode_asset_context_updated, decode_deposit_credited,
+    decode_dex_created, decode_funding_rate_updated, decode_margin_table_changed,
+    decode_market_created, decode_market_halted, decode_market_metadata_changed,
+    decode_market_resumed, decode_open_interest_cap_changed, decode_oracle_updated,
+    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
     decode_order_partially_filled, decode_order_rejected, decode_order_rested,
-    decode_outcome_created, decode_outcome_resolved, decode_trade_matched,
-    encode_asset_context_updated, encode_default_event_payload, encode_dex_created,
+    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_spot_transfer,
+    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
+    decode_vault_withdrawal, decode_withdrawal_debited, encode_asset_context_updated,
+    encode_default_event_payload, encode_deposit_credited, encode_dex_created,
     encode_funding_rate_updated, encode_margin_table_changed, encode_market_created,
     encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
     encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
     encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
-    encode_outcome_created, encode_outcome_resolved, encode_trade_matched, validate_event_payload,
+    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_spot_transfer,
+    encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
+    encode_vault_withdrawal, encode_withdrawal_debited, validate_event_payload,
 };
 use domain_types::{
     Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId, EventId, FundingRate, KnownTime,
     MarketId, OrderId, OrderSide, OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId,
-    TradeId, TransactionId,
+    TradeId, TransactionId, VaultId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -274,6 +280,62 @@ pub struct OrderRejected {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepositCredited {
+    pub account_id: Address,
+    pub asset_id: AssetId,
+    pub amount: Quantity,
+    pub deposit_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawalDebited {
+    pub account_id: Address,
+    pub asset_id: AssetId,
+    pub amount: Quantity,
+    pub withdrawal_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpotTransfer {
+    pub from_account_id: Address,
+    pub to_account_id: Address,
+    pub asset_id: AssetId,
+    pub amount: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerpTransfer {
+    pub from_account_id: Address,
+    pub to_account_id: Address,
+    pub quote_amount: QuoteAmount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubaccountTransfer {
+    pub master_account_id: Address,
+    pub from_account_id: Address,
+    pub to_account_id: Address,
+    pub asset_id: AssetId,
+    pub amount: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultDeposit {
+    pub vault_id: VaultId,
+    pub account_id: Address,
+    pub amount: QuoteAmount,
+    pub shares_issued: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultWithdrawal {
+    pub vault_id: VaultId,
+    pub account_id: Address,
+    pub amount: QuoteAmount,
+    pub shares_redeemed: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DexCreated {
     pub dex_id: DexId,
     pub name: String,
@@ -383,6 +445,13 @@ macro_rules! opaque_payloads {
             OrderFilled(OrderFilled),
             OrderCancelled(OrderCancelled),
             OrderRejected(OrderRejected),
+            DepositCredited(DepositCredited),
+            WithdrawalDebited(WithdrawalDebited),
+            SpotTransfer(SpotTransfer),
+            PerpTransfer(PerpTransfer),
+            SubaccountTransfer(SubaccountTransfer),
+            VaultDeposit(VaultDeposit),
+            VaultWithdrawal(VaultWithdrawal),
             DexCreated(DexCreated),
             AssetContextUpdated(AssetContextUpdated),
             MarketCreated(MarketCreated),
@@ -410,6 +479,13 @@ macro_rules! opaque_payloads {
                     Self::OrderFilled(_) => EventKind::OrderFilled,
                     Self::OrderCancelled(_) => EventKind::OrderCancelled,
                     Self::OrderRejected(_) => EventKind::OrderRejected,
+                    Self::DepositCredited(_) => EventKind::DepositCredited,
+                    Self::WithdrawalDebited(_) => EventKind::WithdrawalDebited,
+                    Self::SpotTransfer(_) => EventKind::SpotTransfer,
+                    Self::PerpTransfer(_) => EventKind::PerpTransfer,
+                    Self::SubaccountTransfer(_) => EventKind::SubaccountTransfer,
+                    Self::VaultDeposit(_) => EventKind::VaultDeposit,
+                    Self::VaultWithdrawal(_) => EventKind::VaultWithdrawal,
                     Self::DexCreated(_) => EventKind::DexCreated,
                     Self::AssetContextUpdated(_) => EventKind::AssetContextUpdated,
                     Self::MarketCreated(_) => EventKind::MarketCreated,
@@ -488,6 +564,87 @@ macro_rules! opaque_payloads {
                         reason: value.reason.clone(),
                     })
                     .map_err(payload_error),
+                    Self::DepositCredited(value) => {
+                        require_positive_quantity(value.amount, "DepositCredited amount")?;
+                        encode_deposit_credited(&WireDepositCredited {
+                            account_id: value.account_id.to_api_string(),
+                            asset_id: value.asset_id.to_string(),
+                            amount: value.amount.to_string(),
+                            deposit_reference: value.deposit_reference.clone(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::WithdrawalDebited(value) => {
+                        require_positive_quantity(value.amount, "WithdrawalDebited amount")?;
+                        encode_withdrawal_debited(&WireWithdrawalDebited {
+                            account_id: value.account_id.to_api_string(),
+                            asset_id: value.asset_id.to_string(),
+                            amount: value.amount.to_string(),
+                            withdrawal_reference: value.withdrawal_reference.clone(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::SpotTransfer(value) => {
+                        require_positive_quantity(value.amount, "SpotTransfer amount")?;
+                        encode_spot_transfer(&WireSpotTransfer {
+                            from_account_id: value.from_account_id.to_api_string(),
+                            to_account_id: value.to_account_id.to_api_string(),
+                            asset_id: value.asset_id.to_string(),
+                            amount: value.amount.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::PerpTransfer(value) => {
+                        require_positive_quote_amount(
+                            value.quote_amount,
+                            "PerpTransfer quote_amount",
+                        )?;
+                        encode_perp_transfer(&WirePerpTransfer {
+                            from_account_id: value.from_account_id.to_api_string(),
+                            to_account_id: value.to_account_id.to_api_string(),
+                            quote_amount: value.quote_amount.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::SubaccountTransfer(value) => {
+                        require_positive_quantity(value.amount, "SubaccountTransfer amount")?;
+                        encode_subaccount_transfer(&WireSubaccountTransfer {
+                            master_account_id: value.master_account_id.to_api_string(),
+                            from_account_id: value.from_account_id.to_api_string(),
+                            to_account_id: value.to_account_id.to_api_string(),
+                            asset_id: value.asset_id.to_string(),
+                            amount: value.amount.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::VaultDeposit(value) => {
+                        require_positive_quote_amount(value.amount, "VaultDeposit amount")?;
+                        require_positive_quantity(
+                            value.shares_issued,
+                            "VaultDeposit shares_issued",
+                        )?;
+                        encode_vault_deposit(&WireVaultDeposit {
+                            vault_id: value.vault_id.to_string(),
+                            account_id: value.account_id.to_api_string(),
+                            amount: value.amount.to_string(),
+                            shares_issued: value.shares_issued.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::VaultWithdrawal(value) => {
+                        require_positive_quote_amount(value.amount, "VaultWithdrawal amount")?;
+                        require_positive_quantity(
+                            value.shares_redeemed,
+                            "VaultWithdrawal shares_redeemed",
+                        )?;
+                        encode_vault_withdrawal(&WireVaultWithdrawal {
+                            vault_id: value.vault_id.to_string(),
+                            account_id: value.account_id.to_api_string(),
+                            amount: value.amount.to_string(),
+                            shares_redeemed: value.shares_redeemed.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
                     Self::DexCreated(value) => encode_dex_created(&WireDexCreated {
                         dex_id: value.dex_id.to_string(),
                         name: value.name.clone(),
@@ -650,6 +807,27 @@ macro_rules! opaque_payloads {
                     EventKind::OrderRejected => {
                         decode_order_rejected_payload(bytes).map(Self::OrderRejected)
                     }
+                    EventKind::DepositCredited => {
+                        decode_deposit_credited_payload(bytes).map(Self::DepositCredited)
+                    }
+                    EventKind::WithdrawalDebited => {
+                        decode_withdrawal_debited_payload(bytes).map(Self::WithdrawalDebited)
+                    }
+                    EventKind::SpotTransfer => {
+                        decode_spot_transfer_payload(bytes).map(Self::SpotTransfer)
+                    }
+                    EventKind::PerpTransfer => {
+                        decode_perp_transfer_payload(bytes).map(Self::PerpTransfer)
+                    }
+                    EventKind::SubaccountTransfer => {
+                        decode_subaccount_transfer_payload(bytes).map(Self::SubaccountTransfer)
+                    }
+                    EventKind::VaultDeposit => {
+                        decode_vault_deposit_payload(bytes).map(Self::VaultDeposit)
+                    }
+                    EventKind::VaultWithdrawal => {
+                        decode_vault_withdrawal_payload(bytes).map(Self::VaultWithdrawal)
+                    }
                     EventKind::DexCreated => {
                         decode_dex_created_payload(bytes).map(Self::DexCreated)
                     }
@@ -767,13 +945,6 @@ opaque_payloads!(
     TwapStarted,
     TwapSliceFilled,
     TwapCompleted,
-    DepositCredited,
-    WithdrawalDebited,
-    SpotTransfer,
-    PerpTransfer,
-    SubaccountTransfer,
-    VaultDeposit,
-    VaultWithdrawal,
     FeeCharged,
     BuilderFeeCharged,
     FundingPaid,
@@ -871,6 +1042,94 @@ fn decode_order_rejected_payload(bytes: &[u8]) -> Result<OrderRejected, Contract
         account_id: payload_value(Address::parse_api(&value.account_id))?,
         reason_code: value.reason_code,
         reason: value.reason,
+    })
+}
+
+fn decode_deposit_credited_payload(bytes: &[u8]) -> Result<DepositCredited, ContractError> {
+    let value = decode_deposit_credited(bytes).map_err(payload_error)?;
+    let amount = payload_value(Quantity::from_str(&value.amount))?;
+    require_positive_quantity(amount, "DepositCredited amount")?;
+    Ok(DepositCredited {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        amount,
+        deposit_reference: value.deposit_reference,
+    })
+}
+
+fn decode_withdrawal_debited_payload(bytes: &[u8]) -> Result<WithdrawalDebited, ContractError> {
+    let value = decode_withdrawal_debited(bytes).map_err(payload_error)?;
+    let amount = payload_value(Quantity::from_str(&value.amount))?;
+    require_positive_quantity(amount, "WithdrawalDebited amount")?;
+    Ok(WithdrawalDebited {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        amount,
+        withdrawal_reference: value.withdrawal_reference,
+    })
+}
+
+fn decode_spot_transfer_payload(bytes: &[u8]) -> Result<SpotTransfer, ContractError> {
+    let value = decode_spot_transfer(bytes).map_err(payload_error)?;
+    let amount = payload_value(Quantity::from_str(&value.amount))?;
+    require_positive_quantity(amount, "SpotTransfer amount")?;
+    Ok(SpotTransfer {
+        from_account_id: payload_value(Address::parse_api(&value.from_account_id))?,
+        to_account_id: payload_value(Address::parse_api(&value.to_account_id))?,
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        amount,
+    })
+}
+
+fn decode_perp_transfer_payload(bytes: &[u8]) -> Result<PerpTransfer, ContractError> {
+    let value = decode_perp_transfer(bytes).map_err(payload_error)?;
+    let quote_amount = payload_value(QuoteAmount::from_str(&value.quote_amount))?;
+    require_positive_quote_amount(quote_amount, "PerpTransfer quote_amount")?;
+    Ok(PerpTransfer {
+        from_account_id: payload_value(Address::parse_api(&value.from_account_id))?,
+        to_account_id: payload_value(Address::parse_api(&value.to_account_id))?,
+        quote_amount,
+    })
+}
+
+fn decode_subaccount_transfer_payload(bytes: &[u8]) -> Result<SubaccountTransfer, ContractError> {
+    let value = decode_subaccount_transfer(bytes).map_err(payload_error)?;
+    let amount = payload_value(Quantity::from_str(&value.amount))?;
+    require_positive_quantity(amount, "SubaccountTransfer amount")?;
+    Ok(SubaccountTransfer {
+        master_account_id: payload_value(Address::parse_api(&value.master_account_id))?,
+        from_account_id: payload_value(Address::parse_api(&value.from_account_id))?,
+        to_account_id: payload_value(Address::parse_api(&value.to_account_id))?,
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        amount,
+    })
+}
+
+fn decode_vault_deposit_payload(bytes: &[u8]) -> Result<VaultDeposit, ContractError> {
+    let value = decode_vault_deposit(bytes).map_err(payload_error)?;
+    let amount = payload_value(QuoteAmount::from_str(&value.amount))?;
+    require_positive_quote_amount(amount, "VaultDeposit amount")?;
+    let shares_issued = payload_value(Quantity::from_str(&value.shares_issued))?;
+    require_positive_quantity(shares_issued, "VaultDeposit shares_issued")?;
+    Ok(VaultDeposit {
+        vault_id: payload_value(VaultId::new(value.vault_id))?,
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        amount,
+        shares_issued,
+    })
+}
+
+fn decode_vault_withdrawal_payload(bytes: &[u8]) -> Result<VaultWithdrawal, ContractError> {
+    let value = decode_vault_withdrawal(bytes).map_err(payload_error)?;
+    let amount = payload_value(QuoteAmount::from_str(&value.amount))?;
+    require_positive_quote_amount(amount, "VaultWithdrawal amount")?;
+    let shares_redeemed = payload_value(Quantity::from_str(&value.shares_redeemed))?;
+    require_positive_quantity(shares_redeemed, "VaultWithdrawal shares_redeemed")?;
+    Ok(VaultWithdrawal {
+        vault_id: payload_value(VaultId::new(value.vault_id))?,
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        amount,
+        shares_redeemed,
     })
 }
 
@@ -1068,13 +1327,31 @@ fn parse_positive_price(value: &str) -> Result<Price, ContractError> {
 
 fn parse_positive_quantity(value: &str) -> Result<Quantity, ContractError> {
     let quantity = payload_value(Quantity::from_str(value))?;
-    if quantity.raw() <= 0 {
+    require_positive_quantity(quantity, "order quantity")?;
+    Ok(quantity)
+}
+
+fn require_positive_quantity(value: Quantity, field_name: &str) -> Result<(), ContractError> {
+    if value.raw() <= 0 {
         return Err(ContractError::Invalid {
             field: "payload",
-            reason: "order quantity must be positive".to_owned(),
+            reason: format!("{field_name} must be positive"),
         });
     }
-    Ok(quantity)
+    Ok(())
+}
+
+fn require_positive_quote_amount(
+    value: QuoteAmount,
+    field_name: &str,
+) -> Result<(), ContractError> {
+    if value.raw() <= 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: format!("{field_name} must be positive"),
+        });
+    }
+    Ok(())
 }
 
 fn parse_nonnegative_quantity(value: &str) -> Result<Quantity, ContractError> {
@@ -1149,6 +1426,55 @@ fn fixture_payload_bytes(kind: EventKind) -> Result<Vec<u8>, ContractError> {
             account_id: Address::from_bytes([0x11; 20]).to_api_string(),
             reason_code: "fixture_rejection".to_owned(),
             reason: "fixture rejection".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::DepositCredited => encode_deposit_credited(&WireDepositCredited {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            asset_id: "USDC".to_owned(),
+            amount: "1.000000".to_owned(),
+            deposit_reference: "fixture-deposit".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::WithdrawalDebited => encode_withdrawal_debited(&WireWithdrawalDebited {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            asset_id: "USDC".to_owned(),
+            amount: "1.000000".to_owned(),
+            withdrawal_reference: "fixture-withdrawal".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::SpotTransfer => encode_spot_transfer(&WireSpotTransfer {
+            from_account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            to_account_id: Address::from_bytes([0x22; 20]).to_api_string(),
+            asset_id: "USDC".to_owned(),
+            amount: "1.000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::PerpTransfer => encode_perp_transfer(&WirePerpTransfer {
+            from_account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            to_account_id: Address::from_bytes([0x22; 20]).to_api_string(),
+            quote_amount: "1.000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::SubaccountTransfer => encode_subaccount_transfer(&WireSubaccountTransfer {
+            master_account_id: Address::from_bytes([0x33; 20]).to_api_string(),
+            from_account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            to_account_id: Address::from_bytes([0x22; 20]).to_api_string(),
+            asset_id: "USDC".to_owned(),
+            amount: "1.000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::VaultDeposit => encode_vault_deposit(&WireVaultDeposit {
+            vault_id: "fixture-vault".to_owned(),
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            amount: "1.000000".to_owned(),
+            shares_issued: "1.00000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::VaultWithdrawal => encode_vault_withdrawal(&WireVaultWithdrawal {
+            vault_id: "fixture-vault".to_owned(),
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            amount: "1.000000".to_owned(),
+            shares_redeemed: "1.00000000".to_owned(),
         })
         .map_err(payload_error),
         EventKind::DexCreated => encode_dex_created(&WireDexCreated {
