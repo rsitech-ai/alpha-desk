@@ -56,6 +56,7 @@ readonly TARGET_SPOOL="$TEMP_ROOT/target-spool"
 readonly TARGET_NODE="$TEMP_ROOT/target-node"
 readonly TARGET_TRUST="$TEMP_ROOT/target-trust"
 readonly TARGET_CANONICAL="$TEMP_ROOT/target-canonical"
+readonly TARGET_INSPECT="$TEMP_ROOT/target-inspect"
 readonly TARGET_MATERIAL="$TEMP_ROOT/target-material"
 readonly TARGET_CONTRACT_A="$TEMP_ROOT/target-contract-a"
 readonly TARGET_CONTRACT_B="$TEMP_ROOT/target-contract-b"
@@ -65,6 +66,7 @@ readonly TARGET_BUILD_B="$TEMP_ROOT/target-build-b"
 readonly CONTRACT_A="$TEMP_ROOT/contracts-a"
 readonly CONTRACT_B="$TEMP_ROOT/contracts-b"
 readonly GENERATED_SPOOL="$TEMP_ROOT/generated-spool"
+readonly GENERATED_CANONICAL="$TEMP_ROOT/generated-canonical.json"
 mkdir -p "$CONTRACT_A/rust" "$CONTRACT_B/rust" "$GENERATED_SPOOL"
 
 CARGO_TARGET_DIR="$TARGET_FIXTURES" \
@@ -90,7 +92,15 @@ CARGO_TARGET_DIR="$TARGET_TRUST" \
 
 CARGO_TARGET_DIR="$TARGET_CANONICAL" \
   cargo +1.97.1 test -p canonical-events \
-  --test event_id --test input --test block --frozen --offline
+  --test event_id --test input --test block --test node_mapping --test upcast \
+  --frozen --offline
+
+CARGO_TARGET_DIR="$TARGET_INSPECT" \
+  cargo +1.97.1 run -p canonical-inspect --frozen --offline -- \
+  canonicalize --root . \
+  --manifest fixtures/canonical/node-v1/inspect.toml \
+  --output "$GENERATED_CANONICAL"
+cmp fixtures/canonical/node-v1/expected.json "$GENERATED_CANONICAL"
 
 CARGO_TARGET_DIR="$TARGET_MATERIAL" \
   cargo +1.97.1 run -p api-contracts --bin schema-generate --frozen --offline -- \

@@ -27,6 +27,7 @@ members = [
   "tools/fixture-inspect",
   "tools/schema-check",
   "tools/spool-inspect",
+  "tools/canonical-inspect",
   "tools/build-info",
   "tools/architecture-check",
   "tools/stage-gate",

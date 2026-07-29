@@ -260,6 +260,14 @@
   buyer/seller order is preserved; maker/taker IDs are intentionally absent;
   standalone and unsupported records have explicit evidence-only
   dispositions; mapped auxiliary trades remain `ProvisionalSource`.
+- 2026-07-29: Added the V1 semantic upcaster boundary. It accepts and fully
+  validates only V1.0.x, preserves exact envelope bytes, and rejects malformed,
+  historical, or future versions with stable reason codes. No fictional
+  historical migration step was registered.
+- 2026-07-29: Added `canonical-inspect` with strict normalized-corpus
+  qualification, catalog-only trade mapping, create-new atomic output, and a
+  committed deterministic manifest containing source, event, payload, and
+  block hashes.
 
 ## Rollback / Recovery
 

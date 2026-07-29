@@ -12,6 +12,7 @@ required=(
   services/hl-research/Cargo.toml
   services/hl-api/Cargo.toml
   tools/spool-inspect/Cargo.toml
+  tools/canonical-inspect/Cargo.toml
   fuzz/Cargo.toml
   apps/AlphaDesk/Package.swift
 )

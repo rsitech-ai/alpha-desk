@@ -1,0 +1,21 @@
+schema_version = 1
+fixture_id = "public-node-v1-trade-batch"
+qualification = "normalized-public-documentation-example"
+production_recording = false
+source_path = "fixtures/source/node-v1/trade-batch.json"
+source_sha256 = "b0a05225bb69e554fcfc838e7c6fde9f4888921d18c30148dc5aa148d375f9d5"
+stream = "trades"
+chain_id = "hyperliquid-mainnet"
+source_id = "fixture-node-trades"
+source_version = "node-public-docs-2026-07-29"
+source_offset = "fixtures/source/node-v1/trade-batch.json"
+observed_at_micros = 1721982386000000
+ingested_at_micros = 1721982386100000
+canonicalized_at_micros = 1721982386200000
+mapper_version = "node-v1-mapper-1"
+catalog_version = "normalized-public-docs-v1"
+expected_disposition = "mapped"
+
+[[market]]
+symbol = "COMP"
+market_id = "perp:COMP"

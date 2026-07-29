@@ -12,7 +12,7 @@ This repository is not yet a runnable desk application. It currently contains a 
 | Rust workspace, exact domain types, schemas, fixtures, telemetry, and provenance | Implemented and locally tested | [`docs/STATUS.md`](docs/STATUS.md) |
 | Stage 0 gate tooling | Implemented; gate outcome `HOLD` | [`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml) |
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
-| Source observation, strict spool, primary-node adapters, source-trust admission, and canonical event/block identity | Implemented and locally tested as libraries; no service runtime or real-node qualification yet | [`docs/STATUS.md`](docs/STATUS.md) |
+| Source observation, strict spool, primary-node adapters, source-trust admission, canonical event/block identity, conservative public trade mapping, and V1 upcast validation | Implemented and locally tested as libraries/tools; no service runtime or real-node qualification yet | [`docs/STATUS.md`](docs/STATUS.md) |
 | Complete durable capture and canonical truth-layer runtime | Partially implemented; independent sources, runtime orchestration, continuity, archive, replay, and publication remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |

@@ -64,6 +64,25 @@ examples, not operator recordings. Read the exact cursor, quarantine, and
 qualification boundary in
 [`adapters/hyperliquid-node.md`](adapters/hyperliquid-node.md).
 
+The deterministic public trade mapping and semantic-version boundary checks
+are:
+
+```sh
+cargo +1.97.1 test -p canonical-events --test node_mapping --locked --offline
+cargo +1.97.1 test -p canonical-events --test upcast --locked --offline
+cargo +1.97.1 test -p canonical-inspect --locked --offline
+cargo +1.97.1 run -p canonical-inspect --locked --offline -- \
+  canonicalize --root . \
+  --manifest fixtures/canonical/node-v1/inspect.toml \
+  --output target/canonical-node-v1.json
+```
+
+The output path must not exist. The inspector publishes one atomically written
+manifest containing source hashes, mapping disposition, event/payload hashes,
+and the canonical block hash. The checked result remains normalized public
+documentation evidence with provisional confirmation; it is not real-node or
+production qualification.
+
 The focused source-trust boundary checks are:
 
 ```sh

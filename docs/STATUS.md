@@ -17,7 +17,7 @@ This is the evidence ledger for the current working repository. The approved des
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
-| 1 — Truth layer | Tasks 1–3, the Task 4 trust/admission boundary, and part of Task 5 are implemented on the hardening branch; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, offline inspection, primary-node per-height and line-file adapters, fail-closed quarantine, exhaustive source-trust admission, deterministic source-independent event IDs and block hashes, production canonical-event construction, presence-aware source sub-indexes, a conservative public block-batched trade mapping, deterministic fixtures, and parser fuzz target | Real-node/operator-corpus qualification, independent/recovery/operator/public/historical transports, remaining source-to-canonical mappings, upcasters, continuity, archive, JetStream publication, long-running capture service, runtime evidence, and signed gate |
+| 1 — Truth layer | Tasks 1–3, the Task 4 trust/admission boundary, and part of Task 5 are implemented on the hardening branch; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe append-only spool, durability receipts, recovery scanner, immutable hash-chained close manifests, offline inspection, primary-node per-height and line-file adapters, fail-closed quarantine, exhaustive source-trust admission, deterministic source-independent event IDs and block hashes, production canonical-event construction, presence-aware source sub-indexes, a conservative public block-batched trade mapping, a byte-preserving V1.0.x upcast boundary, deterministic fixtures, and parser fuzz target | Real-node/operator-corpus qualification, independent/recovery/operator/public/historical transports, remaining source-to-canonical mappings, historical upcast steps when real versions exist, continuity, archive, JetStream publication, long-running capture service, runtime evidence, and signed gate |
 | 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
@@ -33,6 +33,7 @@ The currently useful runnable components are engineering tools:
 - `schema-check` and `schema-generate`
 - `fixture-inspect`
 - `spool-inspect`
+- `canonical-inspect`
 - `architecture-check`
 - `build-info`
 
@@ -81,6 +82,7 @@ prove a running Alpha Desk product:
 - `cargo +1.97.1 test -p canonical-events --test input --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test block --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test node_mapping --locked --offline`
+- `cargo +1.97.1 test -p canonical-events --test upcast --locked --offline`
 - `just spool-verify`
 - `cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time=60`
 
