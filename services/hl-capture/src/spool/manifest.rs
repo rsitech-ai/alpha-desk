@@ -290,8 +290,8 @@ pub(crate) fn load_close_receipt(
     }
     super::inspection::verify_manifest_bytes(&manifest, segment_path)?;
     let reader = super::SpoolReader::open(segment_path)?;
-    let records = reader.read_all()?;
-    super::inspection::verify_manifest_content(&manifest, &reader, &records)?;
+    let summary = reader.summarize()?;
+    super::inspection::verify_manifest_content(&manifest, &reader, &summary)?;
     Ok(CloseReceipt {
         manifest,
         segment_path: segment_path.to_owned(),

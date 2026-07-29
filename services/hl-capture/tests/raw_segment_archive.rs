@@ -4,7 +4,7 @@ use bytes::Bytes;
 use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use domain_types::{ChainId, SourceId};
 use hl_capture::spool::{DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolRotationPolicy};
-use hl_capture::{BlockingRawSegmentArchive, RawSegmentArchive};
+use hl_capture::{BlockingRawSegmentArchive, RawSegmentArchive, RawSegmentArchiveConfig};
 use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
 use storage_ports::{RawObservationArchive, RawObservationRange};
 use tempfile::TempDir;
@@ -41,6 +41,10 @@ fn spool(root: &TempDir) -> SourceSpool {
     .unwrap()
 }
 
+fn archive_config(max_batch_records: usize) -> RawSegmentArchiveConfig {
+    RawSegmentArchiveConfig::try_new(1024, max_batch_records, 4096).unwrap()
+}
+
 #[tokio::test]
 async fn verified_closed_segment_is_archived_byte_exactly_and_idempotently() {
     let root = TempDir::new().unwrap();
@@ -67,11 +71,19 @@ async fn verified_closed_segment_is_archived_byte_exactly_and_idempotently() {
     let closed = source_spool.shutdown(103).unwrap().unwrap();
 
     let first = archiver
-        .archive_segment(&ChainId::new("mainnet").unwrap(), &closed, 1024)
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(1024),
+        )
         .await
         .unwrap();
     let second = archiver
-        .archive_segment(&ChainId::new("mainnet").unwrap(), &closed, 1024)
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(1024),
+        )
         .await
         .unwrap();
 
@@ -121,7 +133,11 @@ async fn segment_mutation_after_close_is_rejected_before_raw_publication() {
         .unwrap();
 
     let error = archiver
-        .archive_segment(&ChainId::new("mainnet").unwrap(), &closed, 1024)
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(1024),
+        )
         .await
         .unwrap_err();
 
@@ -152,7 +168,11 @@ async fn recovered_tail_is_sealed_archived_and_safe_to_replay_idempotently() {
     let mut recovered = spool(&root);
     let sealed = recovered.seal_active(102).unwrap().unwrap();
     archiver
-        .archive_segment(&ChainId::new("mainnet").unwrap(), &sealed, 1024)
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &sealed,
+            archive_config(1024),
+        )
         .await
         .unwrap();
     drop(recovered);
@@ -163,9 +183,47 @@ async fn recovered_tail_is_sealed_archived_and_safe_to_replay_idempotently() {
         .archive_segment(
             &ChainId::new("mainnet").unwrap(),
             &reopened.closed_segments()[0],
-            1024,
+            archive_config(1024),
         )
         .await
         .unwrap();
     assert_eq!(archive.inspect().unwrap().raw_observations(), 1);
+}
+
+#[tokio::test]
+async fn same_hour_segment_is_streamed_into_bounded_record_batches() {
+    let root = TempDir::new().unwrap();
+    let archive = Arc::new(
+        LocalParquetArchive::open(
+            root.path().join("archive"),
+            ArchiveConfig::deterministic_fixture(
+                "raw-segment-test",
+                domain_types::KnownTime::from_unix_micros(1_000).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+    let archiver = BlockingRawSegmentArchive::new(raw_port);
+    let mut source_spool = spool(&root);
+    for offset in 100..105 {
+        source_spool
+            .append(&observation(offset, 1_000), i64::try_from(offset).unwrap())
+            .unwrap();
+    }
+    let closed = source_spool.shutdown(200).unwrap().unwrap();
+
+    let summary = archiver
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(2),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(summary.observation_count(), 5);
+    assert_eq!(summary.batch_count(), 3);
+    assert_eq!(archive.inspect().unwrap().raw_observations(), 5);
 }

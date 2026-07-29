@@ -17,7 +17,7 @@ This is the evidence ledger for the current working repository. The approved des
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
-| 1 — Truth layer | Empty committed-block runtime is synthetic-source proven; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe hash-chained source spool, primary-node file adapter, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive, raw-segment provenance and parity, archive-before-journal-before-JetStream-before-cursor coordination, PostgreSQL recovery, enforced absolute disk reserve, owned runtime lifecycle, atomic status, one-restart process E2E, and bounded synthetic soak evidence | Qualified action-bearing committed mapping and operator corpus, independent/recovery/operator/public/historical transports, downstream-outage spool/backlog decoupling, real historical upcasts, crash-failpoint matrix, percentage disk health, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
+| 1 — Truth layer | Empty committed-block runtime is synthetic-source proven; stage not passed | Validated byte-preserving observations, strict capture configuration, crash-safe hash-chained source spool, bounded one-record-at-a-time spool verification/replay, primary-node file adapter, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive with bounded raw batches, raw-segment provenance and parity, archive-before-journal-before-JetStream-before-cursor coordination, PostgreSQL recovery, enforced absolute disk reserve, owned runtime lifecycle, atomic status, one-restart process E2E, and bounded synthetic soak evidence | Qualified action-bearing committed mapping and operator corpus, independent/recovery/operator/public/historical transports, downstream-outage spool/backlog decoupling, real historical upcasts, crash-failpoint matrix, percentage disk health, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
 | 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
@@ -47,7 +47,10 @@ synthetic-source capture runtime:
 spool, local raw/canonical Parquet archive, PostgreSQL progress adapter,
 authenticated JetStream publisher, coordinator, status writer, cancellation
 tree, and signal handler. The committed mapper accepts only structurally valid
-empty action bundles and fails closed on action-bearing records.
+empty action bundles and fails closed on action-bearing records. Spool scans
+and replay allocate at most one record body at a time, raw archival emits
+bounded batches, and capture configuration rejects segment targets above
+512 MiB.
 
 `hl-capture fixture-replay` retains a deterministic coordinator-only lane. The
 self-contained production-entrypoint E2E uses `hl-capture run`, restarts it once

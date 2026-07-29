@@ -7,8 +7,8 @@ use hl_protocol::{CursorTransition, SourceCursor, SourceObservation};
 
 use super::manifest::load_close_receipt;
 use super::{
-    AppendReceipt, CloseReceipt, DurabilityPolicy, SegmentHeaderV1, SpoolError, SpoolReader,
-    SpoolWriter, inspect_spool, io_error, recover_spool_tail,
+    AppendReceipt, CloseReceipt, DurabilityPolicy, SegmentHeaderV1, SpoolError, SpoolRead,
+    SpoolReader, SpoolWriter, inspect_spool, io_error, recover_spool_tail,
 };
 
 #[derive(Debug, Clone)]
@@ -128,11 +128,20 @@ impl SourceSpool {
         for path in inspection.segment_paths() {
             let reader = SpoolReader::open(path)?;
             validate_header(reader.header(), &config)?;
-            for record in reader.read_all()? {
-                if let Some(previous) = &last_durable_cursor {
-                    validate_successor(record.cursor(), previous)?;
+            let mut records = reader.stream()?;
+            loop {
+                match records.next_record()? {
+                    SpoolRead::Record(record) => {
+                        if let Some(previous) = &last_durable_cursor {
+                            validate_successor(record.cursor(), previous)?;
+                        }
+                        last_durable_cursor = Some(record.cursor().clone());
+                    }
+                    SpoolRead::EndOfFile => break,
+                    SpoolRead::IncompleteTail { record_offset } => {
+                        return Err(SpoolError::IncompleteTail { record_offset });
+                    }
                 }
-                last_durable_cursor = Some(record.cursor().clone());
             }
         }
 

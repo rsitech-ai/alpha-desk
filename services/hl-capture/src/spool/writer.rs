@@ -111,20 +111,12 @@ impl SpoolWriter {
         if let Some(record_offset) = scan.incomplete_tail {
             return Err(SpoolError::IncompleteTail { record_offset });
         }
-        let mut previous = None;
-        for record in &scan.records {
-            if let Some(previous) = &previous {
-                validate_cursor_successor(record.cursor(), previous)?;
-            }
-            previous = Some(record.cursor().clone());
-        }
-        let record_count =
-            u64::try_from(scan.records.len()).map_err(|_| SpoolError::SizeOverflow)?;
+        let record_count = scan.record_count;
         if record_count != report.valid_records {
             return Err(SpoolError::SizeOverflow);
         }
-        let min_cursor = scan.records.first().map(|record| record.cursor().clone());
-        let last_cursor = scan.records.last().map(|record| record.cursor().clone());
+        let min_cursor = scan.first_cursor;
+        let last_cursor = scan.last_cursor;
         file.seek(SeekFrom::End(0))
             .map_err(|source| io_error("seeking to the recovered spool tail", source))?;
         Ok((
