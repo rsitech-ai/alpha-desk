@@ -18,7 +18,7 @@ This is the evidence ledger for the current working repository. The approved des
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
 | 1 — Truth layer | Empty committed-block runtime and one-way failover are synthetic-source proven; stage not passed | Validated byte-preserving observations, strict primary/independent topology, crash-safe hash-chained per-source spools, exact-height create-once failover state, bounded one-record-at-a-time spool verification/replay and central canonical drain, primary and independent node-directory adapters, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive with bounded raw batches, raw-segment provenance and parity, archive-before-journal-before-JetStream-before-cursor coordination, reconnecting PostgreSQL/JetStream sessions, absolute and percentage disk gates, V3 active-source/failover/backlog/capacity status, bounded staggered reconnect backoff, owned runtime lifecycle, restart and no-failback E2E, PostgreSQL/NATS outage-recovery E2E, and bounded synthetic soak evidence | Qualified action-bearing committed mapping and operator corpus, separately operated independent-source qualification, recovery/operator/public/historical transports, overlap reconciliation and explicit failback procedure, real historical upcasts, crash-failpoint matrix, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
-| 2 — State reconstruction | Block-atomic, local checkpoint, serial replay, and exact canonical trade-fact evidence implemented; stage not passed | Pure synchronous reducer contract, default-deny kind/schema ownership, contiguous committed watermark, deterministic canonical state bytes and hash, duplicate idempotence, whole-block rollback, bounded mutations, immutable state deltas, exact state-image restore, content-derived canonical checkpoint manifests bound to archive/schema/reducer identity, descriptor-relative private manifest-last local checkpoint publication/load, immutable-manifest serial replay with preflight, deterministic receipts, exact trade facts with ordinal participant legs and stored quantity-symmetry reconciliation, bounded synthetic trade replay/checkpoint evidence, and focused adversarial tests | Qualified complete action-bearing account/order/position reducers, RocksDB atomic batch/checkpoints, production replay service runtime, correction handling, external account/book reconciliation, deployed-source rebuild evidence, and signed gate |
+| 2 — State reconstruction | Block-atomic, local checkpoint, serial replay, exact canonical trade facts, and exact canonical order lifecycle implemented; stage not passed | Pure synchronous reducer contract, default-deny kind/schema ownership, contiguous committed watermark, deterministic canonical state bytes and hash, duplicate idempotence, whole-block rollback, bounded mutations, immutable state deltas, exact state-image restore, content-derived canonical checkpoint manifests bound to archive/schema/reducer identity, descriptor-relative private manifest-last local checkpoint publication/load, immutable-manifest serial replay with preflight, deterministic receipts, exact trade facts with ordinal participant legs and stored quantity-symmetry reconciliation, exact default-deny order lifecycle with hash-linked transitions, bounded synthetic trade/order replay and checkpoint evidence, and focused adversarial tests | Qualified complete action-bearing account/position/balance/fee/funding/transfer reducers, RocksDB atomic batch/checkpoints, production replay service runtime, correction handling, external account/book reconciliation, deployed-source rebuild evidence, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
 | 5 — Alpha laboratory | Scaffold-only | Workspace crate boundaries | Experiment registry, walk-forward evaluation, leakage controls, models, promotion, and signed gate |
@@ -44,6 +44,7 @@ synthetic-source capture runtime:
 - `hl-capture fixture-replay`
 - `state-replay fixture-e2e`
 - `state-replay trade-e2e`
+- `state-replay order-e2e`
 - `state-replay archive-e2e`
 
 `hl-capture run` constructs the real node-directory adapter, raw-first source
@@ -117,6 +118,12 @@ private checkpoint resume, malformed-trade reducer failure, and
 unsupported-schema quarantine. Its report explicitly declares synthetic
 unassessed source evidence, Stage 1/2 false, and account/order/position
 qualification false.
+`state-replay order-e2e` generates all seven exact order event kinds and proves
+repeated exact-state rebuild, decoded fact/current/transition cardinality,
+private checkpoint resume, checked overfill rollback, terminal lifecycle
+counts, and unsupported-schema quarantine. Its report marks only the synthetic
+order contract proven; Stage 1/2, deployed/live source, position, margin, and
+execution qualification remain false.
 Stage 2 remains unqualified. The exact current contract and limitations are
 recorded in
 [`docs/contracts/deterministic-state-v1.md`](contracts/deterministic-state-v1.md).
@@ -155,6 +162,12 @@ prove a running Alpha Desk product:
   `target/evidence/state-replay-trade/20260729T180733Z-38718/report.json`
   proves exact synthetic canonical trade-state repeat/resume and atomic
   rejection boundaries; it does not qualify Stage 1, Stage 2, or live source.
+- `just state-replay-order-e2e 20 8 4` — retained private report
+  `target/evidence/state-replay-order/20260729T185537Z-82818/report.json`
+  proves four identical rebuilds, checkpoint-equivalent resume, 80 immutable
+  facts and transitions, 20 current orders, exact terminal counts, and atomic
+  overfill/unsupported-schema rejection; it does not qualify Stage 1, Stage 2,
+  deployed/live source, position, margin, or execution semantics.
 - `just oss-audit`
 - `gitleaks detect --source . --no-banner --redact --exit-code 1`
 - `cargo +1.97.1 test -p hl-capture --test spool_recovery --locked --offline`

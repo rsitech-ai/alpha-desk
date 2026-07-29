@@ -102,6 +102,44 @@ independent rebuilds. Override them with the same positional
 `state-replay-soak`. Preserve the entire evidence directory, including both
 rejection archives and the checkpoint generation.
 
+## Canonical order evidence
+
+Run the exact canonical order lifecycle through the immutable archive and
+private checkpoint path:
+
+```bash
+just state-replay-order-e2e
+```
+
+The command writes a new private directory under
+`target/evidence/state-replay-order/`. Alternating generated blocks cover
+acceptance, resting, modification, partial and terminal fill, cancellation,
+and rejection. The run requires:
+
+1. identical state and receipt hashes across independent rebuilds;
+2. a published, verified, loaded, and resumed prefix checkpoint;
+3. strict decoding and exact cardinality for every immutable fact, current
+   order, and transition assessment;
+4. exact filled, cancelled, and fact-only rejection counts;
+5. a late overfill to fail with
+   `order_state.overfill`/`ledger.reducer_failed` without state change; and
+6. schema `1.1.0` to fail with `ledger.unsupported_event` without state change.
+
+The report sets `synthetic_order_contract_proven = true` and keeps Stage 1,
+Stage 2, deployed/live source, position, margin, and execution qualification
+false. It is generated canonical-event evidence, not proof that a deployed
+Hyperliquid source emits these semantics.
+
+For a longer bounded run:
+
+```bash
+just state-replay-order-soak
+```
+
+Defaults are 1,000 order blocks, a checkpoint after 500 blocks, and 100
+independent rebuilds. Preserve the entire evidence directory, including both
+rejection archives and the checkpoint generation.
+
 ## Existing operator archive
 
 Run the same deterministic rebuild and checkpoint-resume proof against an
