@@ -19,12 +19,19 @@ const MAX_SHUTDOWN_GRACE: Duration = Duration::from_secs(300);
 const MAX_BUILD_ID_BYTES: usize = 256;
 const RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(250);
 const RECOVERING_REASON: &str = "capture_runtime.recovering";
+const DISK_HEALTHY_BASIS_POINTS: u16 = 2_000;
+const LOW_DISK_REASON: &str = "capture_disk.low_space";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeHealthSnapshot {
     health: CaptureHealth,
     ready: bool,
     reason_code: Option<&'static str>,
+    latest_captured_height: Option<BlockHeight>,
+    next_expected_capture_height: Option<BlockHeight>,
+    capture_backlog_records: u64,
+    oldest_pending_capture_height: Option<BlockHeight>,
+    disk_free_basis_points: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -38,37 +45,95 @@ impl CaptureRuntimeHealth {
             health: CaptureHealth::Red,
             ready: false,
             reason_code: Some(RECOVERING_REASON),
+            latest_captured_height: None,
+            next_expected_capture_height: None,
+            capture_backlog_records: 0,
+            oldest_pending_capture_height: None,
+            disk_free_basis_points: None,
         });
         Self { sender }
     }
 
     pub(crate) fn set_ready(&self) {
-        self.sender.send_replace(RuntimeHealthSnapshot {
-            health: CaptureHealth::Green,
-            ready: true,
-            reason_code: None,
+        self.sender.send_modify(|snapshot| {
+            if snapshot
+                .disk_free_basis_points
+                .is_some_and(|basis_points| basis_points < DISK_HEALTHY_BASIS_POINTS)
+            {
+                snapshot.health = CaptureHealth::Yellow;
+                snapshot.reason_code = Some(LOW_DISK_REASON);
+            } else {
+                snapshot.health = CaptureHealth::Green;
+                snapshot.reason_code = None;
+            }
+            snapshot.ready = true;
         });
     }
 
     pub(crate) fn set_retryable(&self, reason_code: &'static str) {
-        self.sender.send_replace(RuntimeHealthSnapshot {
-            health: CaptureHealth::Yellow,
-            ready: false,
-            reason_code: Some(reason_code),
+        self.sender.send_modify(|snapshot| {
+            snapshot.health = CaptureHealth::Yellow;
+            snapshot.ready = false;
+            snapshot.reason_code = Some(reason_code);
         });
     }
 
     pub(crate) fn set_latched(&self, reason_code: &'static str) {
-        self.sender.send_replace(RuntimeHealthSnapshot {
-            health: CaptureHealth::Red,
-            ready: false,
-            reason_code: Some(reason_code),
+        self.sender.send_modify(|snapshot| {
+            snapshot.health = CaptureHealth::Red;
+            snapshot.ready = false;
+            snapshot.reason_code = Some(reason_code);
+        });
+    }
+
+    pub(crate) fn record_capture(&self, captured_height: BlockHeight, disk_free_basis_points: u16) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.latest_captured_height = Some(
+                snapshot
+                    .latest_captured_height
+                    .map_or(captured_height, |current| current.max(captured_height)),
+            );
+            snapshot.disk_free_basis_points = Some(disk_free_basis_points);
+            refresh_capture_backlog(snapshot);
+        });
+    }
+
+    pub(crate) fn record_disk_capacity(&self, disk_free_basis_points: u16) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.disk_free_basis_points = Some(disk_free_basis_points);
+        });
+    }
+
+    pub(crate) fn record_next_expected(&self, next_expected: BlockHeight) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.next_expected_capture_height = Some(next_expected);
+            refresh_capture_backlog(snapshot);
         });
     }
 
     fn snapshot(&self) -> RuntimeHealthSnapshot {
         *self.sender.borrow()
     }
+}
+
+fn refresh_capture_backlog(snapshot: &mut RuntimeHealthSnapshot) {
+    let Some(latest) = snapshot.latest_captured_height else {
+        snapshot.capture_backlog_records = 0;
+        snapshot.oldest_pending_capture_height = None;
+        return;
+    };
+    let Some(next) = snapshot.next_expected_capture_height else {
+        snapshot.capture_backlog_records = 0;
+        snapshot.oldest_pending_capture_height = None;
+        return;
+    };
+    if latest < next {
+        snapshot.capture_backlog_records = 0;
+        snapshot.oldest_pending_capture_height = None;
+        return;
+    }
+    snapshot.capture_backlog_records = latest.get().saturating_sub(next.get()).saturating_add(1);
+    snapshot.oldest_pending_capture_height = Some(next);
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +366,7 @@ impl StatusContext {
                     health: CaptureHealth::Yellow,
                     ready: false,
                     reason_code: Some("capture_progress.storage"),
+                    ..runtime_health
                 })
                 .map_err(status_error),
             Err(error) => Err(error),
@@ -341,6 +407,11 @@ impl StatusContext {
         .with_readiness(runtime_health.ready)
         .with_durable_height(cursor.map(|cursor| cursor.committed_block_height()))
         .with_pending_blocks(pending_blocks)
+        .with_capture_capacity(
+            runtime_health.capture_backlog_records,
+            runtime_health.oldest_pending_capture_height,
+            runtime_health.disk_free_basis_points,
+        )
         .with_archive_manifest_id(archive_manifest_id)
         .with_last_error_reason(runtime_health.reason_code.map(str::to_owned)))
     }
@@ -365,7 +436,12 @@ impl StatusContext {
             )
             .with_readiness(runtime_health.ready)
             .with_last_error_reason(runtime_health.reason_code.map(str::to_owned)),
-        };
+        }
+        .with_capture_capacity(
+            runtime_health.capture_backlog_records,
+            runtime_health.oldest_pending_capture_height,
+            runtime_health.disk_free_basis_points,
+        );
         self.writer.write(&status)
     }
 }
@@ -425,4 +501,45 @@ fn progress_error(_error: ProgressError) -> CaptureRuntimeError {
 
 fn status_error(_error: StatusError) -> CaptureRuntimeError {
     CaptureRuntimeError::Status
+}
+
+#[cfg(test)]
+mod tests {
+    use domain_types::BlockHeight;
+
+    use super::CaptureRuntimeHealth;
+
+    #[test]
+    fn capture_telemetry_tracks_backlog_boundary_and_disk_percentage() {
+        let health = CaptureRuntimeHealth::new();
+        health.record_next_expected(BlockHeight::new(41));
+        health.record_capture(BlockHeight::new(43), 2_345);
+
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.capture_backlog_records, 3);
+        assert_eq!(
+            snapshot.oldest_pending_capture_height,
+            Some(BlockHeight::new(41))
+        );
+        assert_eq!(snapshot.disk_free_basis_points, Some(2_345));
+
+        health.record_next_expected(BlockHeight::new(44));
+        let caught_up = health.snapshot();
+        assert_eq!(caught_up.capture_backlog_records, 0);
+        assert_eq!(caught_up.oldest_pending_capture_height, None);
+        assert_eq!(caught_up.disk_free_basis_points, Some(2_345));
+    }
+
+    #[test]
+    fn ready_health_is_yellow_below_twenty_percent_disk_free() {
+        let health = CaptureRuntimeHealth::new();
+        health.record_disk_capacity(1_500);
+
+        health.set_ready();
+
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.health, super::CaptureHealth::Yellow);
+        assert!(snapshot.ready);
+        assert_eq!(snapshot.reason_code, Some("capture_disk.low_space"));
+    }
 }

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use domain_types::{BlockHeight, ChainId, KnownTime};
 use hl_capture::{
-    AppError, CaptureHealth, CaptureStatus, OwnedTask, StatusWriter, run_owned_tasks,
+    AppError, CaptureHealth, CaptureStatus, OwnedTask, StatusError, StatusWriter, run_owned_tasks,
 };
 use tempfile::tempdir;
 use tokio::time::{sleep, timeout};
@@ -176,7 +176,7 @@ fn status_snapshot_is_atomic_versioned_bounded_and_secret_free() {
     assert!(!text.contains("postgresql://"));
     assert!(!text.contains("nats://"));
     let decoded: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
-    assert_eq!(decoded["schema_version"], "hl.capture.status.v1");
+    assert_eq!(decoded["schema_version"], "hl.capture.status.v2");
     assert_eq!(decoded["snapshot_at_micros"], 200);
     assert_eq!(decoded["health"], "green");
     assert_eq!(decoded["ready"], true);
@@ -185,4 +185,32 @@ fn status_snapshot_is_atomic_versioned_bounded_and_secret_free() {
     assert_eq!(decoded["pending_blocks"], 0);
     assert_eq!(decoded["archive_manifest_id"], "manifest-42");
     assert!(decoded.get("last_error_reason").is_none());
+}
+
+#[test]
+fn status_rejects_inconsistent_backlog_and_disk_capacity() {
+    let directory = tempdir().expect("temporary status directory");
+    let writer =
+        StatusWriter::new(directory.path().join("capture-status.json")).expect("status writer");
+    let base = CaptureStatus::new(
+        KnownTime::from_unix_micros(1).expect("time"),
+        "build-123",
+        ChainId::new("mainnet").expect("chain"),
+        CaptureHealth::Green,
+    );
+
+    let missing_backlog =
+        base.clone()
+            .with_capture_capacity(0, Some(BlockHeight::new(42)), Some(2_000));
+    assert!(matches!(
+        writer.write(&missing_backlog),
+        Err(StatusError::InvalidField)
+    ));
+
+    let invalid_percentage =
+        base.with_capture_capacity(1, Some(BlockHeight::new(42)), Some(10_001));
+    assert!(matches!(
+        writer.write(&invalid_percentage),
+        Err(StatusError::InvalidField)
+    ));
 }

@@ -244,7 +244,7 @@ trust = "locally-verified-committed"
 class = "committed-block"
 queue_capacity = 4096
 max_payload_bytes = 8388608
-adapter = { kind = "node-block-directory", path = "${source_root}", stream_name = "synthetic-fixture", start_height = ${first_height}, poll_interval_millis = 25 }
+adapter = { kind = "node-block-directory", path = "${source_root}", stream_name = "synthetic-fixture", start_height = ${first_height}, poll_interval_millis = 25, replica_cmds_style = "actions-and-responses" }
 EOF
 chmod 600 "$config_path"
 
@@ -325,7 +325,17 @@ wait_for_durable_height() {
     if [[ -f "$status_path" ]] \
       && jq -e \
         --argjson expected "$expected_height" \
-        '.ready == true and .health == "green" and .durable_height == $expected and .pending_blocks == 0' \
+        '.ready == true
+          and (
+            (.health == "green" and (.last_error_reason // null) == null)
+            or
+            (.health == "yellow" and .last_error_reason == "capture_disk.low_space")
+          )
+          and .durable_height == $expected
+          and .pending_blocks == 0
+          and .capture_backlog_records == 0
+          and (.oldest_pending_capture_height // null) == null
+          and .disk_free_basis_points >= 1000' \
         "$status_path" >/dev/null 2>&1; then
       return
     fi
@@ -446,7 +456,17 @@ while (( $(date -u '+%s') - process_started_at_epoch < minimum_runtime_seconds )
   fi
   jq -e \
     --argjson expected "$last_height" \
-    '.ready == true and .health == "green" and .durable_height == $expected and .pending_blocks == 0' \
+    '.ready == true
+      and (
+        (.health == "green" and (.last_error_reason // null) == null)
+        or
+        (.health == "yellow" and .last_error_reason == "capture_disk.low_space")
+      )
+      and .durable_height == $expected
+      and .pending_blocks == 0
+      and .capture_backlog_records == 0
+      and (.oldest_pending_capture_height // null) == null
+      and .disk_free_basis_points >= 1000' \
     "$status_path" >/dev/null
   sample_process
   sleep 1
@@ -492,6 +512,22 @@ durable_height="$(docker exec "$postgres_container" \
   exit 1
 }
 
+capture_status_schema_version="$(jq -r '.schema_version' "$status_path")"
+final_capture_backlog_records="$(jq -r '.capture_backlog_records' "$status_path")"
+final_disk_free_basis_points="$(jq -r '.disk_free_basis_points' "$status_path")"
+nats_outage_capture_backlog_records=0
+postgres_outage_capture_backlog_records=0
+if [[ -f "${evidence_root}/status-nats-outage.json" ]]; then
+  nats_outage_capture_backlog_records="$(
+    jq -r '.capture_backlog_records' "${evidence_root}/status-nats-outage.json"
+  )"
+fi
+if [[ -f "${evidence_root}/status-postgres-outage.json" ]]; then
+  postgres_outage_capture_backlog_records="$(
+    jq -r '.capture_backlog_records' "${evidence_root}/status-postgres-outage.json"
+  )"
+fi
+
 binary_sha256="$(shasum -a 256 "${repository_root}/target/debug/hl-capture" | awk '{print $1}')"
 postgres_version="$(docker exec "$postgres_container" postgres --version)"
 nats_version="$(curl --fail --silent --show-error "http://127.0.0.1:${nats_monitor_port}/varz" | jq -r '.version')"
@@ -500,7 +536,8 @@ archive_bytes="$(( $(du -sk "$archive_path" | awk '{print $1}') * 1024 ))"
 service_stdout_bytes="$(wc -c <"$service_stdout" | tr -d '[:space:]')"
 service_stderr_bytes="$(wc -c <"$service_stderr" | tr -d '[:space:]')"
 jq -n \
-  --arg schema_version 'hl.capture.e2e.v1' \
+  --arg schema_version 'hl.capture.e2e.v2' \
+  --arg capture_status_schema_version "$capture_status_schema_version" \
   --arg run_id "$run_id" \
   --arg chain_id "$chain_id" \
   --arg outage_mode "$outage_mode" \
@@ -512,6 +549,10 @@ jq -n \
   --argjson restart_count "$restart_count" \
   --argjson nats_outage_spool_records "$nats_outage_spool_records" \
   --argjson postgres_outage_spool_records "$postgres_outage_spool_records" \
+  --argjson nats_outage_capture_backlog_records "$nats_outage_capture_backlog_records" \
+  --argjson postgres_outage_capture_backlog_records "$postgres_outage_capture_backlog_records" \
+  --argjson final_capture_backlog_records "$final_capture_backlog_records" \
+  --argjson final_disk_free_basis_points "$final_disk_free_basis_points" \
   --argjson minimum_runtime_seconds "$minimum_runtime_seconds" \
   --argjson elapsed_seconds "$elapsed_seconds" \
   --argjson max_rss_kib "$max_rss_kib" \
@@ -525,6 +566,7 @@ jq -n \
   --arg nats_version "$nats_version" \
   '{
     schema_version: $schema_version,
+    capture_status_schema_version: $capture_status_schema_version,
     run_id: $run_id,
     mode: (if $outage_mode == "none" then "synthetic-node-source" else "synthetic-node-source-dependency-outage" end),
     live_source_qualified: false,
@@ -538,6 +580,10 @@ jq -n \
     restart_count: $restart_count,
     nats_outage_spool_records: $nats_outage_spool_records,
     postgres_outage_spool_records: $postgres_outage_spool_records,
+    nats_outage_capture_backlog_records: $nats_outage_capture_backlog_records,
+    postgres_outage_capture_backlog_records: $postgres_outage_capture_backlog_records,
+    final_capture_backlog_records: $final_capture_backlog_records,
+    final_disk_free_basis_points: $final_disk_free_basis_points,
     minimum_runtime_seconds: $minimum_runtime_seconds,
     elapsed_seconds: $elapsed_seconds,
     max_rss_kib: $max_rss_kib,

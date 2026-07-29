@@ -32,9 +32,9 @@ later observations may accumulate durably without being applied out of order.
 - [x] Prove real disposable NATS and PostgreSQL pause/recovery with exact
   five-record spool/raw/block/publication parity and
   `live_source_qualified=false`.
-- [ ] Add explicit backlog size/oldest-cursor and percentage disk-health
+- [x] Add explicit backlog size/oldest-cursor and percentage disk-health
   metrics.
-- [ ] Replace fixed retry delay with bounded exponential backoff plus jitter
+- [x] Replace fixed retry delay with bounded exponential backoff plus jitter
   that remains deterministic under tests.
 - [ ] Add the SIGKILL boundary matrix, multi-hour soak, host-restart proof, and
   production TLS/identity/replicated JetStream qualification.

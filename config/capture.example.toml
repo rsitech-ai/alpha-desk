@@ -43,7 +43,7 @@ class = "committed-block"
 queue_capacity = 4096
 max_payload_bytes = 8388608
 # Replace this illustrative start height with the first retained height approved for your node.
-adapter = { kind = "node-block-directory", path = "/var/lib/hyperliquid/hl/data/replica_cmds", stream_name = "replica-cmds", start_height = 1, poll_interval_millis = 25 }
+adapter = { kind = "node-block-directory", path = "/var/lib/hyperliquid/hl/data/replica_cmds", stream_name = "replica-cmds", start_height = 1, poll_interval_millis = 25, replica_cmds_style = "actions-and-responses" }
 
 [[sources]]
 id = "public-market"

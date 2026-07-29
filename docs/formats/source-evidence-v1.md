@@ -39,3 +39,10 @@ Any action-bearing committed block fails closed with
 complete signed-action and response corpus has not yet been qualified into a
 versioned canonical mapping contract. Neither fixture replay nor an empty-block
 mapping qualifies the live action-bearing source path for production.
+
+Committed node-directory configuration requires the operator assertion
+`replica_cmds_style = "actions-and-responses"` and rejects the node's
+action-only profiles. That prevents knowingly deploying an input which cannot
+describe action outcomes, but it does not attest the running node flags or
+qualify an inferred response schema. Those require retained build/command
+evidence plus redistribution-reviewed operator recordings.
