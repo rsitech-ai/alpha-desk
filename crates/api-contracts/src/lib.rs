@@ -581,6 +581,38 @@ pub struct WireOrderModified {
     pub new_quantity: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOrderPartiallyFilled {
+    pub order_id: String,
+    pub trade_id: String,
+    pub fill_price: String,
+    pub fill_quantity: String,
+    pub remaining_quantity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOrderFilled {
+    pub order_id: String,
+    pub trade_id: String,
+    pub fill_price: String,
+    pub fill_quantity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOrderCancelled {
+    pub order_id: String,
+    pub reason: String,
+    pub remaining_quantity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOrderRejected {
+    pub client_order_id: String,
+    pub account_id: String,
+    pub reason_code: String,
+    pub reason: String,
+}
+
 pub fn encode_order_accepted(value: &WireOrderAccepted) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_order_accepted(value.clone())?;
     Ok(wrap_payload(
@@ -674,6 +706,130 @@ pub fn decode_order_modified(bytes: &[u8]) -> Result<WireOrderModified, PayloadC
         new_price: message.new_price,
         previous_quantity: message.previous_quantity,
         new_quantity: message.new_quantity,
+    })
+}
+
+pub fn encode_order_partially_filled(
+    value: &WireOrderPartiallyFilled,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_order_partially_filled(value.clone())?;
+    Ok(wrap_payload(
+        "OrderPartiallyFilled",
+        generated::hl::canonical::v1::OrderPartiallyFilled {
+            order_id: value.order_id,
+            trade_id: value.trade_id,
+            fill_price: value.fill_price,
+            fill_quantity: value.fill_quantity,
+            remaining_quantity: value.remaining_quantity,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_order_partially_filled(
+    bytes: &[u8],
+) -> Result<WireOrderPartiallyFilled, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OrderPartiallyFilled::decode(
+        unwrap_payload("OrderPartiallyFilled", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OrderPartiallyFilled".to_owned(),
+        source,
+    })?;
+    validate_order_partially_filled(WireOrderPartiallyFilled {
+        order_id: message.order_id,
+        trade_id: message.trade_id,
+        fill_price: message.fill_price,
+        fill_quantity: message.fill_quantity,
+        remaining_quantity: message.remaining_quantity,
+    })
+}
+
+pub fn encode_order_filled(value: &WireOrderFilled) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_order_filled(value.clone())?;
+    Ok(wrap_payload(
+        "OrderFilled",
+        generated::hl::canonical::v1::OrderFilled {
+            order_id: value.order_id,
+            trade_id: value.trade_id,
+            fill_price: value.fill_price,
+            fill_quantity: value.fill_quantity,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_order_filled(bytes: &[u8]) -> Result<WireOrderFilled, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OrderFilled::decode(
+        unwrap_payload("OrderFilled", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OrderFilled".to_owned(),
+        source,
+    })?;
+    validate_order_filled(WireOrderFilled {
+        order_id: message.order_id,
+        trade_id: message.trade_id,
+        fill_price: message.fill_price,
+        fill_quantity: message.fill_quantity,
+    })
+}
+
+pub fn encode_order_cancelled(value: &WireOrderCancelled) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_order_cancelled(value.clone())?;
+    Ok(wrap_payload(
+        "OrderCancelled",
+        generated::hl::canonical::v1::OrderCancelled {
+            order_id: value.order_id,
+            reason: value.reason,
+            remaining_quantity: value.remaining_quantity,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_order_cancelled(bytes: &[u8]) -> Result<WireOrderCancelled, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OrderCancelled::decode(
+        unwrap_payload("OrderCancelled", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OrderCancelled".to_owned(),
+        source,
+    })?;
+    validate_order_cancelled(WireOrderCancelled {
+        order_id: message.order_id,
+        reason: message.reason,
+        remaining_quantity: message.remaining_quantity,
+    })
+}
+
+pub fn encode_order_rejected(value: &WireOrderRejected) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_order_rejected(value.clone())?;
+    Ok(wrap_payload(
+        "OrderRejected",
+        generated::hl::canonical::v1::OrderRejected {
+            client_order_id: value.client_order_id,
+            account_id: value.account_id,
+            reason_code: value.reason_code,
+            reason: value.reason,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_order_rejected(bytes: &[u8]) -> Result<WireOrderRejected, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::OrderRejected::decode(
+        unwrap_payload("OrderRejected", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "OrderRejected".to_owned(),
+        source,
+    })?;
+    validate_order_rejected(WireOrderRejected {
+        client_order_id: message.client_order_id,
+        account_id: message.account_id,
+        reason_code: message.reason_code,
+        reason: message.reason,
     })
 }
 
@@ -775,10 +931,10 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "OrderAccepted" => decode_order_accepted(bytes).map(|_| ()),
         "OrderRested" => decode_order_rested(bytes).map(|_| ()),
         "OrderModified" => decode_order_modified(bytes).map(|_| ()),
-        "OrderPartiallyFilled" => decode!(generated::hl::canonical::v1::OrderPartiallyFilled),
-        "OrderFilled" => decode!(generated::hl::canonical::v1::OrderFilled),
-        "OrderCancelled" => decode!(generated::hl::canonical::v1::OrderCancelled),
-        "OrderRejected" => decode!(generated::hl::canonical::v1::OrderRejected),
+        "OrderPartiallyFilled" => decode_order_partially_filled(bytes).map(|_| ()),
+        "OrderFilled" => decode_order_filled(bytes).map(|_| ()),
+        "OrderCancelled" => decode_order_cancelled(bytes).map(|_| ()),
+        "OrderRejected" => decode_order_rejected(bytes).map(|_| ()),
         "TriggerOrderActivated" => decode!(generated::hl::canonical::v1::TriggerOrderActivated),
         "TwapStarted" => decode!(generated::hl::canonical::v1::TwapStarted),
         "TwapSliceFilled" => decode!(generated::hl::canonical::v1::TwapSliceFilled),
@@ -926,6 +1082,57 @@ fn validate_order_modified(
     Ok(value)
 }
 
+fn validate_order_partially_filled(
+    mut value: WireOrderPartiallyFilled,
+) -> Result<WireOrderPartiallyFilled, PayloadCodecError> {
+    value.order_id = required_order_field("OrderPartiallyFilled", "order_id", value.order_id)?;
+    value.trade_id = required_order_field("OrderPartiallyFilled", "trade_id", value.trade_id)?;
+    value.fill_price =
+        required_order_field("OrderPartiallyFilled", "fill_price", value.fill_price)?;
+    value.fill_quantity =
+        required_order_field("OrderPartiallyFilled", "fill_quantity", value.fill_quantity)?;
+    value.remaining_quantity = required_order_field(
+        "OrderPartiallyFilled",
+        "remaining_quantity",
+        value.remaining_quantity,
+    )?;
+    Ok(value)
+}
+
+fn validate_order_filled(mut value: WireOrderFilled) -> Result<WireOrderFilled, PayloadCodecError> {
+    value.order_id = required_order_field("OrderFilled", "order_id", value.order_id)?;
+    value.trade_id = required_order_field("OrderFilled", "trade_id", value.trade_id)?;
+    value.fill_price = required_order_field("OrderFilled", "fill_price", value.fill_price)?;
+    value.fill_quantity =
+        required_order_field("OrderFilled", "fill_quantity", value.fill_quantity)?;
+    Ok(value)
+}
+
+fn validate_order_cancelled(
+    mut value: WireOrderCancelled,
+) -> Result<WireOrderCancelled, PayloadCodecError> {
+    value.order_id = required_order_field("OrderCancelled", "order_id", value.order_id)?;
+    value.reason = required_bounded_text("OrderCancelled", "reason", value.reason, 1_024)?;
+    value.remaining_quantity = required_order_field(
+        "OrderCancelled",
+        "remaining_quantity",
+        value.remaining_quantity,
+    )?;
+    Ok(value)
+}
+
+fn validate_order_rejected(
+    mut value: WireOrderRejected,
+) -> Result<WireOrderRejected, PayloadCodecError> {
+    value.client_order_id =
+        required_order_field("OrderRejected", "client_order_id", value.client_order_id)?;
+    value.account_id = required_order_field("OrderRejected", "account_id", value.account_id)?;
+    value.reason_code =
+        required_bounded_text("OrderRejected", "reason_code", value.reason_code, 128)?;
+    value.reason = required_bounded_text("OrderRejected", "reason", value.reason, 1_024)?;
+    Ok(value)
+}
+
 fn required_order_field(
     kind: &str,
     field: &str,
@@ -935,6 +1142,22 @@ fn required_order_field(
         return Err(PayloadCodecError::Invalid {
             kind: kind.to_owned(),
             reason: format!("{field} must be non-empty without surrounding whitespace"),
+        });
+    }
+    Ok(value)
+}
+
+fn required_bounded_text(
+    kind: &str,
+    field: &str,
+    value: String,
+    max_bytes: usize,
+) -> Result<String, PayloadCodecError> {
+    let value = required_order_field(kind, field, value)?;
+    if value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be control-free and at most {max_bytes} bytes"),
         });
     }
     Ok(value)

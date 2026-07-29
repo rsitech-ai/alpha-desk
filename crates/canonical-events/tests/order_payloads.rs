@@ -1,14 +1,17 @@
 use api_contracts::{
-    WireCanonicalEventEnvelope, WireOrderAccepted, WireOrderModified, WireOrderRested,
-    encode_order_accepted, encode_order_modified, encode_order_rested,
+    WireCanonicalEventEnvelope, WireOrderAccepted, WireOrderCancelled, WireOrderFilled,
+    WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested,
+    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
+    encode_order_partially_filled, encode_order_rejected, encode_order_rested,
 };
 use canonical_events::{
     CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, ContractError, EventKind,
-    EventPayload, OrderAccepted, OrderModified, OrderRested,
+    EventPayload, OrderAccepted, OrderCancelled, OrderFilled, OrderModified, OrderPartiallyFilled,
+    OrderRejected, OrderRested,
 };
 use domain_types::{
-    Address, BlockHeight, ChainId, KnownTime, MarketId, OrderId, OrderSide, Price, ProtocolTime,
-    Quantity, SourceId, TransactionId,
+    Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, OrderSide, Price,
+    ProtocolTime, Quantity, SourceId, TradeId, TransactionId,
 };
 
 #[test]
@@ -166,6 +169,133 @@ fn enclosing_order_event_preserves_valid_forward_compatible_payload_bytes() {
     let decoded = CanonicalEventEnvelope::decode(&wire.encode_to_vec()).unwrap();
     let reencoded = WireCanonicalEventEnvelope::decode(&decoded.encode_to_vec().unwrap()).unwrap();
     assert_eq!(reencoded.payload, wire.payload);
+}
+
+#[test]
+fn fill_cancel_and_rejection_payloads_decode_to_exact_domain_values() {
+    let partial_bytes = encode_order_partially_filled(&WireOrderPartiallyFilled {
+        order_id: "order-17".to_owned(),
+        trade_id: "trade-18".to_owned(),
+        fill_price: "65000.125000".to_owned(),
+        fill_quantity: "0.25000000".to_owned(),
+        remaining_quantity: "0.50000000".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(
+        EventPayload::decode(EventKind::OrderPartiallyFilled, &partial_bytes).unwrap(),
+        EventPayload::OrderPartiallyFilled(OrderPartiallyFilled {
+            order_id: OrderId::new("order-17").unwrap(),
+            trade_id: TradeId::new("trade-18").unwrap(),
+            fill_price: Price::parse_at_scale("65000.125", 6).unwrap(),
+            fill_quantity: Quantity::parse_at_scale("0.25", 8).unwrap(),
+            remaining_quantity: Quantity::parse_at_scale("0.5", 8).unwrap(),
+        })
+    );
+
+    let filled_bytes = encode_order_filled(&WireOrderFilled {
+        order_id: "order-17".to_owned(),
+        trade_id: "trade-19".to_owned(),
+        fill_price: "65001.000000".to_owned(),
+        fill_quantity: "0.50000000".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(
+        EventPayload::decode(EventKind::OrderFilled, &filled_bytes).unwrap(),
+        EventPayload::OrderFilled(OrderFilled {
+            order_id: OrderId::new("order-17").unwrap(),
+            trade_id: TradeId::new("trade-19").unwrap(),
+            fill_price: Price::parse_at_scale("65001", 6).unwrap(),
+            fill_quantity: Quantity::parse_at_scale("0.5", 8).unwrap(),
+        })
+    );
+
+    let cancelled_bytes = encode_order_cancelled(&WireOrderCancelled {
+        order_id: "order-20".to_owned(),
+        reason: "operator_requested".to_owned(),
+        remaining_quantity: "0.00000000".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(
+        EventPayload::decode(EventKind::OrderCancelled, &cancelled_bytes).unwrap(),
+        EventPayload::OrderCancelled(OrderCancelled {
+            order_id: OrderId::new("order-20").unwrap(),
+            reason: "operator_requested".to_owned(),
+            remaining_quantity: Quantity::parse_at_scale("0", 8).unwrap(),
+        })
+    );
+
+    let account = Address::from_bytes([0x11; 20]);
+    let rejected_bytes = encode_order_rejected(&WireOrderRejected {
+        client_order_id: "client-21".to_owned(),
+        account_id: account.to_api_string(),
+        reason_code: "invalid_tick".to_owned(),
+        reason: "limit price is not aligned to the active tick".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(
+        EventPayload::decode(EventKind::OrderRejected, &rejected_bytes).unwrap(),
+        EventPayload::OrderRejected(OrderRejected {
+            client_order_id: ClientOrderId::new("client-21").unwrap(),
+            account_id: account,
+            reason_code: "invalid_tick".to_owned(),
+            reason: "limit price is not aligned to the active tick".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn order_outcomes_reject_nonpositive_fills_zero_partial_remainder_and_negative_cancel() {
+    for (kind, bytes) in [
+        (
+            EventKind::OrderPartiallyFilled,
+            encode_order_partially_filled(&WireOrderPartiallyFilled {
+                order_id: "order-17".to_owned(),
+                trade_id: "trade-18".to_owned(),
+                fill_price: "65000.125000".to_owned(),
+                fill_quantity: "0.00000000".to_owned(),
+                remaining_quantity: "0.50000000".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::OrderPartiallyFilled,
+            encode_order_partially_filled(&WireOrderPartiallyFilled {
+                order_id: "order-17".to_owned(),
+                trade_id: "trade-18".to_owned(),
+                fill_price: "65000.125000".to_owned(),
+                fill_quantity: "0.25000000".to_owned(),
+                remaining_quantity: "0.00000000".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::OrderFilled,
+            encode_order_filled(&WireOrderFilled {
+                order_id: "order-17".to_owned(),
+                trade_id: "trade-19".to_owned(),
+                fill_price: "-1.000000".to_owned(),
+                fill_quantity: "0.50000000".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::OrderCancelled,
+            encode_order_cancelled(&WireOrderCancelled {
+                order_id: "order-20".to_owned(),
+                reason: "operator_requested".to_owned(),
+                remaining_quantity: "-0.01000000".to_owned(),
+            })
+            .unwrap(),
+        ),
+    ] {
+        assert!(matches!(
+            EventPayload::decode(kind, &bytes),
+            Err(ContractError::Invalid {
+                field: "payload",
+                ..
+            })
+        ));
+    }
 }
 
 fn append_varint_field(mut encoded: Vec<u8>, field: u64, value: u64) -> Vec<u8> {

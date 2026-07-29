@@ -88,26 +88,26 @@
 - Consumes: `OrderPartiallyFilled`, `OrderFilled`, `OrderCancelled`, and `OrderRejected`.
 - Produces: typed exact identities, fill/remaining values, and bounded reasons.
 
-- [ ] **Step 1: Write failing semantic tests**
+- [x] **Step 1: Write failing semantic tests**
 
   Cover positive fill values, nonnegative remaining quantity, partial fill with
   zero remaining rejection, exact fill identity, bounded single-line reasons,
   strict rejection identities, unknown fields, and wrong event kinds.
 
-- [ ] **Step 2: Run the red tests**
+- [x] **Step 2: Run the red tests**
 
   ```bash
   cargo +1.97.1 test -p canonical-events --test order_payloads --locked --offline
   ```
 
-- [ ] **Step 3: Implement the four typed codecs**
+- [x] **Step 3: Implement the four typed codecs**
 
   Add exact wire encode/decode helpers in `api-contracts`. Remove only these
   variants from `opaque_payloads!`; parse exact identifiers and decimals; cap
   reason code at 128 bytes and reason at 1,024 bytes; reject controls and
   noncanonical re-encoding.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   ```bash
   cargo +1.97.1 test -p api-contracts -p canonical-events --locked --offline
