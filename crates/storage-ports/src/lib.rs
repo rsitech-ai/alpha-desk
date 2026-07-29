@@ -2,6 +2,7 @@
 
 mod archive;
 mod capture_progress;
+mod checkpoint;
 
 pub use archive::{
     ARCHIVE_MANIFEST_SCHEMA_V1, ArchiveError, ArchiveObject, ArchiveReceipt, BlockIterator,
@@ -12,6 +13,9 @@ pub use archive::{
 pub use capture_progress::{
     ArchivedBlockPlan, CaptureCursor, CaptureProgressStore, PlannedPublication, ProgressError,
     ProgressRecordDisposition, PublicationAcknowledgement,
+};
+pub use checkpoint::{
+    CheckpointPublishDisposition, CheckpointReceipt, CheckpointStoreError, StateCheckpointStore,
 };
 
 pub const CRATE_BOOTSTRAPPED: bool = true;

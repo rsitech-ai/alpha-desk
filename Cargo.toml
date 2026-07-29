@@ -5,6 +5,7 @@ members = [
   "crates/hl-protocol",
   "crates/canonical-events",
   "crates/canonical-ledger",
+  "crates/canonical-state-store",
   "crates/canonical-archive",
   "crates/orderbook",
   "crates/margin-models",
