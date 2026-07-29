@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "environment": "development",
+  "policy": {
+    "storage": "file",
+    "retention": "limits",
+    "discard": "old",
+    "max_age_seconds": 21600,
+    "max_bytes": 536870912,
+    "max_messages": 1000000,
+    "max_message_bytes": 7500000,
+    "max_consumers": 64,
+    "duplicate_window_seconds": 600,
+    "replicas": 1
+  },
+  "streams": [
+    {
+      "name": "HL_CANONICAL",
+      "subjects": [
+        "hl.v1.block.*",
+        "hl.v1.event.*"
+      ]
+    },
+    {
+      "name": "HL_STATE",
+      "subjects": [
+        "hl.v1.state.*"
+      ]
+    },
+    {
+      "name": "HL_FEATURE",
+      "subjects": [
+        "hl.v1.feature.*"
+      ]
+    },
+    {
+      "name": "HL_SIGNAL",
+      "subjects": [
+        "hl.v1.signal.*"
+      ]
+    },
+    {
+      "name": "HL_HEALTH",
+      "subjects": [
+        "hl.v1.health.*"
+      ]
+    },
+    {
+      "name": "HL_DEADLETTER",
+      "subjects": [
+        "hl.v1.deadletter.>"
+      ]
+    }
+  ]
+}

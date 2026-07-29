@@ -16,6 +16,12 @@ nonce="$(printf '%s' "${raw_nonce}" | tr '[:upper:]' '[:lower:]')"
 readonly project="alpha-desk-stage0-${nonce}"
 readonly merged_config="${nonce_directory}/merged.json"
 export STAGE_GATE_COMPOSE_PROJECT="${project}"
+export ALPHA_DESK_NATS_BOOTSTRAP_USER="stage_bootstrap_${nonce}"
+export ALPHA_DESK_NATS_BOOTSTRAP_PASSWORD="stage_bootstrap_password_${nonce}"
+export ALPHA_DESK_NATS_CAPTURE_USER="stage_capture_${nonce}"
+export ALPHA_DESK_NATS_CAPTURE_PASSWORD="stage_capture_password_${nonce}"
+export ALPHA_DESK_NATS_READER_USER="stage_reader_${nonce}"
+export ALPHA_DESK_NATS_READER_PASSWORD="stage_reader_password_${nonce}"
 compose=(docker compose --project-name "${project}" -f "${compose_file}" -f "${override_file}")
 started_by_gate=false
 
@@ -103,7 +109,7 @@ jq -e --arg project "${project}" '
 ' "${merged_config}" >/dev/null
 
 started_by_gate=true
-"${compose[@]}" up -d --wait --wait-timeout 120
+"${compose[@]}" up -d
 DEV_STACK_COMPOSE_PROJECT="${project}" \
 DEV_STACK_COMPOSE_FILES="${compose_file}:${override_file}" \
 DEV_STACK_NATS_MONITOR_PORT=18222 \
@@ -113,4 +119,6 @@ DEV_STACK_MINIO_PORT=19000 \
 DEV_STACK_OTEL_HEALTH_PORT=13134 \
 DEV_STACK_VICTORIAMETRICS_PORT=18428 \
   ./tools/ci/wait-for-dev-stack.sh
+"${compose[@]}" run --rm --no-deps --entrypoint /bin/sh \
+  nats-init /opt/alpha-desk/test-permissions.sh
 cleanup

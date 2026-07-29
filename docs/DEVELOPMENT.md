@@ -111,12 +111,28 @@ and long-running runtime milestones. Operational response is documented in
 [`runbooks/committed-gap.md`](runbooks/committed-gap.md) and
 [`runbooks/source-divergence.md`](runbooks/source-divergence.md).
 
-The capture incident/cursor migration is checked against the exact pinned
-PostgreSQL image in an isolated no-port container:
+The capture incident, archive/publication journal, and cursor migrations are
+checked against the exact pinned PostgreSQL image in an isolated no-port
+container:
 
 ```sh
 just postgres-migration-smoke
 ```
+
+Focused progress-store checks are:
+
+```sh
+cargo +1.97.1 test -p hl-capture --test progress_store --locked --offline
+ALPHA_DESK_POSTGRES_TEST_URL='<disposable migrated database URL>' \
+  cargo +1.97.1 test -p hl-capture --test postgres_progress \
+  --locked --offline -- --nocapture
+```
+
+The PostgreSQL test intentionally skips unless its explicit environment
+variable is set; a default green result is not integration evidence. Use only
+a disposable migrated database because the selected test creates and removes
+its uniquely named rows. The journal and recovery rules are frozen in
+[`contracts/capture-progress-v1.md`](contracts/capture-progress-v1.md).
 
 The focused immutable-archive checks are:
 
@@ -137,8 +153,9 @@ and supports idempotent immutable compaction without deleting prior
 generations. `count` uses DataFusion as an independent Parquet readability and
 row-count check. The normative format and recovery boundary is
 [`formats/archive-manifest-v1.md`](formats/archive-manifest-v1.md). This is
-storage-layer evidence only: capture still lacks archive-before-cursor
-coordination, JetStream publication, and a long-running runtime.
+storage-layer evidence only. Capture now has independently tested JetStream
+publication and PostgreSQL progress primitives, but it still lacks their
+archive-before-publish coordinator and a long-running runtime.
 The default `just` commands use the byte-reproducible synthetic fixture under
 `fixtures/archive/valid-v1`; empty archive roots fail closed.
 

@@ -101,7 +101,7 @@ inverse path; an unrelated consumer or version fails closed.
 ## Duplicate versions and dependency pins
 
 `multiple-versions = "deny"` and
-`multiple-versions-include-dev = true`. `skip-tree` is empty. The nine current
+`multiple-versions-include-dev = true`. `skip-tree` is empty. The current
 transition exceptions are exact:
 
 | Exact skip | Verified transition path and removal trigger |
@@ -111,10 +111,46 @@ transition exceptions are exact:
 | `foldhash@0.2.0` | `jsonschema 0.48.5 -> referencing 0.48.5` uses 0.2 while the prost build path retains 0.1; remove after those consumers converge. |
 | `hashbrown@0.14.5` | `DataFusion 54.1.0 -> dashmap 6.2.1` uses 0.14 while Arrow 58.4.0 and `indexmap` use 0.17; remove after DashMap converges. |
 | `hashbrown@0.15.5` | `prost-build 0.14.4 -> petgraph 0.8.3` uses 0.15 while `indexmap 2.14.0` uses 0.17; remove after petgraph converges. |
+| `phf@0.13.1` | `tokio-postgres 0.7.18` uses PHF 0.13 for PostgreSQL type metadata while the pinned Arrow time-zone graph retains PHF 0.12; remove when those owners converge. |
+| `phf_shared@0.13.1` | companion of the `tokio-postgres -> phf 0.13` transition while the Arrow time-zone graph retains 0.12; remove with the PHF transition. |
 | `r-efi@6.0.0` | follows `getrandom 0.4.3`, while `getrandom 0.3.4` uses `r-efi 5.3.0`; remove with the getrandom transition. |
 | `syn@2.0.119` | prost/futures/tokio/tracing/wasm macro paths remain on syn 2 while serde/thiserror 2/async-trait use syn 3; remove after macro consumers converge. |
 | `thiserror@1.0.69` | `prometheus 0.14.0 -> protobuf 3.7.2` retains thiserror 1 while workspace APIs use 2; remove after protobuf converges. |
 | `thiserror-impl@1.0.69` | proc-macro companion of the same protobuf transition; remove together with `thiserror@1.0.69`. |
+| `wasi@0.14.7+wasi-0.2.4` | `tokio-postgres 0.7.18 -> whoami 2.1.2 -> wasite 1.0.2` supports WASI 0.2 while `getrandom` retains the legacy WASI 0.11 target package; remove when those target-support paths converge. |
+
+The pinned `async-nats 0.50.0` client enables only JetStream, NKey
+authentication, Ring TLS, and NATS Server 2.14 compatibility. Alpha Desk does
+not enable its KV, object-store, service, NUID, WebSocket, or experimental
+features. Its current transport and `nkeys 0.4.5` authentication graph adds the
+following exact transitions:
+
+| Exact skip | Verified transition path and removal trigger |
+|---|---|
+| `block-buffer@0.10.4` | NKey signing uses the RustCrypto digest 0.10 line while workspace archive hashing uses block-buffer 0.12; remove when nkeys converges. |
+| `const-oid@0.9.6` | `nkeys -> pkcs8/der` retains const-oid 0.9 while SHA-2 0.11 uses 0.10; remove when the signing graph converges. |
+| `cpufeatures@0.2.17` | NKey signing retains RustCrypto cpufeatures 0.2 while workspace SHA-2/BLAKE3 uses 0.3; remove when the signing graph converges. |
+| `crypto-common@0.1.7` | NKey digest 0.10 retains crypto-common 0.1 while workspace digest 0.11 uses 0.2; remove when the signing graph converges. |
+| `digest@0.10.7` | NKey signing retains digest 0.10 while workspace hashing uses 0.11; remove when nkeys converges. |
+| `rand@0.8.7` | `nkeys 0.4.5` uses rand 0.8 while analytics uses 0.9 and async-nats internals use 0.10; remove when nkeys converges. |
+| `rand@0.10.2` | async-nats transport internals use rand 0.10 while the analytics graph uses 0.9; remove when those owners converge. |
+| `rand_chacha@0.3.1` | NKey signing retains rand_chacha 0.3 while analytics uses 0.9; remove when nkeys converges. |
+| `rand_core@0.6.4` | NKey signing retains rand_core 0.6 while analytics/transport use 0.9/0.10; remove when nkeys converges. |
+| `rand_core@0.10.1` | async-nats transport uses rand_core 0.10 while analytics uses 0.9; remove when those owners converge. |
+| `sha2@0.10.9` | NKey signing retains SHA-2 0.10 while archive/publication hashing uses 0.11; remove when nkeys converges. |
+| `windows-sys@0.52.0` | async-nats native certificate discovery reaches schannel/windows-sys 0.52 while current Tokio/filesystem paths use 0.61; remove when rustls-native-certs converges. |
+
+`tools/ci/check-dependency-exceptions.sh` resolves every listed inverse tree
+and fails if any transport exception is no longer owned by
+`async-nats 0.50.0` or `nkeys 0.4.5`. These exact entries are not a general
+allowance for duplicate cryptography or randomness libraries.
+
+The same executable check binds the PHF and WASI transition entries to the
+exact `tokio-postgres 0.7.18` graph. The progress journal uses
+`tokio-postgres` without its optional Chrono, JSON, UUID, Jiff, time, or
+JavaScript features; block heights, stream sequences, and cursor versions are
+encoded as validated decimal text so PostgreSQL `numeric` preserves the full
+unsigned 64-bit domain.
 
 All local path dependencies include exact `version = "=0.1.0"` requirements.
 Registry dependencies use the workspace dependency table and the committed

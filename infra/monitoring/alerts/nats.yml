@@ -1,0 +1,51 @@
+---
+groups:
+  - name: alpha-desk-jetstream
+    rules:
+      - alert: AlphaDeskJetStreamUnavailable
+        expr: nats_core_nats_up == 0
+        for: 2m
+        labels:
+          severity: high
+          team: sre
+          zone: truth-layer
+        annotations:
+          summary: Alpha Desk JetStream is unavailable
+          description: >-
+            Capture publication cannot obtain JetStream acknowledgements.
+            Confirm raw spool and archive headroom before restoring the bus.
+          runbook_url: https://runbooks.alpha-desk.invalid/capture-restart#jetstream-unavailable
+
+      - alert: AlphaDeskJetStreamStorageNearLimit
+        expr: >-
+          nats_core_nats_jetstream_server_store_size_bytes
+          /
+          nats_core_nats_jetstream_server_max_storage_bytes
+          > 0.8
+        for: 5m
+        labels:
+          severity: high
+          team: sre
+          zone: truth-layer
+        annotations:
+          summary: Alpha Desk JetStream storage exceeds 80 percent
+          description: >-
+            Operational retention is approaching its configured storage bound.
+            Verify consumer lag and immutable archive health before intervention.
+          runbook_url: https://runbooks.alpha-desk.invalid/capture-restart#jetstream-storage
+
+      - alert: AlphaDeskJetStreamConsumerRedeliveryHigh
+        expr: >-
+          sum(rate(nats_core_nats_jetstream_consumer_num_redelivered[5m]))
+          > 10
+        for: 10m
+        labels:
+          severity: warning
+          team: sre
+          zone: truth-layer
+        annotations:
+          summary: Alpha Desk JetStream consumer redelivery is elevated
+          description: >-
+            Durable consumers are redelivering more than ten messages per
+            second. Check acknowledgement latency and idempotent effect health.
+          runbook_url: https://runbooks.alpha-desk.invalid/capture-restart#consumer-redelivery

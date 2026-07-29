@@ -14,6 +14,13 @@ services:
       - nats-server
       - --config
       - /etc/nats/nats.conf
+    environment:
+      NATS_BOOTSTRAP_USER: ${ALPHA_DESK_NATS_BOOTSTRAP_USER:?set by tools/dev/with-dev-secrets.sh}
+      NATS_BOOTSTRAP_PASSWORD: ${ALPHA_DESK_NATS_BOOTSTRAP_PASSWORD:?set by tools/dev/with-dev-secrets.sh}
+      NATS_CAPTURE_USER: ${ALPHA_DESK_NATS_CAPTURE_USER:?set by tools/dev/with-dev-secrets.sh}
+      NATS_CAPTURE_PASSWORD: ${ALPHA_DESK_NATS_CAPTURE_PASSWORD:?set by tools/dev/with-dev-secrets.sh}
+      NATS_READER_USER: ${ALPHA_DESK_NATS_READER_USER:?set by tools/dev/with-dev-secrets.sh}
+      NATS_READER_PASSWORD: ${ALPHA_DESK_NATS_READER_PASSWORD:?set by tools/dev/with-dev-secrets.sh}
     ports:
       - "127.0.0.1:4222:4222"
       - "127.0.0.1:8222:8222"
@@ -46,10 +53,19 @@ services:
       - /opt/alpha-desk/init-streams.sh
     environment:
       NATS_URL: nats://nats:4222
+      NATS_BOOTSTRAP_POLICY: /opt/alpha-desk/bootstrap.json
+      NATS_BOOTSTRAP_USER: ${ALPHA_DESK_NATS_BOOTSTRAP_USER:?set by tools/dev/with-dev-secrets.sh}
+      NATS_BOOTSTRAP_PASSWORD: ${ALPHA_DESK_NATS_BOOTSTRAP_PASSWORD:?set by tools/dev/with-dev-secrets.sh}
+      NATS_CAPTURE_USER: ${ALPHA_DESK_NATS_CAPTURE_USER:?set by tools/dev/with-dev-secrets.sh}
+      NATS_CAPTURE_PASSWORD: ${ALPHA_DESK_NATS_CAPTURE_PASSWORD:?set by tools/dev/with-dev-secrets.sh}
+      NATS_READER_USER: ${ALPHA_DESK_NATS_READER_USER:?set by tools/dev/with-dev-secrets.sh}
+      NATS_READER_PASSWORD: ${ALPHA_DESK_NATS_READER_PASSWORD:?set by tools/dev/with-dev-secrets.sh}
       XDG_CONFIG_HOME: /tmp/config
       XDG_DATA_HOME: /tmp/data
     volumes:
       - ./nats/init-streams.sh:/opt/alpha-desk/init-streams.sh:ro
+      - ./nats/bootstrap.json:/opt/alpha-desk/bootstrap.json:ro
+      - ./nats/test-permissions.sh:/opt/alpha-desk/test-permissions.sh:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
     read_only: true
@@ -129,6 +145,8 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/001-alpha-desk.sql:ro
+      - ../../schemas/postgres/0001_capture_incidents.sql:/docker-entrypoint-initdb.d/010-capture-incidents.sql:ro
+      - ../../schemas/postgres/0002_capture_progress.sql:/docker-entrypoint-initdb.d/020-capture-progress.sql:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
       - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=1777

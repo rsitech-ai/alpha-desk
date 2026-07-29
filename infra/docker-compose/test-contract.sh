@@ -13,6 +13,13 @@ compose_file="$script_dir/compose.yaml"
 lock_file="$script_dir/images.lock"
 wait_script="$repo_root/tools/ci/wait-for-dev-stack.sh"
 
+export ALPHA_DESK_NATS_BOOTSTRAP_USER='contract_bootstrap'
+export ALPHA_DESK_NATS_BOOTSTRAP_PASSWORD='contract_bootstrap_password'
+export ALPHA_DESK_NATS_CAPTURE_USER='contract_capture'
+export ALPHA_DESK_NATS_CAPTURE_PASSWORD='contract_capture_password'
+export ALPHA_DESK_NATS_READER_USER='contract_reader'
+export ALPHA_DESK_NATS_READER_PASSWORD='contract_reader_password'
+
 for path in "$compose_file" "$lock_file" "$wait_script"; do
   [[ -f "$path" ]] || {
     printf 'dev-stack-contract:error missing %s\n' "$path" >&2
@@ -175,8 +182,10 @@ dev_up_dry_run="$(
     --dry-run dev-up 2>&1
 )"
 
-[[ "$dev_up_dry_run" == *"up -d --wait --wait-timeout 120"* ]] || {
-  printf 'dev-stack-contract:error dev-up has no bounded Compose wait\n' >&2
+[[ "$dev_up_dry_run" == *"docker compose -f infra/docker-compose/compose.yaml up -d"* ]] &&
+  [[ "$dev_up_dry_run" == *"./tools/ci/wait-for-dev-stack.sh"* ]] &&
+  [[ "$dev_up_dry_run" == *"/opt/alpha-desk/test-permissions.sh"* ]] || {
+  printf 'dev-stack-contract:error dev-up lifecycle or permission gate is incomplete\n' >&2
   exit 1
 }
 
