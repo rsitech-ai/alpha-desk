@@ -330,11 +330,20 @@ Focused tests prove:
   cancellation, and rejection state; immutable fact and hash-linked transition
   records; strict identity/key/codec binding; checked overfill and remainder
   rejection; terminal-state non-resurrection; and whole-block rollback after a
-  late invalid order transition.
+  late invalid order transition; and
+- a bounded operator-visible synthetic order runner proving repeated rebuild,
+  decoded lifecycle cardinality, private checkpoint resume, late-overfill
+  reducer failure, unsupported-schema quarantine, owner-only evidence
+  permissions, and explicit false Stage 1/2, deployed/live source, position,
+  margin, and execution qualification.
 
 This proves stored canonical trade-fact reconciliation and exact synthetic
 order-lifecycle contracts. It does not prove deployed action-bearing source
 compatibility, buyer/seller or maker/taker roles, position or balance state,
 external snapshot reconciliation, RocksDB durability, a production replay
-service, or Stage 2 readiness. Runnable replay evidence remains generated
+service, or Stage 2 readiness. The retained local order report at
+`target/evidence/state-replay-order/20260729T185537Z-82818/report.json` covers
+20 generated blocks, four independent rebuilds, a checkpoint after block 8,
+80 facts and transitions, 20 current orders, 10 filled orders, 10 cancelled
+orders, and 10 fact-only rejections. Runnable replay evidence remains generated
 canonical-event evidence with source qualification explicitly unassessed.

@@ -70,6 +70,7 @@ cargo +1.97.1 test -p hl-analytics --test archive --locked --offline
 cargo +1.97.1 test -p archive-inspect --locked --offline
 just state-replay-e2e
 just state-replay-trade-e2e
+just state-replay-order-e2e
 ```
 
 `just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
@@ -86,6 +87,12 @@ atomic malformed/unsupported rejection. Use `just state-replay-trade-soak` for
 the longer bounded profile. These commands use generated canonical events:
 they do not qualify Stage 1, Stage 2, deployed source semantics, or
 account/order/position state.
+`just state-replay-order-e2e` exercises all seven exact canonical order event
+contracts, immutable facts, current lifecycle state, hash-linked transition
+assessments, checkpoint resume, and atomic malformed/unsupported rejection.
+Use `just state-replay-order-soak` for the longer bounded profile. The report
+proves only the generated canonical order contract: Stage 1/2, deployed/live
+source, position, margin, and execution qualification remain false.
 For an existing canonical archive, use `just state-replay-archive-e2e` or
 `just state-replay-archive-soak` with an explicit chain, inclusive range, and
 manifest-boundary checkpoint height. Operator-archive evidence remains

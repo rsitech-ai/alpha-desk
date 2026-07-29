@@ -188,26 +188,26 @@
 - Consumes: the order reducer, immutable archive, checkpoint store, serial replay.
 - Produces: `state-replay order-e2e`, quick/soak recipes, and private report schema `hyperliquid-alpha-desk/state-replay-order-e2e-report/v1`.
 
-- [ ] **Step 1: Write failing runner/CLI tests**
+- [x] **Step 1: Write failing runner/CLI tests**
 
   Assert repeated/resumed hashes, exact fact/current/transition counts, terminal
   cardinality, malformed and unsupported atomic rejection, `0700`/`0600`
   permissions, and explicit false Stage 1/2, live, position, margin, and
   execution qualification.
 
-- [ ] **Step 2: Run red**
+- [x] **Step 2: Run red**
 
   ```bash
   cargo +1.97.1 test -p state-replay --test order_e2e --test cli --locked --offline
   ```
 
-- [ ] **Step 3: Modularize and implement**
+- [x] **Step 3: Modularize and implement**
 
   Split the current replay library into shared, fixture, archive, trade, and
   order modules, preserving existing public APIs and tests. Add the bounded
   order runner using shared output/archive/checkpoint/rejection primitives.
 
-- [ ] **Step 4: Retained run and full gates**
+- [x] **Step 4: Retained run and full gates**
 
   ```bash
   just state-replay-order-e2e 20 8 4
@@ -218,7 +218,7 @@
 
   Expected: local PASS without Stage 1/2 qualification.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add tools/state-replay justfile README.md docs/STATUS.md docs/runbooks/state-replay-evidence.md
