@@ -168,6 +168,49 @@ impl JetStreamPublisher {
     }
 }
 
+#[derive(Debug)]
+pub struct ReconnectingJetStreamPublisher {
+    config: JetStreamConfig,
+    session: Mutex<Option<JetStreamPublisher>>,
+}
+
+impl ReconnectingJetStreamPublisher {
+    #[must_use]
+    pub fn new(config: JetStreamConfig) -> Self {
+        Self {
+            config,
+            session: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl CanonicalPublisher for ReconnectingJetStreamPublisher {
+    async fn publish(
+        &self,
+        message: &PublicationMessage,
+    ) -> Result<PublicationAck, PublicationError> {
+        let mut session = self.session.lock().await;
+        if session.is_none() {
+            *session = Some(JetStreamPublisher::connect(self.config.clone()).await?);
+        }
+        let result = session
+            .as_ref()
+            .expect("JetStream session was initialized")
+            .publish(message)
+            .await;
+        if matches!(
+            result,
+            Err(PublicationError::TransportConnect
+                | PublicationError::TransportPublish
+                | PublicationError::TransportAck)
+        ) {
+            *session = None;
+        }
+        result
+    }
+}
+
 #[async_trait]
 impl CanonicalPublisher for JetStreamPublisher {
     async fn publish(

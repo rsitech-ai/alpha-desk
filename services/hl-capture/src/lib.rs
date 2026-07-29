@@ -2,6 +2,7 @@
 
 pub mod adapters;
 mod app;
+mod backlog;
 pub mod bus;
 mod committed_pipeline;
 mod config;
@@ -20,6 +21,7 @@ pub mod spool;
 mod status;
 
 pub use app::{CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError};
+pub use backlog::*;
 pub use committed_pipeline::*;
 pub use config::*;
 pub use disk::*;

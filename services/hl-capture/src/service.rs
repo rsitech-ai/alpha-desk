@@ -5,17 +5,16 @@ use std::time::Duration;
 use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use domain_types::BlockHeight;
 use storage_ports::{CanonicalArchive, CaptureProgressStore, RawObservationArchive};
-use tokio_postgres::NoTls;
 use tokio_postgres::config::{Host, SslMode};
 use tokio_util::sync::CancellationToken;
 
-use crate::bus::{JetStreamAuthentication, JetStreamConfig, JetStreamPublisher};
+use crate::bus::{JetStreamAuthentication, JetStreamConfig, ReconnectingJetStreamPublisher};
 use crate::coordinator::{
     BlockingCanonicalArchive, CaptureCoordinator, NoCoordinatorFaults, SystemAcknowledgementClock,
 };
-use crate::progress::PostgresProgressStore;
+use crate::progress::ReconnectingPostgresProgressStore;
 use crate::secret::read_protected_secret;
-use crate::source_runtime::primary_node_task;
+use crate::source_runtime::primary_node_tasks;
 use crate::{
     AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig,
     CaptureRuntimeError, OwnedTask, RawSegmentArchive, StatusWriter, synthetic_fixture_block,
@@ -49,15 +48,17 @@ impl std::fmt::Debug for ConnectedCapture {
 
 impl ConnectedCapture {
     pub async fn run(mut self, cancellation: CancellationToken) -> Result<(), CaptureRuntimeError> {
-        let source_task = primary_node_task(
+        let health = self.runtime.health();
+        let source_tasks = primary_node_tasks(
             &self.config,
             Arc::clone(&self.progress),
             Arc::clone(&self.coordinator),
             Arc::clone(&self.raw_archive),
+            health,
             cancellation.child_token(),
         )
         .map_err(|_| CaptureRuntimeError::InvalidConfig)?;
-        self.infrastructure_tasks.push(source_task);
+        self.infrastructure_tasks.extend(source_tasks);
         self.runtime
             .run(cancellation, self.infrastructure_tasks)
             .await
@@ -128,7 +129,7 @@ impl ConnectedCapture {
 
 pub async fn connect_capture(
     config: &CaptureConfig,
-    cancellation: &CancellationToken,
+    _cancellation: &CancellationToken,
 ) -> Result<ConnectedCapture, RuntimeConnectError> {
     validate_nats_transport(config.runtime().nats_server_url())?;
     let postgres_secret = read_protected_secret(config.runtime().postgres_url_path())
@@ -136,24 +137,13 @@ pub async fn connect_capture(
     let postgres_config = tokio_postgres::Config::from_str(&postgres_secret)
         .map_err(|_| RuntimeConnectError::PostgresConfig)?;
     validate_development_postgres(&postgres_config)?;
-    let (postgres_client, postgres_connection) = postgres_config
-        .connect(NoTls)
-        .await
-        .map_err(|_| RuntimeConnectError::PostgresConnect)?;
-    let postgres_cancellation = cancellation.child_token();
-    let postgres_driver = tokio::spawn(async move {
-        tokio::select! {
-            () = postgres_cancellation.cancelled() => Ok(()),
-            result = postgres_connection => result.map_err(|_| AppError::TaskFailed {
-                task: "postgres-driver",
-                reason_code: "capture_postgres.connection",
-            }),
-        }
-    });
-    let postgres_task = OwnedTask::from_join_handle("postgres-driver", postgres_driver);
-
-    let progress: Arc<dyn CaptureProgressStore> =
-        Arc::new(PostgresProgressStore::new(postgres_client));
+    let progress: Arc<dyn CaptureProgressStore> = Arc::new(
+        ReconnectingPostgresProgressStore::try_new(
+            postgres_config,
+            Duration::from_millis(config.runtime().postgres_operation_timeout_millis()),
+        )
+        .map_err(|_| RuntimeConnectError::PostgresConfig)?,
+    );
     let archive_config =
         ArchiveConfig::production(BUILD_ID).map_err(|_| RuntimeConnectError::Archive)?;
     let archive = Arc::new(
@@ -176,11 +166,7 @@ pub async fn connect_capture(
         config.runtime().publisher_ledger_capacity(),
     )
     .map_err(|_| RuntimeConnectError::NatsConfig)?;
-    let publisher = Arc::new(
-        JetStreamPublisher::connect(publisher_config)
-            .await
-            .map_err(|_| RuntimeConnectError::NatsConnect)?,
-    );
+    let publisher = Arc::new(ReconnectingJetStreamPublisher::new(publisher_config));
     let coordinator = Arc::new(CaptureCoordinator::new(
         Arc::new(BlockingCanonicalArchive::new(canonical_archive)),
         Arc::clone(&progress),
@@ -213,7 +199,7 @@ pub async fn connect_capture(
         coordinator,
         progress,
         raw_archive,
-        infrastructure_tasks: vec![postgres_task],
+        infrastructure_tasks: Vec::new(),
     })
 }
 
@@ -257,14 +243,10 @@ pub enum RuntimeConnectError {
     PostgresConfig,
     #[error("capture development transport must be encrypted or loopback-only")]
     UnsafeDevelopmentTransport,
-    #[error("capture PostgreSQL connection failed")]
-    PostgresConnect,
     #[error("capture archive initialization failed")]
     Archive,
     #[error("capture NATS configuration is invalid")]
     NatsConfig,
-    #[error("capture NATS connection failed")]
-    NatsConnect,
     #[error("capture runtime configuration is invalid")]
     RuntimeConfig,
     #[error("capture status initialization failed")]
@@ -278,10 +260,8 @@ impl RuntimeConnectError {
             Self::Secret => "capture_connect.secret",
             Self::PostgresConfig => "capture_connect.postgres_config",
             Self::UnsafeDevelopmentTransport => "capture_connect.unsafe_transport",
-            Self::PostgresConnect => "capture_connect.postgres",
             Self::Archive => "capture_connect.archive",
             Self::NatsConfig => "capture_connect.nats_config",
-            Self::NatsConnect => "capture_connect.nats",
             Self::RuntimeConfig => "capture_connect.runtime_config",
             Self::Status => "capture_connect.status",
         }

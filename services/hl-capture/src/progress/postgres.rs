@@ -1,14 +1,18 @@
 use async_trait::async_trait;
 use domain_types::{BlockHeight, ChainId, KnownTime, ManifestId};
+use std::time::Duration;
 use storage_ports::{
     ArchivedBlockPlan, CaptureCursor, CaptureProgressStore, PlannedPublication, ProgressError,
     ProgressRecordDisposition, PublicationAcknowledgement,
 };
 use tokio::sync::Mutex;
-use tokio_postgres::{Client, GenericClient, IsolationLevel, Row};
+use tokio::task::AbortHandle;
+use tokio::time::timeout;
+use tokio_postgres::{Client, Config, GenericClient, IsolationLevel, NoTls, Row};
 
 const STORAGE_FAILURE: &str = "PostgreSQL progress operation failed";
 const INVALID_DURABLE_ROW: &str = "PostgreSQL progress row is invalid";
+const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub struct PostgresProgressStore {
@@ -21,6 +25,160 @@ impl PostgresProgressStore {
         Self {
             client: Mutex::new(client),
         }
+    }
+}
+
+pub struct ReconnectingPostgresProgressStore {
+    config: Config,
+    operation_timeout: Duration,
+    session: Mutex<Option<PostgresSession>>,
+}
+
+impl std::fmt::Debug for ReconnectingPostgresProgressStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReconnectingPostgresProgressStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReconnectingPostgresProgressStore {
+    pub fn try_new(config: Config, operation_timeout: Duration) -> Result<Self, ProgressError> {
+        if operation_timeout.is_zero() || operation_timeout > MAX_OPERATION_TIMEOUT {
+            return Err(ProgressError::InvalidInput(
+                "PostgreSQL operation timeout is outside the supported bound",
+            ));
+        }
+        Ok(Self {
+            config,
+            operation_timeout,
+            session: Mutex::new(None),
+        })
+    }
+
+    async fn connect(&self) -> Result<PostgresSession, ProgressError> {
+        let (client, connection) = timeout(self.operation_timeout, self.config.connect(NoTls))
+            .await
+            .map_err(|_| ProgressError::Storage(STORAGE_FAILURE))?
+            .map_err(|_| ProgressError::Storage(STORAGE_FAILURE))?;
+        let driver = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Ok(PostgresSession {
+            store: PostgresProgressStore::new(client),
+            _driver: AbortOnDrop(driver.abort_handle()),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PostgresSession {
+    store: PostgresProgressStore,
+    _driver: AbortOnDrop,
+}
+
+#[derive(Debug)]
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+macro_rules! reconnecting_progress_call {
+    ($self:expr, $method:ident($($argument:expr),* $(,)?)) => {{
+        let mut session = $self.session.lock().await;
+        if session.is_none() {
+            *session = Some($self.connect().await?);
+        }
+        let result = timeout(
+            $self.operation_timeout,
+            session
+                .as_ref()
+                .expect("PostgreSQL session was initialized")
+                .store
+                .$method($($argument),*),
+        )
+        .await
+        .unwrap_or(Err(ProgressError::Storage(STORAGE_FAILURE)));
+        if matches!(result, Err(ProgressError::Storage(_))) {
+            *session = None;
+        }
+        result
+    }};
+}
+
+#[async_trait]
+impl CaptureProgressStore for ReconnectingPostgresProgressStore {
+    async fn initialize_chain(
+        &self,
+        chain_id: &ChainId,
+        first_block_height: BlockHeight,
+    ) -> Result<ProgressRecordDisposition, ProgressError> {
+        reconnecting_progress_call!(self, initialize_chain(chain_id, first_block_height))
+    }
+
+    async fn record_archived(
+        &self,
+        plan: &ArchivedBlockPlan,
+    ) -> Result<ProgressRecordDisposition, ProgressError> {
+        reconnecting_progress_call!(self, record_archived(plan))
+    }
+
+    async fn record_acknowledgement(
+        &self,
+        chain_id: &ChainId,
+        block_height: BlockHeight,
+        acknowledgement: &PublicationAcknowledgement,
+    ) -> Result<ProgressRecordDisposition, ProgressError> {
+        reconnecting_progress_call!(
+            self,
+            record_acknowledgement(chain_id, block_height, acknowledgement)
+        )
+    }
+
+    async fn advance_cursor(
+        &self,
+        chain_id: &ChainId,
+        block_height: BlockHeight,
+    ) -> Result<CaptureCursor, ProgressError> {
+        reconnecting_progress_call!(self, advance_cursor(chain_id, block_height))
+    }
+
+    async fn load_cursor(
+        &self,
+        chain_id: &ChainId,
+    ) -> Result<Option<CaptureCursor>, ProgressError> {
+        reconnecting_progress_call!(self, load_cursor(chain_id))
+    }
+
+    async fn next_expected_height(&self, chain_id: &ChainId) -> Result<BlockHeight, ProgressError> {
+        reconnecting_progress_call!(self, next_expected_height(chain_id))
+    }
+
+    async fn load_archived_block(
+        &self,
+        chain_id: &ChainId,
+        block_height: BlockHeight,
+    ) -> Result<Option<ArchivedBlockPlan>, ProgressError> {
+        reconnecting_progress_call!(self, load_archived_block(chain_id, block_height))
+    }
+
+    async fn load_acknowledgements(
+        &self,
+        chain_id: &ChainId,
+        block_height: BlockHeight,
+    ) -> Result<Vec<PublicationAcknowledgement>, ProgressError> {
+        reconnecting_progress_call!(self, load_acknowledgements(chain_id, block_height))
+    }
+
+    async fn pending_blocks(
+        &self,
+        chain_id: &ChainId,
+        limit: usize,
+    ) -> Result<Vec<ArchivedBlockPlan>, ProgressError> {
+        reconnecting_progress_call!(self, pending_blocks(chain_id, limit))
     }
 }
 

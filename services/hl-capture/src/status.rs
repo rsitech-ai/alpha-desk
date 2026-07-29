@@ -101,6 +101,10 @@ impl CaptureStatus {
         self
     }
 
+    pub(crate) fn belongs_to(&self, build_id: &str, chain_id: &ChainId) -> bool {
+        self.build_id == build_id && self.chain_id == chain_id.as_str()
+    }
+
     fn validate(&self) -> Result<(), StatusError> {
         if self.schema_version != STATUS_SCHEMA_VERSION {
             return Err(StatusError::InvalidSchema);
