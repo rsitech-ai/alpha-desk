@@ -164,6 +164,8 @@ pub enum LedgerError {
     MutationLimitExceeded,
     #[error("state mutation is invalid: {reason}")]
     InvalidMutation { reason: &'static str },
+    #[error("prepared block was built from a different visible state")]
+    PreparedStateDrift,
 }
 
 impl LedgerError {
@@ -183,6 +185,7 @@ impl LedgerError {
             Self::ReducerFailed { .. } => "ledger.reducer_failed",
             Self::MutationLimitExceeded => "ledger.mutation_limit_exceeded",
             Self::InvalidMutation { .. } => "ledger.invalid_mutation",
+            Self::PreparedStateDrift => "ledger.prepared_state_drift",
         }
     }
 

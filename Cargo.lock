@@ -2014,6 +2014,12 @@ name = "hl-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "canonical-events",
+ "canonical-ledger",
+ "domain-types",
+ "storage-ports",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
 ]
@@ -3915,6 +3921,7 @@ name = "storage-ports"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "canonical-events",
  "canonical-ledger",
  "domain-types",

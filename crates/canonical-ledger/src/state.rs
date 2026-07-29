@@ -215,6 +215,14 @@ impl StateImage {
     }
 
     #[must_use]
+    pub const fn canonical_block_hash(&self) -> Option<[u8; 32]> {
+        match self.watermark {
+            Some(watermark) => Some(watermark.canonical_block_hash),
+            None => None,
+        }
+    }
+
+    #[must_use]
     pub fn entries(&self) -> &BTreeMap<StateKey, Vec<u8>> {
         &self.entries
     }

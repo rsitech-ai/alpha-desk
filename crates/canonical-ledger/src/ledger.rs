@@ -160,6 +160,30 @@ pub enum ApplyOutcome {
 }
 
 #[derive(Debug)]
+pub struct PreparedBlock {
+    next_state: StateImage,
+    delta: StateDelta,
+}
+
+impl PreparedBlock {
+    #[must_use]
+    pub const fn state_image(&self) -> &StateImage {
+        &self.next_state
+    }
+
+    #[must_use]
+    pub const fn delta(&self) -> &StateDelta {
+        &self.delta
+    }
+}
+
+#[derive(Debug)]
+pub enum PrepareOutcome {
+    Ready(PreparedBlock),
+    AlreadyApplied(StateCheckpoint),
+}
+
+#[derive(Debug)]
 pub struct CanonicalLedger<R> {
     reducer: R,
     limits: LedgerLimits,
@@ -239,12 +263,23 @@ impl<R: EventReducer> CanonicalLedger<R> {
     }
 
     pub fn apply_block(&mut self, block: &BlockEnvelope) -> Result<ApplyOutcome, LedgerError> {
+        match self.prepare_block(block)? {
+            PrepareOutcome::Ready(prepared) => {
+                self.commit_prepared(prepared).map(ApplyOutcome::Applied)
+            }
+            PrepareOutcome::AlreadyApplied(checkpoint) => {
+                Ok(ApplyOutcome::AlreadyApplied(checkpoint))
+            }
+        }
+    }
+
+    pub fn prepare_block(&self, block: &BlockEnvelope) -> Result<PrepareOutcome, LedgerError> {
         if self.reducer.reducer_set_version() != self.state.reducer_set_version() {
             return Err(LedgerError::ReducerVersionDrift);
         }
         self.validate_boundary(block)?;
-        if let Some(disposition) = self.duplicate_disposition(block)? {
-            return Ok(disposition);
+        if let Some(checkpoint) = self.duplicate_checkpoint(block)? {
+            return Ok(PrepareOutcome::AlreadyApplied(checkpoint));
         }
         self.validate_next_height(block.block_height())?;
         if block.events().len() > self.limits.max_events_per_block {
@@ -291,15 +326,25 @@ impl<R: EventReducer> CanonicalLedger<R> {
         next_state.commit(watermark, candidate);
         let after_state_hash = next_state.state_hash();
         let checkpoint = self.checkpoint_from(watermark, after_state_hash);
-        self.state = next_state;
-        self.state_hash = after_state_hash;
 
-        Ok(ApplyOutcome::Applied(StateDelta {
-            checkpoint,
-            before_state_hash,
-            mutations: applied_mutations,
-            event_count,
+        Ok(PrepareOutcome::Ready(PreparedBlock {
+            next_state,
+            delta: StateDelta {
+                checkpoint,
+                before_state_hash,
+                mutations: applied_mutations,
+                event_count,
+            },
         }))
+    }
+
+    pub fn commit_prepared(&mut self, prepared: PreparedBlock) -> Result<StateDelta, LedgerError> {
+        if self.state_hash != prepared.delta.before_state_hash {
+            return Err(LedgerError::PreparedStateDrift);
+        }
+        self.state = prepared.next_state;
+        self.state_hash = prepared.delta.after_state_hash();
+        Ok(prepared.delta)
     }
 
     fn validate_boundary(&self, block: &BlockEnvelope) -> Result<(), LedgerError> {
@@ -315,10 +360,10 @@ impl<R: EventReducer> CanonicalLedger<R> {
         Ok(())
     }
 
-    fn duplicate_disposition(
+    fn duplicate_checkpoint(
         &self,
         block: &BlockEnvelope,
-    ) -> Result<Option<ApplyOutcome>, LedgerError> {
+    ) -> Result<Option<StateCheckpoint>, LedgerError> {
         let Some(watermark) = self.state.watermark() else {
             return Ok(None);
         };
@@ -328,9 +373,7 @@ impl<R: EventReducer> CanonicalLedger<R> {
         if block.canonical_block_hash() != watermark.canonical_block_hash {
             return Err(LedgerError::CanonicalDivergence);
         }
-        Ok(Some(ApplyOutcome::AlreadyApplied(
-            self.checkpoint_from(watermark, self.state_hash),
-        )))
+        Ok(Some(self.checkpoint_from(watermark, self.state_hash)))
     }
 
     fn validate_next_height(&self, actual: BlockHeight) -> Result<(), LedgerError> {

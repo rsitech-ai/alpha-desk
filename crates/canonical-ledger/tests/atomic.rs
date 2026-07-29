@@ -5,8 +5,8 @@ use canonical_events::{
     EventPayload, SourceEvidence, TradeMatched,
 };
 use canonical_ledger::{
-    ApplyContext, ApplyOutcome, CanonicalLedger, EventReducer, LedgerLimits, ReducerError,
-    StateKey, StateMutation, StateView,
+    ApplyContext, ApplyOutcome, CanonicalLedger, EventReducer, LedgerLimits, PrepareOutcome,
+    ReducerError, StateKey, StateMutation, StateView,
 };
 use domain_types::{
     Address, BlockHeight, ChainId, KnownTime, MarketId, Price, ProtocolTime, Quantity, SourceId,
@@ -344,6 +344,56 @@ fn reducer_version_drift_is_rejected_before_even_an_empty_block_advances() {
 
     assert_eq!(error.reason_code(), "ledger.reducer_version_drift");
     assert_eq!(ledger.state_image().canonical_bytes(), before);
+}
+
+#[test]
+fn prepared_block_is_invisible_until_explicit_commit() {
+    let mut ledger = ledger(80, RejectingReducer);
+    let before_hash = ledger.state_hash();
+    let before_bytes = ledger.state_image().canonical_bytes();
+    let block = empty_block("mainnet", 80, 80);
+
+    let PrepareOutcome::Ready(prepared) = ledger.prepare_block(&block).expect("prepare") else {
+        panic!("new block must prepare");
+    };
+
+    assert_eq!(prepared.delta().before_state_hash(), before_hash);
+    assert_eq!(
+        prepared.state_image().state_hash(),
+        prepared.delta().after_state_hash()
+    );
+    assert_eq!(ledger.state_hash(), before_hash);
+    assert_eq!(ledger.state_image().canonical_bytes(), before_bytes);
+    assert!(ledger.checkpoint().is_none());
+
+    let delta = ledger.commit_prepared(prepared).expect("commit");
+    assert_eq!(ledger.state_hash(), delta.after_state_hash());
+    assert_eq!(ledger.state_image().state_hash(), delta.after_state_hash());
+    assert_eq!(
+        ledger.checkpoint().expect("checkpoint").block_height(),
+        BlockHeight::new(80)
+    );
+}
+
+#[test]
+fn stale_prepared_block_cannot_overwrite_newer_visible_state() {
+    let mut ledger = ledger(90, RejectingReducer);
+    let block = empty_block("mainnet", 90, 90);
+    let PrepareOutcome::Ready(first) = ledger.prepare_block(&block).expect("first prepare") else {
+        panic!("new block must prepare");
+    };
+    let PrepareOutcome::Ready(stale) = ledger.prepare_block(&block).expect("second prepare") else {
+        panic!("new block must prepare");
+    };
+    ledger.commit_prepared(first).expect("first commit");
+    let committed_hash = ledger.state_hash();
+
+    let error = ledger
+        .commit_prepared(stale)
+        .expect_err("stale candidate must fail");
+
+    assert_eq!(error.reason_code(), "ledger.prepared_state_drift");
+    assert_eq!(ledger.state_hash(), committed_hash);
 }
 
 #[derive(Debug, Clone)]
