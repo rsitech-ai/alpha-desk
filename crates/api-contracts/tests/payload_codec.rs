@@ -1,21 +1,28 @@
 use api_contracts::{
-    PayloadCodecError, WireAssetContextUpdated, WireDexCreated, WireFundingRateUpdated,
-    WireMarginTableChanged, WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged,
-    WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted,
-    WireOrderCancelled, WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled,
-    WireOrderRejected, WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WireTradeMatched,
-    decode_asset_context_updated, decode_dex_created, decode_funding_rate_updated,
-    decode_margin_table_changed, decode_market_created, decode_market_halted,
-    decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
-    decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
-    decode_order_modified, decode_order_partially_filled, decode_order_rejected,
-    decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_trade_matched,
-    encode_asset_context_updated, encode_dex_created, encode_funding_rate_updated,
+    PayloadCodecError, WireAssetContextUpdated, WireDepositCredited, WireDexCreated,
+    WireFundingRateUpdated, WireMarginTableChanged, WireMarketCreated, WireMarketHalted,
+    WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated,
+    WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
+    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
+    WireOutcomeResolved, WirePerpTransfer, WireSpotTransfer, WireSubaccountTransfer,
+    WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited,
+    decode_asset_context_updated, decode_deposit_credited, decode_dex_created,
+    decode_funding_rate_updated, decode_margin_table_changed, decode_market_created,
+    decode_market_halted, decode_market_metadata_changed, decode_market_resumed,
+    decode_open_interest_cap_changed, decode_oracle_updated, decode_order_accepted,
+    decode_order_cancelled, decode_order_filled, decode_order_modified,
+    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
+    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_spot_transfer,
+    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
+    decode_vault_withdrawal, decode_withdrawal_debited, encode_asset_context_updated,
+    encode_deposit_credited, encode_dex_created, encode_funding_rate_updated,
     encode_margin_table_changed, encode_market_created, encode_market_halted,
     encode_market_metadata_changed, encode_market_resumed, encode_open_interest_cap_changed,
     encode_oracle_updated, encode_order_accepted, encode_order_cancelled, encode_order_filled,
     encode_order_modified, encode_order_partially_filled, encode_order_rejected,
-    encode_order_rested, encode_outcome_created, encode_outcome_resolved, encode_trade_matched,
+    encode_order_rested, encode_outcome_created, encode_outcome_resolved, encode_perp_transfer,
+    encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
+    encode_vault_withdrawal, encode_withdrawal_debited,
 };
 
 fn trade() -> WireTradeMatched {
@@ -82,6 +89,150 @@ fn empty_or_surrounding_whitespace_identities_are_rejected() {
     assert!(matches!(
         decode_trade_matched(&encoded),
         Err(PayloadCodecError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn account_cash_flow_wire_payloads_round_trip_deterministically() {
+    let deposit = WireDepositCredited {
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        asset_id: "USDC".to_owned(),
+        amount: "125.500000".to_owned(),
+        deposit_reference: "deposit-42".to_owned(),
+    };
+    let withdrawal = WireWithdrawalDebited {
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        asset_id: "USDC".to_owned(),
+        amount: "25.250000".to_owned(),
+        withdrawal_reference: "withdrawal-43".to_owned(),
+    };
+    let spot = WireSpotTransfer {
+        from_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        to_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+        asset_id: "USDC".to_owned(),
+        amount: "10.125000".to_owned(),
+    };
+    let perp = WirePerpTransfer {
+        from_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        to_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+        quote_amount: "2000.125000".to_owned(),
+    };
+    let subaccount = WireSubaccountTransfer {
+        master_account_id: "0x3333333333333333333333333333333333333333".to_owned(),
+        from_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        to_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+        asset_id: "USDC".to_owned(),
+        amount: "4.500000".to_owned(),
+    };
+    let vault_deposit = WireVaultDeposit {
+        vault_id: "vault-alpha".to_owned(),
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        amount: "1000.000000".to_owned(),
+        shares_issued: "10.50000000".to_owned(),
+    };
+    let vault_withdrawal = WireVaultWithdrawal {
+        vault_id: "vault-alpha".to_owned(),
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        amount: "750.000000".to_owned(),
+        shares_redeemed: "7.50000000".to_owned(),
+    };
+
+    assert_eq!(
+        decode_deposit_credited(&encode_deposit_credited(&deposit).unwrap()).unwrap(),
+        deposit
+    );
+    assert_eq!(
+        decode_withdrawal_debited(&encode_withdrawal_debited(&withdrawal).unwrap()).unwrap(),
+        withdrawal
+    );
+    assert_eq!(
+        decode_spot_transfer(&encode_spot_transfer(&spot).unwrap()).unwrap(),
+        spot
+    );
+    assert_eq!(
+        decode_perp_transfer(&encode_perp_transfer(&perp).unwrap()).unwrap(),
+        perp
+    );
+    assert_eq!(
+        decode_subaccount_transfer(&encode_subaccount_transfer(&subaccount).unwrap()).unwrap(),
+        subaccount
+    );
+    assert_eq!(
+        decode_vault_deposit(&encode_vault_deposit(&vault_deposit).unwrap()).unwrap(),
+        vault_deposit
+    );
+    assert_eq!(
+        decode_vault_withdrawal(&encode_vault_withdrawal(&vault_withdrawal).unwrap()).unwrap(),
+        vault_withdrawal
+    );
+    assert_eq!(
+        encode_deposit_credited(&deposit).unwrap(),
+        encode_deposit_credited(&deposit).unwrap()
+    );
+
+    let boundary_reference = WireDepositCredited {
+        deposit_reference: "x".repeat(256),
+        ..deposit
+    };
+    assert_eq!(
+        decode_deposit_credited(&encode_deposit_credited(&boundary_reference).unwrap()).unwrap(),
+        boundary_reference
+    );
+
+    let master_is_from = WireSubaccountTransfer {
+        master_account_id: subaccount.from_account_id.clone(),
+        ..subaccount
+    };
+    assert_eq!(
+        decode_subaccount_transfer(&encode_subaccount_transfer(&master_is_from).unwrap()).unwrap(),
+        master_is_from
+    );
+}
+
+#[test]
+fn account_cash_flow_wire_payloads_reject_missing_padded_and_unsafe_fields() {
+    let valid = WireDepositCredited {
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        asset_id: "USDC".to_owned(),
+        amount: "125.500000".to_owned(),
+        deposit_reference: "deposit-42".to_owned(),
+    };
+    for invalid in [
+        WireDepositCredited {
+            account_id: String::new(),
+            ..valid.clone()
+        },
+        WireDepositCredited {
+            asset_id: " USDC".to_owned(),
+            ..valid.clone()
+        },
+        WireDepositCredited {
+            amount: "125.5 ".to_owned(),
+            ..valid.clone()
+        },
+        WireDepositCredited {
+            deposit_reference: String::new(),
+            ..valid.clone()
+        },
+        WireDepositCredited {
+            deposit_reference: "deposit\n42".to_owned(),
+            ..valid.clone()
+        },
+        WireDepositCredited {
+            deposit_reference: "x".repeat(257),
+            ..valid.clone()
+        },
+    ] {
+        assert!(matches!(
+            encode_deposit_credited(&invalid),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
+
+    let encoded = encode_deposit_credited(&valid).unwrap();
+    assert!(matches!(
+        decode_withdrawal_debited(&encoded),
+        Err(PayloadCodecError::KindMismatch { .. })
     ));
 }
 
