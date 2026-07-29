@@ -129,6 +129,39 @@ archive replay runtime remain later milestones. The current in-memory state
 image is a deterministic reference representation, not a claim that a
 multi-gigabyte production state should be materialized in one allocation.
 
+### Local checkpoint store
+
+`canonical-state-store` implements the synchronous `StateCheckpointStore`
+port for the deterministic reference image. It retains an opened root
+directory descriptor and performs generation, file, and rename operations
+relative to that descriptor. Renaming or replacing the configured pathname
+after open cannot retarget checkpoint I/O.
+
+Each content-derived generation is:
+
+```text
+<private-root>/
+  state-checkpoint-v1-<64 lowercase hex>/
+    state.bin
+    manifest.json
+```
+
+The root and generation directories are owner-only `0700`; files are
+owner-only `0600`. Publication creates a random owner-only staging directory,
+writes and fsyncs `state.bin`, writes and fsyncs `manifest.json` last, fsyncs
+the staging directory, renames the complete directory with `NOREPLACE`, and
+fsyncs the retained root. A crash before rename leaves no content-addressed
+generation; it can leave a hidden `.staged-*` directory, which is ignored by
+load and must be removed only by a future descriptor-relative recovery scanner.
+Ordinary error paths clean their own staging directory. An existing identical
+content-derived generation is idempotent; conflicting content is rejected.
+
+Open and load use `NOFOLLOW`, reject non-private objects and path-bearing
+checkpoint IDs, bound every read before allocation, require both files, decode
+the domain artifact, compare the directory ID, and only then validate runtime
+compatibility. This store is crash-safe local reference checkpoint evidence;
+the RocksDB-native hot-state/checkpoint implementation remains M5.
+
 ## Current evidence and limitations
 
 Focused tests prove:

@@ -49,6 +49,11 @@ impl StateImageLimits {
             max_value_bytes: 16 * 1_024 * 1_024,
         }
     }
+
+    #[must_use]
+    pub const fn max_state_bytes(self) -> usize {
+        self.max_state_bytes
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
