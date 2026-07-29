@@ -171,7 +171,7 @@ Parquet archive, private local checkpoints.
   `maker_rebate` requires a negative rate and credits the account, while every
   charged fee type requires a positive rate and debits the account.
 
-- [ ] **Step 1: Write the failing domain and payload tests**
+- [x] **Step 1: Write the failing domain and payload tests**
 
   Accept only these frozen wire values:
 
@@ -189,13 +189,13 @@ Parquet archive, private local checkpoints.
   account/market identities belongs to the block-atomic reducer in Task 4,
   not the payload codec.
 
-- [ ] **Step 2: Run red**
+- [x] **Step 2: Run red**
 
   ```bash
   cargo +1.97.1 test -p domain-types -p canonical-events --test account_payloads --locked --offline
   ```
 
-- [ ] **Step 3: Implement exact types and codecs**
+- [x] **Step 3: Implement exact types and codecs**
 
   Define payloads with these fields:
 
@@ -260,7 +260,7 @@ Parquet archive, private local checkpoints.
   Remove only these eight variants from `opaque_payloads!`. Keep builder and
   referrer accounts distinct from the charged/rewarded account.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   ```bash
   cargo +1.97.1 test -p domain-types -p api-contracts -p canonical-events --locked --offline

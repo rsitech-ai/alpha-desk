@@ -1,18 +1,24 @@
 use api_contracts::{
-    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireCanonicalEventEnvelope, WireDepositCredited,
-    WirePerpTransfer, WireSpotTransfer, WireSubaccountTransfer, WireVaultDeposit,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireAccountModeChanged, WireBuilderFeeCharged,
+    WireCanonicalEventEnvelope, WireDepositCredited, WireFeeCharged, WireFundingPaid,
+    WireFundingReceived, WireLeverageChanged, WireMarginModeChanged, WirePerpTransfer,
+    WireReferralReward, WireSpotTransfer, WireSubaccountTransfer, WireVaultDeposit,
     WireVaultWithdrawal, WireWithdrawalDebited, decode_deposit_credited,
-    encode_default_event_payload, encode_deposit_credited, encode_perp_transfer,
-    encode_spot_transfer, encode_subaccount_transfer, encode_vault_deposit,
+    encode_account_mode_changed, encode_builder_fee_charged, encode_default_event_payload,
+    encode_deposit_credited, encode_fee_charged, encode_funding_paid, encode_funding_received,
+    encode_leverage_changed, encode_margin_mode_changed, encode_perp_transfer,
+    encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_vault_deposit,
     encode_vault_withdrawal, encode_withdrawal_debited,
 };
 use canonical_events::{
-    CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, DepositCredited, EventKind,
-    EventPayload, PerpTransfer, SpotTransfer, SubaccountTransfer, VaultDeposit, VaultWithdrawal,
-    WithdrawalDebited,
+    AccountModeChanged, BuilderFeeCharged, CanonicalEventEnvelope, CanonicalEventInput,
+    ConfirmationClass, DepositCredited, EventKind, EventPayload, FeeCharged, FundingPaid,
+    FundingReceived, LeverageChanged, MarginModeChanged, PerpTransfer, ReferralReward,
+    SpotTransfer, SubaccountTransfer, VaultDeposit, VaultWithdrawal, WithdrawalDebited,
 };
 use domain_types::{
-    Address, AssetId, BlockHeight, ChainId, KnownTime, ProtocolTime, Quantity, QuoteAmount,
+    AccountAbstractionModeV1, Address, AssetId, BlockHeight, ChainId, FeeRate, FeeTypeV1,
+    FundingRate, KnownTime, Leverage, MarginModeV1, MarketId, ProtocolTime, Quantity, QuoteAmount,
     SourceId, TransactionId, VaultId,
 };
 
@@ -225,9 +231,89 @@ fn valid_account_payload_bytes() -> Vec<(EventKind, Vec<u8>)> {
             EventKind::VaultWithdrawal,
             encode_vault_withdrawal(&WireVaultWithdrawal {
                 vault_id: "vault-alpha".to_owned(),
-                account_id: from,
+                account_id: from.clone(),
                 amount: "1".to_owned(),
                 shares_redeemed: "1".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::FeeCharged,
+            encode_fee_charged(&WireFeeCharged {
+                account_id: from.clone(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                fee_rate: "-0.0001".to_owned(),
+                fee_type: "maker_rebate".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::BuilderFeeCharged,
+            encode_builder_fee_charged(&WireBuilderFeeCharged {
+                account_id: from.clone(),
+                builder_account_id: to.clone(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::FundingPaid,
+            encode_funding_paid(&WireFundingPaid {
+                account_id: from.clone(),
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "-0.0001".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::FundingReceived,
+            encode_funding_received(&WireFundingReceived {
+                account_id: from.clone(),
+                market_id: "perp:BTC".to_owned(),
+                amount: "1".to_owned(),
+                funding_rate: "0.0001".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::ReferralReward,
+            encode_referral_reward(&WireReferralReward {
+                account_id: from.clone(),
+                referrer_account_id: to,
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::AccountModeChanged,
+            encode_account_mode_changed(&WireAccountModeChanged {
+                account_id: from.clone(),
+                previous_mode: "standard".to_owned(),
+                new_mode: "unified".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::MarginModeChanged,
+            encode_margin_mode_changed(&WireMarginModeChanged {
+                account_id: from.clone(),
+                market_id: "perp:BTC".to_owned(),
+                previous_mode: "cross".to_owned(),
+                new_mode: "isolated".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::LeverageChanged,
+            encode_leverage_changed(&WireLeverageChanged {
+                account_id: from,
+                market_id: "perp:BTC".to_owned(),
+                previous_leverage: "3".to_owned(),
+                new_leverage: "5".to_owned(),
             })
             .unwrap(),
         ),
@@ -363,6 +449,279 @@ fn all_cash_flow_payloads_decode_to_exact_domain_values_and_round_trip() {
         assert_eq!(decoded.kind(), kind);
         assert_eq!(decoded.encode_to_vec().unwrap(), bytes);
     }
+}
+
+#[test]
+fn all_fee_funding_reward_and_mode_payloads_round_trip_exact_domain_values() {
+    let account_id = account(0x11);
+    let other_account_id = account(0x22);
+    let asset_id = AssetId::new("USDC").unwrap();
+    let market_id = MarketId::new("perp:BTC").unwrap();
+
+    let cases = [
+        (
+            EventKind::FeeCharged,
+            encode_fee_charged(&WireFeeCharged {
+                account_id: account_id.to_api_string(),
+                asset_id: asset_id.to_string(),
+                amount: "0.250000".to_owned(),
+                fee_rate: "-0.000100".to_owned(),
+                fee_type: "maker_rebate".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::FeeCharged(FeeCharged {
+                account_id,
+                asset_id: asset_id.clone(),
+                amount: Quantity::parse_at_scale("0.25", 6).unwrap(),
+                fee_rate: FeeRate::parse_at_scale("-0.0001", 6).unwrap(),
+                fee_type: FeeTypeV1::MakerRebate,
+            }),
+        ),
+        (
+            EventKind::BuilderFeeCharged,
+            encode_builder_fee_charged(&WireBuilderFeeCharged {
+                account_id: account_id.to_api_string(),
+                builder_account_id: other_account_id.to_api_string(),
+                asset_id: asset_id.to_string(),
+                amount: "0.100000".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::BuilderFeeCharged(BuilderFeeCharged {
+                account_id,
+                builder_account_id: other_account_id,
+                asset_id: asset_id.clone(),
+                amount: Quantity::parse_at_scale("0.1", 6).unwrap(),
+            }),
+        ),
+        (
+            EventKind::FundingPaid,
+            encode_funding_paid(&WireFundingPaid {
+                account_id: account_id.to_api_string(),
+                market_id: market_id.to_string(),
+                amount: "3.500000".to_owned(),
+                funding_rate: "-0.000125".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::FundingPaid(FundingPaid {
+                account_id,
+                market_id: market_id.clone(),
+                amount: QuoteAmount::parse_at_scale("3.5", 6).unwrap(),
+                funding_rate: FundingRate::parse_at_scale("-0.000125", 6).unwrap(),
+            }),
+        ),
+        (
+            EventKind::FundingReceived,
+            encode_funding_received(&WireFundingReceived {
+                account_id: account_id.to_api_string(),
+                market_id: market_id.to_string(),
+                amount: "2.250000".to_owned(),
+                funding_rate: "0.000075".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::FundingReceived(FundingReceived {
+                account_id,
+                market_id: market_id.clone(),
+                amount: QuoteAmount::parse_at_scale("2.25", 6).unwrap(),
+                funding_rate: FundingRate::parse_at_scale("0.000075", 6).unwrap(),
+            }),
+        ),
+        (
+            EventKind::ReferralReward,
+            encode_referral_reward(&WireReferralReward {
+                account_id: account_id.to_api_string(),
+                referrer_account_id: other_account_id.to_api_string(),
+                asset_id: asset_id.to_string(),
+                amount: "0.500000".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::ReferralReward(ReferralReward {
+                account_id,
+                referrer_account_id: other_account_id,
+                asset_id: asset_id.clone(),
+                amount: Quantity::parse_at_scale("0.5", 6).unwrap(),
+            }),
+        ),
+        (
+            EventKind::AccountModeChanged,
+            encode_account_mode_changed(&WireAccountModeChanged {
+                account_id: account_id.to_api_string(),
+                previous_mode: "standard".to_owned(),
+                new_mode: "unified".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::AccountModeChanged(AccountModeChanged {
+                account_id,
+                previous_mode: AccountAbstractionModeV1::Standard,
+                new_mode: AccountAbstractionModeV1::Unified,
+            }),
+        ),
+        (
+            EventKind::MarginModeChanged,
+            encode_margin_mode_changed(&WireMarginModeChanged {
+                account_id: account_id.to_api_string(),
+                market_id: market_id.to_string(),
+                previous_mode: "cross".to_owned(),
+                new_mode: "strict_isolated".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::MarginModeChanged(MarginModeChanged {
+                account_id,
+                market_id: market_id.clone(),
+                previous_mode: MarginModeV1::Cross,
+                new_mode: MarginModeV1::StrictIsolated,
+            }),
+        ),
+        (
+            EventKind::LeverageChanged,
+            encode_leverage_changed(&WireLeverageChanged {
+                account_id: account_id.to_api_string(),
+                market_id: market_id.to_string(),
+                previous_leverage: "3".to_owned(),
+                new_leverage: "5".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::LeverageChanged(LeverageChanged {
+                account_id,
+                market_id,
+                previous_leverage: Leverage::from_raw(3, 0).unwrap(),
+                new_leverage: Leverage::from_raw(5, 0).unwrap(),
+            }),
+        ),
+    ];
+
+    for (kind, bytes, expected) in cases {
+        let decoded = EventPayload::decode(kind, &bytes).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.kind(), kind);
+        assert_eq!(decoded.encode_to_vec().unwrap(), bytes);
+    }
+}
+
+#[test]
+fn fee_funding_reward_and_mode_payloads_reject_financially_invalid_values() {
+    let account_id = account(0x11).to_api_string();
+    let other_account_id = account(0x22).to_api_string();
+
+    for (fee_type, fee_rate) in [
+        ("maker_rebate", "0"),
+        ("maker_rebate", "0.0001"),
+        ("maker", "0"),
+        ("maker", "-0.0001"),
+        ("taker", "-0.0001"),
+        ("referral_discount", "0"),
+        ("protocol", "-0.0001"),
+    ] {
+        let encoded = encode_fee_charged(&WireFeeCharged {
+            account_id: account_id.clone(),
+            asset_id: "USDC".to_owned(),
+            amount: "1".to_owned(),
+            fee_rate: fee_rate.to_owned(),
+            fee_type: fee_type.to_owned(),
+        });
+        assert!(encoded.is_err(), "{fee_type} accepted fee rate {fee_rate}");
+    }
+
+    for invalid in [
+        "0".to_owned(),
+        "-1".to_owned(),
+        "not-a-decimal".to_owned(),
+        format!("0.{}", "1".repeat(39)),
+    ] {
+        for (kind, bytes, field) in [
+            (
+                EventKind::FundingPaid,
+                encode_funding_paid(&WireFundingPaid {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    amount: invalid.clone(),
+                    funding_rate: "-0.0001".to_owned(),
+                }),
+                "FundingPaid.amount",
+            ),
+            (
+                EventKind::FundingReceived,
+                encode_funding_received(&WireFundingReceived {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    amount: invalid.clone(),
+                    funding_rate: "0.0001".to_owned(),
+                }),
+                "FundingReceived.amount",
+            ),
+            (
+                EventKind::LeverageChanged,
+                encode_leverage_changed(&WireLeverageChanged {
+                    account_id: account_id.clone(),
+                    market_id: "perp:BTC".to_owned(),
+                    previous_leverage: "3".to_owned(),
+                    new_leverage: invalid.clone(),
+                }),
+                "LeverageChanged.new_leverage",
+            ),
+        ] {
+            if let Ok(bytes) = bytes {
+                assert!(
+                    EventPayload::decode(kind, &bytes).is_err(),
+                    "{field} accepted {invalid}"
+                );
+            }
+        }
+    }
+
+    assert!(
+        encode_builder_fee_charged(&WireBuilderFeeCharged {
+            account_id: account_id.clone(),
+            builder_account_id: account_id.clone(),
+            asset_id: "USDC".to_owned(),
+            amount: "1".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_referral_reward(&WireReferralReward {
+            account_id: account_id.clone(),
+            referrer_account_id: account_id.clone(),
+            asset_id: "USDC".to_owned(),
+            amount: "1".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_account_mode_changed(&WireAccountModeChanged {
+            account_id: account_id.clone(),
+            previous_mode: "standard".to_owned(),
+            new_mode: "standard".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_margin_mode_changed(&WireMarginModeChanged {
+            account_id: account_id.clone(),
+            market_id: "perp:BTC".to_owned(),
+            previous_mode: "cross".to_owned(),
+            new_mode: "cross".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_leverage_changed(&WireLeverageChanged {
+            account_id,
+            market_id: "perp:BTC".to_owned(),
+            previous_leverage: "5".to_owned(),
+            new_leverage: "5".to_owned(),
+        })
+        .is_err()
+    );
+
+    let valid = encode_referral_reward(&WireReferralReward {
+        account_id: account(0x11).to_api_string(),
+        referrer_account_id: other_account_id,
+        asset_id: "USDC".to_owned(),
+        amount: "1".to_owned(),
+    })
+    .unwrap();
+    let noncanonical = mutate_inner_message(&valid, |message| append_varint_field(message, 100, 1));
+    assert!(EventPayload::decode(EventKind::ReferralReward, &noncanonical).is_err());
 }
 
 #[test]
@@ -794,6 +1153,14 @@ fn strict_account_default_payloads_decode_to_canonical_variants() {
         EventKind::SubaccountTransfer,
         EventKind::VaultDeposit,
         EventKind::VaultWithdrawal,
+        EventKind::FeeCharged,
+        EventKind::BuilderFeeCharged,
+        EventKind::FundingPaid,
+        EventKind::FundingReceived,
+        EventKind::ReferralReward,
+        EventKind::AccountModeChanged,
+        EventKind::MarginModeChanged,
+        EventKind::LeverageChanged,
     ] {
         let bytes = encode_default_event_payload(kind.as_wire_name()).unwrap();
         let payload = EventPayload::decode(kind, &bytes)
@@ -804,11 +1171,39 @@ fn strict_account_default_payloads_decode_to_canonical_variants() {
 
 #[test]
 fn inner_unknown_fields_preserve_exact_bound_and_one_over_fails_closed() {
-    let exact = pad_inner_to_exact_size(&valid_deposit_bytes(), ACCOUNT_PAYLOAD_LIMIT);
-    assert_eq!(exact.len(), ACCOUNT_PAYLOAD_LIMIT);
-    assert!(decode_deposit_credited(&exact).is_ok());
-    assert!(EventPayload::decode(EventKind::DepositCredited, &exact).is_err());
+    for (kind, valid) in valid_account_payload_bytes() {
+        let exact = pad_inner_to_exact_size(&valid, ACCOUNT_PAYLOAD_LIMIT);
+        assert_eq!(exact.len(), ACCOUNT_PAYLOAD_LIMIT);
+        let exact_error = EventPayload::decode(kind, &exact).unwrap_err();
+        assert!(
+            !exact_error
+                .to_string()
+                .contains("exceeds the 16384-byte limit"),
+            "{kind:?} exact-bound payload failed the inclusive size preflight"
+        );
 
+        let one_over = pad_inner_to_exact_size(&valid, ACCOUNT_PAYLOAD_LIMIT + 1);
+        assert_eq!(one_over.len(), ACCOUNT_PAYLOAD_LIMIT + 1);
+        let one_over_error = EventPayload::decode(kind, &one_over).unwrap_err();
+        assert!(
+            one_over_error
+                .to_string()
+                .contains("exceeds the 16384-byte limit"),
+            "{kind:?} did not fail one-over at the size preflight: {one_over_error}"
+        );
+
+        let malformed = vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1];
+        let malformed_error = EventPayload::decode(kind, &malformed).unwrap_err();
+        assert!(
+            malformed_error
+                .to_string()
+                .contains("exceeds the 16384-byte limit"),
+            "{kind:?} unwrapped malformed bytes before the size preflight: {malformed_error}"
+        );
+    }
+
+    let exact = pad_inner_to_exact_size(&valid_deposit_bytes(), ACCOUNT_PAYLOAD_LIMIT);
+    assert!(decode_deposit_credited(&exact).is_ok());
     let mut exact_wire =
         WireCanonicalEventEnvelope::decode(&deposit_envelope().encode_to_vec().unwrap()).unwrap();
     exact_wire.payload = exact.clone();
@@ -818,7 +1213,6 @@ fn inner_unknown_fields_preserve_exact_bound_and_one_over_fails_closed() {
     assert_eq!(reencoded.payload, exact);
 
     let one_over = pad_inner_to_exact_size(&valid_deposit_bytes(), ACCOUNT_PAYLOAD_LIMIT + 1);
-    assert_eq!(one_over.len(), ACCOUNT_PAYLOAD_LIMIT + 1);
     assert!(decode_deposit_credited(&one_over).is_err());
     let mut one_over_wire =
         WireCanonicalEventEnvelope::decode(&deposit_envelope().encode_to_vec().unwrap()).unwrap();
@@ -875,6 +1269,62 @@ fn enclosing_cash_flow_event_preserves_forward_compatible_payload_bytes() {
             deposit_reference,
             ..
         }) if deposit_reference == "deposit-42"
+    ));
+    let reencoded = WireCanonicalEventEnvelope::decode(&decoded.encode_to_vec().unwrap()).unwrap();
+    assert_eq!(reencoded.payload, wire.payload);
+}
+
+#[test]
+fn enclosing_fee_event_preserves_inner_unknown_fields_without_changing_rebate_sign() {
+    let account_id = account(0x11);
+    let time = ProtocolTime::from_unix_micros(1_721_779_200_000_043).unwrap();
+    let envelope = CanonicalEventEnvelope::from_input(CanonicalEventInput {
+        schema_version: "1.0.0".to_owned(),
+        chain_id: ChainId::new("mainnet").unwrap(),
+        block_height: BlockHeight::new(43),
+        block_time: time,
+        transaction_id: TransactionId::new("fee-tx-43").unwrap(),
+        transaction_index: 0,
+        canonical_event_index: 0,
+        market_ids: Vec::new(),
+        account_ids: vec![account_id],
+        source_evidence: vec![
+            canonical_events::SourceEvidence::try_new(
+                SourceId::new("fee-test").unwrap(),
+                "v1",
+                "43",
+                [0x43; 32],
+            )
+            .unwrap(),
+        ],
+        confirmation_class: ConfirmationClass::CommittedPrimary,
+        observed_at: KnownTime::from_unix_micros(time.unix_micros()).unwrap(),
+        ingested_at: KnownTime::from_unix_micros(time.unix_micros()).unwrap(),
+        canonicalized_at: KnownTime::from_unix_micros(time.unix_micros()).unwrap(),
+        parser_version: "fee-test-v1".to_owned(),
+        payload: EventPayload::FeeCharged(FeeCharged {
+            account_id,
+            asset_id: AssetId::new("USDC").unwrap(),
+            amount: Quantity::parse_at_scale("0.25", 6).unwrap(),
+            fee_rate: FeeRate::parse_at_scale("-0.0001", 6).unwrap(),
+            fee_type: FeeTypeV1::MakerRebate,
+        }),
+    })
+    .unwrap();
+    let mut wire = WireCanonicalEventEnvelope::decode(&envelope.encode_to_vec().unwrap()).unwrap();
+    wire.payload = mutate_inner_message(&wire.payload, |message| {
+        append_varint_field(message, 100, 1)
+    });
+    wire.payload_hash = blake3::hash(&wire.payload).as_bytes().to_vec();
+
+    let decoded = CanonicalEventEnvelope::decode(&wire.encode_to_vec()).unwrap();
+    assert!(matches!(
+        decoded.payload(),
+        EventPayload::FeeCharged(FeeCharged {
+            fee_rate,
+            fee_type: FeeTypeV1::MakerRebate,
+            ..
+        }) if fee_rate.raw() < 0
     ));
     let reencoded = WireCanonicalEventEnvelope::decode(&decoded.encode_to_vec().unwrap()).unwrap();
     assert_eq!(reencoded.payload, wire.payload);

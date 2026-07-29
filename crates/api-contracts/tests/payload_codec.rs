@@ -1,28 +1,34 @@
 use api_contracts::{
-    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAssetContextUpdated,
-    WireDepositCredited, WireDexCreated, WireFundingRateUpdated, WireMarginTableChanged,
-    WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed,
-    WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted, WireOrderCancelled,
-    WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected,
-    WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer, WireSpotTransfer,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAccountModeChanged,
+    WireAssetContextUpdated, WireBuilderFeeCharged, WireDepositCredited, WireDexCreated,
+    WireFeeCharged, WireFundingPaid, WireFundingRateUpdated, WireFundingReceived,
+    WireLeverageChanged, WireMarginModeChanged, WireMarginTableChanged, WireMarketCreated,
+    WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged,
+    WireOracleUpdated, WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
+    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
+    WireOutcomeResolved, WirePerpTransfer, WireReferralReward, WireSpotTransfer,
     WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal,
-    WireWithdrawalDebited, decode_asset_context_updated, decode_deposit_credited,
-    decode_dex_created, decode_funding_rate_updated, decode_margin_table_changed,
+    WireWithdrawalDebited, decode_account_mode_changed, decode_asset_context_updated,
+    decode_builder_fee_charged, decode_deposit_credited, decode_dex_created, decode_fee_charged,
+    decode_funding_paid, decode_funding_rate_updated, decode_funding_received,
+    decode_leverage_changed, decode_margin_mode_changed, decode_margin_table_changed,
     decode_market_created, decode_market_halted, decode_market_metadata_changed,
     decode_market_resumed, decode_open_interest_cap_changed, decode_oracle_updated,
     decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
     decode_order_partially_filled, decode_order_rejected, decode_order_rested,
-    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_spot_transfer,
-    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
-    decode_vault_withdrawal, decode_withdrawal_debited, encode_asset_context_updated,
-    encode_default_event_payload, encode_deposit_credited, encode_dex_created,
-    encode_funding_rate_updated, encode_margin_table_changed, encode_market_created,
+    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_referral_reward,
+    decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
+    decode_vault_withdrawal, decode_withdrawal_debited, encode_account_mode_changed,
+    encode_asset_context_updated, encode_builder_fee_charged, encode_default_event_payload,
+    encode_deposit_credited, encode_dex_created, encode_fee_charged, encode_funding_paid,
+    encode_funding_rate_updated, encode_funding_received, encode_leverage_changed,
+    encode_margin_mode_changed, encode_margin_table_changed, encode_market_created,
     encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
     encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
     encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
-    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_spot_transfer,
-    encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
+    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_referral_reward,
+    encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
     encode_vault_withdrawal, encode_withdrawal_debited, validate_event_payload,
 };
 
@@ -258,6 +264,209 @@ fn account_cash_flow_wire_payloads_round_trip_deterministically() {
 }
 
 #[test]
+fn account_fee_funding_reward_and_mode_wire_payloads_round_trip_exactly() {
+    let account = "0x1111111111111111111111111111111111111111".to_owned();
+    let other = "0x2222222222222222222222222222222222222222".to_owned();
+
+    let fee = WireFeeCharged {
+        account_id: account.clone(),
+        asset_id: "USDC".to_owned(),
+        amount: "1.250000".to_owned(),
+        fee_rate: "0.000500".to_owned(),
+        fee_type: "taker".to_owned(),
+    };
+    assert_eq!(
+        decode_fee_charged(&encode_fee_charged(&fee).unwrap()).unwrap(),
+        fee
+    );
+
+    let rebate = WireFeeCharged {
+        account_id: account.clone(),
+        asset_id: "USDC".to_owned(),
+        amount: "0.250000".to_owned(),
+        fee_rate: "-0.000100".to_owned(),
+        fee_type: "maker_rebate".to_owned(),
+    };
+    assert_eq!(
+        decode_fee_charged(&encode_fee_charged(&rebate).unwrap()).unwrap(),
+        rebate
+    );
+
+    let builder = WireBuilderFeeCharged {
+        account_id: account.clone(),
+        builder_account_id: other.clone(),
+        asset_id: "USDC".to_owned(),
+        amount: "0.100000".to_owned(),
+    };
+    assert_eq!(
+        decode_builder_fee_charged(&encode_builder_fee_charged(&builder).unwrap()).unwrap(),
+        builder
+    );
+
+    let funding_paid = WireFundingPaid {
+        account_id: account.clone(),
+        market_id: "perp:BTC".to_owned(),
+        amount: "3.500000".to_owned(),
+        funding_rate: "-0.000125".to_owned(),
+    };
+    assert_eq!(
+        decode_funding_paid(&encode_funding_paid(&funding_paid).unwrap()).unwrap(),
+        funding_paid
+    );
+
+    let funding_received = WireFundingReceived {
+        account_id: account.clone(),
+        market_id: "perp:ETH".to_owned(),
+        amount: "2.250000".to_owned(),
+        funding_rate: "0.000075".to_owned(),
+    };
+    assert_eq!(
+        decode_funding_received(&encode_funding_received(&funding_received).unwrap()).unwrap(),
+        funding_received
+    );
+
+    let referral = WireReferralReward {
+        account_id: account.clone(),
+        referrer_account_id: other,
+        asset_id: "USDC".to_owned(),
+        amount: "0.500000".to_owned(),
+    };
+    assert_eq!(
+        decode_referral_reward(&encode_referral_reward(&referral).unwrap()).unwrap(),
+        referral
+    );
+
+    let account_mode = WireAccountModeChanged {
+        account_id: account.clone(),
+        previous_mode: "standard".to_owned(),
+        new_mode: "unified".to_owned(),
+    };
+    assert_eq!(
+        decode_account_mode_changed(&encode_account_mode_changed(&account_mode).unwrap()).unwrap(),
+        account_mode
+    );
+
+    let margin_mode = WireMarginModeChanged {
+        account_id: account.clone(),
+        market_id: "perp:BTC".to_owned(),
+        previous_mode: "cross".to_owned(),
+        new_mode: "strict_isolated".to_owned(),
+    };
+    assert_eq!(
+        decode_margin_mode_changed(&encode_margin_mode_changed(&margin_mode).unwrap()).unwrap(),
+        margin_mode
+    );
+
+    let leverage = WireLeverageChanged {
+        account_id: account,
+        market_id: "perp:BTC".to_owned(),
+        previous_leverage: "3".to_owned(),
+        new_leverage: "5".to_owned(),
+    };
+    assert_eq!(
+        decode_leverage_changed(&encode_leverage_changed(&leverage).unwrap()).unwrap(),
+        leverage
+    );
+}
+
+#[test]
+fn account_fee_reward_and_mode_wire_payloads_reject_invalid_boundaries() {
+    let account = "0x1111111111111111111111111111111111111111".to_owned();
+    let other = "0x2222222222222222222222222222222222222222".to_owned();
+
+    for invalid in ["Maker", " maker", "maker ", "unknown"] {
+        assert!(
+            encode_fee_charged(&WireFeeCharged {
+                account_id: account.clone(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                fee_rate: "0.001".to_owned(),
+                fee_type: invalid.to_owned(),
+            })
+            .is_err()
+        );
+    }
+    for (fee_type, fee_rate) in [
+        ("maker_rebate", "0"),
+        ("maker_rebate", "0.001"),
+        ("maker", "0"),
+        ("maker", "-0.001"),
+        ("taker", "-0.001"),
+        ("referral_discount", "0"),
+        ("protocol", "-0.001"),
+    ] {
+        assert!(
+            encode_fee_charged(&WireFeeCharged {
+                account_id: account.clone(),
+                asset_id: "USDC".to_owned(),
+                amount: "1".to_owned(),
+                fee_rate: fee_rate.to_owned(),
+                fee_type: fee_type.to_owned(),
+            })
+            .is_err(),
+            "{fee_type} accepted fee rate {fee_rate}"
+        );
+    }
+
+    assert!(
+        encode_builder_fee_charged(&WireBuilderFeeCharged {
+            account_id: account.clone(),
+            builder_account_id: account.clone(),
+            asset_id: "USDC".to_owned(),
+            amount: "1".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_referral_reward(&WireReferralReward {
+            account_id: account.clone(),
+            referrer_account_id: account.clone(),
+            asset_id: "USDC".to_owned(),
+            amount: "1".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_account_mode_changed(&WireAccountModeChanged {
+            account_id: account.clone(),
+            previous_mode: "standard".to_owned(),
+            new_mode: "standard".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_margin_mode_changed(&WireMarginModeChanged {
+            account_id: account.clone(),
+            market_id: "perp:BTC".to_owned(),
+            previous_mode: "cross".to_owned(),
+            new_mode: "cross".to_owned(),
+        })
+        .is_err()
+    );
+    assert!(
+        encode_leverage_changed(&WireLeverageChanged {
+            account_id: account,
+            market_id: "perp:BTC".to_owned(),
+            previous_leverage: "5".to_owned(),
+            new_leverage: "5".to_owned(),
+        })
+        .is_err()
+    );
+
+    let valid = WireReferralReward {
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        referrer_account_id: other,
+        asset_id: "USDC".to_owned(),
+        amount: "1".to_owned(),
+    };
+    let encoded = encode_referral_reward(&valid).unwrap();
+    assert!(matches!(
+        decode_fee_charged(&encoded),
+        Err(PayloadCodecError::KindMismatch { .. })
+    ));
+}
+
+#[test]
 fn account_cash_flow_wire_payloads_reject_missing_padded_and_unsafe_fields() {
     let valid = WireDepositCredited {
         account_id: "0x1111111111111111111111111111111111111111".to_owned(),
@@ -457,6 +666,14 @@ fn generic_validator_preflights_every_account_payload_size() {
         "SubaccountTransfer",
         "VaultDeposit",
         "VaultWithdrawal",
+        "FeeCharged",
+        "BuilderFeeCharged",
+        "FundingPaid",
+        "FundingReceived",
+        "ReferralReward",
+        "AccountModeChanged",
+        "MarginModeChanged",
+        "LeverageChanged",
     ] {
         let default = encode_default_event_payload(kind).unwrap();
 
@@ -491,7 +708,7 @@ fn generic_validator_preflights_every_account_payload_size() {
 
 #[test]
 fn generic_validator_preserves_unrelated_kind_behavior() {
-    let kind = "FeeCharged";
+    let kind = "LiquidationStarted";
     let valid = encode_default_event_payload(kind).unwrap();
     validate_event_payload(kind, &valid).unwrap();
 
@@ -515,6 +732,14 @@ fn strict_account_default_payloads_validate_deterministically() {
         "SubaccountTransfer",
         "VaultDeposit",
         "VaultWithdrawal",
+        "FeeCharged",
+        "BuilderFeeCharged",
+        "FundingPaid",
+        "FundingReceived",
+        "ReferralReward",
+        "AccountModeChanged",
+        "MarginModeChanged",
+        "LeverageChanged",
     ] {
         let first = encode_default_event_payload(kind).unwrap();
         let second = encode_default_event_payload(kind).unwrap();

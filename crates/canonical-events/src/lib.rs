@@ -16,36 +16,43 @@ pub use node_mapping::{
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
-    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireAssetContextUpdated, WireCanonicalEventEnvelope,
-    WireDepositCredited, WireDexCreated, WireFundingRateUpdated, WireMarginTableChanged,
-    WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed,
-    WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted, WireOrderCancelled,
-    WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected,
-    WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer, WireSourceEvidence,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireAccountModeChanged, WireAssetContextUpdated,
+    WireBuilderFeeCharged, WireCanonicalEventEnvelope, WireDepositCredited, WireDexCreated,
+    WireFeeCharged, WireFundingPaid, WireFundingRateUpdated, WireFundingReceived,
+    WireLeverageChanged, WireMarginModeChanged, WireMarginTableChanged, WireMarketCreated,
+    WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged,
+    WireOracleUpdated, WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
+    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
+    WireOutcomeResolved, WirePerpTransfer, WireReferralReward, WireSourceEvidence,
     WireSpotTransfer, WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit,
-    WireVaultWithdrawal, WireWithdrawalDebited, decode_asset_context_updated,
-    decode_deposit_credited, decode_dex_created, decode_funding_rate_updated,
+    WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
+    decode_asset_context_updated, decode_builder_fee_charged, decode_deposit_credited,
+    decode_dex_created, decode_fee_charged, decode_funding_paid, decode_funding_rate_updated,
+    decode_funding_received, decode_leverage_changed, decode_margin_mode_changed,
     decode_margin_table_changed, decode_market_created, decode_market_halted,
     decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
     decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
     decode_order_modified, decode_order_partially_filled, decode_order_rejected,
     decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_perp_transfer,
-    decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
-    decode_vault_withdrawal, decode_withdrawal_debited, encode_asset_context_updated,
-    encode_default_event_payload, encode_deposit_credited, encode_dex_created,
-    encode_funding_rate_updated, encode_margin_table_changed, encode_market_created,
-    encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
-    encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
-    encode_order_cancelled, encode_order_filled, encode_order_modified,
+    decode_referral_reward, decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched,
+    decode_vault_deposit, decode_vault_withdrawal, decode_withdrawal_debited,
+    encode_account_mode_changed, encode_asset_context_updated, encode_builder_fee_charged,
+    encode_default_event_payload, encode_deposit_credited, encode_dex_created, encode_fee_charged,
+    encode_funding_paid, encode_funding_rate_updated, encode_funding_received,
+    encode_leverage_changed, encode_margin_mode_changed, encode_margin_table_changed,
+    encode_market_created, encode_market_halted, encode_market_metadata_changed,
+    encode_market_resumed, encode_open_interest_cap_changed, encode_oracle_updated,
+    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
-    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_spot_transfer,
-    encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
+    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_referral_reward,
+    encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
     encode_vault_withdrawal, encode_withdrawal_debited, validate_event_payload,
 };
 use domain_types::{
-    Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId, EventId, FundingRate, KnownTime,
-    MarketId, OrderId, OrderSide, OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId,
-    TradeId, TransactionId, VaultId,
+    AccountAbstractionModeV1, Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId,
+    EventId, FeeRate, FeeTypeV1, FundingRate, KnownTime, Leverage, MarginModeV1, MarketId, OrderId,
+    OrderSide, OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId, TradeId,
+    TransactionId, VaultId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -336,6 +343,70 @@ pub struct VaultWithdrawal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeCharged {
+    pub account_id: Address,
+    pub asset_id: AssetId,
+    pub amount: Quantity,
+    pub fee_rate: FeeRate,
+    pub fee_type: FeeTypeV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderFeeCharged {
+    pub account_id: Address,
+    pub builder_account_id: Address,
+    pub asset_id: AssetId,
+    pub amount: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingPaid {
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub amount: QuoteAmount,
+    pub funding_rate: FundingRate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingReceived {
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub amount: QuoteAmount,
+    pub funding_rate: FundingRate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralReward {
+    pub account_id: Address,
+    pub referrer_account_id: Address,
+    pub asset_id: AssetId,
+    pub amount: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountModeChanged {
+    pub account_id: Address,
+    pub previous_mode: AccountAbstractionModeV1,
+    pub new_mode: AccountAbstractionModeV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarginModeChanged {
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub previous_mode: MarginModeV1,
+    pub new_mode: MarginModeV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeverageChanged {
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub previous_leverage: Leverage,
+    pub new_leverage: Leverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DexCreated {
     pub dex_id: DexId,
     pub name: String,
@@ -452,6 +523,14 @@ macro_rules! opaque_payloads {
             SubaccountTransfer(SubaccountTransfer),
             VaultDeposit(VaultDeposit),
             VaultWithdrawal(VaultWithdrawal),
+            FeeCharged(FeeCharged),
+            BuilderFeeCharged(BuilderFeeCharged),
+            FundingPaid(FundingPaid),
+            FundingReceived(FundingReceived),
+            ReferralReward(ReferralReward),
+            AccountModeChanged(AccountModeChanged),
+            MarginModeChanged(MarginModeChanged),
+            LeverageChanged(LeverageChanged),
             DexCreated(DexCreated),
             AssetContextUpdated(AssetContextUpdated),
             MarketCreated(MarketCreated),
@@ -486,6 +565,14 @@ macro_rules! opaque_payloads {
                     Self::SubaccountTransfer(_) => EventKind::SubaccountTransfer,
                     Self::VaultDeposit(_) => EventKind::VaultDeposit,
                     Self::VaultWithdrawal(_) => EventKind::VaultWithdrawal,
+                    Self::FeeCharged(_) => EventKind::FeeCharged,
+                    Self::BuilderFeeCharged(_) => EventKind::BuilderFeeCharged,
+                    Self::FundingPaid(_) => EventKind::FundingPaid,
+                    Self::FundingReceived(_) => EventKind::FundingReceived,
+                    Self::ReferralReward(_) => EventKind::ReferralReward,
+                    Self::AccountModeChanged(_) => EventKind::AccountModeChanged,
+                    Self::MarginModeChanged(_) => EventKind::MarginModeChanged,
+                    Self::LeverageChanged(_) => EventKind::LeverageChanged,
                     Self::DexCreated(_) => EventKind::DexCreated,
                     Self::AssetContextUpdated(_) => EventKind::AssetContextUpdated,
                     Self::MarketCreated(_) => EventKind::MarketCreated,
@@ -642,6 +729,110 @@ macro_rules! opaque_payloads {
                             account_id: value.account_id.to_api_string(),
                             amount: value.amount.to_string(),
                             shares_redeemed: value.shares_redeemed.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::FeeCharged(value) => {
+                        require_positive_quantity(value.amount, "FeeCharged amount")?;
+                        validate_fee_rate_semantics(value.fee_type, value.fee_rate)?;
+                        encode_fee_charged(&WireFeeCharged {
+                            account_id: value.account_id.to_api_string(),
+                            asset_id: value.asset_id.to_string(),
+                            amount: value.amount.to_string(),
+                            fee_rate: value.fee_rate.to_string(),
+                            fee_type: value.fee_type.as_wire_name().to_owned(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::BuilderFeeCharged(value) => {
+                        require_positive_quantity(value.amount, "BuilderFeeCharged amount")?;
+                        encode_builder_fee_charged(&WireBuilderFeeCharged {
+                            account_id: value.account_id.to_api_string(),
+                            builder_account_id: value.builder_account_id.to_api_string(),
+                            asset_id: value.asset_id.to_string(),
+                            amount: value.amount.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::FundingPaid(value) => {
+                        require_positive_quote_amount(value.amount, "FundingPaid amount")?;
+                        encode_funding_paid(&WireFundingPaid {
+                            account_id: value.account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            amount: value.amount.to_string(),
+                            funding_rate: value.funding_rate.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::FundingReceived(value) => {
+                        require_positive_quote_amount(value.amount, "FundingReceived amount")?;
+                        encode_funding_received(&WireFundingReceived {
+                            account_id: value.account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            amount: value.amount.to_string(),
+                            funding_rate: value.funding_rate.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::ReferralReward(value) => {
+                        require_positive_quantity(value.amount, "ReferralReward amount")?;
+                        encode_referral_reward(&WireReferralReward {
+                            account_id: value.account_id.to_api_string(),
+                            referrer_account_id: value.referrer_account_id.to_api_string(),
+                            asset_id: value.asset_id.to_string(),
+                            amount: value.amount.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::AccountModeChanged(value) => {
+                        if value.previous_mode == value.new_mode {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "AccountModeChanged modes must differ".to_owned(),
+                            });
+                        }
+                        encode_account_mode_changed(&WireAccountModeChanged {
+                            account_id: value.account_id.to_api_string(),
+                            previous_mode: value.previous_mode.as_wire_name().to_owned(),
+                            new_mode: value.new_mode.as_wire_name().to_owned(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::MarginModeChanged(value) => {
+                        if value.previous_mode == value.new_mode {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "MarginModeChanged modes must differ".to_owned(),
+                            });
+                        }
+                        encode_margin_mode_changed(&WireMarginModeChanged {
+                            account_id: value.account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            previous_mode: value.previous_mode.as_wire_name().to_owned(),
+                            new_mode: value.new_mode.as_wire_name().to_owned(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::LeverageChanged(value) => {
+                        require_positive_leverage(
+                            value.previous_leverage,
+                            "LeverageChanged previous_leverage",
+                        )?;
+                        require_positive_leverage(
+                            value.new_leverage,
+                            "LeverageChanged new_leverage",
+                        )?;
+                        if value.previous_leverage == value.new_leverage {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "LeverageChanged leverage values must differ".to_owned(),
+                            });
+                        }
+                        encode_leverage_changed(&WireLeverageChanged {
+                            account_id: value.account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            previous_leverage: value.previous_leverage.to_string(),
+                            new_leverage: value.new_leverage.to_string(),
                         })
                         .map_err(payload_error)
                     }
@@ -831,6 +1022,30 @@ macro_rules! opaque_payloads {
                     EventKind::VaultWithdrawal => {
                         decode_vault_withdrawal_payload(bytes).map(Self::VaultWithdrawal)
                     }
+                    EventKind::FeeCharged => {
+                        decode_fee_charged_payload(bytes).map(Self::FeeCharged)
+                    }
+                    EventKind::BuilderFeeCharged => {
+                        decode_builder_fee_charged_payload(bytes).map(Self::BuilderFeeCharged)
+                    }
+                    EventKind::FundingPaid => {
+                        decode_funding_paid_payload(bytes).map(Self::FundingPaid)
+                    }
+                    EventKind::FundingReceived => {
+                        decode_funding_received_payload(bytes).map(Self::FundingReceived)
+                    }
+                    EventKind::ReferralReward => {
+                        decode_referral_reward_payload(bytes).map(Self::ReferralReward)
+                    }
+                    EventKind::AccountModeChanged => {
+                        decode_account_mode_changed_payload(bytes).map(Self::AccountModeChanged)
+                    }
+                    EventKind::MarginModeChanged => {
+                        decode_margin_mode_changed_payload(bytes).map(Self::MarginModeChanged)
+                    }
+                    EventKind::LeverageChanged => {
+                        decode_leverage_changed_payload(bytes).map(Self::LeverageChanged)
+                    }
                     EventKind::DexCreated => {
                         decode_dex_created_payload(bytes).map(Self::DexCreated)
                     }
@@ -948,14 +1163,6 @@ opaque_payloads!(
     TwapStarted,
     TwapSliceFilled,
     TwapCompleted,
-    FeeCharged,
-    BuilderFeeCharged,
-    FundingPaid,
-    FundingReceived,
-    ReferralReward,
-    AccountModeChanged,
-    MarginModeChanged,
-    LeverageChanged,
     LiquidationStarted,
     LiquidationFill,
     BackstopLiquidation,
@@ -1133,6 +1340,125 @@ fn decode_vault_withdrawal_payload(bytes: &[u8]) -> Result<VaultWithdrawal, Cont
         account_id: payload_value(Address::parse_api(&value.account_id))?,
         amount,
         shares_redeemed,
+    })
+}
+
+fn decode_fee_charged_payload(bytes: &[u8]) -> Result<FeeCharged, ContractError> {
+    let value = decode_fee_charged(bytes).map_err(payload_error)?;
+    let amount = payload_value(Quantity::from_str(&value.amount))?;
+    require_positive_quantity(amount, "FeeCharged amount")?;
+    let fee_rate = payload_value(FeeRate::from_str(&value.fee_rate))?;
+    let fee_type = payload_value(FeeTypeV1::parse_wire(&value.fee_type))?;
+    validate_fee_rate_semantics(fee_type, fee_rate)?;
+    Ok(FeeCharged {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        amount,
+        fee_rate,
+        fee_type,
+    })
+}
+
+fn decode_builder_fee_charged_payload(bytes: &[u8]) -> Result<BuilderFeeCharged, ContractError> {
+    let value = decode_builder_fee_charged(bytes).map_err(payload_error)?;
+    let amount = payload_value(Quantity::from_str(&value.amount))?;
+    require_positive_quantity(amount, "BuilderFeeCharged amount")?;
+    Ok(BuilderFeeCharged {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        builder_account_id: payload_value(Address::parse_api(&value.builder_account_id))?,
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        amount,
+    })
+}
+
+fn decode_funding_paid_payload(bytes: &[u8]) -> Result<FundingPaid, ContractError> {
+    let value = decode_funding_paid(bytes).map_err(payload_error)?;
+    let amount = payload_value(QuoteAmount::from_str(&value.amount))?;
+    require_positive_quote_amount(amount, "FundingPaid amount")?;
+    Ok(FundingPaid {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        amount,
+        funding_rate: payload_value(FundingRate::from_str(&value.funding_rate))?,
+    })
+}
+
+fn decode_funding_received_payload(bytes: &[u8]) -> Result<FundingReceived, ContractError> {
+    let value = decode_funding_received(bytes).map_err(payload_error)?;
+    let amount = payload_value(QuoteAmount::from_str(&value.amount))?;
+    require_positive_quote_amount(amount, "FundingReceived amount")?;
+    Ok(FundingReceived {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        amount,
+        funding_rate: payload_value(FundingRate::from_str(&value.funding_rate))?,
+    })
+}
+
+fn decode_referral_reward_payload(bytes: &[u8]) -> Result<ReferralReward, ContractError> {
+    let value = decode_referral_reward(bytes).map_err(payload_error)?;
+    let amount = payload_value(Quantity::from_str(&value.amount))?;
+    require_positive_quantity(amount, "ReferralReward amount")?;
+    Ok(ReferralReward {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        referrer_account_id: payload_value(Address::parse_api(&value.referrer_account_id))?,
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        amount,
+    })
+}
+
+fn decode_account_mode_changed_payload(bytes: &[u8]) -> Result<AccountModeChanged, ContractError> {
+    let value = decode_account_mode_changed(bytes).map_err(payload_error)?;
+    let previous_mode = payload_value(AccountAbstractionModeV1::parse_wire(&value.previous_mode))?;
+    let new_mode = payload_value(AccountAbstractionModeV1::parse_wire(&value.new_mode))?;
+    if previous_mode == new_mode {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "AccountModeChanged modes must differ".to_owned(),
+        });
+    }
+    Ok(AccountModeChanged {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        previous_mode,
+        new_mode,
+    })
+}
+
+fn decode_margin_mode_changed_payload(bytes: &[u8]) -> Result<MarginModeChanged, ContractError> {
+    let value = decode_margin_mode_changed(bytes).map_err(payload_error)?;
+    let previous_mode = payload_value(MarginModeV1::parse_wire(&value.previous_mode))?;
+    let new_mode = payload_value(MarginModeV1::parse_wire(&value.new_mode))?;
+    if previous_mode == new_mode {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "MarginModeChanged modes must differ".to_owned(),
+        });
+    }
+    Ok(MarginModeChanged {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        previous_mode,
+        new_mode,
+    })
+}
+
+fn decode_leverage_changed_payload(bytes: &[u8]) -> Result<LeverageChanged, ContractError> {
+    let value = decode_leverage_changed(bytes).map_err(payload_error)?;
+    let previous_leverage = payload_value(Leverage::from_str(&value.previous_leverage))?;
+    require_positive_leverage(previous_leverage, "LeverageChanged previous_leverage")?;
+    let new_leverage = payload_value(Leverage::from_str(&value.new_leverage))?;
+    require_positive_leverage(new_leverage, "LeverageChanged new_leverage")?;
+    if previous_leverage == new_leverage {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "LeverageChanged leverage values must differ".to_owned(),
+        });
+    }
+    Ok(LeverageChanged {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        previous_leverage,
+        new_leverage,
     })
 }
 
@@ -1357,6 +1683,36 @@ fn require_positive_quote_amount(
     Ok(())
 }
 
+fn require_positive_leverage(value: Leverage, field_name: &str) -> Result<(), ContractError> {
+    if value.raw() <= 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: format!("{field_name} must be positive"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_fee_rate_semantics(
+    fee_type: FeeTypeV1,
+    fee_rate: FeeRate,
+) -> Result<(), ContractError> {
+    let valid = match fee_type {
+        FeeTypeV1::MakerRebate => fee_rate.raw() < 0,
+        FeeTypeV1::Maker | FeeTypeV1::Taker | FeeTypeV1::ReferralDiscount | FeeTypeV1::Protocol => {
+            fee_rate.raw() > 0
+        }
+    };
+    if !valid {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "maker_rebate requires a negative fee rate; charged fees require a positive fee rate"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn parse_nonnegative_quantity(value: &str) -> Result<Quantity, ContractError> {
     let quantity = payload_value(Quantity::from_str(value))?;
     if quantity.raw() < 0 {
@@ -1478,6 +1834,62 @@ fn fixture_payload_bytes(kind: EventKind) -> Result<Vec<u8>, ContractError> {
             account_id: Address::from_bytes([0x11; 20]).to_api_string(),
             amount: "1.000000".to_owned(),
             shares_redeemed: "1.00000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::FeeCharged => encode_fee_charged(&WireFeeCharged {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            asset_id: "USDC".to_owned(),
+            amount: "1.000000".to_owned(),
+            fee_rate: "-0.000100".to_owned(),
+            fee_type: FeeTypeV1::MakerRebate.as_wire_name().to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::BuilderFeeCharged => encode_builder_fee_charged(&WireBuilderFeeCharged {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            builder_account_id: Address::from_bytes([0x22; 20]).to_api_string(),
+            asset_id: "USDC".to_owned(),
+            amount: "1.000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::FundingPaid => encode_funding_paid(&WireFundingPaid {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            amount: "1.000000".to_owned(),
+            funding_rate: "-0.000100".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::FundingReceived => encode_funding_received(&WireFundingReceived {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            amount: "1.000000".to_owned(),
+            funding_rate: "0.000100".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::ReferralReward => encode_referral_reward(&WireReferralReward {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            referrer_account_id: Address::from_bytes([0x22; 20]).to_api_string(),
+            asset_id: "USDC".to_owned(),
+            amount: "1.000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::AccountModeChanged => encode_account_mode_changed(&WireAccountModeChanged {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            previous_mode: AccountAbstractionModeV1::Standard.as_wire_name().to_owned(),
+            new_mode: AccountAbstractionModeV1::Unified.as_wire_name().to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::MarginModeChanged => encode_margin_mode_changed(&WireMarginModeChanged {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            previous_mode: MarginModeV1::Cross.as_wire_name().to_owned(),
+            new_mode: MarginModeV1::Isolated.as_wire_name().to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::LeverageChanged => encode_leverage_changed(&WireLeverageChanged {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            previous_leverage: "1".to_owned(),
+            new_leverage: "2".to_owned(),
         })
         .map_err(payload_error),
         EventKind::DexCreated => encode_dex_created(&WireDexCreated {
@@ -2284,6 +2696,14 @@ fn validate_account_payload_size(kind: EventKind, bytes: &[u8]) -> Result<(), Co
             | EventKind::SubaccountTransfer
             | EventKind::VaultDeposit
             | EventKind::VaultWithdrawal
+            | EventKind::FeeCharged
+            | EventKind::BuilderFeeCharged
+            | EventKind::FundingPaid
+            | EventKind::FundingReceived
+            | EventKind::ReferralReward
+            | EventKind::AccountModeChanged
+            | EventKind::MarginModeChanged
+            | EventKind::LeverageChanged
     ) && bytes.len() > MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES
     {
         return Err(ContractError::Invalid {
