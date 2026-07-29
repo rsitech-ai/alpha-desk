@@ -171,6 +171,34 @@ not amend, rebase, push, or discard user work.
       audit.
 - [x] Commit `feat(replay): add canonical market evidence runner`.
 
+## Whole-plan review remediation
+
+The independent whole-plan review placed Milestone 4 on HOLD because the
+original repeated/checkpoint replay range ended before
+`MarketMetadataChanged`. The remediation keeps that review decision intact
+until independent rereview, and narrows the implementation claim to the
+observable evidence below:
+
+- [x] Put a valid hash-only `MarketMetadataChanged` block inside the primary
+      repeated range.
+- [x] Require at least two independent full-range replays with identical
+      unresolved final-state and full receipt hashes.
+- [x] Strictly decode the closed exact interval, open unresolved interval, and
+      absent exact-value applicability after every independent replay.
+- [x] Resume a prefix checkpoint through a suffix that crosses the metadata
+      transition and require the same unresolved final-state hash.
+- [x] Publish the unresolved final hash, transition height, and exact/current
+      plus exact/unresolved version cardinalities.
+- [x] Preserve metadata-unresolved value rejection, late invalid whole-block
+      rollback, unsupported `1.1.0` quarantine, private permissions, and the
+      single true synthetic qualification.
+- [x] Update the top-level repository summary and evidence documentation
+      without changing Stage, source, storage, downstream, or production
+      qualification.
+- [x] Retain the remediated `20/8/4` evidence run and record its exact gates
+      and report path.
+- [x] Commit `fix(replay): include metadata intervals in market evidence`.
+
 ## Completion boundary
 
 This plan completes the exact synthetic V1 market-state prerequisite. It does
