@@ -60,7 +60,7 @@ Parquet archive, private local checkpoints.
 - Produces: public payload structs using `Address`, `AssetId`, `VaultId`,
   `Quantity`, and `QuoteAmount`, with deterministic API encode/decode helpers.
 
-- [ ] **Step 1: Write the failing payload tests**
+- [x] **Step 1: Write the failing payload tests**
 
   Add exact round-trip tests for all seven kinds. Assert lowercase API
   addresses, distinct transfer endpoints, positive amounts/shares, bounded
@@ -69,7 +69,7 @@ Parquet archive, private local checkpoints.
   zero/negative values, malformed decimals, and over-precision above the
   domain maximum.
 
-- [ ] **Step 2: Run the red test**
+- [x] **Step 2: Run the red test**
 
   ```bash
   cargo +1.97.1 test -p canonical-events --test account_payloads --locked --offline
@@ -77,7 +77,7 @@ Parquet archive, private local checkpoints.
 
   Expected: compile failure because the seven typed payload APIs do not exist.
 
-- [ ] **Step 3: Implement the strict payloads**
+- [x] **Step 3: Implement the strict payloads**
 
   Define:
 
@@ -136,7 +136,7 @@ Parquet archive, private local checkpoints.
   enclosing envelope byte path; canonical payload re-encoding must be strict
   and deterministic.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
   ```bash
   cargo +1.97.1 test -p api-contracts -p canonical-events --locked --offline
@@ -688,6 +688,13 @@ Parquet archive, private local checkpoints.
 
 - 2026-07-29: Plan created after dynamic market registry whole-plan GO at
   `3514605`. Task 1 typed cash-flow contracts is next.
+- 2026-07-29: Task 1 completed at `6af8feb`. The initial implementation
+  promoted all seven cash-flow/transfer/vault payloads. Independent review
+  held the slice until a shared 16 KiB limit covered encoder, direct decoder,
+  canonical decode, and generic validation before Prost work; deterministic
+  defaults and the complete independent negative matrix were also added.
+  Final re-review returned GO. Parent verification passed 98 affected tests,
+  strict all-target/all-feature Clippy, formatting, and diff checks.
 
 ## Rollback / Recovery
 
