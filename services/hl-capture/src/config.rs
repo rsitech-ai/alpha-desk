@@ -50,11 +50,33 @@ impl CaptureConfig {
             return Err(ConfigError::MissingSources);
         }
         let mut ids = BTreeSet::new();
+        let mut primary_committed_sources = 0_u8;
+        let mut independent_committed_sources = 0_u8;
         for source in &self.sources {
             source.validate()?;
             if !ids.insert(source.id.as_str()) {
                 return Err(ConfigError::DuplicateSource);
             }
+            match (source.trust, source.observation_class) {
+                (SourceTrust::LocallyVerifiedCommitted, ObservationClass::CommittedBlock) => {
+                    primary_committed_sources = primary_committed_sources.saturating_add(1);
+                    validate_committed_source_adapter(source)?;
+                }
+                (SourceTrust::IndependentCommitted, ObservationClass::CommittedBlock) => {
+                    independent_committed_sources = independent_committed_sources.saturating_add(1);
+                    validate_committed_source_adapter(source)?;
+                }
+                _ => {}
+            }
+        }
+        if primary_committed_sources == 0 {
+            return Err(ConfigError::MissingPrimaryCommittedSource);
+        }
+        if primary_committed_sources > 1 {
+            return Err(ConfigError::DuplicatePrimaryCommittedSource);
+        }
+        if independent_committed_sources > 1 {
+            return Err(ConfigError::DuplicateIndependentCommittedSource);
         }
         Ok(())
     }
@@ -87,6 +109,17 @@ impl CaptureConfig {
     #[must_use]
     pub fn payload_limit(&self, id: &str) -> Option<usize> {
         self.source(id).map(SourceConfig::max_payload_bytes)
+    }
+}
+
+fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), ConfigError> {
+    if matches!(
+        source.adapter,
+        Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+    ) {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidCommittedSourceAdapter)
     }
 }
 
@@ -501,6 +534,14 @@ pub enum ConfigError {
     InvalidSourceTrust,
     #[error("capture source adapter is invalid")]
     InvalidSourceAdapter,
+    #[error("capture configuration requires exactly one primary committed source")]
+    MissingPrimaryCommittedSource,
+    #[error("capture configuration contains multiple primary committed sources")]
+    DuplicatePrimaryCommittedSource,
+    #[error("capture configuration contains multiple independent committed sources")]
+    DuplicateIndependentCommittedSource,
+    #[error("committed capture source requires a node block-directory adapter")]
+    InvalidCommittedSourceAdapter,
     #[error("capture credential reference is not an absolute protected path")]
     InvalidCredentialPath,
     #[error("capture configuration has no sources")]
@@ -538,6 +579,18 @@ impl ConfigError {
             Self::InvalidPayloadLimit => "capture_config.invalid_payload_limit",
             Self::InvalidSourceTrust => "capture_config.invalid_source_trust",
             Self::InvalidSourceAdapter => "capture_config.invalid_source_adapter",
+            Self::MissingPrimaryCommittedSource => {
+                "capture_config.missing_primary_committed_source"
+            }
+            Self::DuplicatePrimaryCommittedSource => {
+                "capture_config.duplicate_primary_committed_source"
+            }
+            Self::DuplicateIndependentCommittedSource => {
+                "capture_config.duplicate_independent_committed_source"
+            }
+            Self::InvalidCommittedSourceAdapter => {
+                "capture_config.invalid_committed_source_adapter"
+            }
             Self::InvalidCredentialPath => "capture_config.invalid_credential_path",
             Self::MissingSources => "capture_config.missing_sources",
             Self::InvalidChainId => "capture_config.invalid_chain_id",

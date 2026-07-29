@@ -12,6 +12,22 @@ fn replace_once(source: &str, from: &str, to: &str) -> String {
     source.replacen(from, to, 1)
 }
 
+fn committed_node_source(id: &str, trust: &str, path: &str) -> String {
+    format!(
+        r#"
+
+[[sources]]
+id = "{id}"
+source_version = "hyperliquid-node-v1"
+trust = "{trust}"
+class = "committed-block"
+queue_capacity = 4096
+max_payload_bytes = 8388608
+adapter = {{ kind = "node-block-directory", path = "{path}", stream_name = "{id}-replica-cmds", start_height = 1, poll_interval_millis = 25, replica_cmds_style = "actions-and-responses" }}
+"#
+    )
+}
+
 #[test]
 fn example_configuration_is_strict_valid_and_complete() {
     let example = include_str!("../../../config/capture.example.toml");
@@ -95,6 +111,93 @@ fn example_configuration_is_strict_valid_and_complete() {
             .payload_limit("public-market")
             .expect("public source limit"),
         1_048_576
+    );
+}
+
+#[test]
+fn topology_accepts_one_primary_and_at_most_one_independent_committed_source() {
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        committed_node_source(
+            "independent-node",
+            "independent-committed",
+            "/var/lib/hyperliquid-independent/hl/data/replica_cmds"
+        )
+    );
+    let config = CaptureConfig::from_toml(&source).expect("valid dual committed topology");
+
+    assert_eq!(config.sources().len(), 3);
+    assert_eq!(
+        config
+            .source("independent-node")
+            .expect("independent source")
+            .trust(),
+        SourceTrust::IndependentCommitted
+    );
+}
+
+#[test]
+fn ambiguous_committed_source_topologies_fail_before_opening_files() {
+    let no_primary = replace_once(
+        &valid_config(),
+        "trust = \"locally-verified-committed\"",
+        "trust = \"independent-committed\"",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&no_primary)
+            .expect_err("primary is required")
+            .reason_code(),
+        "capture_config.missing_primary_committed_source"
+    );
+
+    let duplicate_primary = format!(
+        "{}{}",
+        valid_config(),
+        committed_node_source(
+            "primary-node-two",
+            "locally-verified-committed",
+            "/var/lib/hyperliquid-two/hl/data/replica_cmds"
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&duplicate_primary)
+            .expect_err("primary role must be unique")
+            .reason_code(),
+        "capture_config.duplicate_primary_committed_source"
+    );
+
+    let duplicate_independent = format!(
+        "{}{}{}",
+        valid_config(),
+        committed_node_source(
+            "independent-node-one",
+            "independent-committed",
+            "/var/lib/hyperliquid-independent-one/hl/data/replica_cmds"
+        ),
+        committed_node_source(
+            "independent-node-two",
+            "independent-committed",
+            "/var/lib/hyperliquid-independent-two/hl/data/replica_cmds"
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&duplicate_independent)
+            .expect_err("independent role must be unique")
+            .reason_code(),
+        "capture_config.duplicate_independent_committed_source"
+    );
+
+    let missing_adapter = replace_once(
+        &valid_config(),
+        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25, replica_cmds_style = \"actions-and-responses\" }\n",
+        "",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing_adapter)
+            .expect_err("committed source adapter is required")
+            .reason_code(),
+        "capture_config.invalid_committed_source_adapter"
     );
 }
 
@@ -403,20 +506,25 @@ fn unknown_node_adapter_keys_and_streams_fail_strict_deserialization() {
 
 #[test]
 fn node_line_stream_class_must_match_the_configured_output() {
-    let source = replace_once(
-        &replace_once(
-            &valid_config(),
-            "class = \"committed-block\"",
-            "class = \"auxiliary-ledger\"",
-        ),
-        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25, replica_cmds_style = \"actions-and-responses\" }",
-        "adapter = { kind = \"node-line\", path = \"/var/lib/hyperliquid/hl/data/node_fills/hourly/20260728/12\", stream_name = \"node-fills\", stream = \"fills\", poll_interval_millis = 25 }",
+    let source = format!(
+        r#"{}
+
+[[sources]]
+id = "node-fills"
+source_version = "hyperliquid-node-v1"
+trust = "locally-verified-committed"
+class = "auxiliary-ledger"
+queue_capacity = 4096
+max_payload_bytes = 8388608
+adapter = {{ kind = "node-line", path = "/var/lib/hyperliquid/hl/data/node_fills/hourly/20260728/12", stream_name = "node-fills", stream = "fills", poll_interval_millis = 25 }}
+"#,
+        valid_config()
     );
     let config = CaptureConfig::from_toml(&source).expect("valid node line source");
 
     assert!(matches!(
         config
-            .source("primary-node")
+            .source("node-fills")
             .expect("node line source")
             .adapter(),
         Some(SourceAdapterConfig::NodeLine {
