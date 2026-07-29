@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod compactor;
 mod fs;
 mod inspection;

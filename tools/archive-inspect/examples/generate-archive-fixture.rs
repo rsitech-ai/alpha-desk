@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use canonical_events::{
     BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, EventPayload,
     SourceEvidence, TradeMatched,
@@ -16,7 +17,6 @@ use domain_types::{
     BlockHeight, BlockRange, ChainId, KnownTime, Price, ProtocolTime, Quantity, SourceId,
     TransactionId,
 };
-use hl_analytics::archive::{ArchiveConfig, LocalParquetArchive};
 use hl_protocol::{
     ObservationClass, ParseWarning, ReceiveTimestamps, SourceCursor, SourceObservation,
 };

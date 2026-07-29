@@ -93,10 +93,10 @@ name = "archive-inspect"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "canonical-archive",
  "canonical-events",
  "datafusion",
  "domain-types",
- "hl-analytics",
  "hl-protocol",
  "storage-ports",
  "tempfile",
@@ -544,6 +544,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f2d30e4173c4026932d51d31d6b0613b1fd3014bf3f9f8943d4ba139c437ba0"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "canonical-archive"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "bytes",
+ "canonical-events",
+ "chrono",
+ "domain-types",
+ "hex",
+ "hl-protocol",
+ "parquet",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "storage-ports",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
 ]
 
 [[package]]
@@ -1914,23 +1936,15 @@ name = "hl-analytics"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arrow",
  "bytes",
+ "canonical-archive",
  "canonical-events",
- "chrono",
  "domain-types",
- "hex",
  "hl-protocol",
- "parquet",
- "rustix",
- "serde",
  "serde_json",
- "sha2 0.11.0",
  "storage-ports",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1951,6 +1965,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "canonical-archive",
  "canonical-events",
  "crc32c",
  "domain-types",

@@ -5,6 +5,7 @@ required=(
   Cargo.toml rust-toolchain.toml justfile
   crates/domain-types/Cargo.toml
   crates/canonical-events/Cargo.toml
+  crates/canonical-archive/Cargo.toml
   crates/telemetry/Cargo.toml
   services/hl-capture/Cargo.toml
   services/hl-core/Cargo.toml

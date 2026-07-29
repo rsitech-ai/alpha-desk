@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use archive_inspect::{count, verify};
+use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use canonical_events::{
     BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, EventPayload,
     SourceEvidence, TradeMatched,
@@ -8,7 +9,6 @@ use canonical_events::{
 use domain_types::{
     BlockHeight, ChainId, KnownTime, Price, ProtocolTime, Quantity, SourceId, TransactionId,
 };
-use hl_analytics::archive::{ArchiveConfig, LocalParquetArchive};
 use storage_ports::CanonicalArchive;
 
 #[tokio::test]

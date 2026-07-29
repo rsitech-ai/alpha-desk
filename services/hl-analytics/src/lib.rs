@@ -1,3 +1,3 @@
 #![forbid(unsafe_code)]
 
-pub mod archive;
+pub use canonical_archive as archive;

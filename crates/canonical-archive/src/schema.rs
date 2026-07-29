@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 use storage_ports::ArchiveError;
 
 pub const CANONICAL_SCHEMA_DOCUMENT: &[u8] =
-    include_bytes!("../../../../schemas/parquet/canonical-events-v1.json");
+    include_bytes!("../../../schemas/parquet/canonical-events-v1.json");
 pub const RAW_SCHEMA_DOCUMENT: &[u8] =
-    include_bytes!("../../../../schemas/parquet/raw-observations-v1.json");
+    include_bytes!("../../../schemas/parquet/raw-observations-v1.json");
 
 pub fn canonical_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![

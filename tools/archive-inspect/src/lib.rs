@@ -2,10 +2,8 @@
 
 use std::path::Path;
 
+use canonical_archive::{ArchiveConfig, ArchiveDataset, ArchiveInspection, LocalParquetArchive};
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
-use hl_analytics::archive::{
-    ArchiveConfig, ArchiveDataset, ArchiveInspection, LocalParquetArchive,
-};
 use storage_ports::ArchiveError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

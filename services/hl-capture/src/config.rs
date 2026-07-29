@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
-use domain_types::SourceId;
+use domain_types::{BlockHeight, ChainId, SourceId};
 use hl_protocol::node::v1::NodeStreamKind;
 use hl_protocol::{ObservationClass, SourceAdmission, SourceTrust};
 use serde::{Deserialize, Serialize};
@@ -15,11 +15,18 @@ const MAX_ROTATION_INTERVAL_SECONDS: u64 = 86_400;
 const MAX_BATCH_RECORDS: u32 = 100_000;
 const MAX_BATCH_DELAY_MILLIS: u64 = 60_000;
 const MAX_SOURCE_POLL_INTERVAL_MILLIS: u64 = 60_000;
+const MAX_RUNTIME_TIMEOUT_MILLIS: u64 = 300_000;
+const MAX_RUNTIME_BLOCK_CAPACITY: usize = 10_000_000;
+const MAX_RUNTIME_PATH_BYTES: usize = 4_096;
+const MAX_DISK_RESERVE_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
+const MAX_NATS_SERVER_BYTES: usize = 2_048;
+const MAX_NATS_ACK_INFLIGHT: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureConfig {
     parser_version: String,
+    runtime: RuntimeConfig,
     spool: SpoolConfig,
     sources: Vec<SourceConfig>,
 }
@@ -37,6 +44,7 @@ impl CaptureConfig {
 
     fn validate(&self) -> Result<(), ConfigError> {
         validate_identity(&self.parser_version).map_err(|_| ConfigError::InvalidParserVersion)?;
+        self.runtime.validate()?;
         self.spool.validate()?;
         if self.sources.is_empty() {
             return Err(ConfigError::MissingSources);
@@ -57,6 +65,11 @@ impl CaptureConfig {
     }
 
     #[must_use]
+    pub const fn runtime(&self) -> &RuntimeConfig {
+        &self.runtime
+    }
+
+    #[must_use]
     pub const fn spool(&self) -> &SpoolConfig {
         &self.spool
     }
@@ -74,6 +87,142 @@ impl CaptureConfig {
     #[must_use]
     pub fn payload_limit(&self, id: &str) -> Option<usize> {
         self.source(id).map(SourceConfig::max_payload_bytes)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConfig {
+    chain_id: String,
+    first_height: u64,
+    archive_path: PathBuf,
+    status_path: PathBuf,
+    postgres_url_path: PathBuf,
+    nats_server_url: String,
+    nats_stream: String,
+    nats_username: String,
+    nats_password_path: PathBuf,
+    max_pending_blocks: usize,
+    retained_committed_blocks: usize,
+    publisher_ledger_capacity: usize,
+    nats_max_ack_inflight: usize,
+    publish_timeout_millis: u64,
+    backpressure_timeout_millis: u64,
+    shutdown_grace_millis: u64,
+    disk_reserve_bytes: u64,
+}
+
+impl RuntimeConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        ChainId::new(self.chain_id.clone()).map_err(|_| ConfigError::InvalidChainId)?;
+        validate_runtime_path(&self.archive_path)?;
+        validate_runtime_path(&self.status_path)?;
+        validate_credential_path(&self.postgres_url_path)?;
+        validate_nats_server(&self.nats_server_url)?;
+        validate_identity(&self.nats_stream).map_err(|_| ConfigError::InvalidRuntimeIdentity)?;
+        if self.nats_stream != crate::bus::CANONICAL_STREAM {
+            return Err(ConfigError::InvalidNatsStream);
+        }
+        validate_identity(&self.nats_username).map_err(|_| ConfigError::InvalidRuntimeIdentity)?;
+        validate_credential_path(&self.nats_password_path)?;
+        if !(1..=MAX_RUNTIME_BLOCK_CAPACITY).contains(&self.max_pending_blocks)
+            || !(1..=MAX_RUNTIME_BLOCK_CAPACITY).contains(&self.retained_committed_blocks)
+            || !(1..=MAX_RUNTIME_BLOCK_CAPACITY).contains(&self.publisher_ledger_capacity)
+            || !(1..=MAX_NATS_ACK_INFLIGHT).contains(&self.nats_max_ack_inflight)
+            || !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(&self.publish_timeout_millis)
+            || !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(&self.backpressure_timeout_millis)
+            || !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(&self.shutdown_grace_millis)
+            || !(1..=MAX_DISK_RESERVE_BYTES).contains(&self.disk_reserve_bytes)
+        {
+            return Err(ConfigError::InvalidRuntimeLimit);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn chain_id(&self) -> ChainId {
+        ChainId::new(self.chain_id.clone())
+            .expect("RuntimeConfig is constructed only through validated deserialization")
+    }
+
+    #[must_use]
+    pub const fn first_height(&self) -> BlockHeight {
+        BlockHeight::new(self.first_height)
+    }
+
+    #[must_use]
+    pub fn archive_path(&self) -> &Path {
+        &self.archive_path
+    }
+
+    #[must_use]
+    pub fn status_path(&self) -> &Path {
+        &self.status_path
+    }
+
+    #[must_use]
+    pub fn postgres_url_path(&self) -> &Path {
+        &self.postgres_url_path
+    }
+
+    #[must_use]
+    pub fn nats_server_url(&self) -> &str {
+        &self.nats_server_url
+    }
+
+    #[must_use]
+    pub fn nats_stream(&self) -> &str {
+        &self.nats_stream
+    }
+
+    #[must_use]
+    pub fn nats_username(&self) -> &str {
+        &self.nats_username
+    }
+
+    #[must_use]
+    pub fn nats_password_path(&self) -> &Path {
+        &self.nats_password_path
+    }
+
+    #[must_use]
+    pub const fn max_pending_blocks(&self) -> usize {
+        self.max_pending_blocks
+    }
+
+    #[must_use]
+    pub const fn retained_committed_blocks(&self) -> usize {
+        self.retained_committed_blocks
+    }
+
+    #[must_use]
+    pub const fn publisher_ledger_capacity(&self) -> usize {
+        self.publisher_ledger_capacity
+    }
+
+    #[must_use]
+    pub const fn nats_max_ack_inflight(&self) -> usize {
+        self.nats_max_ack_inflight
+    }
+
+    #[must_use]
+    pub const fn publish_timeout_millis(&self) -> u64 {
+        self.publish_timeout_millis
+    }
+
+    #[must_use]
+    pub const fn backpressure_timeout_millis(&self) -> u64 {
+        self.backpressure_timeout_millis
+    }
+
+    #[must_use]
+    pub const fn shutdown_grace_millis(&self) -> u64 {
+        self.shutdown_grace_millis
+    }
+
+    #[must_use]
+    pub const fn disk_reserve_bytes(&self) -> u64 {
+        self.disk_reserve_bytes
     }
 }
 
@@ -325,6 +474,18 @@ pub enum ConfigError {
     InvalidCredentialPath,
     #[error("capture configuration has no sources")]
     MissingSources,
+    #[error("capture runtime chain identifier is invalid")]
+    InvalidChainId,
+    #[error("capture runtime path is unsafe")]
+    InvalidRuntimePath,
+    #[error("capture runtime identity is invalid")]
+    InvalidRuntimeIdentity,
+    #[error("capture NATS server URL is invalid or contains inline credentials")]
+    InvalidNatsServer,
+    #[error("capture NATS stream is not the canonical production stream")]
+    InvalidNatsStream,
+    #[error("capture runtime limit is outside the supported range")]
+    InvalidRuntimeLimit,
     #[error("validated capture configuration could not be serialized")]
     Serialization,
 }
@@ -347,9 +508,61 @@ impl ConfigError {
             Self::InvalidSourceAdapter => "capture_config.invalid_source_adapter",
             Self::InvalidCredentialPath => "capture_config.invalid_credential_path",
             Self::MissingSources => "capture_config.missing_sources",
+            Self::InvalidChainId => "capture_config.invalid_chain_id",
+            Self::InvalidRuntimePath => "capture_config.invalid_runtime_path",
+            Self::InvalidRuntimeIdentity => "capture_config.invalid_runtime_identity",
+            Self::InvalidNatsServer => "capture_config.invalid_nats_server",
+            Self::InvalidNatsStream => "capture_config.invalid_nats_stream",
+            Self::InvalidRuntimeLimit => "capture_config.invalid_runtime_limit",
             Self::Serialization => "capture_config.serialization",
         }
     }
+}
+
+fn validate_runtime_path(path: &Path) -> Result<(), ConfigError> {
+    if path.as_os_str().is_empty()
+        || path == Path::new("/")
+        || path.as_os_str().len() > MAX_RUNTIME_PATH_BYTES
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        Err(ConfigError::InvalidRuntimePath)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_nats_server(value: &str) -> Result<(), ConfigError> {
+    if value.len() > MAX_NATS_SERVER_BYTES
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(ConfigError::InvalidNatsServer);
+    }
+
+    let address = value
+        .parse::<async_nats::ServerAddr>()
+        .map_err(|_| ConfigError::InvalidNatsServer)?;
+    let url = address.clone().into_inner();
+    let scheme_is_supported = matches!(address.scheme(), "nats" | "tls");
+    let unencrypted_host_is_loopback =
+        address.scheme() != "nats" || matches!(address.host(), "127.0.0.1" | "::1");
+    let has_only_authority =
+        matches!(url.path(), "" | "/") && url.query().is_none() && url.fragment().is_none();
+
+    if !scheme_is_supported
+        || !unencrypted_host_is_loopback
+        || address.host().is_empty()
+        || address.port() == 0
+        || address.has_user_pass()
+        || address.is_websocket()
+        || !has_only_authority
+    {
+        return Err(ConfigError::InvalidNatsServer);
+    }
+
+    Ok(())
 }
 
 fn validate_identity(value: &str) -> Result<(), ()> {

@@ -1,5 +1,4 @@
 use std::{
-    fs,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -10,6 +9,8 @@ use async_nats::{
 };
 use async_trait::async_trait;
 use tokio::sync::Mutex;
+
+use crate::secret::read_protected_secret;
 
 use super::{
     CanonicalPublisher, PublicationAck, PublicationError, PublicationLedger, PublicationMessage,
@@ -132,7 +133,7 @@ impl JetStreamPublisher {
         let options = match &config.authentication {
             JetStreamAuthentication::Anonymous => ConnectOptions::new(),
             JetStreamAuthentication::CredentialsFile(path) => {
-                validate_secret_file(path).map_err(|_| PublicationError::TransportConnect)?;
+                read_protected_secret(path).map_err(|_| PublicationError::TransportConnect)?;
                 ConnectOptions::with_credentials_file(path)
                     .await
                     .map_err(|_| PublicationError::TransportConnect)?
@@ -141,7 +142,7 @@ impl JetStreamPublisher {
                 username,
                 password_path,
             } => {
-                let password = read_secret_file(password_path)
+                let password = read_protected_secret(password_path)
                     .map_err(|_| PublicationError::TransportConnect)?;
                 ConnectOptions::with_user_and_password(username.clone(), password)
             }
@@ -263,44 +264,6 @@ fn validate_username(value: &str) -> Result<(), JetStreamConfigError> {
     }
 }
 
-fn validate_secret_file(path: &Path) -> Result<(), std::io::Error> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16_384 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "unsafe NATS secret file",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "NATS secret file permissions are too broad",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn read_secret_file(path: &Path) -> Result<String, std::io::Error> {
-    validate_secret_file(path)?;
-    let bytes = fs::read(path)?;
-    let value = String::from_utf8(bytes)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "NATS secret UTF-8"))?;
-    let value = value.strip_suffix('\n').unwrap_or(&value);
-    let value = value.strip_suffix('\r').unwrap_or(value);
-    if value.is_empty() || value.chars().any(char::is_control) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid NATS secret",
-        ));
-    }
-    Ok(value.to_owned())
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use std::{
@@ -310,7 +273,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::read_secret_file;
+    use crate::secret::read_protected_secret;
 
     #[test]
     fn secret_file_must_be_regular_private_and_bounded() {
@@ -319,17 +282,17 @@ mod tests {
         fs::write(&secret, b"selected-secret\n").expect("write secret");
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).expect("set private mode");
         assert_eq!(
-            read_secret_file(&secret).expect("private secret"),
+            read_protected_secret(&secret).expect("private secret"),
             "selected-secret"
         );
 
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o640)).expect("set broad mode");
-        assert!(read_secret_file(&secret).is_err());
+        assert!(read_protected_secret(&secret).is_err());
 
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o600))
             .expect("restore private mode");
         let link = directory.path().join("secret-link");
         symlink(&secret, &link).expect("create secret symlink");
-        assert!(read_secret_file(&link).is_err());
+        assert!(read_protected_secret(&link).is_err());
     }
 }

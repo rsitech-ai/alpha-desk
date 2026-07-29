@@ -39,7 +39,13 @@
 - [x] (2026-07-29) Implemented archive-before-publish coordination, exact
   crash-boundary recovery, archive-only prefix reconciliation, and source-free
   journal recovery.
-- [ ] Implement service lifecycle/status, restart E2E, and soak evidence.
+- [x] (2026-07-29) Implemented owned lifecycle, strict CLI/configuration,
+  atomic status, real dependency wiring, explicit synthetic fixture replay,
+  and signal-safe bounded shutdown.
+- [x] (2026-07-29) Added a self-contained PostgreSQL/NATS process E2E with one
+  durable restart and an atomic bounded-soak evidence report.
+- [ ] Wire the committed primary-node mapper/source spool into `run`, add
+  loopback health/metrics, and complete the crash-failpoint restart matrix.
 
 ## Decisions and discoveries
 
@@ -68,6 +74,16 @@
 - The PostgreSQL adapter was requalified against the current V2 schema on a
   disposable pinned PostgreSQL 18.4 instance after the archive object and
   schema identity fields were added.
+- The runtime E2E owns fresh pinned PostgreSQL and authenticated NATS
+  containers on random loopback ports. It no longer depends on an ambient
+  development stack, preserves non-secret evidence, and removes only
+  test-owned infrastructure and temporary secret files.
+- `fixture-replay` is the only enabled ingestion command. Production `run`
+  fails closed with `capture_runtime.committed_source_mapper_unavailable`
+  until the real node block-to-canonical mapper and spool/cursor loop exist.
+- A graceful process restart now proves coordinator recovery against the same
+  archive, PostgreSQL journal/cursor, and JetStream stream. Crash failpoints,
+  forced termination, and live-source restart qualification remain open.
 
 ## Current State
 
@@ -75,8 +91,8 @@
   - `services/hl-capture/` contains validated capture configuration, primary
     node file adapters, a crash-safe per-source spool, quarantine records, and
     a deterministic in-memory canonical sequencer.
-  - `services/hl-analytics/src/archive/` contains the verified local canonical
-    and raw Parquet archive implementation behind `storage-ports` contracts.
+  - `crates/canonical-archive/` contains the verified local canonical and raw
+    Parquet archive implementation behind `storage-ports` contracts.
   - `schemas/postgres/0001_capture_incidents.sql` contains incident and final
     sequencer-cursor tables, but no archived/publish-pending block journal.
   - `infra/docker-compose/` already pins NATS Server `2.14.3`, runs JetStream on
@@ -90,9 +106,11 @@
     durable cursor advances;
   - archive append is immutable and idempotent, and full verification happens
     before replay yields any block;
-  - `hl-capture` currently exits immediately and has no bus, progress store,
-    coordinator, recovery procedure, runtime ownership tree, status command,
-    or soak harness.
+  - `hl-capture fixture-replay` runs the real archive, PostgreSQL progress
+    store, JetStream publisher, recovery coordinator, owned lifecycle, atomic
+    status, restart lane, and bounded soak harness;
+  - `hl-capture run` is deliberately unavailable until a committed source
+    mapper can preserve the approved source authority and spool semantics.
 - Constraints:
   - implement approved Truth Layer Tasks 8 and 9 and design sections 10.8,
     24, and 26; do not invent a second transport or treat NATS as the archive;
@@ -312,6 +330,11 @@
     bounded drain timeout, no detached tasks, and secret-free output.
 - Expected result: the process stays running only when its durable dependencies
   and source authority are valid, and shuts down predictably.
+- Current result: the owned process, strict CLI/config, atomic status, startup
+  recovery, panic/failure propagation, task joining, and SIGTERM fixture path
+  are implemented. Loopback HTTP readiness/health/metrics, disk/backpressure
+  enforcement, source task ownership, systemd activation, and dashboard
+  evidence remain.
 
 ### M6. Add restart E2E, bounded soak, and operator recovery evidence
 
@@ -334,10 +357,15 @@
   - document exact diagnosis and recovery without deleting operator evidence.
 - Verification:
   - `just capture-e2e`;
-  - `just capture-soak DURATION=10m` for development smoke;
+  - `just capture-soak 10m` for development smoke;
   - a later retained multi-hour run before Stage 1 qualification.
 - Expected result: a user can start the product foundation, accumulate honest
   runtime evidence, stop/restart it, and inspect its durable state.
+- Current result: `just capture-e2e` and `just capture-soak <duration>` run
+  against fresh test-owned PostgreSQL 18.4 and authenticated NATS 2.14.3,
+  retain atomic evidence, restart once, and verify archive/journal/cursor
+  agreement. The crash-failpoint matrix, spool corruption injection, and
+  retained multi-hour run remain.
 
 ### M7. Close the runtime milestone
 
@@ -368,7 +396,7 @@
 - `cargo +1.97.1 test -p hl-capture --locked`
 - `just dev-stack-contract`
 - `just capture-e2e`
-- `just capture-soak DURATION=10m`
+- `just capture-soak 10m`
 - `cargo +1.97.1 deny --locked check`
 - `just verify`
 - `just generated`
@@ -410,6 +438,17 @@
 - 2026-07-29: Do not fabricate the missing independent/historical source
   contracts to make an E2E test look live. Fixture replay proves runtime
   mechanics; real source qualification remains a separate Stage 1 gate.
+- 2026-07-29: Accept plaintext NATS only for exact IPv4/IPv6 loopback hosts;
+  remote endpoints require `tls://`. Parse the address structurally and reject
+  credentials, WebSockets, paths, queries, fragments, port zero, and spoofed
+  loopback prefixes.
+- 2026-07-29: Keep the E2E dependency stack fully self-contained. A shared
+  development NATS process is useful for manual work but cannot establish
+  portable restart/soak evidence.
+- 2026-07-29: Extract immutable archive mechanics into the reusable
+  `canonical-archive` foundation rather than making `hl-capture` depend on the
+  `hl-analytics` deployable. Keep the exact Parquet `paste` advisory exception
+  fail-closed over only the reviewed archive consumers.
 
 ## Progress Log
 
@@ -427,6 +466,34 @@
   ID-to-content tracking, and divergent duplicate rejection. The frozen
   subject/permission/consumer contract is documented. Next action is M2
   JetStream transport and stream-policy qualification.
+- 2026-07-29: M1–M4 complete and committed as `e81bf0f`. The focused package,
+  disposable PostgreSQL reconnect, NATS policy, dependency, and secret-scan
+  gates passed.
+- 2026-07-29: M5 runtime slice complete for the explicit fixture lane. Focused
+  tests cover strict config/CLI, owner-only secrets, startup recovery,
+  lifecycle cancellation/failure/panic joining, atomic status, and the
+  deterministic fixture coordinator.
+- 2026-07-29: M6 partial runtime evidence is green. Report
+  `20260729T122217Z-16653` used fresh PostgreSQL 18.4 and NATS 2.14.3, archived
+  three blocks, recorded six acknowledgements, restarted once, emitted zero
+  service stdout/stderr bytes, verified the archive, and shut down cleanly.
+  Report `20260729T122425Z-18323` ran the restart-enabled 10-second soak with
+  ten blocks, twenty acknowledgements, 25.8 MiB peak RSS, zero service output,
+  verified archive state, and clean shutdown.
+- 2026-07-29: Next action is to pass the full focused local gate, commit M5/M6,
+  then implement the committed node mapper and source-spool-to-coordinator
+  loop.
+- 2026-07-29: The focused gate exposed an undesirable deployable-to-deployable
+  dependency from `hl-capture` to `hl-analytics`. Archive mechanics were moved
+  without behavior changes into `crates/canonical-archive`; analytics re-exports
+  that foundation and capture/inspection consume it directly. Strict Clippy,
+  archive/analytics/capture/inspector tests, architecture checks, dependency
+  exceptions, cargo-deny, workspace layout, and post-refactor E2E report
+  `20260729T123149Z-26365` are green.
+- 2026-07-29: Post-refactor soak report `20260729T123326Z-28210` is green:
+  ten blocks, twenty acknowledgements, one restart, 16 seconds elapsed,
+  24.9 MiB peak RSS, zero service output, verified archive, and clean shutdown.
+  M5/M6 is ready for its local milestone commit.
 
 ## Rollback / Recovery
 

@@ -35,7 +35,7 @@ if ! grep -Fxq 'parquet v58.4.0' <<<"$paste_tree"; then
     exit 1
 fi
 if grep -Ev \
-    '^(paste v1\.0\.15 \(proc-macro\)|parquet v58\.4\.0|datafusion(-[a-z-]+)? v54\.1\.0( \(\*\))?|hl-analytics v0\.1\.0 \(.+\)|archive-inspect v0\.1\.0 \(.+\))$' \
+    '^(paste v1\.0\.15 \(proc-macro\)|parquet v58\.4\.0|datafusion(-[a-z-]+)? v54\.1\.0( \(\*\))?|canonical-archive v0\.1\.0 \(.+\)|hl-analytics v0\.1\.0 \(.+\)|hl-capture v0\.1\.0 \(.+\)|archive-inspect v0\.1\.0 \(.+\)|spool-inspect v0\.1\.0 \(.+\))$' \
     <<<"$paste_tree" | grep -q .; then
     printf 'dependency-exception-error: unexpected paste inverse dependency:\n%s\n' "$paste_tree" >&2
     exit 1
