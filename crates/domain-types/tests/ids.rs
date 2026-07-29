@@ -1,4 +1,4 @@
-use domain_types::{Address, BlockHeight, ChainId, ValueError};
+use domain_types::{Address, BlockHeight, ChainId, LiquidationId, ValueError};
 
 #[test]
 fn ids_reject_empty_and_whitespace_padded_values() {
@@ -58,4 +58,25 @@ fn id_and_address_serde_revalidate_external_values() {
     assert!(
         serde_json::from_str::<Address>("\"0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"").is_err()
     );
+}
+
+#[test]
+fn liquidation_ids_are_strict_canonical_domain_ids() {
+    let liquidation_id = LiquidationId::new("liquidation-42").unwrap();
+    assert_eq!(liquidation_id.as_str(), "liquidation-42");
+    assert_eq!(liquidation_id.to_string(), "liquidation-42");
+    assert_eq!(
+        serde_json::from_str::<LiquidationId>(&serde_json::to_string(&liquidation_id).unwrap())
+            .unwrap(),
+        liquidation_id
+    );
+
+    for invalid in ["", " liquidation-42", "liquidation-42 ", "\tliquidation-42"] {
+        assert_eq!(
+            LiquidationId::new(invalid),
+            Err(ValueError::Invalid),
+            "{invalid:?}"
+        );
+    }
+    assert!(serde_json::from_str::<LiquidationId>("\" liquidation-42\"").is_err());
 }

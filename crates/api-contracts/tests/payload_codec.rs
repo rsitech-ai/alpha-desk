@@ -1,35 +1,39 @@
 use api_contracts::{
     MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAccountModeChanged,
-    WireAssetContextUpdated, WireBuilderFeeCharged, WireDepositCredited, WireDexCreated,
-    WireFeeCharged, WireFundingPaid, WireFundingRateUpdated, WireFundingReceived,
-    WireLeverageChanged, WireMarginModeChanged, WireMarginTableChanged, WireMarketCreated,
-    WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged,
-    WireOracleUpdated, WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
-    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
-    WireOutcomeResolved, WirePerpTransfer, WireReferralReward, WireSpotTransfer,
-    WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal,
-    WireWithdrawalDebited, decode_account_mode_changed, decode_asset_context_updated,
+    WireAssetContextUpdated, WireBackstopLiquidation, WireBuilderFeeCharged, WireDepositCredited,
+    WireDexCreated, WireFeeCharged, WireFundingPaid, WireFundingRateUpdated, WireFundingReceived,
+    WireLeverageChanged, WireLiquidationFill, WireLiquidationStarted, WireMarginModeChanged,
+    WireMarginTableChanged, WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged,
+    WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted,
+    WireOrderCancelled, WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled,
+    WireOrderRejected, WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer,
+    WirePositionSettled, WireReferralReward, WireSpotTransfer, WireSubaccountTransfer,
+    WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited,
+    decode_account_mode_changed, decode_asset_context_updated, decode_backstop_liquidation,
     decode_builder_fee_charged, decode_deposit_credited, decode_dex_created, decode_fee_charged,
     decode_funding_paid, decode_funding_rate_updated, decode_funding_received,
-    decode_leverage_changed, decode_margin_mode_changed, decode_margin_table_changed,
-    decode_market_created, decode_market_halted, decode_market_metadata_changed,
-    decode_market_resumed, decode_open_interest_cap_changed, decode_oracle_updated,
-    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
+    decode_leverage_changed, decode_liquidation_fill, decode_liquidation_started,
+    decode_margin_mode_changed, decode_margin_table_changed, decode_market_created,
+    decode_market_halted, decode_market_metadata_changed, decode_market_resumed,
+    decode_open_interest_cap_changed, decode_oracle_updated, decode_order_accepted,
+    decode_order_cancelled, decode_order_filled, decode_order_modified,
     decode_order_partially_filled, decode_order_rejected, decode_order_rested,
-    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_referral_reward,
-    decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
-    decode_vault_withdrawal, decode_withdrawal_debited, encode_account_mode_changed,
-    encode_asset_context_updated, encode_builder_fee_charged, encode_default_event_payload,
-    encode_deposit_credited, encode_dex_created, encode_fee_charged, encode_funding_paid,
-    encode_funding_rate_updated, encode_funding_received, encode_leverage_changed,
-    encode_margin_mode_changed, encode_margin_table_changed, encode_market_created,
-    encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
-    encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
-    encode_order_cancelled, encode_order_filled, encode_order_modified,
+    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_position_settled,
+    decode_referral_reward, decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched,
+    decode_vault_deposit, decode_vault_withdrawal, decode_withdrawal_debited,
+    encode_account_mode_changed, encode_asset_context_updated, encode_backstop_liquidation,
+    encode_builder_fee_charged, encode_default_event_payload, encode_deposit_credited,
+    encode_dex_created, encode_fee_charged, encode_funding_paid, encode_funding_rate_updated,
+    encode_funding_received, encode_leverage_changed, encode_liquidation_fill,
+    encode_liquidation_started, encode_margin_mode_changed, encode_margin_table_changed,
+    encode_market_created, encode_market_halted, encode_market_metadata_changed,
+    encode_market_resumed, encode_open_interest_cap_changed, encode_oracle_updated,
+    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
-    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_referral_reward,
-    encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
-    encode_vault_withdrawal, encode_withdrawal_debited, validate_event_payload,
+    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_position_settled,
+    encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched,
+    encode_vault_deposit, encode_vault_withdrawal, encode_withdrawal_debited,
+    validate_event_payload,
 };
 
 const ACCOUNT_PAYLOAD_LIMIT: usize = MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES;
@@ -125,6 +129,47 @@ fn encode_leverage_with_market_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCod
         market_id: "M".repeat(bytes),
         previous_leverage: "3".to_owned(),
         new_leverage: "5".to_owned(),
+    })
+}
+
+fn encode_liquidation_started_with_id_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_liquidation_started(&WireLiquidationStarted {
+        account_id: primary_account(),
+        liquidation_id: "L".repeat(bytes),
+        margin_value: "9.000000".to_owned(),
+        maintenance_requirement: "10.000000".to_owned(),
+    })
+}
+
+fn encode_liquidation_fill_with_market_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_liquidation_fill(&WireLiquidationFill {
+        liquidation_id: "liquidation-42".to_owned(),
+        account_id: primary_account(),
+        market_id: "M".repeat(bytes),
+        price: "65000.000000".to_owned(),
+        quantity: "0.01000000".to_owned(),
+    })
+}
+
+fn encode_backstop_liquidation_with_market_bytes(
+    bytes: usize,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_backstop_liquidation(&WireBackstopLiquidation {
+        liquidation_id: "liquidation-42".to_owned(),
+        account_id: primary_account(),
+        backstop_account_id: secondary_account(),
+        market_id: "M".repeat(bytes),
+        quantity: "0.01000000".to_owned(),
+    })
+}
+
+fn encode_position_settled_with_market_bytes(bytes: usize) -> Result<Vec<u8>, PayloadCodecError> {
+    encode_position_settled(&WirePositionSettled {
+        account_id: primary_account(),
+        market_id: "M".repeat(bytes),
+        settlement_price: "0.000000".to_owned(),
+        settled_quantity: "1.00000000".to_owned(),
+        realized_pnl: "-5.000000".to_owned(),
     })
 }
 
@@ -463,6 +508,142 @@ fn account_fee_funding_reward_and_mode_wire_payloads_round_trip_exactly() {
         decode_leverage_changed(&encode_leverage_changed(&leverage).unwrap()).unwrap(),
         leverage
     );
+}
+
+#[test]
+fn liquidation_and_settlement_wire_payloads_round_trip_exactly() {
+    let account = primary_account();
+    let backstop = secondary_account();
+
+    let started = WireLiquidationStarted {
+        account_id: account.clone(),
+        liquidation_id: "liquidation-42".to_owned(),
+        margin_value: "99.000000".to_owned(),
+        maintenance_requirement: "100.000000".to_owned(),
+    };
+    assert_eq!(
+        decode_liquidation_started(&encode_liquidation_started(&started).unwrap()).unwrap(),
+        started
+    );
+
+    let fill = WireLiquidationFill {
+        liquidation_id: "liquidation-42".to_owned(),
+        account_id: account.clone(),
+        market_id: "perp:BTC".to_owned(),
+        price: "65000.000000".to_owned(),
+        quantity: "0.01000000".to_owned(),
+    };
+    assert_eq!(
+        decode_liquidation_fill(&encode_liquidation_fill(&fill).unwrap()).unwrap(),
+        fill
+    );
+
+    let backstop_fill = WireBackstopLiquidation {
+        liquidation_id: "liquidation-42".to_owned(),
+        account_id: account.clone(),
+        backstop_account_id: backstop,
+        market_id: "perp:BTC".to_owned(),
+        quantity: "0.00500000".to_owned(),
+    };
+    assert_eq!(
+        decode_backstop_liquidation(&encode_backstop_liquidation(&backstop_fill).unwrap()).unwrap(),
+        backstop_fill
+    );
+
+    for settlement_price in ["0.000000", "63000.000000"] {
+        for realized_pnl in ["-125.500000", "0.000000", "125.500000"] {
+            let settled = WirePositionSettled {
+                account_id: account.clone(),
+                market_id: "perp:BTC".to_owned(),
+                settlement_price: settlement_price.to_owned(),
+                settled_quantity: "0.01000000".to_owned(),
+                realized_pnl: realized_pnl.to_owned(),
+            };
+            assert_eq!(
+                decode_position_settled(&encode_position_settled(&settled).unwrap()).unwrap(),
+                settled
+            );
+        }
+    }
+}
+
+#[test]
+fn liquidation_and_settlement_wire_payloads_reject_invalid_boundaries() {
+    let account = primary_account();
+    let backstop = secondary_account();
+
+    for invalid_id in ["", " liquidation-42", "liquidation-42 "] {
+        assert!(
+            encode_liquidation_started(&WireLiquidationStarted {
+                account_id: account.clone(),
+                liquidation_id: invalid_id.to_owned(),
+                margin_value: "9.000000".to_owned(),
+                maintenance_requirement: "10.000000".to_owned(),
+            })
+            .is_err(),
+            "LiquidationStarted accepted liquidation_id {invalid_id:?}"
+        );
+    }
+
+    for (margin_value, maintenance_requirement) in [
+        ("-1.000000", "10.000000"),
+        ("9.00000", "10.000000"),
+        ("10.000000", "10.000000"),
+        ("11.000000", "10.000000"),
+        ("invalid", "10.000000"),
+    ] {
+        assert!(
+            encode_liquidation_started(&WireLiquidationStarted {
+                account_id: account.clone(),
+                liquidation_id: "liquidation-42".to_owned(),
+                margin_value: margin_value.to_owned(),
+                maintenance_requirement: maintenance_requirement.to_owned(),
+            })
+            .is_err(),
+            "LiquidationStarted accepted margin {margin_value:?} and maintenance {maintenance_requirement:?}"
+        );
+    }
+
+    assert!(
+        encode_backstop_liquidation(&WireBackstopLiquidation {
+            liquidation_id: "liquidation-42".to_owned(),
+            account_id: account.clone(),
+            backstop_account_id: account.clone(),
+            market_id: "perp:BTC".to_owned(),
+            quantity: "1".to_owned(),
+        })
+        .is_err()
+    );
+
+    for invalid_account in [
+        "",
+        "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "0x111111111111111111111111111111111111111",
+    ] {
+        assert!(
+            encode_position_settled(&WirePositionSettled {
+                account_id: invalid_account.to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                settlement_price: "0".to_owned(),
+                settled_quantity: "1".to_owned(),
+                realized_pnl: "-1".to_owned(),
+            })
+            .is_err()
+        );
+    }
+
+    let valid = WireBackstopLiquidation {
+        liquidation_id: "liquidation-42".to_owned(),
+        account_id: account,
+        backstop_account_id: backstop,
+        market_id: "perp:BTC".to_owned(),
+        quantity: "1".to_owned(),
+    };
+    let encoded = encode_backstop_liquidation(&valid).unwrap();
+    assert!(matches!(
+        decode_liquidation_fill(&encoded),
+        Err(PayloadCodecError::KindMismatch { .. })
+    ));
 }
 
 #[test]
@@ -866,6 +1047,72 @@ fn every_task2_public_encoder_and_direct_decoder_enforces_the_shared_payload_bou
 }
 
 #[test]
+fn every_task3_public_encoder_and_direct_decoder_enforces_the_shared_payload_bound() {
+    for (kind, encoder) in [
+        (
+            "LiquidationStarted",
+            encode_liquidation_started_with_id_bytes
+                as fn(usize) -> Result<Vec<u8>, PayloadCodecError>,
+        ),
+        ("LiquidationFill", encode_liquidation_fill_with_market_bytes),
+        (
+            "BackstopLiquidation",
+            encode_backstop_liquidation_with_market_bytes,
+        ),
+        ("PositionSettled", encode_position_settled_with_market_bytes),
+    ] {
+        assert_encoder_exact_one_over_and_70k(kind, encoder);
+    }
+
+    type Decoder = fn(&[u8]) -> Result<(), PayloadCodecError>;
+    let decoders: [(&str, Decoder); 4] = [
+        ("LiquidationStarted", |bytes| {
+            decode_liquidation_started(bytes).map(|_| ())
+        }),
+        ("LiquidationFill", |bytes| {
+            decode_liquidation_fill(bytes).map(|_| ())
+        }),
+        ("BackstopLiquidation", |bytes| {
+            decode_backstop_liquidation(bytes).map(|_| ())
+        }),
+        ("PositionSettled", |bytes| {
+            decode_position_settled(bytes).map(|_| ())
+        }),
+    ];
+    for (kind, decode) in decoders {
+        let default = encode_default_event_payload(kind).unwrap();
+
+        let exact = pad_outer_unknown_to_exact_size(&default, ACCOUNT_PAYLOAD_LIMIT);
+        assert_eq!(exact.len(), ACCOUNT_PAYLOAD_LIMIT);
+        decode(&exact).unwrap_or_else(|error| {
+            panic!("{kind} direct decoder rejected the inclusive boundary: {error}")
+        });
+
+        let exact_malformed = vec![0xff; ACCOUNT_PAYLOAD_LIMIT];
+        assert!(matches!(
+            decode(&exact_malformed),
+            Err(PayloadCodecError::Decode {
+                kind: decode_kind,
+                ..
+            }) if decode_kind == "TypedPayloadEnvelope"
+        ));
+
+        for probe in [
+            pad_outer_unknown_to_exact_size(&default, ACCOUNT_PAYLOAD_LIMIT + 1),
+            vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1],
+            pad_outer_unknown_to_exact_size(&default, 70_000),
+            vec![0xff; 70_000],
+        ] {
+            let outcome = std::panic::catch_unwind(|| decode(&probe));
+            let error = outcome
+                .unwrap_or_else(|_| panic!("{kind} public decoder panicked on oversized input"))
+                .unwrap_err();
+            assert_account_payload_size_error(error, kind);
+        }
+    }
+}
+
+#[test]
 fn generic_validator_preflights_every_account_payload_size() {
     for kind in [
         "DepositCredited",
@@ -883,6 +1130,10 @@ fn generic_validator_preflights_every_account_payload_size() {
         "AccountModeChanged",
         "MarginModeChanged",
         "LeverageChanged",
+        "LiquidationStarted",
+        "LiquidationFill",
+        "BackstopLiquidation",
+        "PositionSettled",
     ] {
         let default = encode_default_event_payload(kind).unwrap();
 
@@ -917,7 +1168,7 @@ fn generic_validator_preflights_every_account_payload_size() {
 
 #[test]
 fn generic_validator_preserves_unrelated_kind_behavior() {
-    let kind = "LiquidationStarted";
+    let kind = "TriggerOrderActivated";
     let valid = encode_default_event_payload(kind).unwrap();
     validate_event_payload(kind, &valid).unwrap();
 
@@ -949,6 +1200,10 @@ fn strict_account_default_payloads_validate_deterministically() {
         "AccountModeChanged",
         "MarginModeChanged",
         "LeverageChanged",
+        "LiquidationStarted",
+        "LiquidationFill",
+        "BackstopLiquidation",
+        "PositionSettled",
     ] {
         let first = encode_default_event_payload(kind).unwrap();
         let second = encode_default_event_payload(kind).unwrap();

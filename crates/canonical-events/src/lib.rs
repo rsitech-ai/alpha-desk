@@ -17,42 +17,47 @@ pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
     MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireAccountModeChanged, WireAssetContextUpdated,
-    WireBuilderFeeCharged, WireCanonicalEventEnvelope, WireDepositCredited, WireDexCreated,
-    WireFeeCharged, WireFundingPaid, WireFundingRateUpdated, WireFundingReceived,
-    WireLeverageChanged, WireMarginModeChanged, WireMarginTableChanged, WireMarketCreated,
-    WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged,
-    WireOracleUpdated, WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
+    WireBackstopLiquidation, WireBuilderFeeCharged, WireCanonicalEventEnvelope,
+    WireDepositCredited, WireDexCreated, WireFeeCharged, WireFundingPaid, WireFundingRateUpdated,
+    WireFundingReceived, WireLeverageChanged, WireLiquidationFill, WireLiquidationStarted,
+    WireMarginModeChanged, WireMarginTableChanged, WireMarketCreated, WireMarketHalted,
+    WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated,
+    WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
     WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
-    WireOutcomeResolved, WirePerpTransfer, WireReferralReward, WireSourceEvidence,
-    WireSpotTransfer, WireSubaccountTransfer, WireTradeMatched, WireVaultDeposit,
-    WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
-    decode_asset_context_updated, decode_builder_fee_charged, decode_deposit_credited,
-    decode_dex_created, decode_fee_charged, decode_funding_paid, decode_funding_rate_updated,
-    decode_funding_received, decode_leverage_changed, decode_margin_mode_changed,
+    WireOutcomeResolved, WirePerpTransfer, WirePositionSettled, WireReferralReward,
+    WireSourceEvidence, WireSpotTransfer, WireSubaccountTransfer, WireTradeMatched,
+    WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
+    decode_asset_context_updated, decode_backstop_liquidation, decode_builder_fee_charged,
+    decode_deposit_credited, decode_dex_created, decode_fee_charged, decode_funding_paid,
+    decode_funding_rate_updated, decode_funding_received, decode_leverage_changed,
+    decode_liquidation_fill, decode_liquidation_started, decode_margin_mode_changed,
     decode_margin_table_changed, decode_market_created, decode_market_halted,
     decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
     decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
     decode_order_modified, decode_order_partially_filled, decode_order_rejected,
     decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_perp_transfer,
-    decode_referral_reward, decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched,
-    decode_vault_deposit, decode_vault_withdrawal, decode_withdrawal_debited,
-    encode_account_mode_changed, encode_asset_context_updated, encode_builder_fee_charged,
+    decode_position_settled, decode_referral_reward, decode_spot_transfer,
+    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
+    decode_vault_withdrawal, decode_withdrawal_debited, encode_account_mode_changed,
+    encode_asset_context_updated, encode_backstop_liquidation, encode_builder_fee_charged,
     encode_default_event_payload, encode_deposit_credited, encode_dex_created, encode_fee_charged,
     encode_funding_paid, encode_funding_rate_updated, encode_funding_received,
-    encode_leverage_changed, encode_margin_mode_changed, encode_margin_table_changed,
-    encode_market_created, encode_market_halted, encode_market_metadata_changed,
-    encode_market_resumed, encode_open_interest_cap_changed, encode_oracle_updated,
-    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
+    encode_leverage_changed, encode_liquidation_fill, encode_liquidation_started,
+    encode_margin_mode_changed, encode_margin_table_changed, encode_market_created,
+    encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
+    encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
+    encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
-    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_referral_reward,
-    encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched, encode_vault_deposit,
-    encode_vault_withdrawal, encode_withdrawal_debited, validate_event_payload,
+    encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_position_settled,
+    encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched,
+    encode_vault_deposit, encode_vault_withdrawal, encode_withdrawal_debited,
+    validate_event_payload,
 };
 use domain_types::{
     AccountAbstractionModeV1, Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId,
-    EventId, FeeRate, FeeTypeV1, FundingRate, KnownTime, Leverage, MarginModeV1, MarketId, OrderId,
-    OrderSide, OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId, TradeId,
-    TransactionId, VaultId,
+    EventId, FeeRate, FeeTypeV1, FundingRate, KnownTime, Leverage, LiquidationId, MarginModeV1,
+    MarketId, OrderId, OrderSide, OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId,
+    TradeId, TransactionId, UsdAmount, VaultId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -407,6 +412,41 @@ pub struct LeverageChanged {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiquidationStarted {
+    pub account_id: Address,
+    pub liquidation_id: LiquidationId,
+    pub margin_value: UsdAmount,
+    pub maintenance_requirement: UsdAmount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiquidationFill {
+    pub liquidation_id: LiquidationId,
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub price: Price,
+    pub quantity: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackstopLiquidation {
+    pub liquidation_id: LiquidationId,
+    pub account_id: Address,
+    pub backstop_account_id: Address,
+    pub market_id: MarketId,
+    pub quantity: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionSettled {
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub settlement_price: Price,
+    pub settled_quantity: Quantity,
+    pub realized_pnl: QuoteAmount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DexCreated {
     pub dex_id: DexId,
     pub name: String,
@@ -531,6 +571,10 @@ macro_rules! opaque_payloads {
             AccountModeChanged(AccountModeChanged),
             MarginModeChanged(MarginModeChanged),
             LeverageChanged(LeverageChanged),
+            LiquidationStarted(LiquidationStarted),
+            LiquidationFill(LiquidationFill),
+            BackstopLiquidation(BackstopLiquidation),
+            PositionSettled(PositionSettled),
             DexCreated(DexCreated),
             AssetContextUpdated(AssetContextUpdated),
             MarketCreated(MarketCreated),
@@ -573,6 +617,10 @@ macro_rules! opaque_payloads {
                     Self::AccountModeChanged(_) => EventKind::AccountModeChanged,
                     Self::MarginModeChanged(_) => EventKind::MarginModeChanged,
                     Self::LeverageChanged(_) => EventKind::LeverageChanged,
+                    Self::LiquidationStarted(_) => EventKind::LiquidationStarted,
+                    Self::LiquidationFill(_) => EventKind::LiquidationFill,
+                    Self::BackstopLiquidation(_) => EventKind::BackstopLiquidation,
+                    Self::PositionSettled(_) => EventKind::PositionSettled,
                     Self::DexCreated(_) => EventKind::DexCreated,
                     Self::AssetContextUpdated(_) => EventKind::AssetContextUpdated,
                     Self::MarketCreated(_) => EventKind::MarketCreated,
@@ -836,6 +884,72 @@ macro_rules! opaque_payloads {
                         })
                         .map_err(payload_error)
                     }
+                    Self::LiquidationStarted(value) => {
+                        validate_liquidation_started_semantics(
+                            value.margin_value,
+                            value.maintenance_requirement,
+                        )?;
+                        encode_liquidation_started(&WireLiquidationStarted {
+                            account_id: value.account_id.to_api_string(),
+                            liquidation_id: value.liquidation_id.to_string(),
+                            margin_value: value.margin_value.to_string(),
+                            maintenance_requirement: value.maintenance_requirement.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::LiquidationFill(value) => {
+                        require_positive_price(value.price, "LiquidationFill price")?;
+                        require_positive_quantity(value.quantity, "LiquidationFill quantity")?;
+                        encode_liquidation_fill(&WireLiquidationFill {
+                            liquidation_id: value.liquidation_id.to_string(),
+                            account_id: value.account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            price: value.price.to_string(),
+                            quantity: value.quantity.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::BackstopLiquidation(value) => {
+                        if value.account_id == value.backstop_account_id {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "BackstopLiquidation accounts must differ".to_owned(),
+                            });
+                        }
+                        require_positive_quantity(
+                            value.quantity,
+                            "BackstopLiquidation quantity",
+                        )?;
+                        encode_backstop_liquidation(&WireBackstopLiquidation {
+                            liquidation_id: value.liquidation_id.to_string(),
+                            account_id: value.account_id.to_api_string(),
+                            backstop_account_id: value.backstop_account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            quantity: value.quantity.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::PositionSettled(value) => {
+                        if value.settlement_price.raw() < 0 {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "PositionSettled settlement_price must be nonnegative"
+                                    .to_owned(),
+                            });
+                        }
+                        require_positive_quantity(
+                            value.settled_quantity,
+                            "PositionSettled settled_quantity",
+                        )?;
+                        encode_position_settled(&WirePositionSettled {
+                            account_id: value.account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            settlement_price: value.settlement_price.to_string(),
+                            settled_quantity: value.settled_quantity.to_string(),
+                            realized_pnl: value.realized_pnl.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
                     Self::DexCreated(value) => encode_dex_created(&WireDexCreated {
                         dex_id: value.dex_id.to_string(),
                         name: value.name.clone(),
@@ -1046,6 +1160,18 @@ macro_rules! opaque_payloads {
                     EventKind::LeverageChanged => {
                         decode_leverage_changed_payload(bytes).map(Self::LeverageChanged)
                     }
+                    EventKind::LiquidationStarted => {
+                        decode_liquidation_started_payload(bytes).map(Self::LiquidationStarted)
+                    }
+                    EventKind::LiquidationFill => {
+                        decode_liquidation_fill_payload(bytes).map(Self::LiquidationFill)
+                    }
+                    EventKind::BackstopLiquidation => {
+                        decode_backstop_liquidation_payload(bytes).map(Self::BackstopLiquidation)
+                    }
+                    EventKind::PositionSettled => {
+                        decode_position_settled_payload(bytes).map(Self::PositionSettled)
+                    }
                     EventKind::DexCreated => {
                         decode_dex_created_payload(bytes).map(Self::DexCreated)
                     }
@@ -1163,10 +1289,6 @@ opaque_payloads!(
     TwapStarted,
     TwapSliceFilled,
     TwapCompleted,
-    LiquidationStarted,
-    LiquidationFill,
-    BackstopLiquidation,
-    PositionSettled,
 );
 
 fn decode_order_accepted_payload(bytes: &[u8]) -> Result<OrderAccepted, ContractError> {
@@ -1462,6 +1584,68 @@ fn decode_leverage_changed_payload(bytes: &[u8]) -> Result<LeverageChanged, Cont
     })
 }
 
+fn decode_liquidation_started_payload(bytes: &[u8]) -> Result<LiquidationStarted, ContractError> {
+    let value = decode_liquidation_started(bytes).map_err(payload_error)?;
+    let margin_value = payload_value(UsdAmount::from_str(&value.margin_value))?;
+    let maintenance_requirement =
+        payload_value(UsdAmount::from_str(&value.maintenance_requirement))?;
+    validate_liquidation_started_semantics(margin_value, maintenance_requirement)?;
+    Ok(LiquidationStarted {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        liquidation_id: payload_value(LiquidationId::new(value.liquidation_id))?,
+        margin_value,
+        maintenance_requirement,
+    })
+}
+
+fn decode_liquidation_fill_payload(bytes: &[u8]) -> Result<LiquidationFill, ContractError> {
+    let value = decode_liquidation_fill(bytes).map_err(payload_error)?;
+    Ok(LiquidationFill {
+        liquidation_id: payload_value(LiquidationId::new(value.liquidation_id))?,
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        price: parse_positive_price(&value.price)?,
+        quantity: parse_positive_quantity(&value.quantity)?,
+    })
+}
+
+fn decode_backstop_liquidation_payload(bytes: &[u8]) -> Result<BackstopLiquidation, ContractError> {
+    let value = decode_backstop_liquidation(bytes).map_err(payload_error)?;
+    let account_id = payload_value(Address::parse_api(&value.account_id))?;
+    let backstop_account_id = payload_value(Address::parse_api(&value.backstop_account_id))?;
+    if account_id == backstop_account_id {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "BackstopLiquidation accounts must differ".to_owned(),
+        });
+    }
+    Ok(BackstopLiquidation {
+        liquidation_id: payload_value(LiquidationId::new(value.liquidation_id))?,
+        account_id,
+        backstop_account_id,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        quantity: parse_positive_quantity(&value.quantity)?,
+    })
+}
+
+fn decode_position_settled_payload(bytes: &[u8]) -> Result<PositionSettled, ContractError> {
+    let value = decode_position_settled(bytes).map_err(payload_error)?;
+    let settlement_price = payload_value(Price::from_str(&value.settlement_price))?;
+    if settlement_price.raw() < 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "PositionSettled settlement_price must be nonnegative".to_owned(),
+        });
+    }
+    Ok(PositionSettled {
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        settlement_price,
+        settled_quantity: parse_positive_quantity(&value.settled_quantity)?,
+        realized_pnl: payload_value(QuoteAmount::from_str(&value.realized_pnl))?,
+    })
+}
+
 fn decode_dex_created_payload(bytes: &[u8]) -> Result<DexCreated, ContractError> {
     let value = decode_dex_created(bytes).map_err(payload_error)?;
     Ok(DexCreated {
@@ -1645,13 +1829,18 @@ fn hash_array(value: Vec<u8>, name: &str) -> Result<[u8; HASH_LENGTH], ContractE
 
 fn parse_positive_price(value: &str) -> Result<Price, ContractError> {
     let price = payload_value(Price::from_str(value))?;
-    if price.raw() <= 0 {
+    require_positive_price(price, "order price")?;
+    Ok(price)
+}
+
+fn require_positive_price(value: Price, field_name: &str) -> Result<(), ContractError> {
+    if value.raw() <= 0 {
         return Err(ContractError::Invalid {
             field: "payload",
-            reason: "order price must be positive".to_owned(),
+            reason: format!("{field_name} must be positive"),
         });
     }
-    Ok(price)
+    Ok(())
 }
 
 fn parse_positive_quantity(value: &str) -> Result<Quantity, ContractError> {
@@ -1688,6 +1877,32 @@ fn require_positive_leverage(value: Leverage, field_name: &str) -> Result<(), Co
         return Err(ContractError::Invalid {
             field: "payload",
             reason: format!("{field_name} must be positive"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_liquidation_started_semantics(
+    margin_value: UsdAmount,
+    maintenance_requirement: UsdAmount,
+) -> Result<(), ContractError> {
+    if margin_value.raw() < 0 || maintenance_requirement.raw() < 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "LiquidationStarted margin values must be nonnegative".to_owned(),
+        });
+    }
+    if margin_value.scale() != maintenance_requirement.scale() {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "LiquidationStarted margin values must use the same scale".to_owned(),
+        });
+    }
+    if margin_value >= maintenance_requirement {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "LiquidationStarted margin_value must be less than maintenance_requirement"
+                .to_owned(),
         });
     }
     Ok(())
@@ -1890,6 +2105,37 @@ fn fixture_payload_bytes(kind: EventKind) -> Result<Vec<u8>, ContractError> {
             market_id: "perp:BTC".to_owned(),
             previous_leverage: "1".to_owned(),
             new_leverage: "2".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::LiquidationStarted => encode_liquidation_started(&WireLiquidationStarted {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            liquidation_id: "fixture-liquidation".to_owned(),
+            margin_value: "0.900000".to_owned(),
+            maintenance_requirement: "1.000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::LiquidationFill => encode_liquidation_fill(&WireLiquidationFill {
+            liquidation_id: "fixture-liquidation".to_owned(),
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            price: "1.000000".to_owned(),
+            quantity: "1.00000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::BackstopLiquidation => encode_backstop_liquidation(&WireBackstopLiquidation {
+            liquidation_id: "fixture-liquidation".to_owned(),
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            backstop_account_id: Address::from_bytes([0x22; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            quantity: "1.00000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::PositionSettled => encode_position_settled(&WirePositionSettled {
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            settlement_price: "0.000000".to_owned(),
+            settled_quantity: "1.00000000".to_owned(),
+            realized_pnl: "0.000000".to_owned(),
         })
         .map_err(payload_error),
         EventKind::DexCreated => encode_dex_created(&WireDexCreated {
@@ -2704,6 +2950,10 @@ fn validate_account_payload_size(kind: EventKind, bytes: &[u8]) -> Result<(), Co
             | EventKind::AccountModeChanged
             | EventKind::MarginModeChanged
             | EventKind::LeverageChanged
+            | EventKind::LiquidationStarted
+            | EventKind::LiquidationFill
+            | EventKind::BackstopLiquidation
+            | EventKind::PositionSettled
     ) && bytes.len() > MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES
     {
         return Err(ContractError::Invalid {

@@ -1,25 +1,29 @@
 use api_contracts::{
     MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAccountModeChanged,
-    WireBuilderFeeCharged, WireCanonicalEventEnvelope, WireDepositCredited, WireFeeCharged,
-    WireFundingPaid, WireFundingReceived, WireLeverageChanged, WireMarginModeChanged,
-    WirePerpTransfer, WireReferralReward, WireSpotTransfer, WireSubaccountTransfer,
+    WireBackstopLiquidation, WireBuilderFeeCharged, WireCanonicalEventEnvelope,
+    WireDepositCredited, WireFeeCharged, WireFundingPaid, WireFundingReceived, WireLeverageChanged,
+    WireLiquidationFill, WireLiquidationStarted, WireMarginModeChanged, WirePerpTransfer,
+    WirePositionSettled, WireReferralReward, WireSpotTransfer, WireSubaccountTransfer,
     WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited, decode_deposit_credited,
-    encode_account_mode_changed, encode_builder_fee_charged, encode_default_event_payload,
-    encode_deposit_credited, encode_fee_charged, encode_funding_paid, encode_funding_received,
-    encode_leverage_changed, encode_margin_mode_changed, encode_perp_transfer,
-    encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_vault_deposit,
-    encode_vault_withdrawal, encode_withdrawal_debited,
+    encode_account_mode_changed, encode_backstop_liquidation, encode_builder_fee_charged,
+    encode_default_event_payload, encode_deposit_credited, encode_fee_charged, encode_funding_paid,
+    encode_funding_received, encode_leverage_changed, encode_liquidation_fill,
+    encode_liquidation_started, encode_margin_mode_changed, encode_perp_transfer,
+    encode_position_settled, encode_referral_reward, encode_spot_transfer,
+    encode_subaccount_transfer, encode_vault_deposit, encode_vault_withdrawal,
+    encode_withdrawal_debited,
 };
 use canonical_events::{
-    AccountModeChanged, BuilderFeeCharged, CanonicalEventEnvelope, CanonicalEventInput,
-    ConfirmationClass, DepositCredited, EventKind, EventPayload, FeeCharged, FundingPaid,
-    FundingReceived, LeverageChanged, MarginModeChanged, PerpTransfer, ReferralReward,
-    SpotTransfer, SubaccountTransfer, VaultDeposit, VaultWithdrawal, WithdrawalDebited,
+    AccountModeChanged, BackstopLiquidation, BuilderFeeCharged, CanonicalEventEnvelope,
+    CanonicalEventInput, ConfirmationClass, DepositCredited, EventKind, EventPayload, FeeCharged,
+    FundingPaid, FundingReceived, LeverageChanged, LiquidationFill, LiquidationStarted,
+    MarginModeChanged, PerpTransfer, PositionSettled, ReferralReward, SpotTransfer,
+    SubaccountTransfer, VaultDeposit, VaultWithdrawal, WithdrawalDebited,
 };
 use domain_types::{
     AccountAbstractionModeV1, Address, AssetId, BlockHeight, ChainId, FeeRate, FeeTypeV1,
-    FundingRate, KnownTime, Leverage, MarginModeV1, MarketId, ProtocolTime, Quantity, QuoteAmount,
-    SourceId, TransactionId, VaultId,
+    FundingRate, KnownTime, Leverage, LiquidationId, MarginModeV1, MarketId, Price, ProtocolTime,
+    Quantity, QuoteAmount, SourceId, TransactionId, UsdAmount, VaultId,
 };
 
 const ACCOUNT_PAYLOAD_LIMIT: usize = MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES;
@@ -296,7 +300,7 @@ fn valid_account_payload_bytes() -> Vec<(EventKind, Vec<u8>)> {
             EventKind::ReferralReward,
             encode_referral_reward(&WireReferralReward {
                 account_id: from.clone(),
-                referrer_account_id: to,
+                referrer_account_id: to.clone(),
                 asset_id: "USDC".to_owned(),
                 amount: "1".to_owned(),
             })
@@ -324,10 +328,53 @@ fn valid_account_payload_bytes() -> Vec<(EventKind, Vec<u8>)> {
         (
             EventKind::LeverageChanged,
             encode_leverage_changed(&WireLeverageChanged {
-                account_id: from,
+                account_id: from.clone(),
                 market_id: "perp:BTC".to_owned(),
                 previous_leverage: "3".to_owned(),
                 new_leverage: "5".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::LiquidationStarted,
+            encode_liquidation_started(&WireLiquidationStarted {
+                account_id: from.clone(),
+                liquidation_id: "liquidation-42".to_owned(),
+                margin_value: "9.000000".to_owned(),
+                maintenance_requirement: "10.000000".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::LiquidationFill,
+            encode_liquidation_fill(&WireLiquidationFill {
+                liquidation_id: "liquidation-42".to_owned(),
+                account_id: from.clone(),
+                market_id: "perp:BTC".to_owned(),
+                price: "65000.000000".to_owned(),
+                quantity: "0.01000000".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::BackstopLiquidation,
+            encode_backstop_liquidation(&WireBackstopLiquidation {
+                liquidation_id: "liquidation-42".to_owned(),
+                account_id: from.clone(),
+                backstop_account_id: to,
+                market_id: "perp:BTC".to_owned(),
+                quantity: "0.00500000".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            EventKind::PositionSettled,
+            encode_position_settled(&WirePositionSettled {
+                account_id: from,
+                market_id: "perp:BTC".to_owned(),
+                settlement_price: "0.000000".to_owned(),
+                settled_quantity: "0.01000000".to_owned(),
+                realized_pnl: "-125.500000".to_owned(),
             })
             .unwrap(),
         ),
@@ -608,6 +655,274 @@ fn all_fee_funding_reward_and_mode_payloads_round_trip_exact_domain_values() {
         assert_eq!(decoded, expected);
         assert_eq!(decoded.kind(), kind);
         assert_eq!(decoded.encode_to_vec().unwrap(), bytes);
+    }
+}
+
+#[test]
+fn all_liquidation_and_settlement_payloads_round_trip_exact_domain_values() {
+    let account_id = account(0x11);
+    let backstop_account_id = account(0x22);
+    let liquidation_id = LiquidationId::new("liquidation-42").unwrap();
+    let market_id = MarketId::new("perp:BTC").unwrap();
+
+    let cases = [
+        (
+            EventKind::LiquidationStarted,
+            encode_liquidation_started(&WireLiquidationStarted {
+                account_id: account_id.to_api_string(),
+                liquidation_id: liquidation_id.to_string(),
+                margin_value: "99.000000".to_owned(),
+                maintenance_requirement: "100.000000".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::LiquidationStarted(LiquidationStarted {
+                account_id,
+                liquidation_id: liquidation_id.clone(),
+                margin_value: UsdAmount::parse_at_scale("99", 6).unwrap(),
+                maintenance_requirement: UsdAmount::parse_at_scale("100", 6).unwrap(),
+            }),
+        ),
+        (
+            EventKind::LiquidationFill,
+            encode_liquidation_fill(&WireLiquidationFill {
+                liquidation_id: liquidation_id.to_string(),
+                account_id: account_id.to_api_string(),
+                market_id: market_id.to_string(),
+                price: "65000.000000".to_owned(),
+                quantity: "0.01000000".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::LiquidationFill(LiquidationFill {
+                liquidation_id: liquidation_id.clone(),
+                account_id,
+                market_id: market_id.clone(),
+                price: Price::parse_at_scale("65000", 6).unwrap(),
+                quantity: Quantity::parse_at_scale("0.01", 8).unwrap(),
+            }),
+        ),
+        (
+            EventKind::BackstopLiquidation,
+            encode_backstop_liquidation(&WireBackstopLiquidation {
+                liquidation_id: liquidation_id.to_string(),
+                account_id: account_id.to_api_string(),
+                backstop_account_id: backstop_account_id.to_api_string(),
+                market_id: market_id.to_string(),
+                quantity: "0.00500000".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::BackstopLiquidation(BackstopLiquidation {
+                liquidation_id,
+                account_id,
+                backstop_account_id,
+                market_id: market_id.clone(),
+                quantity: Quantity::parse_at_scale("0.005", 8).unwrap(),
+            }),
+        ),
+        (
+            EventKind::PositionSettled,
+            encode_position_settled(&WirePositionSettled {
+                account_id: account_id.to_api_string(),
+                market_id: market_id.to_string(),
+                settlement_price: "0.000000".to_owned(),
+                settled_quantity: "0.01000000".to_owned(),
+                realized_pnl: "-125.500000".to_owned(),
+            })
+            .unwrap(),
+            EventPayload::PositionSettled(PositionSettled {
+                account_id,
+                market_id,
+                settlement_price: Price::parse_at_scale("0", 6).unwrap(),
+                settled_quantity: Quantity::parse_at_scale("0.01", 8).unwrap(),
+                realized_pnl: QuoteAmount::parse_at_scale("-125.5", 6).unwrap(),
+            }),
+        ),
+    ];
+
+    for (kind, bytes, expected) in cases {
+        let decoded = EventPayload::decode(kind, &bytes).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.kind(), kind);
+        assert_eq!(decoded.encode_to_vec().unwrap(), bytes);
+    }
+}
+
+#[test]
+fn liquidation_and_settlement_payloads_reject_invalid_financial_values() {
+    let account_id = account(0x11).to_api_string();
+    let backstop_account_id = account(0x22).to_api_string();
+
+    for (margin_value, maintenance_requirement) in [
+        ("-1.000000", "10.000000"),
+        ("9.00000", "10.000000"),
+        ("10.000000", "10.000000"),
+        ("11.000000", "10.000000"),
+        ("invalid", "10.000000"),
+        (
+            "0.000000000000000000000000000000000000000",
+            "1.000000000000000000000000000000000000000",
+        ),
+    ] {
+        assert_wire_or_canonical_rejects(
+            EventKind::LiquidationStarted,
+            encode_liquidation_started(&WireLiquidationStarted {
+                account_id: account_id.clone(),
+                liquidation_id: "liquidation-42".to_owned(),
+                margin_value: margin_value.to_owned(),
+                maintenance_requirement: maintenance_requirement.to_owned(),
+            }),
+            "margin_value/maintenance_requirement",
+            &format!("{margin_value}/{maintenance_requirement}"),
+        );
+    }
+
+    for invalid in [
+        "0",
+        "-1",
+        "invalid",
+        "1.000000000000000000000000000000000000000",
+    ] {
+        assert_wire_or_canonical_rejects(
+            EventKind::LiquidationFill,
+            encode_liquidation_fill(&WireLiquidationFill {
+                liquidation_id: "liquidation-42".to_owned(),
+                account_id: account_id.clone(),
+                market_id: "perp:BTC".to_owned(),
+                price: invalid.to_owned(),
+                quantity: "1".to_owned(),
+            }),
+            "price",
+            invalid,
+        );
+        assert_wire_or_canonical_rejects(
+            EventKind::LiquidationFill,
+            encode_liquidation_fill(&WireLiquidationFill {
+                liquidation_id: "liquidation-42".to_owned(),
+                account_id: account_id.clone(),
+                market_id: "perp:BTC".to_owned(),
+                price: "1".to_owned(),
+                quantity: invalid.to_owned(),
+            }),
+            "quantity",
+            invalid,
+        );
+        assert_wire_or_canonical_rejects(
+            EventKind::BackstopLiquidation,
+            encode_backstop_liquidation(&WireBackstopLiquidation {
+                liquidation_id: "liquidation-42".to_owned(),
+                account_id: account_id.clone(),
+                backstop_account_id: backstop_account_id.clone(),
+                market_id: "perp:BTC".to_owned(),
+                quantity: invalid.to_owned(),
+            }),
+            "quantity",
+            invalid,
+        );
+        assert_wire_or_canonical_rejects(
+            EventKind::PositionSettled,
+            encode_position_settled(&WirePositionSettled {
+                account_id: account_id.clone(),
+                market_id: "perp:BTC".to_owned(),
+                settlement_price: "0".to_owned(),
+                settled_quantity: invalid.to_owned(),
+                realized_pnl: "-1".to_owned(),
+            }),
+            "settled_quantity",
+            invalid,
+        );
+    }
+
+    assert_wire_or_canonical_rejects(
+        EventKind::PositionSettled,
+        encode_position_settled(&WirePositionSettled {
+            account_id: account_id.clone(),
+            market_id: "perp:BTC".to_owned(),
+            settlement_price: "-0.000001".to_owned(),
+            settled_quantity: "1".to_owned(),
+            realized_pnl: "-1".to_owned(),
+        }),
+        "settlement_price",
+        "-0.000001",
+    );
+
+    assert_wire_or_canonical_rejects(
+        EventKind::BackstopLiquidation,
+        encode_backstop_liquidation(&WireBackstopLiquidation {
+            liquidation_id: "liquidation-42".to_owned(),
+            account_id: account_id.clone(),
+            backstop_account_id: account_id,
+            market_id: "perp:BTC".to_owned(),
+            quantity: "1".to_owned(),
+        }),
+        "backstop_account_id",
+        "same account",
+    );
+
+    for realized_pnl in ["-1.000000", "0.000000", "1.000000"] {
+        let bytes = encode_position_settled(&WirePositionSettled {
+            account_id: account(0x11).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            settlement_price: "0.000000".to_owned(),
+            settled_quantity: "1.00000000".to_owned(),
+            realized_pnl: realized_pnl.to_owned(),
+        })
+        .unwrap();
+        assert!(
+            EventPayload::decode(EventKind::PositionSettled, &bytes).is_ok(),
+            "PositionSettled rejected signed realized PnL {realized_pnl}"
+        );
+    }
+}
+
+#[test]
+fn liquidation_and_settlement_payloads_reject_malformed_domain_identities() {
+    let account_id = account(0x11).to_api_string();
+    let backstop_account_id = account(0x22).to_api_string();
+    for invalid_id in ["", " liquidation-42", "liquidation-42 "] {
+        assert_wire_or_canonical_rejects(
+            EventKind::LiquidationStarted,
+            encode_liquidation_started(&WireLiquidationStarted {
+                account_id: account_id.clone(),
+                liquidation_id: invalid_id.to_owned(),
+                margin_value: "9.000000".to_owned(),
+                maintenance_requirement: "10.000000".to_owned(),
+            }),
+            "liquidation_id",
+            invalid_id,
+        );
+    }
+
+    for invalid_account in [
+        "",
+        "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "0x111111111111111111111111111111111111111",
+    ] {
+        assert_wire_or_canonical_rejects(
+            EventKind::BackstopLiquidation,
+            encode_backstop_liquidation(&WireBackstopLiquidation {
+                liquidation_id: "liquidation-42".to_owned(),
+                account_id: invalid_account.to_owned(),
+                backstop_account_id: backstop_account_id.clone(),
+                market_id: "perp:BTC".to_owned(),
+                quantity: "1".to_owned(),
+            }),
+            "account_id",
+            invalid_account,
+        );
+    }
+
+    for invalid_market in ["", " perp:BTC", "perp:BTC "] {
+        assert_wire_or_canonical_rejects(
+            EventKind::LiquidationFill,
+            encode_liquidation_fill(&WireLiquidationFill {
+                liquidation_id: "liquidation-42".to_owned(),
+                account_id: account_id.clone(),
+                market_id: invalid_market.to_owned(),
+                price: "1".to_owned(),
+                quantity: "1".to_owned(),
+            }),
+            "market_id",
+            invalid_market,
+        );
     }
 }
 
@@ -1612,6 +1927,10 @@ fn strict_account_default_payloads_decode_to_canonical_variants() {
         EventKind::AccountModeChanged,
         EventKind::MarginModeChanged,
         EventKind::LeverageChanged,
+        EventKind::LiquidationStarted,
+        EventKind::LiquidationFill,
+        EventKind::BackstopLiquidation,
+        EventKind::PositionSettled,
     ] {
         let bytes = encode_default_event_payload(kind.as_wire_name()).unwrap();
         let payload = EventPayload::decode(kind, &bytes)
@@ -1776,6 +2095,64 @@ fn enclosing_fee_event_preserves_inner_unknown_fields_without_changing_rebate_si
             fee_type: FeeTypeV1::MakerRebate,
             ..
         }) if fee_rate.raw() < 0
+    ));
+    let reencoded = WireCanonicalEventEnvelope::decode(&decoded.encode_to_vec().unwrap()).unwrap();
+    assert_eq!(reencoded.payload, wire.payload);
+}
+
+#[test]
+fn enclosing_liquidation_event_preserves_inner_unknown_fields_and_exact_values() {
+    let account_id = account(0x11);
+    let time = ProtocolTime::from_unix_micros(1_721_779_200_000_044).unwrap();
+    let envelope = CanonicalEventEnvelope::from_input(CanonicalEventInput {
+        schema_version: "1.0.0".to_owned(),
+        chain_id: ChainId::new("mainnet").unwrap(),
+        block_height: BlockHeight::new(44),
+        block_time: time,
+        transaction_id: TransactionId::new("liquidation-tx-44").unwrap(),
+        transaction_index: 0,
+        canonical_event_index: 0,
+        market_ids: Vec::new(),
+        account_ids: vec![account_id],
+        source_evidence: vec![
+            canonical_events::SourceEvidence::try_new(
+                SourceId::new("liquidation-test").unwrap(),
+                "v1",
+                "44",
+                [0x44; 32],
+            )
+            .unwrap(),
+        ],
+        confirmation_class: ConfirmationClass::CommittedPrimary,
+        observed_at: KnownTime::from_unix_micros(time.unix_micros()).unwrap(),
+        ingested_at: KnownTime::from_unix_micros(time.unix_micros()).unwrap(),
+        canonicalized_at: KnownTime::from_unix_micros(time.unix_micros()).unwrap(),
+        parser_version: "liquidation-test-v1".to_owned(),
+        payload: EventPayload::LiquidationStarted(LiquidationStarted {
+            account_id,
+            liquidation_id: LiquidationId::new("liquidation-44").unwrap(),
+            margin_value: UsdAmount::parse_at_scale("99", 6).unwrap(),
+            maintenance_requirement: UsdAmount::parse_at_scale("100", 6).unwrap(),
+        }),
+    })
+    .unwrap();
+    let mut wire = WireCanonicalEventEnvelope::decode(&envelope.encode_to_vec().unwrap()).unwrap();
+    wire.payload = mutate_inner_message(&wire.payload, |message| {
+        append_varint_field(message, 100, 1)
+    });
+    wire.payload_hash = blake3::hash(&wire.payload).as_bytes().to_vec();
+
+    let decoded = CanonicalEventEnvelope::decode(&wire.encode_to_vec()).unwrap();
+    assert!(matches!(
+        decoded.payload(),
+        EventPayload::LiquidationStarted(LiquidationStarted {
+            liquidation_id,
+            margin_value,
+            maintenance_requirement,
+            ..
+        }) if liquidation_id.as_str() == "liquidation-44"
+            && *margin_value == UsdAmount::parse_at_scale("99", 6).unwrap()
+            && *maintenance_requirement == UsdAmount::parse_at_scale("100", 6).unwrap()
     ));
     let reencoded = WireCanonicalEventEnvelope::decode(&decoded.encode_to_vec().unwrap()).unwrap();
     assert_eq!(reencoded.payload, wire.payload);

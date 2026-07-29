@@ -737,6 +737,41 @@ pub struct WireLeverageChanged {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireLiquidationStarted {
+    pub account_id: String,
+    pub liquidation_id: String,
+    pub margin_value: String,
+    pub maintenance_requirement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireLiquidationFill {
+    pub liquidation_id: String,
+    pub account_id: String,
+    pub market_id: String,
+    pub price: String,
+    pub quantity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireBackstopLiquidation {
+    pub liquidation_id: String,
+    pub account_id: String,
+    pub backstop_account_id: String,
+    pub market_id: String,
+    pub quantity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WirePositionSettled {
+    pub account_id: String,
+    pub market_id: String,
+    pub settlement_price: String,
+    pub settled_quantity: String,
+    pub realized_pnl: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireDexCreated {
     pub dex_id: String,
     pub name: String,
@@ -1526,6 +1561,144 @@ pub fn decode_leverage_changed(bytes: &[u8]) -> Result<WireLeverageChanged, Payl
     })
 }
 
+pub fn encode_liquidation_started(
+    value: &WireLiquidationStarted,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_liquidation_started(value.clone())?;
+    bounded_account_payload(
+        "LiquidationStarted",
+        generated::hl::canonical::v1::LiquidationStarted {
+            account_id: value.account_id,
+            liquidation_id: value.liquidation_id,
+            margin_value: value.margin_value,
+            maintenance_requirement: value.maintenance_requirement,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_liquidation_started(
+    bytes: &[u8],
+) -> Result<WireLiquidationStarted, PayloadCodecError> {
+    validate_account_payload_size("LiquidationStarted", bytes)?;
+    let message = generated::hl::canonical::v1::LiquidationStarted::decode(
+        unwrap_payload("LiquidationStarted", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "LiquidationStarted".to_owned(),
+        source,
+    })?;
+    validate_liquidation_started(WireLiquidationStarted {
+        account_id: message.account_id,
+        liquidation_id: message.liquidation_id,
+        margin_value: message.margin_value,
+        maintenance_requirement: message.maintenance_requirement,
+    })
+}
+
+pub fn encode_liquidation_fill(value: &WireLiquidationFill) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_liquidation_fill(value.clone())?;
+    bounded_account_payload(
+        "LiquidationFill",
+        generated::hl::canonical::v1::LiquidationFill {
+            liquidation_id: value.liquidation_id,
+            account_id: value.account_id,
+            market_id: value.market_id,
+            price: value.price,
+            quantity: value.quantity,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_liquidation_fill(bytes: &[u8]) -> Result<WireLiquidationFill, PayloadCodecError> {
+    validate_account_payload_size("LiquidationFill", bytes)?;
+    let message = generated::hl::canonical::v1::LiquidationFill::decode(
+        unwrap_payload("LiquidationFill", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "LiquidationFill".to_owned(),
+        source,
+    })?;
+    validate_liquidation_fill(WireLiquidationFill {
+        liquidation_id: message.liquidation_id,
+        account_id: message.account_id,
+        market_id: message.market_id,
+        price: message.price,
+        quantity: message.quantity,
+    })
+}
+
+pub fn encode_backstop_liquidation(
+    value: &WireBackstopLiquidation,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_backstop_liquidation(value.clone())?;
+    bounded_account_payload(
+        "BackstopLiquidation",
+        generated::hl::canonical::v1::BackstopLiquidation {
+            liquidation_id: value.liquidation_id,
+            account_id: value.account_id,
+            backstop_account_id: value.backstop_account_id,
+            market_id: value.market_id,
+            quantity: value.quantity,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_backstop_liquidation(
+    bytes: &[u8],
+) -> Result<WireBackstopLiquidation, PayloadCodecError> {
+    validate_account_payload_size("BackstopLiquidation", bytes)?;
+    let message = generated::hl::canonical::v1::BackstopLiquidation::decode(
+        unwrap_payload("BackstopLiquidation", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "BackstopLiquidation".to_owned(),
+        source,
+    })?;
+    validate_backstop_liquidation(WireBackstopLiquidation {
+        liquidation_id: message.liquidation_id,
+        account_id: message.account_id,
+        backstop_account_id: message.backstop_account_id,
+        market_id: message.market_id,
+        quantity: message.quantity,
+    })
+}
+
+pub fn encode_position_settled(value: &WirePositionSettled) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_position_settled(value.clone())?;
+    bounded_account_payload(
+        "PositionSettled",
+        generated::hl::canonical::v1::PositionSettled {
+            account_id: value.account_id,
+            market_id: value.market_id,
+            settlement_price: value.settlement_price,
+            settled_quantity: value.settled_quantity,
+            realized_pnl: value.realized_pnl,
+        }
+        .encode_to_vec(),
+    )
+}
+
+pub fn decode_position_settled(bytes: &[u8]) -> Result<WirePositionSettled, PayloadCodecError> {
+    validate_account_payload_size("PositionSettled", bytes)?;
+    let message = generated::hl::canonical::v1::PositionSettled::decode(
+        unwrap_payload("PositionSettled", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "PositionSettled".to_owned(),
+        source,
+    })?;
+    validate_position_settled(WirePositionSettled {
+        account_id: message.account_id,
+        market_id: message.market_id,
+        settlement_price: message.settlement_price,
+        settled_quantity: message.settled_quantity,
+        realized_pnl: message.realized_pnl,
+    })
+}
+
 pub fn encode_dex_created(value: &WireDexCreated) -> Result<Vec<u8>, PayloadCodecError> {
     let value = validate_dex_created(value.clone())?;
     Ok(wrap_payload(
@@ -2037,13 +2210,40 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
             });
         }
         "LiquidationStarted" => {
-            default_message::<generated::hl::canonical::v1::LiquidationStarted>()
+            return encode_liquidation_started(&WireLiquidationStarted {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                liquidation_id: "synthetic-default-liquidation".to_owned(),
+                margin_value: "0".to_owned(),
+                maintenance_requirement: "1".to_owned(),
+            });
         }
-        "LiquidationFill" => default_message::<generated::hl::canonical::v1::LiquidationFill>(),
+        "LiquidationFill" => {
+            return encode_liquidation_fill(&WireLiquidationFill {
+                liquidation_id: "synthetic-default-liquidation".to_owned(),
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                price: "1".to_owned(),
+                quantity: "1".to_owned(),
+            });
+        }
         "BackstopLiquidation" => {
-            default_message::<generated::hl::canonical::v1::BackstopLiquidation>()
+            return encode_backstop_liquidation(&WireBackstopLiquidation {
+                liquidation_id: "synthetic-default-liquidation".to_owned(),
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                backstop_account_id: "0x2222222222222222222222222222222222222222".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                quantity: "1".to_owned(),
+            });
         }
-        "PositionSettled" => default_message::<generated::hl::canonical::v1::PositionSettled>(),
+        "PositionSettled" => {
+            return encode_position_settled(&WirePositionSettled {
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                settlement_price: "0".to_owned(),
+                settled_quantity: "1".to_owned(),
+                realized_pnl: "0".to_owned(),
+            });
+        }
         "MarketHalted" => default_message::<generated::hl::canonical::v1::MarketHalted>(),
         "MarketResumed" => default_message::<generated::hl::canonical::v1::MarketResumed>(),
         "OpenInterestCapChanged" => {
@@ -2089,6 +2289,10 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
             | "AccountModeChanged"
             | "MarginModeChanged"
             | "LeverageChanged"
+            | "LiquidationStarted"
+            | "LiquidationFill"
+            | "BackstopLiquidation"
+            | "PositionSettled"
     ) {
         validate_account_payload_size(kind, bytes)?;
     }
@@ -2131,10 +2335,10 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "AccountModeChanged" => decode_account_mode_changed(bytes).map(|_| ()),
         "MarginModeChanged" => decode_margin_mode_changed(bytes).map(|_| ()),
         "LeverageChanged" => decode_leverage_changed(bytes).map(|_| ()),
-        "LiquidationStarted" => decode!(generated::hl::canonical::v1::LiquidationStarted),
-        "LiquidationFill" => decode!(generated::hl::canonical::v1::LiquidationFill),
-        "BackstopLiquidation" => decode!(generated::hl::canonical::v1::BackstopLiquidation),
-        "PositionSettled" => decode!(generated::hl::canonical::v1::PositionSettled),
+        "LiquidationStarted" => decode_liquidation_started(bytes).map(|_| ()),
+        "LiquidationFill" => decode_liquidation_fill(bytes).map(|_| ()),
+        "BackstopLiquidation" => decode_backstop_liquidation(bytes).map(|_| ()),
+        "PositionSettled" => decode_position_settled(bytes).map(|_| ()),
         "MarketHalted" => decode_market_halted(bytes).map(|_| ()),
         "MarketResumed" => decode_market_resumed(bytes).map(|_| ()),
         "OpenInterestCapChanged" => decode_open_interest_cap_changed(bytes).map(|_| ()),
@@ -2581,6 +2785,97 @@ fn validate_leverage_changed(
     Ok(value)
 }
 
+fn validate_liquidation_started(
+    mut value: WireLiquidationStarted,
+) -> Result<WireLiquidationStarted, PayloadCodecError> {
+    const KIND: &str = "LiquidationStarted";
+    value.account_id = required_api_address(KIND, "account_id", value.account_id)?;
+    value.liquidation_id = required_payload_field(KIND, "liquidation_id", value.liquidation_id)?;
+    value.margin_value = required_payload_field(KIND, "margin_value", value.margin_value)?;
+    value.maintenance_requirement = required_payload_field(
+        KIND,
+        "maintenance_requirement",
+        value.maintenance_requirement,
+    )?;
+    let (margin_raw, margin_scale) = parse_wire_decimal(KIND, "margin_value", &value.margin_value)?;
+    let (maintenance_raw, maintenance_scale) = parse_wire_decimal(
+        KIND,
+        "maintenance_requirement",
+        &value.maintenance_requirement,
+    )?;
+    if margin_raw < 0 || maintenance_raw < 0 {
+        return Err(PayloadCodecError::Invalid {
+            kind: KIND.to_owned(),
+            reason: "margin_value and maintenance_requirement must be nonnegative".to_owned(),
+        });
+    }
+    if margin_scale != maintenance_scale {
+        return Err(PayloadCodecError::Invalid {
+            kind: KIND.to_owned(),
+            reason: "margin_value and maintenance_requirement must use the same scale".to_owned(),
+        });
+    }
+    if margin_raw >= maintenance_raw {
+        return Err(PayloadCodecError::Invalid {
+            kind: KIND.to_owned(),
+            reason: "margin_value must be less than maintenance_requirement".to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+fn validate_liquidation_fill(
+    mut value: WireLiquidationFill,
+) -> Result<WireLiquidationFill, PayloadCodecError> {
+    const KIND: &str = "LiquidationFill";
+    value.liquidation_id = required_payload_field(KIND, "liquidation_id", value.liquidation_id)?;
+    value.account_id = required_api_address(KIND, "account_id", value.account_id)?;
+    value.market_id = required_payload_field(KIND, "market_id", value.market_id)?;
+    value.price = required_payload_field(KIND, "price", value.price)?;
+    value.quantity = required_payload_field(KIND, "quantity", value.quantity)?;
+    require_positive_wire_decimal(KIND, "price", &value.price)?;
+    require_positive_wire_decimal(KIND, "quantity", &value.quantity)?;
+    Ok(value)
+}
+
+fn validate_backstop_liquidation(
+    mut value: WireBackstopLiquidation,
+) -> Result<WireBackstopLiquidation, PayloadCodecError> {
+    const KIND: &str = "BackstopLiquidation";
+    value.liquidation_id = required_payload_field(KIND, "liquidation_id", value.liquidation_id)?;
+    value.account_id = required_api_address(KIND, "account_id", value.account_id)?;
+    value.backstop_account_id =
+        required_api_address(KIND, "backstop_account_id", value.backstop_account_id)?;
+    require_distinct_accounts(
+        KIND,
+        "account_id",
+        &value.account_id,
+        "backstop_account_id",
+        &value.backstop_account_id,
+    )?;
+    value.market_id = required_payload_field(KIND, "market_id", value.market_id)?;
+    value.quantity = required_payload_field(KIND, "quantity", value.quantity)?;
+    require_positive_wire_decimal(KIND, "quantity", &value.quantity)?;
+    Ok(value)
+}
+
+fn validate_position_settled(
+    mut value: WirePositionSettled,
+) -> Result<WirePositionSettled, PayloadCodecError> {
+    const KIND: &str = "PositionSettled";
+    value.account_id = required_api_address(KIND, "account_id", value.account_id)?;
+    value.market_id = required_payload_field(KIND, "market_id", value.market_id)?;
+    value.settlement_price =
+        required_payload_field(KIND, "settlement_price", value.settlement_price)?;
+    value.settled_quantity =
+        required_payload_field(KIND, "settled_quantity", value.settled_quantity)?;
+    value.realized_pnl = required_payload_field(KIND, "realized_pnl", value.realized_pnl)?;
+    require_nonnegative_wire_decimal(KIND, "settlement_price", &value.settlement_price)?;
+    require_positive_wire_decimal(KIND, "settled_quantity", &value.settled_quantity)?;
+    parse_wire_decimal(KIND, "realized_pnl", &value.realized_pnl)?;
+    Ok(value)
+}
+
 fn validate_dex_created(mut value: WireDexCreated) -> Result<WireDexCreated, PayloadCodecError> {
     value.dex_id = required_payload_field("DexCreated", "dex_id", value.dex_id)?;
     value.name = required_bounded_text("DexCreated", "name", value.name, 256)?;
@@ -2900,6 +3195,111 @@ fn required_wire_value(
         });
     }
     Ok(value)
+}
+
+fn require_positive_wire_decimal(
+    kind: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), PayloadCodecError> {
+    let (raw, _) = parse_wire_decimal(kind, field, value)?;
+    if raw <= 0 {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be positive"),
+        });
+    }
+    Ok(())
+}
+
+fn require_nonnegative_wire_decimal(
+    kind: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), PayloadCodecError> {
+    let (raw, _) = parse_wire_decimal(kind, field, value)?;
+    if raw < 0 {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be nonnegative"),
+        });
+    }
+    Ok(())
+}
+
+fn parse_wire_decimal(
+    kind: &str,
+    field: &str,
+    value: &str,
+) -> Result<(i128, u8), PayloadCodecError> {
+    const MAX_DECIMAL_SCALE: usize = 38;
+    let (negative, unsigned) = match value.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, value),
+    };
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || (!fraction.is_empty() && !fraction.bytes().all(|byte| byte.is_ascii_digit()))
+        || value.ends_with('.')
+    {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} must be a canonical decimal string"),
+        });
+    }
+    if fraction.len() > MAX_DECIMAL_SCALE {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} exceeds the frozen 38-digit decimal scale"),
+        });
+    }
+
+    let magnitude = whole
+        .parse::<u128>()
+        .ok()
+        .and_then(|whole| {
+            let factor = 10_u128.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+            let fractional = if fraction.is_empty() {
+                Some(0)
+            } else {
+                fraction.parse::<u128>().ok()
+            }?;
+            whole
+                .checked_mul(factor)
+                .and_then(|scaled| scaled.checked_add(fractional))
+        })
+        .ok_or_else(|| PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: format!("{field} is outside the fixed-point range"),
+        })?;
+    let positive_limit = i128::MAX as u128;
+    let negative_limit = positive_limit + 1;
+    let raw = if negative {
+        if magnitude > negative_limit {
+            return Err(PayloadCodecError::Invalid {
+                kind: kind.to_owned(),
+                reason: format!("{field} is outside the fixed-point range"),
+            });
+        }
+        if magnitude == negative_limit {
+            i128::MIN
+        } else {
+            -(magnitude as i128)
+        }
+    } else {
+        if magnitude > positive_limit {
+            return Err(PayloadCodecError::Invalid {
+                kind: kind.to_owned(),
+                reason: format!("{field} is outside the fixed-point range"),
+            });
+        }
+        magnitude as i128
+    };
+    Ok((raw, u8::try_from(fraction.len()).expect("scale is bounded")))
 }
 
 fn decimal_wire_sign(kind: &str, field: &str, value: &str) -> Result<i8, PayloadCodecError> {
