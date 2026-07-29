@@ -58,6 +58,7 @@ string_id!(ClusterVersionId);
 string_id!(DexId);
 string_id!(MarketId);
 string_id!(AssetId);
+string_id!(OutcomeId);
 string_id!(OrderId);
 string_id!(ClientOrderId);
 string_id!(TradeId);

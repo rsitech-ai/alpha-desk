@@ -1,15 +1,21 @@
 use api_contracts::{
-    PayloadCodecError, WireAssetContextUpdated, WireDexCreated, WireMarketCreated,
-    WireMarketMetadataChanged, WireOrderAccepted, WireOrderCancelled, WireOrderFilled,
-    WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested,
-    WireTradeMatched, decode_asset_context_updated, decode_dex_created, decode_market_created,
-    decode_market_metadata_changed, decode_order_accepted, decode_order_cancelled,
-    decode_order_filled, decode_order_modified, decode_order_partially_filled,
-    decode_order_rejected, decode_order_rested, decode_trade_matched, encode_asset_context_updated,
-    encode_dex_created, encode_market_created, encode_market_metadata_changed,
-    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
-    encode_order_partially_filled, encode_order_rejected, encode_order_rested,
-    encode_trade_matched,
+    PayloadCodecError, WireAssetContextUpdated, WireDexCreated, WireFundingRateUpdated,
+    WireMarginTableChanged, WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged,
+    WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted,
+    WireOrderCancelled, WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled,
+    WireOrderRejected, WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WireTradeMatched,
+    decode_asset_context_updated, decode_dex_created, decode_funding_rate_updated,
+    decode_margin_table_changed, decode_market_created, decode_market_halted,
+    decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
+    decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
+    decode_order_modified, decode_order_partially_filled, decode_order_rejected,
+    decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_trade_matched,
+    encode_asset_context_updated, encode_dex_created, encode_funding_rate_updated,
+    encode_margin_table_changed, encode_market_created, encode_market_halted,
+    encode_market_metadata_changed, encode_market_resumed, encode_open_interest_cap_changed,
+    encode_oracle_updated, encode_order_accepted, encode_order_cancelled, encode_order_filled,
+    encode_order_modified, encode_order_partially_filled, encode_order_rejected,
+    encode_order_rested, encode_outcome_created, encode_outcome_resolved, encode_trade_matched,
 };
 
 fn trade() -> WireTradeMatched {
@@ -370,5 +376,157 @@ fn market_metadata_wire_payloads_reject_wrong_kind() {
     assert!(matches!(
         decode_market_created(&encoded),
         Err(PayloadCodecError::KindMismatch { .. })
+    ));
+}
+
+#[test]
+fn market_status_wire_payloads_round_trip_and_reject_ambiguous_transitions() {
+    let halted = WireMarketHalted {
+        market_id: "perp:BTC".to_owned(),
+        reason: "scheduled_protocol_upgrade".to_owned(),
+    };
+    assert_eq!(
+        decode_market_halted(&encode_market_halted(&halted).unwrap()).unwrap(),
+        halted
+    );
+
+    let resumed = WireMarketResumed {
+        market_id: "perp:BTC".to_owned(),
+        reason: "upgrade_complete".to_owned(),
+    };
+    assert_eq!(
+        decode_market_resumed(&encode_market_resumed(&resumed).unwrap()).unwrap(),
+        resumed
+    );
+
+    let cap = WireOpenInterestCapChanged {
+        market_id: "perp:BTC".to_owned(),
+        previous_cap: "100000000".to_owned(),
+        new_cap: "125000000".to_owned(),
+    };
+    assert_eq!(
+        decode_open_interest_cap_changed(&encode_open_interest_cap_changed(&cap).unwrap()).unwrap(),
+        cap
+    );
+
+    let margin = WireMarginTableChanged {
+        market_id: "perp:BTC".to_owned(),
+        previous_table_hash: "margin-table-v7".to_owned(),
+        new_table_hash: "margin-table-v8".to_owned(),
+    };
+    assert_eq!(
+        decode_margin_table_changed(&encode_margin_table_changed(&margin).unwrap()).unwrap(),
+        margin
+    );
+
+    for invalid in [
+        WireMarketHalted {
+            market_id: String::new(),
+            reason: "scheduled".to_owned(),
+        },
+        WireMarketHalted {
+            market_id: "perp:BTC".to_owned(),
+            reason: "unsafe\nreason".to_owned(),
+        },
+        WireMarketHalted {
+            market_id: "perp:BTC".to_owned(),
+            reason: "x".repeat(1_025),
+        },
+    ] {
+        assert!(matches!(
+            encode_market_halted(&invalid),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
+
+    assert!(matches!(
+        encode_open_interest_cap_changed(&WireOpenInterestCapChanged {
+            market_id: "perp:BTC".to_owned(),
+            previous_cap: "100".to_owned(),
+            new_cap: "100".to_owned(),
+        }),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+    assert!(matches!(
+        encode_margin_table_changed(&WireMarginTableChanged {
+            market_id: "perp:BTC".to_owned(),
+            previous_table_hash: "same".to_owned(),
+            new_table_hash: "same".to_owned(),
+        }),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn market_valuation_and_outcome_wire_payloads_round_trip_and_bound_time() {
+    let oracle = WireOracleUpdated {
+        market_id: "perp:BTC".to_owned(),
+        oracle_price: "65000.125000".to_owned(),
+        source: "hyperliquid-validator-oracle".to_owned(),
+        effective_at_micros: 1_721_779_200_000_042,
+    };
+    assert_eq!(
+        decode_oracle_updated(&encode_oracle_updated(&oracle).unwrap()).unwrap(),
+        oracle
+    );
+
+    let funding = WireFundingRateUpdated {
+        market_id: "perp:BTC".to_owned(),
+        funding_rate: "-0.00001250".to_owned(),
+        effective_at_micros: 1_721_779_200_000_043,
+    };
+    assert_eq!(
+        decode_funding_rate_updated(&encode_funding_rate_updated(&funding).unwrap()).unwrap(),
+        funding
+    );
+
+    let created = WireOutcomeCreated {
+        market_id: "outcome:presidential-election".to_owned(),
+        outcome_id: "candidate-a".to_owned(),
+        description: "Candidate A wins the election".to_owned(),
+    };
+    assert_eq!(
+        decode_outcome_created(&encode_outcome_created(&created).unwrap()).unwrap(),
+        created
+    );
+
+    let resolved = WireOutcomeResolved {
+        market_id: "outcome:presidential-election".to_owned(),
+        outcome_id: "candidate-a".to_owned(),
+        settlement_value: "1.000000".to_owned(),
+        resolved_at_micros: 1_730_000_000_000_000,
+    };
+    assert_eq!(
+        decode_outcome_resolved(&encode_outcome_resolved(&resolved).unwrap()).unwrap(),
+        resolved
+    );
+
+    assert!(matches!(
+        encode_oracle_updated(&WireOracleUpdated {
+            effective_at_micros: -1,
+            ..oracle
+        }),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+    assert!(matches!(
+        encode_funding_rate_updated(&WireFundingRateUpdated {
+            effective_at_micros: -1,
+            ..funding
+        }),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+    assert!(matches!(
+        encode_outcome_created(&WireOutcomeCreated {
+            description: "unsafe\noutcome".to_owned(),
+            ..created
+        }),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+    assert!(matches!(
+        encode_outcome_resolved(&WireOutcomeResolved {
+            resolved_at_micros: -1,
+            ..resolved
+        }),
+        Err(PayloadCodecError::Invalid { .. })
     ));
 }

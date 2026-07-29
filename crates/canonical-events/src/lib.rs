@@ -16,22 +16,30 @@ pub use node_mapping::{
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
-    WireAssetContextUpdated, WireCanonicalEventEnvelope, WireDexCreated, WireMarketCreated,
-    WireMarketMetadataChanged, WireOrderAccepted, WireOrderCancelled, WireOrderFilled,
-    WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested,
+    WireAssetContextUpdated, WireCanonicalEventEnvelope, WireDexCreated, WireFundingRateUpdated,
+    WireMarginTableChanged, WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged,
+    WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted,
+    WireOrderCancelled, WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled,
+    WireOrderRejected, WireOrderRested, WireOutcomeCreated, WireOutcomeResolved,
     WireSourceEvidence, WireTradeMatched, decode_asset_context_updated, decode_dex_created,
-    decode_market_created, decode_market_metadata_changed, decode_order_accepted,
+    decode_funding_rate_updated, decode_margin_table_changed, decode_market_created,
+    decode_market_halted, decode_market_metadata_changed, decode_market_resumed,
+    decode_open_interest_cap_changed, decode_oracle_updated, decode_order_accepted,
     decode_order_cancelled, decode_order_filled, decode_order_modified,
     decode_order_partially_filled, decode_order_rejected, decode_order_rested,
-    decode_trade_matched, encode_asset_context_updated, encode_default_event_payload,
-    encode_dex_created, encode_market_created, encode_market_metadata_changed,
-    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
+    decode_outcome_created, decode_outcome_resolved, decode_trade_matched,
+    encode_asset_context_updated, encode_default_event_payload, encode_dex_created,
+    encode_funding_rate_updated, encode_margin_table_changed, encode_market_created,
+    encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
+    encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
+    encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
-    encode_trade_matched, validate_event_payload,
+    encode_outcome_created, encode_outcome_resolved, encode_trade_matched, validate_event_payload,
 };
 use domain_types::{
-    Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId, EventId, KnownTime, MarketId,
-    OrderId, OrderSide, Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId,
+    Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId, EventId, FundingRate, KnownTime,
+    MarketId, OrderId, OrderSide, OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId,
+    TradeId, TransactionId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -296,6 +304,62 @@ pub struct MarketMetadataChanged {
     pub metadata_hash: [u8; HASH_LENGTH],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketHalted {
+    pub market_id: MarketId,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketResumed {
+    pub market_id: MarketId,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenInterestCapChanged {
+    pub market_id: MarketId,
+    pub previous_cap: QuoteAmount,
+    pub new_cap: QuoteAmount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarginTableChanged {
+    pub market_id: MarketId,
+    pub previous_table_hash: String,
+    pub new_table_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleUpdated {
+    pub market_id: MarketId,
+    pub oracle_price: Price,
+    pub source: String,
+    pub effective_at: ProtocolTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingRateUpdated {
+    pub market_id: MarketId,
+    pub funding_rate: FundingRate,
+    pub effective_at: ProtocolTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeCreated {
+    pub market_id: MarketId,
+    pub outcome_id: OutcomeId,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeResolved {
+    pub market_id: MarketId,
+    pub outcome_id: OutcomeId,
+    pub settlement_value: Price,
+    pub resolved_at: ProtocolTime,
+}
+
 macro_rules! opaque_payloads {
     ($($kind:ident),+ $(,)?) => {
         $(
@@ -323,6 +387,14 @@ macro_rules! opaque_payloads {
             AssetContextUpdated(AssetContextUpdated),
             MarketCreated(MarketCreated),
             MarketMetadataChanged(MarketMetadataChanged),
+            MarketHalted(MarketHalted),
+            MarketResumed(MarketResumed),
+            OpenInterestCapChanged(OpenInterestCapChanged),
+            MarginTableChanged(MarginTableChanged),
+            OracleUpdated(OracleUpdated),
+            FundingRateUpdated(FundingRateUpdated),
+            OutcomeCreated(OutcomeCreated),
+            OutcomeResolved(OutcomeResolved),
             TradeMatched(TradeMatched),
         }
 
@@ -342,6 +414,14 @@ macro_rules! opaque_payloads {
                     Self::AssetContextUpdated(_) => EventKind::AssetContextUpdated,
                     Self::MarketCreated(_) => EventKind::MarketCreated,
                     Self::MarketMetadataChanged(_) => EventKind::MarketMetadataChanged,
+                    Self::MarketHalted(_) => EventKind::MarketHalted,
+                    Self::MarketResumed(_) => EventKind::MarketResumed,
+                    Self::OpenInterestCapChanged(_) => EventKind::OpenInterestCapChanged,
+                    Self::MarginTableChanged(_) => EventKind::MarginTableChanged,
+                    Self::OracleUpdated(_) => EventKind::OracleUpdated,
+                    Self::FundingRateUpdated(_) => EventKind::FundingRateUpdated,
+                    Self::OutcomeCreated(_) => EventKind::OutcomeCreated,
+                    Self::OutcomeResolved(_) => EventKind::OutcomeResolved,
                     Self::TradeMatched(_) => EventKind::TradeMatched,
                 }
             }
@@ -442,6 +522,80 @@ macro_rules! opaque_payloads {
                         })
                         .map_err(payload_error)
                     }
+                    Self::MarketHalted(value) => encode_market_halted(&WireMarketHalted {
+                        market_id: value.market_id.to_string(),
+                        reason: value.reason.clone(),
+                    })
+                    .map_err(payload_error),
+                    Self::MarketResumed(value) => encode_market_resumed(&WireMarketResumed {
+                        market_id: value.market_id.to_string(),
+                        reason: value.reason.clone(),
+                    })
+                    .map_err(payload_error),
+                    Self::OpenInterestCapChanged(value) => {
+                        validate_open_interest_cap_semantics(value)?;
+                        encode_open_interest_cap_changed(&WireOpenInterestCapChanged {
+                            market_id: value.market_id.to_string(),
+                            previous_cap: value.previous_cap.to_string(),
+                            new_cap: value.new_cap.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::MarginTableChanged(value) => {
+                        encode_margin_table_changed(&WireMarginTableChanged {
+                            market_id: value.market_id.to_string(),
+                            previous_table_hash: value.previous_table_hash.clone(),
+                            new_table_hash: value.new_table_hash.clone(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::OracleUpdated(value) => {
+                        if value.oracle_price.raw() <= 0 {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "OracleUpdated price must be positive".to_owned(),
+                            });
+                        }
+                        encode_oracle_updated(&WireOracleUpdated {
+                            market_id: value.market_id.to_string(),
+                            oracle_price: value.oracle_price.to_string(),
+                            source: value.source.clone(),
+                            effective_at_micros: value.effective_at.unix_micros(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::FundingRateUpdated(value) => {
+                        encode_funding_rate_updated(&WireFundingRateUpdated {
+                            market_id: value.market_id.to_string(),
+                            funding_rate: value.funding_rate.to_string(),
+                            effective_at_micros: value.effective_at.unix_micros(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::OutcomeCreated(value) => {
+                        encode_outcome_created(&WireOutcomeCreated {
+                            market_id: value.market_id.to_string(),
+                            outcome_id: value.outcome_id.to_string(),
+                            description: value.description.clone(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::OutcomeResolved(value) => {
+                        if value.settlement_value.raw() < 0 {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "OutcomeResolved settlement value must be nonnegative"
+                                    .to_owned(),
+                            });
+                        }
+                        encode_outcome_resolved(&WireOutcomeResolved {
+                            market_id: value.market_id.to_string(),
+                            outcome_id: value.outcome_id.to_string(),
+                            settlement_value: value.settlement_value.to_string(),
+                            resolved_at_micros: value.resolved_at.unix_micros(),
+                        })
+                        .map_err(payload_error)
+                    }
                     Self::TradeMatched(value) => encode_trade_matched(&WireTradeMatched {
                         trade_id: value.trade_id.as_ref().map(ToString::to_string),
                         market_id: value.market_id.as_ref().map(ToString::to_string),
@@ -507,6 +661,29 @@ macro_rules! opaque_payloads {
                     }
                     EventKind::MarketMetadataChanged => decode_market_metadata_changed_payload(bytes)
                         .map(Self::MarketMetadataChanged),
+                    EventKind::MarketHalted => {
+                        decode_market_halted_payload(bytes).map(Self::MarketHalted)
+                    }
+                    EventKind::MarketResumed => {
+                        decode_market_resumed_payload(bytes).map(Self::MarketResumed)
+                    }
+                    EventKind::OpenInterestCapChanged => decode_open_interest_cap_changed_payload(bytes)
+                        .map(Self::OpenInterestCapChanged),
+                    EventKind::MarginTableChanged => {
+                        decode_margin_table_changed_payload(bytes).map(Self::MarginTableChanged)
+                    }
+                    EventKind::OracleUpdated => {
+                        decode_oracle_updated_payload(bytes).map(Self::OracleUpdated)
+                    }
+                    EventKind::FundingRateUpdated => {
+                        decode_funding_rate_updated_payload(bytes).map(Self::FundingRateUpdated)
+                    }
+                    EventKind::OutcomeCreated => {
+                        decode_outcome_created_payload(bytes).map(Self::OutcomeCreated)
+                    }
+                    EventKind::OutcomeResolved => {
+                        decode_outcome_resolved_payload(bytes).map(Self::OutcomeResolved)
+                    }
                     $(
                         EventKind::$kind => {
                             validate_payload(kind, bytes)?;
@@ -609,14 +786,6 @@ opaque_payloads!(
     LiquidationFill,
     BackstopLiquidation,
     PositionSettled,
-    MarketHalted,
-    MarketResumed,
-    OpenInterestCapChanged,
-    MarginTableChanged,
-    OracleUpdated,
-    FundingRateUpdated,
-    OutcomeCreated,
-    OutcomeResolved,
 );
 
 fn decode_order_accepted_payload(bytes: &[u8]) -> Result<OrderAccepted, ContractError> {
@@ -747,6 +916,114 @@ fn decode_market_metadata_changed_payload(
         market_id: payload_value(MarketId::new(value.market_id))?,
         metadata_version: value.metadata_version,
         metadata_hash: hash_array(value.metadata_hash, "MarketMetadataChanged metadata_hash")?,
+    })
+}
+
+fn decode_market_halted_payload(bytes: &[u8]) -> Result<MarketHalted, ContractError> {
+    let value = decode_market_halted(bytes).map_err(payload_error)?;
+    Ok(MarketHalted {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        reason: value.reason,
+    })
+}
+
+fn decode_market_resumed_payload(bytes: &[u8]) -> Result<MarketResumed, ContractError> {
+    let value = decode_market_resumed(bytes).map_err(payload_error)?;
+    Ok(MarketResumed {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        reason: value.reason,
+    })
+}
+
+fn decode_open_interest_cap_changed_payload(
+    bytes: &[u8],
+) -> Result<OpenInterestCapChanged, ContractError> {
+    let value = decode_open_interest_cap_changed(bytes).map_err(payload_error)?;
+    let changed = OpenInterestCapChanged {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        previous_cap: payload_value(QuoteAmount::from_str(&value.previous_cap))?,
+        new_cap: payload_value(QuoteAmount::from_str(&value.new_cap))?,
+    };
+    validate_open_interest_cap_semantics(&changed)?;
+    Ok(changed)
+}
+
+fn validate_open_interest_cap_semantics(
+    value: &OpenInterestCapChanged,
+) -> Result<(), ContractError> {
+    if value.previous_cap.raw() < 0 || value.new_cap.raw() < 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "OpenInterestCapChanged values must be nonnegative".to_owned(),
+        });
+    }
+    if value.previous_cap == value.new_cap {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "OpenInterestCapChanged values must differ".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn decode_margin_table_changed_payload(bytes: &[u8]) -> Result<MarginTableChanged, ContractError> {
+    let value = decode_margin_table_changed(bytes).map_err(payload_error)?;
+    Ok(MarginTableChanged {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        previous_table_hash: value.previous_table_hash,
+        new_table_hash: value.new_table_hash,
+    })
+}
+
+fn decode_oracle_updated_payload(bytes: &[u8]) -> Result<OracleUpdated, ContractError> {
+    let value = decode_oracle_updated(bytes).map_err(payload_error)?;
+    let oracle_price = payload_value(Price::from_str(&value.oracle_price))?;
+    if oracle_price.raw() <= 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "OracleUpdated price must be positive".to_owned(),
+        });
+    }
+    Ok(OracleUpdated {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        oracle_price,
+        source: value.source,
+        effective_at: payload_value(ProtocolTime::from_unix_micros(value.effective_at_micros))?,
+    })
+}
+
+fn decode_funding_rate_updated_payload(bytes: &[u8]) -> Result<FundingRateUpdated, ContractError> {
+    let value = decode_funding_rate_updated(bytes).map_err(payload_error)?;
+    Ok(FundingRateUpdated {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        funding_rate: payload_value(FundingRate::from_str(&value.funding_rate))?,
+        effective_at: payload_value(ProtocolTime::from_unix_micros(value.effective_at_micros))?,
+    })
+}
+
+fn decode_outcome_created_payload(bytes: &[u8]) -> Result<OutcomeCreated, ContractError> {
+    let value = decode_outcome_created(bytes).map_err(payload_error)?;
+    Ok(OutcomeCreated {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        outcome_id: payload_value(OutcomeId::new(value.outcome_id))?,
+        description: value.description,
+    })
+}
+
+fn decode_outcome_resolved_payload(bytes: &[u8]) -> Result<OutcomeResolved, ContractError> {
+    let value = decode_outcome_resolved(bytes).map_err(payload_error)?;
+    let settlement_value = payload_value(Price::from_str(&value.settlement_value))?;
+    if settlement_value.raw() < 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "OutcomeResolved settlement value must be nonnegative".to_owned(),
+        });
+    }
+    Ok(OutcomeResolved {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        outcome_id: payload_value(OutcomeId::new(value.outcome_id))?,
+        settlement_value,
+        resolved_at: payload_value(ProtocolTime::from_unix_micros(value.resolved_at_micros))?,
     })
 }
 
@@ -903,6 +1180,56 @@ fn fixture_payload_bytes(kind: EventKind) -> Result<Vec<u8>, ContractError> {
             })
             .map_err(payload_error)
         }
+        EventKind::MarketHalted => encode_market_halted(&WireMarketHalted {
+            market_id: "perp:BTC".to_owned(),
+            reason: "fixture halt".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::MarketResumed => encode_market_resumed(&WireMarketResumed {
+            market_id: "perp:BTC".to_owned(),
+            reason: "fixture resume".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::OpenInterestCapChanged => {
+            encode_open_interest_cap_changed(&WireOpenInterestCapChanged {
+                market_id: "perp:BTC".to_owned(),
+                previous_cap: "100000000".to_owned(),
+                new_cap: "125000000".to_owned(),
+            })
+            .map_err(payload_error)
+        }
+        EventKind::MarginTableChanged => encode_margin_table_changed(&WireMarginTableChanged {
+            market_id: "perp:BTC".to_owned(),
+            previous_table_hash: "fixture-margin-v1".to_owned(),
+            new_table_hash: "fixture-margin-v2".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::OracleUpdated => encode_oracle_updated(&WireOracleUpdated {
+            market_id: "perp:BTC".to_owned(),
+            oracle_price: "1.000000".to_owned(),
+            source: "fixture-oracle".to_owned(),
+            effective_at_micros: 1_700_000_000_000_000,
+        })
+        .map_err(payload_error),
+        EventKind::FundingRateUpdated => encode_funding_rate_updated(&WireFundingRateUpdated {
+            market_id: "perp:BTC".to_owned(),
+            funding_rate: "0.00010000".to_owned(),
+            effective_at_micros: 1_700_000_000_000_000,
+        })
+        .map_err(payload_error),
+        EventKind::OutcomeCreated => encode_outcome_created(&WireOutcomeCreated {
+            market_id: "outcome:fixture".to_owned(),
+            outcome_id: "yes".to_owned(),
+            description: "Fixture outcome".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::OutcomeResolved => encode_outcome_resolved(&WireOutcomeResolved {
+            market_id: "outcome:fixture".to_owned(),
+            outcome_id: "yes".to_owned(),
+            settlement_value: "1.000000".to_owned(),
+            resolved_at_micros: 1_700_000_000_000_000,
+        })
+        .map_err(payload_error),
         _ => encode_default_event_payload(kind.as_wire_name()).map_err(payload_error),
     }
 }

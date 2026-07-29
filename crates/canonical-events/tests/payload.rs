@@ -4,11 +4,13 @@ use api_contracts::{
 };
 use canonical_events::{
     AssetContextUpdated, CanonicalEventEnvelope, ConfirmationClass, ContractError, DexCreated,
-    EventKind, EventPayload, MarketCreated, MarketMetadataChanged, TradeMatched,
+    EventKind, EventPayload, FundingRateUpdated, MarginTableChanged, MarketCreated, MarketHalted,
+    MarketMetadataChanged, MarketResumed, OpenInterestCapChanged, OracleUpdated, OutcomeCreated,
+    OutcomeResolved, TradeMatched,
 };
 use domain_types::{
-    Address, AssetId, BlockHeight, DexId, EventId, KnownTime, MarketId, OrderId, Price,
-    ProtocolTime, Quantity, TradeId, TransactionId,
+    Address, AssetId, BlockHeight, DexId, EventId, FundingRate, KnownTime, MarketId, OrderId,
+    OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, TradeId, TransactionId,
 };
 
 fn task_4_envelope(schema_version: &str) -> Result<CanonicalEventEnvelope, ContractError> {
@@ -192,6 +194,95 @@ fn market_metadata_payloads_reject_semantically_invalid_direct_values() {
     .unwrap();
     assert!(matches!(
         EventPayload::decode(EventKind::MarketCreated, &invalid_wire),
+        Err(ContractError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn market_state_payloads_are_typed_and_round_trip_exactly() {
+    let market_id = MarketId::new("perp:BTC").unwrap();
+    let outcome_market_id = MarketId::new("outcome:presidential-election").unwrap();
+    let payloads = [
+        EventPayload::MarketHalted(MarketHalted {
+            market_id: market_id.clone(),
+            reason: "scheduled_upgrade".to_owned(),
+        }),
+        EventPayload::MarketResumed(MarketResumed {
+            market_id: market_id.clone(),
+            reason: "upgrade_complete".to_owned(),
+        }),
+        EventPayload::OpenInterestCapChanged(OpenInterestCapChanged {
+            market_id: market_id.clone(),
+            previous_cap: QuoteAmount::from_raw(100_000_000, 0).unwrap(),
+            new_cap: QuoteAmount::from_raw(125_000_000, 0).unwrap(),
+        }),
+        EventPayload::MarginTableChanged(MarginTableChanged {
+            market_id: market_id.clone(),
+            previous_table_hash: "margin-table-v7".to_owned(),
+            new_table_hash: "margin-table-v8".to_owned(),
+        }),
+        EventPayload::OracleUpdated(OracleUpdated {
+            market_id: market_id.clone(),
+            oracle_price: Price::parse_at_scale("65000.125", 6).unwrap(),
+            source: "hyperliquid-validator-oracle".to_owned(),
+            effective_at: ProtocolTime::from_unix_micros(1_721_779_200_000_042).unwrap(),
+        }),
+        EventPayload::FundingRateUpdated(FundingRateUpdated {
+            market_id,
+            funding_rate: "-0.00001250".parse::<FundingRate>().unwrap(),
+            effective_at: ProtocolTime::from_unix_micros(1_721_779_200_000_043).unwrap(),
+        }),
+        EventPayload::OutcomeCreated(OutcomeCreated {
+            market_id: outcome_market_id.clone(),
+            outcome_id: OutcomeId::new("candidate-a").unwrap(),
+            description: "Candidate A wins the election".to_owned(),
+        }),
+        EventPayload::OutcomeResolved(OutcomeResolved {
+            market_id: outcome_market_id,
+            outcome_id: OutcomeId::new("candidate-a").unwrap(),
+            settlement_value: Price::parse_at_scale("1", 6).unwrap(),
+            resolved_at: ProtocolTime::from_unix_micros(1_730_000_000_000_000).unwrap(),
+        }),
+    ];
+
+    for payload in payloads {
+        let kind = payload.kind();
+        let bytes = payload.encode_to_vec().unwrap();
+        assert_eq!(EventPayload::decode(kind, &bytes).unwrap(), payload);
+    }
+}
+
+#[test]
+fn market_state_payloads_reject_invalid_direct_values() {
+    let invalid_oracle = EventPayload::OracleUpdated(OracleUpdated {
+        market_id: MarketId::new("perp:BTC").unwrap(),
+        oracle_price: Price::from_raw(0, 6).unwrap(),
+        source: "validator".to_owned(),
+        effective_at: ProtocolTime::from_unix_micros(1).unwrap(),
+    });
+    assert!(matches!(
+        invalid_oracle.encode_to_vec(),
+        Err(ContractError::Invalid { .. })
+    ));
+
+    let invalid_cap = EventPayload::OpenInterestCapChanged(OpenInterestCapChanged {
+        market_id: MarketId::new("perp:BTC").unwrap(),
+        previous_cap: QuoteAmount::from_raw(100, 0).unwrap(),
+        new_cap: QuoteAmount::from_raw(100, 0).unwrap(),
+    });
+    assert!(matches!(
+        invalid_cap.encode_to_vec(),
+        Err(ContractError::Invalid { .. })
+    ));
+
+    let invalid_settlement = EventPayload::OutcomeResolved(OutcomeResolved {
+        market_id: MarketId::new("outcome:test").unwrap(),
+        outcome_id: OutcomeId::new("yes").unwrap(),
+        settlement_value: Price::from_raw(-1, 6).unwrap(),
+        resolved_at: ProtocolTime::from_unix_micros(1).unwrap(),
+    });
+    assert!(matches!(
+        invalid_settlement.encode_to_vec(),
         Err(ContractError::Invalid { .. })
     ));
 }
