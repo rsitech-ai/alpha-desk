@@ -177,6 +177,14 @@ impl CanonicalArchive for LocalParquetArchive {
         reader::read_range(self, chain, range)
     }
 
+    fn plan_range(
+        &self,
+        chain: &ChainId,
+        range: BlockRange,
+    ) -> Result<Vec<VerifiedManifest>, ArchiveError> {
+        reader::plan_range(self, chain, range)
+    }
+
     fn verify_manifest(&self, manifest: &ManifestId) -> Result<VerifiedManifest, ArchiveError> {
         reader::verify_block_manifest(self, manifest)
     }

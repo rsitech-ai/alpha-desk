@@ -79,6 +79,10 @@ Parser fuzzing additionally requires the pinned `nightly-2026-07-16` toolchain a
 `just state-replay-e2e` runs the bounded synthetic Stage 2 evidence path; use
 `just state-replay-soak` for the longer repeated rebuild profile. Neither
 qualifies live source semantics or Stage 2.
+For an existing canonical archive, use `just state-replay-archive-e2e` or
+`just state-replay-archive-soak` with an explicit chain, inclusive range, and
+manifest-boundary checkpoint height. Operator-archive evidence remains
+watermark-only and unqualified.
 
 To validate the local dependency stack separately:
 
