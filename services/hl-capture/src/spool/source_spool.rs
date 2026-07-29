@@ -5,6 +5,7 @@ use std::time::Duration;
 use domain_types::SourceId;
 use hl_protocol::{CursorTransition, SourceCursor, SourceObservation};
 
+use super::manifest::load_close_receipt;
 use super::{
     AppendReceipt, CloseReceipt, DurabilityPolicy, SegmentHeaderV1, SpoolError, SpoolReader,
     SpoolWriter, inspect_spool, io_error, recover_spool_tail,
@@ -84,8 +85,32 @@ pub struct SourceSpool {
     config: SourceSpoolConfig,
     writer: Option<SpoolWriter>,
     segment_paths: Vec<PathBuf>,
+    closed_segments: Vec<CloseReceipt>,
     last_durable_cursor: Option<SourceCursor>,
     chain_tip: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSpoolAppend {
+    durability_receipt: Option<AppendReceipt>,
+    closed_segment: Option<CloseReceipt>,
+}
+
+impl SourceSpoolAppend {
+    #[must_use]
+    pub const fn durability_receipt(&self) -> Option<&AppendReceipt> {
+        self.durability_receipt.as_ref()
+    }
+
+    #[must_use]
+    pub const fn closed_segment(&self) -> Option<&CloseReceipt> {
+        self.closed_segment.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Option<AppendReceipt>, Option<CloseReceipt>) {
+        (self.durability_receipt, self.closed_segment)
+    }
 }
 
 impl SourceSpool {
@@ -134,6 +159,11 @@ impl SourceSpool {
             (writer, active)
         };
         let mut segment_paths = inspection.segment_paths().to_vec();
+        let closed_segments = segment_paths
+            .iter()
+            .filter(|path| Some(path.as_path()) != inspection.open_segment_path())
+            .map(load_close_receipt)
+            .collect::<Result<Vec<_>, _>>()?;
         if segment_paths.last() != Some(&active_path) {
             segment_paths.push(active_path);
         }
@@ -141,6 +171,7 @@ impl SourceSpool {
             config,
             writer: Some(writer),
             segment_paths,
+            closed_segments,
             last_durable_cursor,
             chain_tip: inspection.chain_tip(),
         })
@@ -150,22 +181,27 @@ impl SourceSpool {
         &mut self,
         observation: &SourceObservation,
         durable_at_micros: i64,
-    ) -> Result<Option<AppendReceipt>, SpoolError> {
+    ) -> Result<SourceSpoolAppend, SpoolError> {
         if let Some(previous) = &self.last_durable_cursor {
             validate_successor(observation.cursor(), previous)?;
         }
-        if self.rotation_due(durable_at_micros)? {
-            self.rotate(durable_at_micros)?;
-        }
-        let receipt = self
+        let closed_segment = if self.rotation_due(durable_at_micros)? {
+            Some(self.rotate(durable_at_micros)?)
+        } else {
+            None
+        };
+        let durability_receipt = self
             .writer
             .as_mut()
             .ok_or(SpoolError::SegmentClosed)?
             .append(observation, durable_at_micros)?;
-        if let Some(receipt) = &receipt {
+        if let Some(receipt) = &durability_receipt {
             self.last_durable_cursor = Some(receipt.durable_cursor.clone());
         }
-        Ok(receipt)
+        Ok(SourceSpoolAppend {
+            durability_receipt,
+            closed_segment,
+        })
     }
 
     #[must_use]
@@ -182,6 +218,11 @@ impl SourceSpool {
     }
 
     #[must_use]
+    pub fn closed_segments(&self) -> &[CloseReceipt] {
+        &self.closed_segments
+    }
+
+    #[must_use]
     pub fn last_durable_cursor(&self) -> Option<&SourceCursor> {
         self.last_durable_cursor.as_ref()
     }
@@ -189,6 +230,22 @@ impl SourceSpool {
     #[must_use]
     pub const fn source_id(&self) -> &SourceId {
         &self.config.source_id
+    }
+
+    pub fn seal_active(
+        &mut self,
+        closed_at_micros: i64,
+    ) -> Result<Option<CloseReceipt>, SpoolError> {
+        if self
+            .writer
+            .as_ref()
+            .ok_or(SpoolError::SegmentClosed)?
+            .record_count()
+            == 0
+        {
+            return Ok(None);
+        }
+        self.rotate(closed_at_micros).map(Some)
     }
 
     pub fn shutdown(mut self, closed_at_micros: i64) -> Result<Option<CloseReceipt>, SpoolError> {
@@ -216,7 +273,7 @@ impl SourceSpool {
         Ok(size_due || age_due)
     }
 
-    fn rotate(&mut self, closed_at_micros: i64) -> Result<(), SpoolError> {
+    fn rotate(&mut self, closed_at_micros: i64) -> Result<CloseReceipt, SpoolError> {
         let writer = self.writer.take().ok_or(SpoolError::SegmentClosed)?;
         let next_sequence = writer
             .header()
@@ -236,7 +293,8 @@ impl SourceSpool {
         let writer = SpoolWriter::create(&self.config.directory, header, self.config.durability)?;
         self.segment_paths.push(writer.segment_path().to_owned());
         self.writer = Some(writer);
-        Ok(())
+        self.closed_segments.push(closed.clone());
+        Ok(closed)
     }
 }
 

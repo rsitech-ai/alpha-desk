@@ -78,17 +78,22 @@ append.
 
 ## Quarantine
 
-Malformed complete JSON and unknown variants expose a `NodeQuarantineRecord`
-containing:
+The line-oriented adapters parse complete records before emission. Malformed
+complete JSON and unknown variants expose a `NodeQuarantineRecord` containing:
 
 - the exact payload bytes;
 - the candidate source cursor;
 - the BLAKE3 content hash;
 - the stable reason code.
 
-The adapter remains pinned to that record until the caller durably retains the
-quarantine evidence and calls `acknowledge_quarantine_durable`. This prevents a
-parser failure from becoming silent data loss.
+Those adapters remain pinned to that record until the caller durably retains
+the quarantine evidence and calls `acknowledge_quarantine_durable`.
+
+The per-height committed-block adapter has a stricter raw-first boundary: it
+emits exact file bytes without parsing, the runtime fsyncs them into the source
+spool, and only then does the committed mapper parse them. Malformed or
+unsupported action-bearing records remain in the verified spool and stop
+canonical progress with a stable reason code. They are not skipped.
 
 ## Configuration
 
@@ -97,6 +102,7 @@ The checked example config declares a primary per-height source:
 ```toml
 [[sources]]
 id = "primary-node"
+source_version = "hyperliquid-node-v1"
 class = "committed-block"
 queue_capacity = 4096
 max_payload_bytes = 8388608

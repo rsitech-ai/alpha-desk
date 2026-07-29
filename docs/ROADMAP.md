@@ -8,8 +8,8 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 2. Qualify the implemented primary-node adapters against non-secret operator node recordings.
 3. Bind independent and recovery transports to the implemented fail-closed
    source-trust policy without exposing proprietary operator-feed material.
-4. Build continuity, quarantine, archive, replay, and publication before claiming a meaningful
-   long-running product test.
+4. Add independent gap recovery and downstream-outage spool draining before a
+   meaningful long-running product test.
 
 ## Required order
 
@@ -33,8 +33,11 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
   outside the public repository.
 - Complete qualified source-to-canonical mappings and upcasters on the
   implemented stable event/block identity boundary.
-- Continuity/quarantine, immutable archive, and replayable publication.
-- Only after those foundations: a long-running capture service and meaningful restart/replay/soak evidence.
+- Independent gap recovery, durable backlog draining, canonical state replay,
+  and correction handling.
+- Extend the runnable capture service from short synthetic restart/soak
+  evidence to multi-hour, crash-failpoint, host-restart, and real-source
+  qualification.
 
 ## Deliberately deferred
 

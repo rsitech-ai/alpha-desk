@@ -380,6 +380,11 @@ archive_summary="$("${repository_root}/target/debug/archive-inspect" verify "$ar
   printf '%s\n' 'capture-e2e:error archive block count mismatch' >&2
   exit 1
 }
+[[ "$archive_summary" == *"raw_sources=1"* &&
+  "$archive_summary" == *"raw_observations=${block_count}"* ]] || {
+  printf '%s\n' 'capture-e2e:error raw archive observation count mismatch' >&2
+  exit 1
+}
 spool_summary="$("${repository_root}/target/debug/spool-inspect" \
   verify "${evidence_root}/spool/synthetic-fixture")"
 [[ "$spool_summary" == *"records=${block_count}"* ]] || {
@@ -422,6 +427,7 @@ jq -n \
   --argjson first_height "$first_height" \
   --argjson last_height "$last_height" \
   --argjson block_count "$block_count" \
+  --argjson raw_observation_count "$block_count" \
   --argjson acknowledged_publications "$acknowledged_publications" \
   --argjson restart_count "$restart_count" \
   --argjson minimum_runtime_seconds "$minimum_runtime_seconds" \
@@ -444,6 +450,7 @@ jq -n \
     first_height: $first_height,
     last_height: $last_height,
     block_count: $block_count,
+    raw_observation_count: $raw_observation_count,
     acknowledged_publications: $acknowledged_publications,
     restart_count: $restart_count,
     minimum_runtime_seconds: $minimum_runtime_seconds,

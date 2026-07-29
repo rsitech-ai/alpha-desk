@@ -185,6 +185,7 @@ pub(crate) struct ManifestFields {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseReceipt {
     manifest: ClosedSegmentManifestV1,
+    segment_path: PathBuf,
     manifest_path: PathBuf,
     manifest_hash: [u8; 32],
 }
@@ -196,6 +197,11 @@ impl CloseReceipt {
     }
 
     #[must_use]
+    pub fn segment_path(&self) -> &Path {
+        &self.segment_path
+    }
+
+    #[must_use]
     pub fn manifest_path(&self) -> &Path {
         &self.manifest_path
     }
@@ -203,6 +209,14 @@ impl CloseReceipt {
     #[must_use]
     pub const fn manifest_hash(&self) -> [u8; 32] {
         self.manifest_hash
+    }
+
+    pub fn verify_current(&self) -> Result<(), SpoolError> {
+        let current = load_close_receipt(&self.segment_path)?;
+        if current != *self {
+            return Err(SpoolError::ManifestContentMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -255,6 +269,32 @@ pub(crate) fn publish_manifest(
     sync_directory(manifest_path.parent().ok_or(SpoolError::InvalidManifest)?)?;
     Ok(CloseReceipt {
         manifest,
+        segment_path: segment_path.to_owned(),
+        manifest_path,
+        manifest_hash: *blake3::hash(&encoded).as_bytes(),
+    })
+}
+
+pub(crate) fn load_close_receipt(
+    segment_path: impl AsRef<Path>,
+) -> Result<CloseReceipt, SpoolError> {
+    let segment_path = segment_path.as_ref();
+    let manifest_path = manifest_path_for(segment_path);
+    let encoded = fs::read(&manifest_path)
+        .map_err(|source| io_error("reading a closed-segment manifest", source))?;
+    let manifest: ClosedSegmentManifestV1 =
+        serde_json::from_slice(&encoded).map_err(|_| SpoolError::InvalidManifest)?;
+    manifest.validate()?;
+    if segment_path.file_name().and_then(std::ffi::OsStr::to_str) != Some(manifest.segment_file()) {
+        return Err(SpoolError::ManifestContentMismatch);
+    }
+    super::inspection::verify_manifest_bytes(&manifest, segment_path)?;
+    let reader = super::SpoolReader::open(segment_path)?;
+    let records = reader.read_all()?;
+    super::inspection::verify_manifest_content(&manifest, &reader, &records)?;
+    Ok(CloseReceipt {
+        manifest,
+        segment_path: segment_path.to_owned(),
         manifest_path,
         manifest_hash: *blake3::hash(&encoded).as_bytes(),
     })

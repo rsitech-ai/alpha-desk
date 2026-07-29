@@ -2,27 +2,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
 use domain_types::{ChainId, SourceId};
-use hl_protocol::{
-    BlockSource, ParseWarning, SourceAdmission, SourceError, SourceObservation,
-    SourceRequestContext,
-};
+use hl_protocol::{BlockSource, SourceAdmission, SourceError, SourceRequestContext};
 use storage_ports::CaptureProgressStore;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::{NodeBlockDirectoryConfig, NodeBlockDirectorySource};
 use crate::coordinator::CaptureCoordinator;
 use crate::spool::{
-    DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy,
+    CloseReceipt, DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError, SpoolReader,
+    SpoolRotationPolicy,
 };
 use crate::{
-    AppError, CaptureConfig, CommittedNodePipeline, CommittedNodePipelineConfig, OwnedTask,
-    PipelineError, PipelineOutcome, SourceAdapterConfig,
+    AppError, CaptureConfig, CommittedNodePipeline, CommittedNodePipelineConfig, DiskReserveError,
+    DiskReserveGuard, FilesystemDiskSpaceProbe, OwnedTask, PipelineError, PipelineOutcome,
+    RawSegmentArchive, RawSegmentArchiveError, SourceAdapterConfig,
 };
 
 const SPOOL_SCHEMA_VERSION: &str = "spool-v1";
 const SOURCE_TASK_NAME: &str = "primary-node-source";
+const WRITE_HEADROOM_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct NodeSourceTaskConfig {
@@ -37,17 +36,20 @@ struct NodeSourceTaskConfig {
     poll_interval: Duration,
     max_payload_bytes: usize,
     spool_path: PathBuf,
+    archive_path: PathBuf,
     segment_target_bytes: u64,
     rotation_interval: Duration,
     backpressure_timeout: Duration,
     max_pending_blocks: usize,
     retained_committed_blocks: usize,
+    disk_reserve_bytes: u64,
 }
 
 pub(crate) fn primary_node_task(
     config: &CaptureConfig,
     progress: Arc<dyn CaptureProgressStore>,
     coordinator: Arc<CaptureCoordinator>,
+    raw_archive: Arc<dyn RawSegmentArchive>,
     cancellation: CancellationToken,
 ) -> Result<OwnedTask, SourceRuntimeError> {
     let mut selected = None;
@@ -80,6 +82,7 @@ pub(crate) fn primary_node_task(
             poll_interval: Duration::from_millis(*poll_interval_millis),
             max_payload_bytes: source.max_payload_bytes(),
             spool_path: config.spool().path().join(source.id()),
+            archive_path: config.runtime().archive_path().to_path_buf(),
             segment_target_bytes: config.spool().segment_target_bytes(),
             rotation_interval: Duration::from_secs(config.spool().rotation_interval_seconds()),
             backpressure_timeout: Duration::from_millis(
@@ -87,16 +90,23 @@ pub(crate) fn primary_node_task(
             ),
             max_pending_blocks: config.runtime().max_pending_blocks(),
             retained_committed_blocks: config.runtime().retained_committed_blocks(),
+            disk_reserve_bytes: config.runtime().disk_reserve_bytes(),
         });
     }
     let selected = selected.ok_or(SourceRuntimeError::InvalidConfig)?;
     Ok(OwnedTask::new(SOURCE_TASK_NAME, async move {
-        run_primary_node(selected, progress, coordinator, cancellation.child_token())
-            .await
-            .map_err(|error| AppError::TaskFailed {
-                task: SOURCE_TASK_NAME,
-                reason_code: error.reason_code(),
-            })
+        run_primary_node(
+            selected,
+            progress,
+            coordinator,
+            raw_archive,
+            cancellation.child_token(),
+        )
+        .await
+        .map_err(|error| AppError::TaskFailed {
+            task: SOURCE_TASK_NAME,
+            reason_code: error.reason_code(),
+        })
     }))
 }
 
@@ -104,6 +114,7 @@ async fn run_primary_node(
     config: NodeSourceTaskConfig,
     progress: Arc<dyn CaptureProgressStore>,
     coordinator: Arc<CaptureCoordinator>,
+    raw_archive: Arc<dyn RawSegmentArchive>,
     cancellation: CancellationToken,
 ) -> Result<(), SourceRuntimeError> {
     let first_height = progress
@@ -136,6 +147,30 @@ async fn run_primary_node(
             .await
             .map_err(|_| SourceRuntimeError::BlockingTask)?
             .map_err(SourceRuntimeError::Spool)?;
+    let disk_guard = DiskReserveGuard::try_new(
+        FilesystemDiskSpaceProbe::open([config.spool_path.clone(), config.archive_path.clone()])?,
+        config.disk_reserve_bytes,
+    )?;
+    disk_guard.ensure_write(WRITE_HEADROOM_BYTES)?;
+    let (returned_spool, sealed) = tokio::task::spawn_blocking(move || {
+        let mut owned = spool;
+        let result = owned.seal_active(created_at);
+        (owned, result)
+    })
+    .await
+    .map_err(|_| SourceRuntimeError::BlockingTask)?;
+    spool = returned_spool;
+    sealed.map_err(SourceRuntimeError::Spool)?;
+    for segment in spool.closed_segments().to_vec() {
+        archive_closed_segment(
+            raw_archive.as_ref(),
+            &disk_guard,
+            &config.chain_id,
+            &segment,
+            config.max_payload_bytes,
+        )
+        .await?;
+    }
     let mut pipeline = CommittedNodePipeline::new(pipeline_config, coordinator.as_ref());
 
     for path in spool.verified_segment_paths().to_vec() {
@@ -147,18 +182,14 @@ async fn run_primary_node(
             if record.cursor().offset() < first_height.get() {
                 continue;
             }
-            let observation = SourceObservation::new(
-                config.source_id.clone(),
-                config.source_version.clone(),
-                record.observation_class(),
-                record.cursor().clone(),
-                record.received(),
-                record.parser_schema_version(),
-                Bytes::copy_from_slice(record.payload()),
-                Vec::<ParseWarning>::new(),
-                config.max_payload_bytes,
-            )
-            .map_err(|_| SourceRuntimeError::InvalidSpoolObservation)?;
+            let observation = record
+                .into_observation(
+                    config.source_id.clone(),
+                    config.source_version.clone(),
+                    config.max_payload_bytes,
+                )
+                .map_err(|_| SourceRuntimeError::InvalidSpoolObservation)?;
+            disk_guard.ensure_write(anticipated_write_bytes(observation.payload().len())?)?;
             require_advancing_outcome(pipeline.process_spooled(&observation).await?)?;
         }
     }
@@ -186,15 +217,31 @@ async fn run_primary_node(
         let observation = match source.next_observation(&context).await {
             Ok(observation) => observation,
             Err(SourceError::Cancelled) => {
-                close_spool(spool).await?;
+                close_spool(
+                    spool,
+                    raw_archive.as_ref(),
+                    &disk_guard,
+                    &config.chain_id,
+                    config.max_payload_bytes,
+                )
+                .await?;
                 return Ok(());
             }
             Err(SourceError::BackpressureTimeout) => continue,
             Err(error) => {
-                close_spool(spool).await?;
+                close_spool(
+                    spool,
+                    raw_archive.as_ref(),
+                    &disk_guard,
+                    &config.chain_id,
+                    config.max_payload_bytes,
+                )
+                .await?;
                 return Err(SourceRuntimeError::Source(error));
             }
         };
+        let anticipated_write = anticipated_write_bytes(observation.payload().len())?;
+        disk_guard.ensure_write(anticipated_write)?;
         let durable_at = now_micros()?;
         let observation_for_spool = observation.clone();
         let (returned_spool, append) = tokio::task::spawn_blocking(move || {
@@ -205,29 +252,89 @@ async fn run_primary_node(
         .await
         .map_err(|_| SourceRuntimeError::BlockingTask)?;
         spool = returned_spool;
-        let receipt = append
-            .map_err(SourceRuntimeError::Spool)?
-            .ok_or(SourceRuntimeError::MissingDurabilityReceipt)?;
+        let (receipt, closed_segment) = append.map_err(SourceRuntimeError::Spool)?.into_parts();
+        let receipt = receipt.ok_or(SourceRuntimeError::MissingDurabilityReceipt)?;
+        if let Some(segment) = closed_segment {
+            archive_closed_segment(
+                raw_archive.as_ref(),
+                &disk_guard,
+                &config.chain_id,
+                &segment,
+                config.max_payload_bytes,
+            )
+            .await?;
+        }
+        disk_guard.ensure_write(anticipated_write)?;
         source
             .acknowledge_durable(&receipt.durable_cursor)
             .map_err(SourceRuntimeError::Source)?;
         match pipeline.process_spooled(&observation).await {
             Ok(outcome) => require_advancing_outcome(outcome)?,
             Err(error) => {
-                close_spool(spool).await?;
+                close_spool(
+                    spool,
+                    raw_archive.as_ref(),
+                    &disk_guard,
+                    &config.chain_id,
+                    config.max_payload_bytes,
+                )
+                .await?;
                 return Err(SourceRuntimeError::Pipeline(error));
             }
         }
     }
 }
 
-async fn close_spool(spool: SourceSpool) -> Result<(), SourceRuntimeError> {
+async fn close_spool(
+    spool: SourceSpool,
+    raw_archive: &dyn RawSegmentArchive,
+    disk_guard: &DiskReserveGuard<FilesystemDiskSpaceProbe>,
+    chain_id: &ChainId,
+    max_payload_bytes: usize,
+) -> Result<(), SourceRuntimeError> {
     let closed_at = now_micros()?;
-    tokio::task::spawn_blocking(move || spool.shutdown(closed_at))
+    let closed = tokio::task::spawn_blocking(move || spool.shutdown(closed_at))
         .await
         .map_err(|_| SourceRuntimeError::BlockingTask)?
         .map_err(SourceRuntimeError::Spool)?;
+    if let Some(segment) = closed {
+        archive_closed_segment(
+            raw_archive,
+            disk_guard,
+            chain_id,
+            &segment,
+            max_payload_bytes,
+        )
+        .await?;
+    }
     Ok(())
+}
+
+async fn archive_closed_segment(
+    raw_archive: &dyn RawSegmentArchive,
+    disk_guard: &DiskReserveGuard<FilesystemDiskSpaceProbe>,
+    chain_id: &ChainId,
+    segment: &CloseReceipt,
+    max_payload_bytes: usize,
+) -> Result<(), SourceRuntimeError> {
+    let anticipated = segment
+        .manifest()
+        .file_size_bytes()
+        .checked_add(WRITE_HEADROOM_BYTES)
+        .ok_or(SourceRuntimeError::Disk(DiskReserveError::SizeOverflow))?;
+    disk_guard.ensure_write(anticipated)?;
+    raw_archive
+        .archive_segment(chain_id, segment, max_payload_bytes)
+        .await
+        .map_err(SourceRuntimeError::RawArchive)?;
+    Ok(())
+}
+
+fn anticipated_write_bytes(payload_bytes: usize) -> Result<u64, SourceRuntimeError> {
+    u64::try_from(payload_bytes)
+        .map_err(|_| SourceRuntimeError::Disk(DiskReserveError::SizeOverflow))?
+        .checked_add(WRITE_HEADROOM_BYTES)
+        .ok_or(SourceRuntimeError::Disk(DiskReserveError::SizeOverflow))
 }
 
 fn require_advancing_outcome(outcome: PipelineOutcome) -> Result<(), SourceRuntimeError> {
@@ -257,6 +364,10 @@ pub(crate) enum SourceRuntimeError {
     Source(#[source] SourceError),
     #[error("primary node canonical pipeline failed: {0}")]
     Pipeline(#[from] PipelineError),
+    #[error("primary node raw archive failed: {0}")]
+    RawArchive(#[source] RawSegmentArchiveError),
+    #[error("primary node disk reserve failed: {0}")]
+    Disk(#[from] DiskReserveError),
     #[error("primary node spool record is not a valid observation")]
     InvalidSpoolObservation,
     #[error("primary node committed append produced no durability receipt")]
@@ -279,6 +390,8 @@ impl SourceRuntimeError {
             Self::Spool(error) => error.reason_code(),
             Self::Source(error) => error.reason_code(),
             Self::Pipeline(error) => error.reason_code(),
+            Self::RawArchive(error) => error.reason_code(),
+            Self::Disk(error) => error.reason_code(),
             Self::InvalidSpoolObservation => "capture_source.invalid_spool_observation",
             Self::MissingDurabilityReceipt => "capture_source.missing_durability_receipt",
             Self::Gap => "capture_source.gap",

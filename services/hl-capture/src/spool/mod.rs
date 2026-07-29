@@ -15,7 +15,7 @@ pub use manifest::{CloseReceipt, ClosedSegmentManifestV1, MANIFEST_SCHEMA_V1};
 pub use reader::{SpoolReader, validate_segment_bytes};
 pub use record::SpoolRecord;
 pub use recovery::{RecoveryReport, recover_open_segment};
-pub use source_spool::{SourceSpool, SourceSpoolConfig, SpoolRotationPolicy};
+pub use source_spool::{SourceSpool, SourceSpoolAppend, SourceSpoolConfig, SpoolRotationPolicy};
 pub use writer::{AppendReceipt, DurabilityPolicy, SpoolWriter};
 
 pub(crate) const MAX_IDENTITY_BYTES: usize = 256;
@@ -41,6 +41,8 @@ pub enum SpoolError {
     IncompleteTail { record_offset: u64 },
     #[error("spool observation does not match the segment source")]
     SourceMismatch,
+    #[error("spool v1 cannot preserve parse warnings")]
+    UnsupportedWarnings,
     #[error("spool observation cursor regressed")]
     CursorRegression,
     #[error("spool durability policy is invalid")]
@@ -91,6 +93,7 @@ impl SpoolError {
             Self::CorruptRecord { .. } => "spool.corrupt_record",
             Self::IncompleteTail { .. } => "spool.incomplete_tail",
             Self::SourceMismatch => "spool.source_mismatch",
+            Self::UnsupportedWarnings => "spool.unsupported_warnings",
             Self::CursorRegression => "spool.cursor_regression",
             Self::InvalidDurabilityPolicy => "spool.invalid_durability_policy",
             Self::InvalidTimestamp => "spool.invalid_timestamp",

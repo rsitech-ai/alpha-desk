@@ -1,5 +1,9 @@
 use bytes::Bytes;
-use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
+use domain_types::SourceId;
+use hl_protocol::{
+    ObservationClass, ObservationError, ParseWarning, ReceiveTimestamps, SourceCursor,
+    SourceObservation,
+};
 
 use super::{MAX_IDENTITY_BYTES, MAX_PAYLOAD_BYTES, MAX_RECORD_BYTES, SpoolError};
 
@@ -46,9 +50,31 @@ impl SpoolRecord {
     pub const fn content_hash(&self) -> blake3::Hash {
         self.content_hash
     }
+
+    pub fn into_observation(
+        self,
+        source_id: SourceId,
+        source_version: impl Into<String>,
+        max_payload_bytes: usize,
+    ) -> Result<SourceObservation, ObservationError> {
+        SourceObservation::new(
+            source_id,
+            source_version,
+            self.observation_class,
+            self.cursor,
+            self.received,
+            self.parser_schema_version,
+            self.payload,
+            Vec::<ParseWarning>::new(),
+            max_payload_bytes,
+        )
+    }
 }
 
 pub(crate) fn encode_record(observation: &SourceObservation) -> Result<Vec<u8>, SpoolError> {
+    if !observation.warnings().is_empty() {
+        return Err(SpoolError::UnsupportedWarnings);
+    }
     if observation.cursor().epoch().len() > MAX_IDENTITY_BYTES
         || observation.parser_schema_version().len() > MAX_IDENTITY_BYTES
         || observation.payload().len() > MAX_PAYLOAD_BYTES

@@ -4,8 +4,10 @@
 
 A spool parser, recovery scanner, manifest-chain, checksum, length, or
 durability error is a fail-closed evidence-integrity incident. The current
-synthetic capture E2E does not route fixture blocks through the source spool,
-so a green E2E report is not spool recovery evidence.
+synthetic node-source E2E routes every observation through the spool, verifies
+its closed manifest chain, restarts from it, and requires raw Parquet parity.
+That lane is useful recovery evidence, but it is not a corrupt-middle-record,
+power-loss, or host-reboot qualification.
 
 ## Preserve before acting
 
@@ -45,8 +47,8 @@ Resume only after:
   fully verified spool;
 - the source can replay the missing range under the approved authority
   contract; and
-- a restart test proves identical canonical identities and contiguous durable
-  progress.
+- a restart test proves identical raw and canonical identities, contiguous
+  durable progress, and raw archive parity.
 
 If those conditions cannot be established, keep the service non-ready and
 escalate the incident with the preserved evidence.

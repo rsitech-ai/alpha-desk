@@ -227,7 +227,7 @@ fn inspect_directory_entries(
     })
 }
 
-fn verify_manifest_bytes(
+pub(crate) fn verify_manifest_bytes(
     manifest: &ClosedSegmentManifestV1,
     segment_path: &Path,
 ) -> Result<(), SpoolError> {
@@ -242,7 +242,7 @@ fn verify_manifest_bytes(
     Ok(())
 }
 
-fn verify_manifest_content(
+pub(crate) fn verify_manifest_content(
     manifest: &ClosedSegmentManifestV1,
     reader: &SpoolReader,
     records: &[super::SpoolRecord],
