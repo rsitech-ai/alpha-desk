@@ -69,6 +69,7 @@ just spool-verify
 cargo +1.97.1 test -p hl-analytics --test archive --locked --offline
 cargo +1.97.1 test -p archive-inspect --locked --offline
 just state-replay-e2e
+just state-replay-trade-e2e
 ```
 
 `just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
@@ -79,6 +80,12 @@ Parser fuzzing additionally requires the pinned `nightly-2026-07-16` toolchain a
 `just state-replay-e2e` runs the bounded synthetic Stage 2 evidence path; use
 `just state-replay-soak` for the longer repeated rebuild profile. Neither
 qualifies live source semantics or Stage 2.
+`just state-replay-trade-e2e` exercises the exact canonical trade reducer,
+decoded fact/participant/reconciliation cardinality, checkpoint resume, and
+atomic malformed/unsupported rejection. Use `just state-replay-trade-soak` for
+the longer bounded profile. These commands use generated canonical events:
+they do not qualify Stage 1, Stage 2, deployed source semantics, or
+account/order/position state.
 For an existing canonical archive, use `just state-replay-archive-e2e` or
 `just state-replay-archive-soak` with an explicit chain, inclusive range, and
 manifest-boundary checkpoint height. Operator-archive evidence remains

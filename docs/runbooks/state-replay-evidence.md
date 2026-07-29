@@ -57,6 +57,51 @@ total replayed blocks across the repeated and checkpoint-equivalence passes.
 Disk use is driven mainly by the one-time Parquet archive; runtime grows
 approximately with `blocks * (iterations + 1)`.
 
+## Canonical trade evidence
+
+Run the exact canonical trade-fact reducer through the same immutable archive
+and private checkpoint path:
+
+```bash
+just state-replay-trade-e2e
+```
+
+The command writes a new private directory under
+`target/evidence/state-replay-trade/`. Each generated committed block contains
+one exact `TradeMatched@1.0.0` event. The run:
+
+1. requires all independent rebuild state and receipt hashes to match;
+2. publishes, verifies, loads, and resumes a prefix checkpoint;
+3. decodes every trade fact, both ordinal participant legs, and every stored
+   quantity-symmetry reconciliation record;
+4. requires exact expected record cardinality and a passed reconciliation for
+   every generated trade;
+5. requires a malformed trade to fail with
+   `trade_state.invalid_trade_id`/`ledger.reducer_failed` without state change;
+   and
+6. requires an unsupported trade schema to fail with
+   `ledger.unsupported_event` without state change.
+
+The report declares
+`evidence_class = "synthetic_canonical_trade"`,
+`state_semantics = "canonical_trade_facts"`,
+`source_qualification = "synthetic_unassessed"`, Stage 1 and Stage 2 false,
+live-source qualification false, and account/order/position qualification
+false. Participant indices are stable ordinals only; they are not buyer/seller
+or maker/taker claims.
+
+For a longer bounded run:
+
+```bash
+just state-replay-trade-soak
+```
+
+Defaults are 1,000 trade blocks, a checkpoint after 500 blocks, and 100
+independent rebuilds. Override them with the same positional
+`blocks checkpoint_after iterations` arguments used by
+`state-replay-soak`. Preserve the entire evidence directory, including both
+rejection archives and the checkpoint generation.
+
 ## Existing operator archive
 
 Run the same deterministic rebuild and checkpoint-resume proof against an
@@ -113,10 +158,13 @@ qualified. Do not relabel such a stop as archive corruption.
 
 ## Interpreting the result
 
-A successful report is `runtime-proven:synthetic` evidence for deterministic
-serial replay, local checkpoint resume, and poison-block atomicity. It does not
-prove action-bearing reducers, RocksDB durability, deployed Hyperliquid source
-compatibility, reconciliation, service readiness, or the Stage 2 gate.
+A successful fixture report is `runtime-proven:synthetic` evidence for
+deterministic serial replay, local checkpoint resume, and poison-block
+atomicity. A successful trade report additionally proves the exact implemented
+canonical trade-fact and stored quantity-symmetry contracts against generated
+canonical events. Neither proves RocksDB durability, deployed Hyperliquid
+source compatibility, external account/book reconciliation, complete
+action-bearing state, service readiness, or the Stage 2 gate.
 
 Retain the complete evidence directory when comparing runs. The archive,
 checkpoint generation, and report belong together; do not copy only the JSON
