@@ -22,6 +22,8 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Source-independent V1 event IDs, validated production canonical-event
   construction, deterministic canonical block hashes, and fail-closed block
   ordering/boundary invariants.
+- Presence-aware source-event sub-index provenance for deterministic
+  one-source-record-to-many-canonical-event mappings.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 

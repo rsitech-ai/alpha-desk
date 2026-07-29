@@ -39,6 +39,23 @@ fn envelope_round_trip_preserves_full_domain_identity_and_order() {
 }
 
 #[test]
+fn source_evidence_round_trip_preserves_parent_offset_and_event_sub_index() {
+    let mut wire = valid_wire();
+    wire.source_evidence[0].source_event_index = Some(0);
+
+    let decoded = decode(wire).expect("indexed source evidence");
+    let evidence = &decoded.source_evidence()[0];
+
+    assert_eq!(evidence.source_offset(), "hyperliquid-mainnet:42:7:9");
+    assert_eq!(evidence.source_event_index(), Some(0));
+    let encoded = WireCanonicalEventEnvelope::decode(
+        &decoded.encode_to_vec().expect("encode indexed evidence"),
+    )
+    .expect("wire envelope");
+    assert_eq!(encoded.source_evidence[0].source_event_index, Some(0));
+}
+
+#[test]
 fn source_evidence_is_required_and_each_field_is_validated() {
     let mut missing = valid_wire();
     missing.source_evidence.clear();

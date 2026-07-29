@@ -414,6 +414,7 @@ pub struct WireSourceEvidence {
     pub source_version: String,
     pub source_offset: String,
     pub content_hash: Vec<u8>,
+    pub source_event_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,6 +484,7 @@ impl From<&WireSourceEvidence> for generated::hl::canonical::v1::SourceEvidence 
             source_version: value.source_version.clone(),
             source_offset: value.source_offset.clone(),
             content_hash: value.content_hash.clone(),
+            source_event_index: value.source_event_index,
         }
     }
 }
@@ -520,6 +522,7 @@ impl From<generated::hl::canonical::v1::SourceEvidence> for WireSourceEvidence {
             source_version: value.source_version,
             source_offset: value.source_offset,
             content_hash: value.content_hash,
+            source_event_index: value.source_event_index,
         }
     }
 }
