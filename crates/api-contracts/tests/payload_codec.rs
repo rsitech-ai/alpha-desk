@@ -1,7 +1,11 @@
 use api_contracts::{
-    PayloadCodecError, WireOrderAccepted, WireOrderModified, WireOrderRested, WireTradeMatched,
-    decode_order_accepted, decode_order_modified, decode_order_rested, decode_trade_matched,
-    encode_order_accepted, encode_order_modified, encode_order_rested, encode_trade_matched,
+    PayloadCodecError, WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
+    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireTradeMatched,
+    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
+    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
+    decode_trade_matched, encode_order_accepted, encode_order_cancelled, encode_order_filled,
+    encode_order_modified, encode_order_partially_filled, encode_order_rejected,
+    encode_order_rested, encode_trade_matched,
 };
 
 fn trade() -> WireTradeMatched {
@@ -140,4 +144,93 @@ fn order_wire_payloads_reject_missing_padded_and_wrong_kind_fields() {
         decode_order_rested(&encoded),
         Err(PayloadCodecError::KindMismatch { .. })
     ));
+}
+
+#[test]
+fn order_outcome_wire_payloads_round_trip_exactly() {
+    let partial = WireOrderPartiallyFilled {
+        order_id: "order-17".to_owned(),
+        trade_id: "trade-18".to_owned(),
+        fill_price: "65000.125000".to_owned(),
+        fill_quantity: "0.25000000".to_owned(),
+        remaining_quantity: "0.50000000".to_owned(),
+    };
+    assert_eq!(
+        decode_order_partially_filled(&encode_order_partially_filled(&partial).unwrap()).unwrap(),
+        partial
+    );
+
+    let filled = WireOrderFilled {
+        order_id: "order-17".to_owned(),
+        trade_id: "trade-19".to_owned(),
+        fill_price: "65001.000000".to_owned(),
+        fill_quantity: "0.50000000".to_owned(),
+    };
+    assert_eq!(
+        decode_order_filled(&encode_order_filled(&filled).unwrap()).unwrap(),
+        filled
+    );
+
+    let cancelled = WireOrderCancelled {
+        order_id: "order-20".to_owned(),
+        reason: "operator_requested".to_owned(),
+        remaining_quantity: "0.12500000".to_owned(),
+    };
+    assert_eq!(
+        decode_order_cancelled(&encode_order_cancelled(&cancelled).unwrap()).unwrap(),
+        cancelled
+    );
+
+    let rejected = WireOrderRejected {
+        client_order_id: "client-21".to_owned(),
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        reason_code: "invalid_tick".to_owned(),
+        reason: "limit price is not aligned to the active tick".to_owned(),
+    };
+    assert_eq!(
+        decode_order_rejected(&encode_order_rejected(&rejected).unwrap()).unwrap(),
+        rejected
+    );
+}
+
+#[test]
+fn order_outcome_wire_payloads_reject_unsafe_reasons_and_missing_identity() {
+    let invalid_rejections = [
+        WireOrderRejected {
+            client_order_id: String::new(),
+            account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+            reason_code: "invalid_tick".to_owned(),
+            reason: "invalid tick".to_owned(),
+        },
+        WireOrderRejected {
+            client_order_id: "client-21".to_owned(),
+            account_id: " account".to_owned(),
+            reason_code: "invalid_tick".to_owned(),
+            reason: "invalid tick".to_owned(),
+        },
+        WireOrderRejected {
+            client_order_id: "client-21".to_owned(),
+            account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+            reason_code: "invalid\ncode".to_owned(),
+            reason: "invalid tick".to_owned(),
+        },
+        WireOrderRejected {
+            client_order_id: "client-21".to_owned(),
+            account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+            reason_code: "x".repeat(129),
+            reason: "invalid tick".to_owned(),
+        },
+        WireOrderRejected {
+            client_order_id: "client-21".to_owned(),
+            account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+            reason_code: "invalid_tick".to_owned(),
+            reason: "x".repeat(1_025),
+        },
+    ];
+    for invalid in invalid_rejections {
+        assert!(matches!(
+            encode_order_rejected(&invalid),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
 }
