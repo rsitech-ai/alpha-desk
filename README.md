@@ -18,8 +18,8 @@ canonical state, APIs, research workflows, and native UI remain planned work.
 | Stage 0 gate tooling | Implemented; gate outcome `HOLD` | [`config/stage-gates/stage-0.toml`](config/stage-gates/stage-0.toml) |
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
 | Source observation, strict recoverable spool, primary-node adapter, source-trust admission, conservative committed mapper, and canonical sequencing | Runnable and locally restart/soak tested with synthetic empty node-format blocks; not live-source qualified | [`docs/STATUS.md`](docs/STATUS.md) |
-| Immutable canonical/raw Parquet archive, verified compaction, replay reads, and offline inspection | Canonical block archive is wired before publication/cursor advancement; raw-observation Parquet archival remains unconnected | [`docs/formats/archive-manifest-v1.md`](docs/formats/archive-manifest-v1.md) |
-| Complete durable capture and canonical truth-layer runtime | Partially implemented; action mappings, independent sources, raw archival, gap recovery, canonical state, and replay service remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Immutable canonical/raw Parquet archive, verified compaction, replay reads, and offline inspection | Canonical blocks and verified closed-spool raw observations are wired; compaction remains an offline operation | [`docs/formats/archive-manifest-v1.md`](docs/formats/archive-manifest-v1.md) |
+| Complete durable capture and canonical truth-layer runtime | Partially implemented; action mappings, independent sources, gap recovery, canonical state, and replay service remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |
 

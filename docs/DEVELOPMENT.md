@@ -176,9 +176,10 @@ The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
 drip-feeds deterministic, empty transaction-block records through the real
 node-directory adapter and `hl-capture run`, verifies raw spool durability,
-archives and publishes committed blocks, performs one clean process restart
-against the same spool/archive/journal state, verifies PostgreSQL and
-JetStream acknowledgements, and proves a final bounded SIGTERM shutdown:
+archives byte-identical raw observations plus committed blocks, performs one
+clean process restart against the same spool/archive/journal state, verifies
+PostgreSQL and JetStream acknowledgements, and proves a final bounded SIGTERM
+shutdown:
 
 ```sh
 just capture-e2e
@@ -197,10 +198,11 @@ contains `"mode": "synthetic-node-source"` and
 `"live_source_qualified": false`. The production `run` command is connected,
 but the committed mapper accepts only structurally valid blocks with no action
 bundles. Action-bearing records fail closed with
-`canonical_mapping.unsupported_committed_actions`. Raw observations are
-verified in the spool but are not yet copied into the long-term raw Parquet
-archive. One-node loopback password authentication and tmpfs JetStream also do
-not qualify production TLS, identity, or three-replica durability.
+`canonical_mapping.unsupported_committed_actions`. Closed, verified spool
+segments are archived idempotently into raw Parquet before restart completion
+or graceful task exit. One-node loopback password authentication and tmpfs
+JetStream also do not qualify production TLS, identity, or three-replica
+durability.
 See [`runbooks/capture-restart.md`](runbooks/capture-restart.md) for retained
 evidence and restart diagnosis.
 

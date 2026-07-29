@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use domain_types::BlockHeight;
-use storage_ports::{CanonicalArchive, CaptureProgressStore};
+use storage_ports::{CanonicalArchive, CaptureProgressStore, RawObservationArchive};
 use tokio_postgres::NoTls;
 use tokio_postgres::config::{Host, SslMode};
 use tokio_util::sync::CancellationToken;
@@ -17,8 +17,8 @@ use crate::progress::PostgresProgressStore;
 use crate::secret::read_protected_secret;
 use crate::source_runtime::primary_node_task;
 use crate::{
-    AppError, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError, OwnedTask,
-    StatusWriter, synthetic_fixture_block,
+    AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig,
+    CaptureRuntimeError, OwnedTask, RawSegmentArchive, StatusWriter, synthetic_fixture_block,
 };
 
 const BUILD_ID: &str = concat!("hl-capture/", env!("CARGO_PKG_VERSION"));
@@ -31,6 +31,7 @@ pub struct ConnectedCapture {
     runtime: CaptureRuntime,
     coordinator: Arc<CaptureCoordinator>,
     progress: Arc<dyn CaptureProgressStore>,
+    raw_archive: Arc<dyn RawSegmentArchive>,
     infrastructure_tasks: Vec<OwnedTask>,
 }
 
@@ -52,6 +53,7 @@ impl ConnectedCapture {
             &self.config,
             Arc::clone(&self.progress),
             Arc::clone(&self.coordinator),
+            Arc::clone(&self.raw_archive),
             cancellation.child_token(),
         )
         .map_err(|_| CaptureRuntimeError::InvalidConfig)?;
@@ -158,7 +160,10 @@ pub async fn connect_capture(
         LocalParquetArchive::open(config.runtime().archive_path(), archive_config)
             .map_err(|_| RuntimeConnectError::Archive)?,
     );
-    let archive: Arc<dyn CanonicalArchive> = archive;
+    let canonical_archive: Arc<dyn CanonicalArchive> = archive.clone();
+    let raw_observation_archive: Arc<dyn RawObservationArchive> = archive;
+    let raw_archive: Arc<dyn RawSegmentArchive> =
+        Arc::new(BlockingRawSegmentArchive::new(raw_observation_archive));
     let publisher_config = JetStreamConfig::try_new(
         config.runtime().nats_server_url(),
         JetStreamAuthentication::UserPasswordFile {
@@ -177,7 +182,7 @@ pub async fn connect_capture(
             .map_err(|_| RuntimeConnectError::NatsConnect)?,
     );
     let coordinator = Arc::new(CaptureCoordinator::new(
-        Arc::new(BlockingCanonicalArchive::new(archive)),
+        Arc::new(BlockingCanonicalArchive::new(canonical_archive)),
         Arc::clone(&progress),
         publisher,
         Arc::new(SystemAcknowledgementClock),
@@ -207,6 +212,7 @@ pub async fn connect_capture(
         runtime,
         coordinator,
         progress,
+        raw_archive,
         infrastructure_tasks: vec![postgres_task],
     })
 }

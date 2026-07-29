@@ -15,7 +15,7 @@ one per-height raw observation through the real node adapter and spool, sends
 SIGTERM, restarts the same binary against the same spool, archive, publication
 journal, stream, and chain, then drip-feeds the remaining blocks. It does not
 qualify action-bearing Hyperliquid semantics, a live source, crash failpoints,
-host reboot, raw Parquet archival, or a multi-node production deployment.
+host reboot, or a multi-node production deployment.
 
 `hl-capture run` is the tested command. The committed mapper deliberately
 rejects non-empty action bundles until a qualified corpus and response mapping
@@ -44,14 +44,33 @@ A successful default run has:
 - `live_source_qualified` equal to `false`;
 - `restart_count` equal to `1`;
 - `clean_shutdown` equal to `true`;
-- three raw spool records, three archived empty blocks, and three acknowledged
-  block publications;
+- three byte-identical raw observations in both spool and Parquet, three
+  archived empty blocks, and three acknowledged block publications;
 - a terminal status with `ready=false`, `health=yellow`, no pending blocks,
   and the expected durable height.
 
 The retained configuration contains credential paths but no credential values.
 Its temporary credential directory is removed during cleanup, so it cannot be
 used to reconnect later.
+
+## Disk reserve stop
+
+`capture_disk.insufficient_space` means the runtime could not preserve
+`runtime.disk_reserve_bytes` plus conservative headroom for the next spool or
+archive write. The source observation is not acknowledged at that boundary.
+
+1. Preserve the status, spool, archive, and filesystem-capacity evidence.
+2. Stop only the affected capture service; do not delete spool or archive
+   objects to manufacture headroom.
+3. Expand the approved filesystem or move the complete verified dataset under
+   a documented migration procedure.
+4. Verify spool and archive manifests before restart.
+5. Confirm the next expected canonical height and raw cursor before allowing
+   the source to resume.
+
+The absolute reserve is an enforced write boundary. The design's percentage
+GREEN/AMBER/RED health policy and alerts still need their own runtime metric and
+suppression integration.
 
 ## Failed restart or shutdown
 
