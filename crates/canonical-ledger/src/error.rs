@@ -51,6 +51,17 @@ impl ReducerError {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    pub(crate) fn from_static(reason_code: &'static str, message: &'static str) -> Self {
+        assert!(
+            valid_reason_code(reason_code) && valid_message(message),
+            "internal reducer errors must use validated stable literals"
+        );
+        Self {
+            reason_code: reason_code.to_owned(),
+            message: message.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

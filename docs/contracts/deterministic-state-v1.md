@@ -18,6 +18,9 @@ bytes and envelope routing metadata are never interpreted as account, order,
 market, fee, funding, transfer, or position semantics.
 
 An actually empty committed block is a supported watermark-only transition.
+The production `WatermarkOnlyReducerV1` freezes that boundary under reducer-set
+version `hyperliquid-alpha-desk-watermark-only@1.0.0`; its qualified
+action-bearing event registry is deliberately empty.
 
 ## Block atomicity
 
@@ -121,7 +124,9 @@ Focused tests prove:
 - whole-block rollback after a late event or invariant failure;
 - exact duplicate idempotence and same-height divergence;
 - chain, height, confirmation, reducer-version, and support gates; and
-- mutation bounds and ambiguous key rejection.
+- mutation bounds and ambiguous key rejection; and
+- the production watermark-only reducer accepting empty primary/independent
+  committed blocks while quarantining a typed trade block without state effects.
 
 This does not prove action-bearing account or order state, checkpoint crash
 safety, archive replay, RocksDB durability, reconciliation, live-source
