@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use domain_types::SourceId;
 use hl_capture::spool::{
-    DurabilityPolicy, SegmentHeaderV1, SpoolError, SpoolReader, SpoolWriter, recover_open_segment,
-    recover_spool_tail, validate_segment_bytes,
+    DurabilityPolicy, SegmentHeaderV1, SpoolError, SpoolRead, SpoolReader, SpoolWriter,
+    recover_open_segment, recover_spool_tail, validate_segment_bytes,
 };
 use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
 use tempfile::TempDir;
@@ -170,6 +170,54 @@ fn reader_round_trips_framing_metadata_and_source_payload_bytes() {
     );
     assert_eq!(records[2].payload(), b"third");
     assert_eq!(records[2].content_hash(), blake3::hash(b"third"));
+}
+
+#[test]
+fn incremental_reader_keeps_a_bounded_cursor_and_retries_an_incomplete_active_tail() {
+    let fixture = TempDir::new().expect("fixture");
+    let (segment, offsets) = write_three_records(fixture.path());
+    let complete = fs::read(&segment).expect("complete segment");
+    let third_offset = usize::try_from(offsets[2]).expect("fixture offset");
+    let cut = third_offset + 8;
+    OpenOptions::new()
+        .write(true)
+        .open(&segment)
+        .expect("open segment")
+        .set_len(u64::try_from(cut).expect("fixture cut"))
+        .expect("truncate into final record");
+
+    let reader = SpoolReader::open(&segment).expect("open incremental reader");
+    let mut records = reader.stream().expect("open record stream");
+    assert!(matches!(
+        records.next_record().expect("first record"),
+        SpoolRead::Record(record) if record.cursor().offset() == 40
+    ));
+    assert!(matches!(
+        records.next_record().expect("second record"),
+        SpoolRead::Record(record) if record.cursor().offset() == 41
+    ));
+    assert_eq!(records.next_offset(), offsets[2]);
+    assert!(matches!(
+        records.next_record().expect("incomplete active tail"),
+        SpoolRead::IncompleteTail { record_offset } if record_offset == offsets[2]
+    ));
+    assert_eq!(records.next_offset(), offsets[2]);
+
+    OpenOptions::new()
+        .append(true)
+        .open(&segment)
+        .expect("reopen active tail")
+        .write_all(&complete[cut..])
+        .expect("finish active record");
+
+    assert!(matches!(
+        records.next_record().expect("completed final record"),
+        SpoolRead::Record(record) if record.cursor().offset() == 42
+    ));
+    assert!(matches!(
+        records.next_record().expect("complete eof"),
+        SpoolRead::EndOfFile
+    ));
 }
 
 #[test]

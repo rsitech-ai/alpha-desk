@@ -2,26 +2,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use domain_types::{ChainId, SourceId};
+use domain_types::{BlockHeight, ChainId, SourceId};
 use hl_protocol::{BlockSource, SourceAdmission, SourceError, SourceRequestContext};
 use storage_ports::CaptureProgressStore;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::{NodeBlockDirectoryConfig, NodeBlockDirectorySource};
 use crate::coordinator::CaptureCoordinator;
 use crate::spool::{
-    CloseReceipt, DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError, SpoolReader,
-    SpoolRotationPolicy,
+    CloseReceipt, DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError, SpoolRead,
+    SpoolReader, SpoolRecord, SpoolRotationPolicy,
 };
 use crate::{
     AppError, CaptureConfig, CommittedNodePipeline, CommittedNodePipelineConfig, DiskReserveError,
     DiskReserveGuard, FilesystemDiskSpaceProbe, OwnedTask, PipelineError, PipelineOutcome,
-    RawSegmentArchive, RawSegmentArchiveError, SourceAdapterConfig,
+    RawSegmentArchive, RawSegmentArchiveConfig, RawSegmentArchiveError, SourceAdapterConfig,
 };
 
 const SPOOL_SCHEMA_VERSION: &str = "spool-v1";
 const SOURCE_TASK_NAME: &str = "primary-node-source";
 const WRITE_HEADROOM_BYTES: u64 = 1024 * 1024;
+const RAW_ARCHIVE_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct NodeSourceTaskConfig {
@@ -34,6 +36,7 @@ struct NodeSourceTaskConfig {
     stream_name: String,
     start_height: u64,
     poll_interval: Duration,
+    queue_capacity: usize,
     max_payload_bytes: usize,
     spool_path: PathBuf,
     archive_path: PathBuf,
@@ -80,6 +83,7 @@ pub(crate) fn primary_node_task(
             stream_name: stream_name.clone(),
             start_height: *start_height,
             poll_interval: Duration::from_millis(*poll_interval_millis),
+            queue_capacity: source.queue_capacity(),
             max_payload_bytes: source.max_payload_bytes(),
             spool_path: config.spool().path().join(source.id()),
             archive_path: config.runtime().archive_path().to_path_buf(),
@@ -151,6 +155,12 @@ async fn run_primary_node(
         FilesystemDiskSpaceProbe::open([config.spool_path.clone(), config.archive_path.clone()])?,
         config.disk_reserve_bytes,
     )?;
+    let raw_archive_config = RawSegmentArchiveConfig::try_new(
+        config.max_payload_bytes,
+        config.queue_capacity,
+        RAW_ARCHIVE_BATCH_BYTES,
+    )
+    .map_err(SourceRuntimeError::RawArchive)?;
     disk_guard.ensure_write(WRITE_HEADROOM_BYTES)?;
     let (returned_spool, sealed) = tokio::task::spawn_blocking(move || {
         let mut owned = spool;
@@ -167,31 +177,14 @@ async fn run_primary_node(
             &disk_guard,
             &config.chain_id,
             &segment,
-            config.max_payload_bytes,
+            raw_archive_config,
         )
         .await?;
     }
     let mut pipeline = CommittedNodePipeline::new(pipeline_config, coordinator.as_ref());
 
     for path in spool.verified_segment_paths().to_vec() {
-        let records = tokio::task::spawn_blocking(move || SpoolReader::open(path)?.read_all())
-            .await
-            .map_err(|_| SourceRuntimeError::BlockingTask)?
-            .map_err(SourceRuntimeError::Spool)?;
-        for record in records {
-            if record.cursor().offset() < first_height.get() {
-                continue;
-            }
-            let observation = record
-                .into_observation(
-                    config.source_id.clone(),
-                    config.source_version.clone(),
-                    config.max_payload_bytes,
-                )
-                .map_err(|_| SourceRuntimeError::InvalidSpoolObservation)?;
-            disk_guard.ensure_write(anticipated_write_bytes(observation.payload().len())?)?;
-            require_advancing_outcome(pipeline.process_spooled(&observation).await?)?;
-        }
+        replay_spool_segment(path, first_height, &config, &disk_guard, &mut pipeline).await?;
     }
 
     let adapter_config = NodeBlockDirectoryConfig::new(
@@ -222,7 +215,7 @@ async fn run_primary_node(
                     raw_archive.as_ref(),
                     &disk_guard,
                     &config.chain_id,
-                    config.max_payload_bytes,
+                    raw_archive_config,
                 )
                 .await?;
                 return Ok(());
@@ -234,7 +227,7 @@ async fn run_primary_node(
                     raw_archive.as_ref(),
                     &disk_guard,
                     &config.chain_id,
-                    config.max_payload_bytes,
+                    raw_archive_config,
                 )
                 .await?;
                 return Err(SourceRuntimeError::Source(error));
@@ -260,7 +253,7 @@ async fn run_primary_node(
                 &disk_guard,
                 &config.chain_id,
                 &segment,
-                config.max_payload_bytes,
+                raw_archive_config,
             )
             .await?;
         }
@@ -276,7 +269,7 @@ async fn run_primary_node(
                     raw_archive.as_ref(),
                     &disk_guard,
                     &config.chain_id,
-                    config.max_payload_bytes,
+                    raw_archive_config,
                 )
                 .await?;
                 return Err(SourceRuntimeError::Pipeline(error));
@@ -285,12 +278,64 @@ async fn run_primary_node(
     }
 }
 
+async fn replay_spool_segment(
+    path: PathBuf,
+    first_height: BlockHeight,
+    config: &NodeSourceTaskConfig,
+    disk_guard: &DiskReserveGuard<FilesystemDiskSpaceProbe>,
+    pipeline: &mut CommittedNodePipeline<'_, CaptureCoordinator>,
+) -> Result<(), SourceRuntimeError> {
+    let (sender, mut receiver) = mpsc::channel::<SpoolRecord>(1);
+    let reader = tokio::task::spawn_blocking(move || -> Result<(), SpoolError> {
+        let reader = SpoolReader::open(path)?;
+        let mut records = reader.stream()?;
+        loop {
+            match records.next_record()? {
+                SpoolRead::Record(record) => {
+                    if sender.blocking_send(record).is_err() {
+                        return Ok(());
+                    }
+                }
+                SpoolRead::EndOfFile => return Ok(()),
+                SpoolRead::IncompleteTail { record_offset } => {
+                    return Err(SpoolError::IncompleteTail { record_offset });
+                }
+            }
+        }
+    });
+    let processing: Result<(), SourceRuntimeError> = async {
+        while let Some(record) = receiver.recv().await {
+            if record.cursor().offset() < first_height.get() {
+                continue;
+            }
+            let observation = record
+                .into_observation(
+                    config.source_id.clone(),
+                    config.source_version.clone(),
+                    config.max_payload_bytes,
+                )
+                .map_err(|_| SourceRuntimeError::InvalidSpoolObservation)?;
+            disk_guard.ensure_write(anticipated_write_bytes(observation.payload().len())?)?;
+            require_advancing_outcome(pipeline.process_spooled(&observation).await?)?;
+        }
+        Ok(())
+    }
+    .await;
+    drop(receiver);
+    let reader = reader
+        .await
+        .map_err(|_| SourceRuntimeError::BlockingTask)?
+        .map_err(SourceRuntimeError::Spool);
+    processing?;
+    reader
+}
+
 async fn close_spool(
     spool: SourceSpool,
     raw_archive: &dyn RawSegmentArchive,
     disk_guard: &DiskReserveGuard<FilesystemDiskSpaceProbe>,
     chain_id: &ChainId,
-    max_payload_bytes: usize,
+    raw_archive_config: RawSegmentArchiveConfig,
 ) -> Result<(), SourceRuntimeError> {
     let closed_at = now_micros()?;
     let closed = tokio::task::spawn_blocking(move || spool.shutdown(closed_at))
@@ -303,7 +348,7 @@ async fn close_spool(
             disk_guard,
             chain_id,
             &segment,
-            max_payload_bytes,
+            raw_archive_config,
         )
         .await?;
     }
@@ -315,7 +360,7 @@ async fn archive_closed_segment(
     disk_guard: &DiskReserveGuard<FilesystemDiskSpaceProbe>,
     chain_id: &ChainId,
     segment: &CloseReceipt,
-    max_payload_bytes: usize,
+    raw_archive_config: RawSegmentArchiveConfig,
 ) -> Result<(), SourceRuntimeError> {
     let anticipated = segment
         .manifest()
@@ -324,7 +369,7 @@ async fn archive_closed_segment(
         .ok_or(SourceRuntimeError::Disk(DiskReserveError::SizeOverflow))?;
     disk_guard.ensure_write(anticipated)?;
     raw_archive
-        .archive_segment(chain_id, segment, max_payload_bytes)
+        .archive_segment(chain_id, segment, raw_archive_config)
         .await
         .map_err(SourceRuntimeError::RawArchive)?;
     Ok(())

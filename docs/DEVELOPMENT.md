@@ -200,7 +200,10 @@ but the committed mapper accepts only structurally valid blocks with no action
 bundles. Action-bearing records fail closed with
 `canonical_mapping.unsupported_committed_actions`. Closed, verified spool
 segments are archived idempotently into raw Parquet before restart completion
-or graceful task exit. One-node loopback password authentication and tmpfs
+or graceful task exit. Spool verification and replay stream one bounded record
+at a time; raw Parquet batches are additionally bounded by record count and
+uncompressed payload bytes. Segment targets above 512 MiB are rejected pending
+production benchmarking. One-node loopback password authentication and tmpfs
 JetStream also do not qualify production TLS, identity, or three-replica
 durability.
 See [`runbooks/capture-restart.md`](runbooks/capture-restart.md) for retained

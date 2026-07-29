@@ -40,7 +40,7 @@ pub fn recover_open_segment(path: impl AsRef<Path>) -> Result<RecoveryReport, Sp
         initial_size
     };
     Ok(RecoveryReport {
-        valid_records: u64::try_from(scan.records.len()).map_err(|_| SpoolError::SizeOverflow)?,
+        valid_records: scan.record_count,
         truncated_bytes: initial_size
             .checked_sub(final_size)
             .ok_or(SpoolError::SizeOverflow)?,

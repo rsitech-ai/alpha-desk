@@ -12,7 +12,9 @@ use std::io;
 pub use header::SegmentHeaderV1;
 pub use inspection::{SpoolInspection, inspect_spool, recover_spool_tail};
 pub use manifest::{CloseReceipt, ClosedSegmentManifestV1, MANIFEST_SCHEMA_V1};
-pub use reader::{SpoolReader, validate_segment_bytes};
+pub use reader::{
+    SpoolRead, SpoolReader, SpoolRecordStream, SpoolRecordSummary, validate_segment_bytes,
+};
 pub use record::SpoolRecord;
 pub use recovery::{RecoveryReport, recover_open_segment};
 pub use source_spool::{SourceSpool, SourceSpoolAppend, SourceSpoolConfig, SpoolRotationPolicy};

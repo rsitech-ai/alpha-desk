@@ -4,7 +4,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::manifest::ClosedSegmentManifestV1;
-use super::{RecoveryReport, SpoolError, SpoolReader, io_error, recover_open_segment};
+use super::{
+    RecoveryReport, SpoolError, SpoolReader, SpoolRecordSummary, io_error, recover_open_segment,
+};
 
 type SegmentPaths = BTreeMap<u64, PathBuf>;
 type CollectedEntries = (SegmentPaths, SegmentPaths);
@@ -66,11 +68,11 @@ pub fn inspect_spool(path: impl AsRef<Path>) -> Result<SpoolInspection, SpoolErr
     }
     if metadata.is_file() {
         let reader = SpoolReader::open(path)?;
-        let records = reader.read_all()?;
+        let summary = reader.summarize()?;
         return Ok(SpoolInspection {
             closed_segments: 0,
             open_segments: 1,
-            records: u64::try_from(records.len()).map_err(|_| SpoolError::SizeOverflow)?,
+            records: summary.record_count(),
             chain_tip: None,
             segment_paths: vec![path.to_owned()],
             open_segment_path: Some(path.to_owned()),
@@ -175,8 +177,8 @@ fn inspect_directory_entries(
             .ok_or(SpoolError::ManifestSegmentMissing)?;
         verify_manifest_bytes(&manifest, segment_path)?;
         let reader = SpoolReader::open(segment_path)?;
-        let records = reader.read_all()?;
-        verify_manifest_content(&manifest, &reader, &records)?;
+        let summary = reader.summarize()?;
+        verify_manifest_content(&manifest, &reader, &summary)?;
 
         let encoded = fs::read(manifest_path)
             .map_err(|source| io_error("hashing a closed-segment manifest", source))?;
@@ -184,7 +186,7 @@ fn inspect_directory_entries(
         previous_sequence = Some(*sequence);
         closed_sequences.insert(*sequence);
         total_records = total_records
-            .checked_add(u64::try_from(records.len()).map_err(|_| SpoolError::SizeOverflow)?)
+            .checked_add(summary.record_count())
             .ok_or(SpoolError::SizeOverflow)?;
     }
 
@@ -207,9 +209,9 @@ fn inspect_directory_entries(
                 .get(sequence)
                 .ok_or(SpoolError::UnexpectedOpenSegment)?,
         )?;
-        let records = reader.read_all()?;
+        let summary = reader.summarize()?;
         total_records = total_records
-            .checked_add(u64::try_from(records.len()).map_err(|_| SpoolError::SizeOverflow)?)
+            .checked_add(summary.record_count())
             .ok_or(SpoolError::SizeOverflow)?;
     }
 
@@ -245,7 +247,7 @@ pub(crate) fn verify_manifest_bytes(
 pub(crate) fn verify_manifest_content(
     manifest: &ClosedSegmentManifestV1,
     reader: &SpoolReader,
-    records: &[super::SpoolRecord],
+    summary: &SpoolRecordSummary,
 ) -> Result<(), SpoolError> {
     if reader.header().segment_sequence() != manifest.segment_sequence()
         || reader.header().source_id().as_str() != manifest.source_id()
@@ -255,12 +257,9 @@ pub(crate) fn verify_manifest_content(
     {
         return Err(SpoolError::ManifestContentMismatch);
     }
-    let expected_count = u64::try_from(records.len()).map_err(|_| SpoolError::SizeOverflow)?;
-    let first = records.first().ok_or(SpoolError::ManifestContentMismatch)?;
-    let last = records.last().ok_or(SpoolError::ManifestContentMismatch)?;
-    if manifest.record_count() != expected_count
-        || manifest.min_cursor() != first.cursor()
-        || manifest.max_cursor() != last.cursor()
+    if manifest.record_count() != summary.record_count()
+        || Some(manifest.min_cursor()) != summary.first_cursor()
+        || Some(manifest.max_cursor()) != summary.last_cursor()
     {
         return Err(SpoolError::ManifestContentMismatch);
     }

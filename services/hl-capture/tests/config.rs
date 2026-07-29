@@ -144,6 +144,11 @@ fn queue_payload_segment_rotation_and_durability_limits_fail_closed() {
             "capture_config.invalid_segment_target",
         ),
         (
+            "segment_target_bytes = 67108864",
+            "segment_target_bytes = 536870913",
+            "capture_config.invalid_segment_target",
+        ),
+        (
             "rotation_interval_seconds = 300",
             "rotation_interval_seconds = 0",
             "capture_config.invalid_rotation_interval",
