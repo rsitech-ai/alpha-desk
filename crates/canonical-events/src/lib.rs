@@ -453,6 +453,28 @@ impl SourceEvidence {
     }
 }
 
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum EvidenceMergeError {
+    #[error("canonical event content differs")]
+    CanonicalContentMismatch,
+    #[error("source evidence locator has conflicting content for source {source_id}")]
+    SourceEvidenceConflict {
+        source_id: SourceId,
+        existing_hash: [u8; HASH_LENGTH],
+        conflicting_hash: [u8; HASH_LENGTH],
+    },
+}
+
+impl EvidenceMergeError {
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::CanonicalContentMismatch => "canonical_event.content_mismatch",
+            Self::SourceEvidenceConflict { .. } => "canonical_event.source_evidence_conflict",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventOrderingKey<'a> {
     pub chain_id: &'a str,
@@ -746,6 +768,11 @@ impl CanonicalEventEnvelope {
     }
 
     #[must_use]
+    pub fn market_ids(&self) -> &[MarketId] {
+        &self.market_ids
+    }
+
+    #[must_use]
     pub fn account_addresses(&self) -> &[Address] {
         &self.account_ids
     }
@@ -753,6 +780,34 @@ impl CanonicalEventEnvelope {
     #[must_use]
     pub fn source_evidence(&self) -> &[SourceEvidence] {
         &self.source_evidence
+    }
+
+    pub fn merge_matching_source_evidence(&self, other: &Self) -> Result<Self, EvidenceMergeError> {
+        if !self.has_same_canonical_content(other) {
+            return Err(EvidenceMergeError::CanonicalContentMismatch);
+        }
+
+        for existing in &self.source_evidence {
+            for conflicting in &other.source_evidence {
+                if same_evidence_locator(existing, conflicting)
+                    && existing.content_hash != conflicting.content_hash
+                {
+                    return Err(EvidenceMergeError::SourceEvidenceConflict {
+                        source_id: existing.source_id.clone(),
+                        existing_hash: existing.content_hash,
+                        conflicting_hash: conflicting.content_hash,
+                    });
+                }
+            }
+        }
+
+        let mut merged = self.clone();
+        merged
+            .source_evidence
+            .extend(other.source_evidence.iter().cloned());
+        merged.source_evidence.sort_by(compare_source_evidence);
+        merged.source_evidence.dedup();
+        Ok(merged)
     }
 
     #[must_use]
@@ -819,6 +874,40 @@ impl CanonicalEventEnvelope {
             payload,
         })
     }
+}
+
+impl CanonicalEventEnvelope {
+    fn has_same_canonical_content(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.chain_id == other.chain_id
+            && self.block_height == other.block_height
+            && self.block_time == other.block_time
+            && self.transaction_id == other.transaction_id
+            && self.transaction_index == other.transaction_index
+            && self.event_index == other.event_index
+            && self.event_id == other.event_id
+            && self.market_ids == other.market_ids
+            && self.account_ids == other.account_ids
+            && self.payload_hash == other.payload_hash
+            && self.payload == other.payload
+            && self.encoded_payload == other.encoded_payload
+    }
+}
+
+fn same_evidence_locator(left: &SourceEvidence, right: &SourceEvidence) -> bool {
+    left.source_id == right.source_id
+        && left.source_version == right.source_version
+        && left.source_offset == right.source_offset
+        && left.source_event_index == right.source_event_index
+}
+
+fn compare_source_evidence(left: &SourceEvidence, right: &SourceEvidence) -> std::cmp::Ordering {
+    left.source_id
+        .cmp(&right.source_id)
+        .then_with(|| left.source_version.cmp(&right.source_version))
+        .then_with(|| left.source_offset.cmp(&right.source_offset))
+        .then_with(|| left.source_event_index.cmp(&right.source_event_index))
+        .then_with(|| left.content_hash.cmp(&right.content_hash))
 }
 
 impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {

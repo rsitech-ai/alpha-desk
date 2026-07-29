@@ -95,6 +95,29 @@ observation class. Watermark eligibility and publication lane are derived from
 that validated pair. See
 [`adapters/source-priority.md`](adapters/source-priority.md).
 
+The focused canonical continuity checks are:
+
+```sh
+cargo +1.97.1 test -p hl-capture --test sequencer --locked --offline
+cargo +1.97.1 clippy -p hl-capture --all-targets --all-features \
+  --locked --offline -- -D warnings
+```
+
+The synchronous state machine has bounded pending/recent histories, isolates
+provisional watermarks, emits explicit recovery decisions for evicted history,
+and permanently latches red on source divergence. It does not persist a
+durable cursor: archive-before-cursor integration remains part of the archive
+and long-running runtime milestones. Operational response is documented in
+[`runbooks/committed-gap.md`](runbooks/committed-gap.md) and
+[`runbooks/source-divergence.md`](runbooks/source-divergence.md).
+
+The capture incident/cursor migration is checked against the exact pinned
+PostgreSQL image in an isolated no-port container:
+
+```sh
+just postgres-migration-smoke
+```
+
 ## Engineering rules
 
 - Write a focused failing test before behavior changes.

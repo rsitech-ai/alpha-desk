@@ -234,10 +234,27 @@ fn compute_block_hash(
         hasher.update(&event.canonical_event_index().to_be_bytes());
         hash_bytes(&mut hasher, event.event_id().as_str().as_bytes());
         hash_bytes(&mut hasher, event.event_kind().as_wire_name().as_bytes());
+        hash_bytes(&mut hasher, event.schema_version().as_bytes());
+        hash_count(&mut hasher, event.market_ids().len());
+        for market_id in event.market_ids() {
+            hash_bytes(&mut hasher, market_id.as_str().as_bytes());
+        }
+        hash_count(&mut hasher, event.account_addresses().len());
+        for account in event.account_addresses() {
+            hash_bytes(&mut hasher, account.as_bytes());
+        }
         hasher.update(&event.payload_hash());
     }
 
     *hasher.finalize().as_bytes()
+}
+
+fn hash_count(hasher: &mut blake3::Hasher, count: usize) {
+    let count = match u64::try_from(count) {
+        Ok(count) => count,
+        Err(_) => unreachable!("canonical block collections cannot exceed the u64 framing limit"),
+    };
+    hasher.update(&count.to_be_bytes());
 }
 
 fn hash_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {

@@ -22,6 +22,9 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Source-independent V1 event IDs, validated production canonical-event
   construction, deterministic canonical block hashes, and fail-closed block
   ordering/boundary invariants.
+- Canonical block content hashes bind schema plus market/account routing
+  metadata while excluding source/lifecycle metadata; matching independent
+  observations merge sorted event evidence and reject same-locator conflicts.
 - Presence-aware source-event sub-index provenance for deterministic
   one-source-record-to-many-canonical-event mappings.
 - Hashed public Node V1 block-batched trade contract and conservative
@@ -34,6 +37,10 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Deterministic `canonical-inspect` CLI with strict qualified-corpus input,
   create-new atomic output, source/event/payload/block hashes, and a committed
   reproducibility manifest.
+- Bounded deterministic canonical sequencer with committed/provisional
+  watermarks, gap recovery decisions, duplicate suppression, retained-history
+  verification, source-evidence merging, and red-latched divergence
+  quarantine.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 
@@ -46,6 +53,6 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Stage 0 gate remains on `HOLD`.
 - Independent/recovery transports, proprietary operator-feed integration,
   real-node corpus qualification, the long-running capture runtime, remaining
-  source-to-canonical mappings, continuity, archive publication,
+  source-to-canonical mappings, durable cursor/archive publication,
   APIs, research workflows, and native applications are not yet implemented.
 - No public release, supported version, production deployment, or performance qualification exists.
