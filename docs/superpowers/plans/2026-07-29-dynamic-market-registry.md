@@ -79,21 +79,26 @@ forward old values as if they belonged to the new hash.
 - Modify: `crates/canonical-ledger/src/lib.rs`
 - Modify: `docs/contracts/deterministic-state-v1.md`
 
-- [ ] Write failing table-driven lifecycle, point-in-time, key/codec, and
+- [x] Write failing table-driven lifecycle, point-in-time, key/codec, and
       whole-block rollback tests.
-- [ ] Add reducer version
+- [x] Add reducer version
       `hyperliquid-alpha-desk-canonical-market@1.0.0`.
-- [ ] Store immutable event facts, current DEX/asset/market/outcome state, and
+- [x] Store immutable event facts, current DEX/asset/market/outcome state, and
       non-overlapping metadata-version intervals.
-- [ ] Derive price/quantity scales only from the canonical tick/lot values that
+- [x] Derive price/quantity scales only from the canonical tick/lot values that
       created the market; reject invalid transitions and unknown prerequisites.
-- [ ] On `MarketMetadataChanged`, close the prior exact interval, record the new
+- [x] On `MarketMetadataChanged`, close the prior exact interval, record the new
       version/hash as unresolved, and suppress value-dependent updates until
       authoritative metadata is supplied.
-- [ ] Default-deny halt/resume, cap, margin table, oracle, funding, and outcome
+- [x] Default-deny halt/resume, cap, margin table, oracle, funding, and outcome
       transitions; keep all arithmetic checked and fixed-point.
-- [ ] Run canonical-ledger/replay suites and strict Clippy.
-- [ ] Commit `feat(state): add versioned dynamic market registry`.
+- [x] Run canonical-ledger/replay suites and strict Clippy.
+- [x] Commit `feat(state): add versioned dynamic market registry`.
+
+**Progress (2026-07-29):** M3 is implemented and locally verified with 13
+focused market-state tests, the combined canonical-ledger/replay suites, and
+strict all-target/all-feature Clippy. The local M3 commit is recorded in the
+task report.
 
 ## Milestone 4: Add replay/checkpoint evidence and soak
 

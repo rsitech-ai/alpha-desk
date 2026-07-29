@@ -81,6 +81,50 @@ balance, fee, funding, margin, liquidation, or order-book state. Its inputs are
 canonical-event contracts, not evidence that any deployed source emits those
 contracts correctly.
 
+`CanonicalMarketReducerV1` freezes the point-in-time V1 market registry under
+reducer-set version `hyperliquid-alpha-desk-canonical-market@1.0.0`. It owns
+only exact schema `1.0.0` events for `DexCreated`, `AssetContextUpdated`,
+`MarketCreated`, `MarketMetadataChanged`, `MarketHalted`, `MarketResumed`,
+`OpenInterestCapChanged`, `MarginTableChanged`, `OracleUpdated`,
+`FundingRateUpdated`, `OutcomeCreated`, and `OutcomeResolved`.
+
+The reducer stores one immutable `market-fact.v1` record for every owned event
+and key-bound current records for DEX, asset context, market, and outcome
+identity. DEX, asset, market, metadata-version, event, and outcome identities
+cannot be reused. A market can be created only after its DEX and two distinct
+assets exist in candidate state. Creation installs the exact metadata interval
+`creation@1.0.0`; tick size, lot size, price scale, and quantity scale come
+only from the canonical creation values.
+
+Metadata intervals are key-bound by framed market and version identities and
+cannot overlap. A later hash-only `MarketMetadataChanged` must occur at a
+strictly later block with a lexically increasing, unused version. It closes
+the prior interval at the previous block, opens an unresolved interval, and
+removes exact tick, lot, and scale applicability from current state. While
+unresolved, open-interest cap, margin-table, oracle, funding, and outcome
+resolution events fail with `market_state.metadata_unresolved`; the reducer
+does not copy values across an unproven metadata hash.
+
+Status changes default-deny: only active-to-halted and halted-to-active are
+valid. Outcomes have immutable market-bound identity and may resolve exactly
+once. Oracle and funding effective times never regress. Open-interest cap and
+margin-table changes compare their asserted previous values with current state
+after the first such event establishes the predecessor omitted by
+`MarketCreated`; every later mismatch rejects the complete candidate block.
+Envelope market and account lists must exactly match payload identity for every
+event.
+
+All market-registry record families are bounded to 16 KiB, encoded as strict
+field-ordered JSON with unknown fields denied, and accepted only when canonical
+re-encoding reproduces the exact bytes. Keys use length framing and typed
+`decode_at` helpers reject records presented under another identity. Oversized
+identifiers fail key construction instead of panicking.
+
+This registry is a storage-neutral canonical prerequisite. It does not qualify
+deployed source mapping, authoritative metadata snapshots, external oracle
+reconciliation, account or position effects, margin formulas, order books, or
+Stage 2 readiness.
+
 ## Block atomicity
 
 The ledger:

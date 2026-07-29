@@ -3,6 +3,7 @@
 mod checkpoint;
 mod error;
 mod ledger;
+mod market;
 mod order;
 mod reducer;
 mod state;
@@ -14,6 +15,11 @@ pub use error::{CheckpointError, LedgerError, ReducerError, StateImageError, Sta
 pub use ledger::{
     ApplyOutcome, CanonicalLedger, LedgerLimits, PrepareOutcome, PreparedBlock, StateCheckpoint,
     StateDelta,
+};
+pub use market::{
+    AssetContextCurrentRecordV1, CanonicalMarketReducerV1, DexCurrentRecordV1,
+    MarketCurrentRecordV1, MarketFactRecordV1, MarketMetadataResolutionV1,
+    MarketMetadataVersionRecordV1, MarketStateError, MarketStatusV1, OutcomeCurrentRecordV1,
 };
 pub use order::{
     CanonicalOrderReducerV1, OrderCurrentRecordV1, OrderFactRecordV1, OrderLifecycleV1,
