@@ -6,7 +6,8 @@ use canonical_events::{
     EventPayload, SourceEvidence, TradeMatched,
 };
 use domain_types::{
-    BlockHeight, ChainId, KnownTime, Price, ProtocolTime, Quantity, SourceId, TransactionId,
+    Address, BlockHeight, ChainId, KnownTime, MarketId, Price, ProtocolTime, Quantity, SourceId,
+    TransactionId,
 };
 
 fn known(micros: i64) -> KnownTime {
@@ -36,6 +37,37 @@ fn event(
     lifecycle_offset: i64,
     payload_seed: u64,
 ) -> CanonicalEventEnvelope {
+    scoped_event(
+        chain,
+        height,
+        block_time,
+        transaction_id,
+        transaction_index,
+        event_index,
+        source_id,
+        confirmation_class,
+        lifecycle_offset,
+        payload_seed,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scoped_event(
+    chain: &str,
+    height: u64,
+    block_time: i64,
+    transaction_id: &str,
+    transaction_index: u32,
+    event_index: u32,
+    source_id: &str,
+    confirmation_class: ConfirmationClass,
+    lifecycle_offset: i64,
+    payload_seed: u64,
+    market_ids: Vec<MarketId>,
+    account_ids: Vec<Address>,
+) -> CanonicalEventEnvelope {
     CanonicalEventEnvelope::from_input(CanonicalEventInput {
         schema_version: "1.0.0".to_owned(),
         chain_id: ChainId::new(chain).expect("chain"),
@@ -44,8 +76,8 @@ fn event(
         transaction_id: TransactionId::new(transaction_id).expect("transaction"),
         transaction_index,
         canonical_event_index: event_index,
-        market_ids: Vec::new(),
-        account_ids: Vec::new(),
+        market_ids,
+        account_ids,
         source_evidence: vec![source(source_id, payload_seed as u8)],
         confirmation_class,
         observed_at: known(2_000 + lifecycle_offset),
@@ -172,6 +204,55 @@ fn payload_divergence_changes_block_hash_without_changing_event_identity() {
         8,
     );
     assert_eq!(left_event.event_id(), right_event.event_id());
+
+    let left = block(
+        ConfirmationClass::CommittedPrimary,
+        vec![left_event],
+        "primary",
+    )
+    .expect("left");
+    let right = block(
+        ConfirmationClass::CommittedPrimary,
+        vec![right_event],
+        "primary",
+    )
+    .expect("right");
+
+    assert_ne!(left.canonical_block_hash(), right.canonical_block_hash());
+}
+
+#[test]
+fn routing_metadata_divergence_changes_block_hash_without_changing_event_identity() {
+    let left_event = scoped_event(
+        "mainnet",
+        42,
+        1_000,
+        "tx-7",
+        3,
+        0,
+        "primary",
+        ConfirmationClass::CommittedPrimary,
+        0,
+        7,
+        vec![MarketId::new("BTC").expect("market")],
+        vec![Address::from_bytes([0x11; 20])],
+    );
+    let right_event = scoped_event(
+        "mainnet",
+        42,
+        1_000,
+        "tx-7",
+        3,
+        0,
+        "primary",
+        ConfirmationClass::CommittedPrimary,
+        0,
+        7,
+        vec![MarketId::new("ETH").expect("market")],
+        vec![Address::from_bytes([0x22; 20])],
+    );
+    assert_eq!(left_event.event_id(), right_event.event_id());
+    assert_eq!(left_event.payload_hash(), right_event.payload_hash());
 
     let left = block(
         ConfirmationClass::CommittedPrimary,

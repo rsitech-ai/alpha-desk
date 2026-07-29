@@ -40,6 +40,11 @@ It hashes:
    - canonical event index as unsigned 32-bit big-endian;
    - framed event ID UTF-8 bytes;
    - framed stable event-kind wire-name bytes;
+   - framed canonical schema-version UTF-8 bytes;
+   - market-ID count as unsigned 64-bit big-endian, then every framed market
+     ID in envelope order;
+   - account-address count as unsigned 64-bit big-endian, then every
+     length-framed 20-byte address in envelope order;
    - the 32-byte payload hash.
 
 The projection deliberately excludes confirmation class, source hashes,
@@ -47,9 +52,10 @@ source evidence, lifecycle timestamps, parser version, and source bytes.
 Primary and independently operated committed observations of identical
 canonical content must therefore produce the same canonical block hash.
 
-Different payload content under one stable event identity changes the block
-hash and is handled by the sequencer as critical divergence. It is never an
-in-place update.
+Different payload, schema, market-routing, or account-routing content under one
+stable event identity changes the block hash and is handled by the sequencer as
+critical divergence. It is never an in-place update. Matching independently
+observed events merge their sorted source evidence without changing this hash.
 
 ## Empty-block test vector
 

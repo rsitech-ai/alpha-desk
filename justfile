@@ -59,6 +59,9 @@ stage-0-gate builder_id:
 stage-0-compose-smoke:
     ./tools/ci/stage-0-compose-smoke.sh
 
+postgres-migration-smoke:
+    ./tools/ci/check-postgres-migrations.sh
+
 dev-up:
     docker compose -f infra/docker-compose/compose.yaml up -d --wait --wait-timeout 120
     ./tools/ci/wait-for-dev-stack.sh

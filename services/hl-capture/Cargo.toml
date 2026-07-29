@@ -15,6 +15,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
 bytes.workspace = true
+canonical-events = { path = "../../crates/canonical-events", version = "=0.1.0" }
 crc32c.workspace = true
 domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
 hl-protocol = { path = "../../crates/hl-protocol", version = "=0.1.0" }

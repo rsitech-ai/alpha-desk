@@ -56,6 +56,7 @@ readonly TARGET_SPOOL="$TEMP_ROOT/target-spool"
 readonly TARGET_NODE="$TEMP_ROOT/target-node"
 readonly TARGET_TRUST="$TEMP_ROOT/target-trust"
 readonly TARGET_CANONICAL="$TEMP_ROOT/target-canonical"
+readonly TARGET_SEQUENCER="$TEMP_ROOT/target-sequencer"
 readonly TARGET_INSPECT="$TEMP_ROOT/target-inspect"
 readonly TARGET_MATERIAL="$TEMP_ROOT/target-material"
 readonly TARGET_CONTRACT_A="$TEMP_ROOT/target-contract-a"
@@ -92,8 +93,12 @@ CARGO_TARGET_DIR="$TARGET_TRUST" \
 
 CARGO_TARGET_DIR="$TARGET_CANONICAL" \
   cargo +1.97.1 test -p canonical-events \
-  --test event_id --test input --test block --test node_mapping --test upcast \
+  --test event_id --test input --test block --test evidence_merge \
+  --test node_mapping --test upcast \
   --frozen --offline
+
+CARGO_TARGET_DIR="$TARGET_SEQUENCER" \
+  cargo +1.97.1 test -p hl-capture --test sequencer --frozen --offline
 
 CARGO_TARGET_DIR="$TARGET_INSPECT" \
   cargo +1.97.1 run -p canonical-inspect --frozen --offline -- \

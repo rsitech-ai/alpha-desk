@@ -76,7 +76,9 @@ For focused commands and development conventions, read [docs/DEVELOPMENT.md](doc
 ## Repository map
 
 - `crates/` — domain contracts, stable canonical event/block identity, storage ports, telemetry, and research foundations
-- `services/` — service boundaries; `hl-capture` contains observation, spool, and primary-node adapter libraries, while service binaries remain bootstrap-only
+- `services/` — service boundaries; `hl-capture` contains observation, spool,
+  primary-node adapter, and bounded canonical-sequencer libraries, while
+  service binaries remain bootstrap-only
 - `apps/AlphaDesk/` — Swift package foundations; currently no application target
 - `schemas/` — versioned Protobuf and JSON contracts
 - `fixtures/` — deterministic synthetic fixtures and provenance-labeled normalized public schema examples

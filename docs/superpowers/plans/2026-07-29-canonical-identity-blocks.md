@@ -339,6 +339,12 @@ over:
 Do not include confirmation class, source hashes/evidence, observed/ingested/
 canonicalized times, parser version, or encoded source bytes.
 
+The implementation was subsequently hardened before archive adoption to bind
+the canonical schema version plus ordered market and account routing metadata.
+Those fields affect downstream routing and therefore cannot be excluded from
+the canonical content projection. Source, confirmation, lifecycle, parser, and
+raw-byte evidence remain excluded.
+
 - [ ] **Step 4: Verify GREEN and document the projection**
 
 Run:
