@@ -8,9 +8,10 @@ owns the exact twelve market event kinds at schema `1.0.0` under reducer version
 
 ## Commit
 
-- `feat(state): add versioned dynamic market registry` (this report is included
-  in that local commit; the resolved SHA is returned to the orchestrator after
-  commit creation)
+- `7530484` — `feat(state): add versioned dynamic market registry`
+- `fix(state): harden market metadata registry` (review remediation; this
+  report is included in that local commit and its resolved SHA is returned
+  after commit creation)
 
 ## Exact tests
 
@@ -25,7 +26,7 @@ Final verification:
 
 ```text
 cargo +1.97.1 test -p canonical-ledger --test market_state --locked --offline
-13 passed; 0 failed
+17 passed; 0 failed
 
 cargo +1.97.1 test -p canonical-ledger -p replay-engine --locked --offline
 all canonical-ledger, replay-engine, and doc tests passed
@@ -37,6 +38,39 @@ git diff --check
 passed
 ```
 
+## Independent-review remediation
+
+Observed focused RED evidence:
+
+```text
+strictly_increasing_unresolved_metadata_versions_close_each_prior_interval
+failed with market_state.metadata_unresolved on metadata-v3
+
+exact/unresolved scale assertions failed to compile because the public getters
+returned u8 instead of Option
+
+unresolved_current_getters_hide_all_prior_value_dependent_state
+failed because open_interest_cap returned the prior Some value
+```
+
+Remediation:
+
+- Strictly increasing metadata versions now close either exact or unresolved
+  open intervals. Creation, unresolved v2, and unresolved v3 boundaries plus
+  invalid-follow-up rollback are directly tested.
+- Current scale getters return `Option<u32>`. Hash-only changes clear prior
+  exact tick, lot, scale, cap, margin-table, oracle, and funding current values;
+  value-dependent getters additionally gate on exact metadata resolution.
+- Compound key construction precomputes checked framed length, rejects above
+  64 KiB before allocation, and maps fallible exact-reservation failure to
+  `MarketStateError::InvalidKey`. Exact and one-byte-over single, metadata, and
+  outcome key boundaries are tested.
+- The lifecycle test asserts the explicit twelve-kind set including
+  `MarketMetadataChanged`. Focused negative coverage now includes DEX, asset,
+  market, and outcome collisions; operator/account envelope mismatch; and all
+  six record families across canonical, noncanonical, unknown-field,
+  over-16-KiB, correct-key, and wrong-key paths.
+
 ## Key design choices
 
 - Every accepted owned event writes one immutable event-ID-bound fact.
@@ -46,9 +80,10 @@ passed
   installs exact `creation@1.0.0` metadata, and derives scales only from its
   canonical tick and lot values.
 - Hash-only metadata changes close the prior interval at the previous block,
-  create a non-overlapping unresolved interval, and remove exact tick, lot, and
-  scale applicability. Cap, margin-table, oracle, funding, and outcome
-  resolution then fail with `market_state.metadata_unresolved`.
+  including when the prior interval is already unresolved, create a
+  non-overlapping unresolved interval, and remove all value-dependent current
+  applicability. Cap, margin-table, oracle, funding, and outcome resolution
+  then fail with `market_state.metadata_unresolved`.
 - Halt/resume and outcome resolution are explicit default-deny state machines.
   Oracle and funding times never regress, and later cap/table changes must bind
   their exact current predecessor.

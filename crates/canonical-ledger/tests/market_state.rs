@@ -1,20 +1,20 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use canonical_events::{
     AssetContextUpdated, BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput,
-    ConfirmationClass, DexCreated, EventPayload, FundingRateUpdated, MarginTableChanged,
+    ConfirmationClass, DexCreated, EventKind, EventPayload, FundingRateUpdated, MarginTableChanged,
     MarketCreated, MarketHalted, MarketMetadataChanged, MarketResumed, OpenInterestCapChanged,
     OracleUpdated, OutcomeCreated, OutcomeResolved, SourceEvidence,
 };
 use canonical_ledger::{
     ApplyOutcome, AssetContextCurrentRecordV1, CanonicalLedger, CanonicalMarketReducerV1,
-    DexCurrentRecordV1, EventReducer, LedgerLimits, MarketCurrentRecordV1,
+    DexCurrentRecordV1, EventReducer, LedgerLimits, MarketCurrentRecordV1, MarketFactRecordV1,
     MarketMetadataResolutionV1, MarketMetadataVersionRecordV1, MarketStateError, MarketStatusV1,
-    OutcomeCurrentRecordV1,
+    OutcomeCurrentRecordV1, StateKey,
 };
 use domain_types::{
-    Address, AssetId, BlockHeight, ChainId, DexId, FundingRate, KnownTime, MarketId, OutcomeId,
-    Price, ProtocolTime, Quantity, QuoteAmount, SourceId, TransactionId,
+    Address, AssetId, BlockHeight, ChainId, DexId, EventId, FundingRate, KnownTime, MarketId,
+    OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId, TransactionId,
 };
 
 const OPERATOR: Address = Address::from_bytes([0x11; 20]);
@@ -117,8 +117,8 @@ fn exact_market_creation_requires_dex_and_assets_and_is_key_bound() {
         current.metadata_resolution(),
         MarketMetadataResolutionV1::Exact
     );
-    assert_eq!(current.price_scale(), 6);
-    assert_eq!(current.quantity_scale(), 8);
+    assert_eq!(current.price_scale(), Some(6));
+    assert_eq!(current.quantity_scale(), Some(8));
 
     let version_key =
         MarketMetadataVersionRecordV1::state_key(&market, current.metadata_version()).unwrap();
@@ -170,6 +170,8 @@ fn hash_only_metadata_change_closes_exact_interval_and_suppresses_values() {
     assert_eq!(current.metadata_version(), "metadata-v2");
     assert_eq!(current.tick_size(), None);
     assert_eq!(current.lot_size(), None);
+    assert_eq!(current.price_scale(), None);
+    assert_eq!(current.quantity_scale(), None);
 
     let prior_key = MarketMetadataVersionRecordV1::state_key(&market, "creation@1.0.0").unwrap();
     let prior = MarketMetadataVersionRecordV1::decode_at(
@@ -255,6 +257,11 @@ fn all_twelve_market_events_reduce_in_valid_order() {
             settlement_value: Price::parse_at_scale("1", 6).unwrap(),
             resolved_at: ProtocolTime::from_unix_micros(308).unwrap(),
         }),
+        EventPayload::MarketMetadataChanged(MarketMetadataChanged {
+            market_id: market.clone(),
+            metadata_version: "metadata-v2".to_owned(),
+            metadata_hash: [0x41; 32],
+        }),
     ];
     for (offset, payload) in transitions.into_iter().enumerate() {
         let height = 301 + u64::try_from(offset).unwrap();
@@ -273,22 +280,45 @@ fn all_twelve_market_events_reduce_in_valid_order() {
             .unwrap();
     }
 
-    assert_eq!(namespace_count(&ledger, "market-fact.v1"), 12);
+    assert_eq!(namespace_count(&ledger, "market-fact.v1"), 13);
+    let actual_kinds = ledger
+        .state_image()
+        .entries()
+        .iter()
+        .filter(|(key, _)| key.namespace() == "market-fact.v1")
+        .map(|(key, bytes)| {
+            MarketFactRecordV1::decode_at(key, bytes)
+                .unwrap()
+                .event_kind()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_kinds,
+        BTreeSet::from([
+            EventKind::DexCreated,
+            EventKind::AssetContextUpdated,
+            EventKind::MarketCreated,
+            EventKind::MarketMetadataChanged,
+            EventKind::MarketHalted,
+            EventKind::MarketResumed,
+            EventKind::OpenInterestCapChanged,
+            EventKind::MarginTableChanged,
+            EventKind::OracleUpdated,
+            EventKind::FundingRateUpdated,
+            EventKind::OutcomeCreated,
+            EventKind::OutcomeResolved,
+        ])
+    );
     let current = current_market(&ledger, &market);
     assert_eq!(current.status(), MarketStatusV1::Active);
     assert_eq!(
-        current.open_interest_cap(),
-        Some(QuoteAmount::parse_at_scale("1250000", 6).unwrap())
+        current.metadata_resolution(),
+        MarketMetadataResolutionV1::Unresolved
     );
-    assert_eq!(current.margin_table_hash(), Some("margin-v2"));
-    assert_eq!(
-        current.oracle_price(),
-        Some(Price::parse_at_scale("65000", 6).unwrap())
-    );
-    assert_eq!(
-        current.funding_rate(),
-        Some(FundingRate::parse_at_scale("0.0001", 8).unwrap())
-    );
+    assert_eq!(current.open_interest_cap(), None);
+    assert_eq!(current.margin_table_hash(), None);
+    assert_eq!(current.oracle_price(), None);
+    assert_eq!(current.funding_rate(), None);
 
     let outcome_key = OutcomeCurrentRecordV1::state_key(&market, &outcome).unwrap();
     let outcome_record = OutcomeCurrentRecordV1::decode_at(
@@ -304,6 +334,63 @@ fn all_twelve_market_events_reduce_in_valid_order() {
         outcome_record.resolved_at(),
         Some(ProtocolTime::from_unix_micros(308).unwrap())
     );
+}
+
+#[test]
+fn unresolved_current_getters_hide_all_prior_value_dependent_state() {
+    let market = MarketId::new("perp:BTC").unwrap();
+    let mut ledger = seeded_market(350, &market);
+    let payloads = vec![
+        EventPayload::OpenInterestCapChanged(OpenInterestCapChanged {
+            market_id: market.clone(),
+            previous_cap: QuoteAmount::parse_at_scale("10", 6).unwrap(),
+            new_cap: QuoteAmount::parse_at_scale("20", 6).unwrap(),
+        }),
+        EventPayload::MarginTableChanged(MarginTableChanged {
+            market_id: market.clone(),
+            previous_table_hash: "margin-v1".to_owned(),
+            new_table_hash: "margin-v2".to_owned(),
+        }),
+        EventPayload::OracleUpdated(OracleUpdated {
+            market_id: market.clone(),
+            oracle_price: Price::parse_at_scale("65000", 6).unwrap(),
+            source: "validator".to_owned(),
+            effective_at: ProtocolTime::from_unix_micros(353).unwrap(),
+        }),
+        EventPayload::FundingRateUpdated(FundingRateUpdated {
+            market_id: market.clone(),
+            funding_rate: FundingRate::parse_at_scale("0.0001", 8).unwrap(),
+            effective_at: ProtocolTime::from_unix_micros(354).unwrap(),
+        }),
+        EventPayload::MarketMetadataChanged(MarketMetadataChanged {
+            market_id: market.clone(),
+            metadata_version: "metadata-v2".to_owned(),
+            metadata_hash: [0x42; 32],
+        }),
+    ];
+    for (offset, payload) in payloads.into_iter().enumerate() {
+        let height = 351 + u64::try_from(offset).unwrap();
+        ledger
+            .apply_block(&single_market_block(height, &market, payload))
+            .unwrap();
+    }
+
+    let current = current_market(&ledger, &market);
+    assert_eq!(
+        current.metadata_resolution(),
+        MarketMetadataResolutionV1::Unresolved
+    );
+    assert_eq!(current.tick_size(), None);
+    assert_eq!(current.lot_size(), None);
+    assert_eq!(current.price_scale(), None);
+    assert_eq!(current.quantity_scale(), None);
+    assert_eq!(current.open_interest_cap(), None);
+    assert_eq!(current.margin_table_hash(), None);
+    assert_eq!(current.oracle_price(), None);
+    assert_eq!(current.oracle_source(), None);
+    assert_eq!(current.oracle_effective_at(), None);
+    assert_eq!(current.funding_rate(), None);
+    assert_eq!(current.funding_effective_at(), None);
 }
 
 #[test]
@@ -396,6 +483,150 @@ fn identities_prerequisites_and_collisions_default_deny() {
     assert_eq!(
         collision_error.reducer_reason_code(),
         Some("market_state.outcome_identity_collision")
+    );
+}
+
+#[test]
+fn dex_asset_market_collisions_and_envelope_accounts_fail_closed() {
+    let other_operator = Address::from_bytes([0x12; 20]);
+    let dex = DexId::new("validator").unwrap();
+    let dex_payload = EventPayload::DexCreated(DexCreated {
+        dex_id: dex.clone(),
+        name: "Validator Perpetuals".to_owned(),
+        operator_account_id: OPERATOR,
+    });
+
+    let mut wrong_operator = ledger(450);
+    let before = wrong_operator.state_image().canonical_bytes();
+    let error = wrong_operator
+        .apply_block(&block(
+            450,
+            vec![event(
+                450,
+                0,
+                dex_payload.clone(),
+                Vec::new(),
+                vec![other_operator],
+                "1.0.0",
+            )],
+        ))
+        .unwrap_err();
+    assert_eq!(
+        error.reducer_reason_code(),
+        Some("market_state.invalid_account_identity")
+    );
+    assert_eq!(wrong_operator.state_image().canonical_bytes(), before);
+
+    let mut duplicate_dex = ledger(450);
+    duplicate_dex
+        .apply_block(&block(
+            450,
+            vec![event(
+                450,
+                0,
+                dex_payload.clone(),
+                Vec::new(),
+                vec![OPERATOR],
+                "1.0.0",
+            )],
+        ))
+        .unwrap();
+    let error = duplicate_dex
+        .apply_block(&block(
+            451,
+            vec![event(
+                451,
+                0,
+                dex_payload,
+                Vec::new(),
+                vec![OPERATOR],
+                "1.0.0",
+            )],
+        ))
+        .unwrap_err();
+    assert_eq!(
+        error.reducer_reason_code(),
+        Some("market_state.dex_identity_collision")
+    );
+
+    let asset = AssetId::new("BTC").unwrap();
+    let asset_payload = EventPayload::AssetContextUpdated(AssetContextUpdated {
+        asset_id: asset,
+        context_version: "btc-v1".to_owned(),
+        context_hash: [0x51; 32],
+    });
+    let mut duplicate_asset = ledger(450);
+    duplicate_asset
+        .apply_block(&block(
+            450,
+            vec![event(
+                450,
+                0,
+                asset_payload.clone(),
+                Vec::new(),
+                Vec::new(),
+                "1.0.0",
+            )],
+        ))
+        .unwrap();
+    let error = duplicate_asset
+        .apply_block(&block(
+            451,
+            vec![event(
+                451,
+                0,
+                asset_payload,
+                Vec::new(),
+                Vec::new(),
+                "1.0.0",
+            )],
+        ))
+        .unwrap_err();
+    assert_eq!(
+        error.reducer_reason_code(),
+        Some("market_state.asset_identity_collision")
+    );
+
+    let market = MarketId::new("perp:BTC").unwrap();
+    let mut duplicate_market = seeded_market(450, &market);
+    let error = duplicate_market
+        .apply_block(&single_market_block(
+            451,
+            &market,
+            EventPayload::MarketCreated(MarketCreated {
+                market_id: market.clone(),
+                dex_id: dex,
+                base_asset_id: AssetId::new("BTC").unwrap(),
+                quote_asset_id: AssetId::new("USDC").unwrap(),
+                tick_size: Price::parse_at_scale("0.1", 6).unwrap(),
+                lot_size: Quantity::parse_at_scale("0.00001", 8).unwrap(),
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(
+        error.reducer_reason_code(),
+        Some("market_state.market_identity_collision")
+    );
+
+    let error = duplicate_market
+        .apply_block(&block(
+            451,
+            vec![event(
+                451,
+                0,
+                EventPayload::MarketHalted(MarketHalted {
+                    market_id: market.clone(),
+                    reason: "maintenance".to_owned(),
+                }),
+                vec![market],
+                vec![OPERATOR],
+                "1.0.0",
+            )],
+        ))
+        .unwrap_err();
+    assert_eq!(
+        error.reducer_reason_code(),
+        Some("market_state.invalid_account_identity")
     );
 }
 
@@ -648,30 +879,160 @@ fn unsupported_schema_is_default_denied() {
 }
 
 #[test]
-fn records_are_canonical_key_bound_and_identifier_keys_are_bounded() {
+fn every_record_codec_is_canonical_bounded_unknown_field_denying_and_key_bound() {
     let market = MarketId::new("perp:BTC").unwrap();
-    let ledger = seeded_market(1000, &market);
-    let key = MarketCurrentRecordV1::state_key(&market).unwrap();
-    let bytes = ledger.state_image().entries().get(&key).unwrap();
-    let mut whitespace = vec![b' '];
-    whitespace.extend_from_slice(bytes);
-    assert_eq!(
-        MarketCurrentRecordV1::decode(&whitespace),
-        Err(MarketStateError::NonCanonical)
-    );
-    let other_key = MarketCurrentRecordV1::state_key(&MarketId::new("perp:ETH").unwrap()).unwrap();
-    assert_eq!(
-        MarketCurrentRecordV1::decode_at(&other_key, bytes),
-        Err(MarketStateError::KeyMismatch)
-    );
+    let outcome = OutcomeId::new("up").unwrap();
+    let mut ledger = seeded_market(1000, &market);
+    ledger
+        .apply_block(&single_market_block(
+            1001,
+            &market,
+            EventPayload::OutcomeCreated(OutcomeCreated {
+                market_id: market.clone(),
+                outcome_id: outcome.clone(),
+                description: "BTC closes higher".to_owned(),
+            }),
+        ))
+        .unwrap();
 
-    let oversized = MarketId::new("x".repeat(70 * 1024)).unwrap();
+    let (fact_key, fact_bytes) = first_namespace_record(&ledger, "market-fact.v1");
+    let dex = DexId::new("validator").unwrap();
+    let dex_key = DexCurrentRecordV1::state_key(&dex).unwrap();
+    let asset = AssetId::new("BTC").unwrap();
+    let asset_key = AssetContextCurrentRecordV1::state_key(&asset).unwrap();
+    let market_key = MarketCurrentRecordV1::state_key(&market).unwrap();
+    let metadata_key = MarketMetadataVersionRecordV1::state_key(&market, "creation@1.0.0").unwrap();
+    let outcome_key = OutcomeCurrentRecordV1::state_key(&market, &outcome).unwrap();
+
+    let cases = vec![
+        CodecCase {
+            name: "fact",
+            key: fact_key,
+            wrong_key: MarketFactRecordV1::state_key(&EventId::new("wrong-event").unwrap())
+                .unwrap(),
+            bytes: fact_bytes,
+            decode: decode_fact,
+            decode_at: decode_fact_at,
+        },
+        CodecCase {
+            name: "dex",
+            key: dex_key.clone(),
+            wrong_key: DexCurrentRecordV1::state_key(&DexId::new("other-dex").unwrap()).unwrap(),
+            bytes: state_bytes(&ledger, &dex_key),
+            decode: decode_dex,
+            decode_at: decode_dex_at,
+        },
+        CodecCase {
+            name: "asset",
+            key: asset_key.clone(),
+            wrong_key: AssetContextCurrentRecordV1::state_key(&AssetId::new("ETH").unwrap())
+                .unwrap(),
+            bytes: state_bytes(&ledger, &asset_key),
+            decode: decode_asset,
+            decode_at: decode_asset_at,
+        },
+        CodecCase {
+            name: "market",
+            key: market_key.clone(),
+            wrong_key: MarketCurrentRecordV1::state_key(&MarketId::new("perp:ETH").unwrap())
+                .unwrap(),
+            bytes: state_bytes(&ledger, &market_key),
+            decode: decode_market,
+            decode_at: decode_market_at,
+        },
+        CodecCase {
+            name: "metadata",
+            key: metadata_key.clone(),
+            wrong_key: MarketMetadataVersionRecordV1::state_key(&market, "other-version").unwrap(),
+            bytes: state_bytes(&ledger, &metadata_key),
+            decode: decode_metadata,
+            decode_at: decode_metadata_at,
+        },
+        CodecCase {
+            name: "outcome",
+            key: outcome_key.clone(),
+            wrong_key: OutcomeCurrentRecordV1::state_key(&market, &OutcomeId::new("down").unwrap())
+                .unwrap(),
+            bytes: state_bytes(&ledger, &outcome_key),
+            decode: decode_outcome,
+            decode_at: decode_outcome_at,
+        },
+    ];
+
+    for case in cases {
+        assert!(case.bytes.len() < 16 * 1024, "{} fixture", case.name);
+        assert_eq!(
+            (case.decode)(&case.bytes),
+            Ok(()),
+            "{} canonical",
+            case.name
+        );
+        assert_eq!(
+            (case.decode_at)(&case.key, &case.bytes),
+            Ok(()),
+            "{} key-bound",
+            case.name
+        );
+
+        let mut whitespace = vec![b' '];
+        whitespace.extend_from_slice(&case.bytes);
+        assert_eq!(
+            (case.decode)(&whitespace),
+            Err(MarketStateError::NonCanonical),
+            "{} noncanonical",
+            case.name
+        );
+        assert_eq!(
+            (case.decode)(&with_unknown_field(&case.bytes)),
+            Err(MarketStateError::Codec),
+            "{} unknown field",
+            case.name
+        );
+        assert_eq!(
+            (case.decode)(&vec![b'x'; 16 * 1024 + 1]),
+            Err(MarketStateError::LimitExceeded),
+            "{} bound",
+            case.name
+        );
+        assert_eq!(
+            (case.decode_at)(&case.wrong_key, &case.bytes),
+            Err(MarketStateError::KeyMismatch),
+            "{} wrong key",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn single_and_compound_keys_enforce_exact_framed_boundaries() {
+    const MAX_KEY_BYTES: usize = 64 * 1024;
+    const FRAME_BYTES: usize = 8;
+
+    let exact_single = MarketId::new("m".repeat(MAX_KEY_BYTES - FRAME_BYTES)).unwrap();
+    let exact_single_key = MarketCurrentRecordV1::state_key(&exact_single).unwrap();
+    assert_eq!(exact_single_key.key().len(), MAX_KEY_BYTES);
+    let oversized_single = MarketId::new("m".repeat(MAX_KEY_BYTES - FRAME_BYTES + 1)).unwrap();
     assert_eq!(
-        MarketCurrentRecordV1::state_key(&oversized),
+        MarketCurrentRecordV1::state_key(&oversized_single),
         Err(MarketStateError::InvalidKey)
     );
+
+    let market = MarketId::new("m").unwrap();
+    let exact_second_length = MAX_KEY_BYTES - (2 * FRAME_BYTES) - market.as_str().len();
+    let exact_version = "v".repeat(exact_second_length);
+    let exact_metadata = MarketMetadataVersionRecordV1::state_key(&market, &exact_version).unwrap();
+    assert_eq!(exact_metadata.key().len(), MAX_KEY_BYTES);
     assert_eq!(
-        MarketMetadataVersionRecordV1::state_key(&market, &"v".repeat(70 * 1024)),
+        MarketMetadataVersionRecordV1::state_key(&market, &format!("{exact_version}v"),),
+        Err(MarketStateError::InvalidKey)
+    );
+
+    let exact_outcome = OutcomeId::new("o".repeat(exact_second_length)).unwrap();
+    let exact_outcome_key = OutcomeCurrentRecordV1::state_key(&market, &exact_outcome).unwrap();
+    assert_eq!(exact_outcome_key.key().len(), MAX_KEY_BYTES);
+    let oversized_outcome = OutcomeId::new("o".repeat(exact_second_length + 1)).unwrap();
+    assert_eq!(
+        OutcomeCurrentRecordV1::state_key(&market, &oversized_outcome),
         Err(MarketStateError::InvalidKey)
     );
 }
@@ -779,6 +1140,77 @@ fn metadata_versions_require_distinct_heights_and_monotonic_identity() {
         error.reducer_reason_code(),
         Some("market_state.non_monotonic_metadata")
     );
+}
+
+#[test]
+fn strictly_increasing_unresolved_metadata_versions_close_each_prior_interval() {
+    let market = MarketId::new("perp:BTC").unwrap();
+    let mut ledger = seeded_market(1150, &market);
+
+    for (height, version, hash) in [
+        (1151, "metadata-v2", [0x71; 32]),
+        (1152, "metadata-v3", [0x72; 32]),
+    ] {
+        ledger
+            .apply_block(&single_market_block(
+                height,
+                &market,
+                EventPayload::MarketMetadataChanged(MarketMetadataChanged {
+                    market_id: market.clone(),
+                    metadata_version: version.to_owned(),
+                    metadata_hash: hash,
+                }),
+            ))
+            .unwrap();
+    }
+
+    let creation = metadata_version(&ledger, &market, "creation@1.0.0");
+    assert_eq!(
+        creation.effective_until_block(),
+        Some(BlockHeight::new(1150))
+    );
+    assert_eq!(creation.resolution(), MarketMetadataResolutionV1::Exact);
+
+    let v2 = metadata_version(&ledger, &market, "metadata-v2");
+    assert_eq!(v2.effective_from_block(), BlockHeight::new(1151));
+    assert_eq!(v2.effective_until_block(), Some(BlockHeight::new(1151)));
+    assert_eq!(v2.resolution(), MarketMetadataResolutionV1::Unresolved);
+
+    let v3 = metadata_version(&ledger, &market, "metadata-v3");
+    assert_eq!(v3.effective_from_block(), BlockHeight::new(1152));
+    assert_eq!(v3.effective_until_block(), None);
+    assert_eq!(v3.resolution(), MarketMetadataResolutionV1::Unresolved);
+    assert_eq!(v3.tick_size(), None);
+    assert_eq!(v3.lot_size(), None);
+
+    let current = current_market(&ledger, &market);
+    assert_eq!(current.metadata_version(), "metadata-v3");
+    assert_eq!(
+        current.metadata_resolution(),
+        MarketMetadataResolutionV1::Unresolved
+    );
+    assert_eq!(current.tick_size(), None);
+    assert_eq!(current.lot_size(), None);
+    assert_eq!(current.price_scale(), None);
+    assert_eq!(current.quantity_scale(), None);
+
+    let before_invalid = ledger.state_image().canonical_bytes();
+    let error = ledger
+        .apply_block(&single_market_block(
+            1153,
+            &market,
+            EventPayload::MarketMetadataChanged(MarketMetadataChanged {
+                market_id: market.clone(),
+                metadata_version: "metadata-v2".to_owned(),
+                metadata_hash: [0x73; 32],
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(
+        error.reducer_reason_code(),
+        Some("market_state.non_monotonic_metadata")
+    );
+    assert_eq!(ledger.state_image().canonical_bytes(), before_invalid);
 }
 
 #[test]
@@ -1006,6 +1438,19 @@ fn current_market(
         .unwrap()
 }
 
+fn metadata_version(
+    ledger: &CanonicalLedger<CanonicalMarketReducerV1>,
+    market: &MarketId,
+    version: &str,
+) -> MarketMetadataVersionRecordV1 {
+    let key = MarketMetadataVersionRecordV1::state_key(market, version).unwrap();
+    MarketMetadataVersionRecordV1::decode_at(
+        &key,
+        ledger.state_image().entries().get(&key).unwrap(),
+    )
+    .unwrap()
+}
+
 fn namespace_count(ledger: &CanonicalLedger<CanonicalMarketReducerV1>, namespace: &str) -> usize {
     ledger
         .state_image()
@@ -1013,6 +1458,89 @@ fn namespace_count(ledger: &CanonicalLedger<CanonicalMarketReducerV1>, namespace
         .keys()
         .filter(|key| key.namespace() == namespace)
         .count()
+}
+
+struct CodecCase {
+    name: &'static str,
+    key: StateKey,
+    wrong_key: StateKey,
+    bytes: Vec<u8>,
+    decode: fn(&[u8]) -> Result<(), MarketStateError>,
+    decode_at: fn(&StateKey, &[u8]) -> Result<(), MarketStateError>,
+}
+
+fn first_namespace_record(
+    ledger: &CanonicalLedger<CanonicalMarketReducerV1>,
+    namespace: &str,
+) -> (StateKey, Vec<u8>) {
+    ledger
+        .state_image()
+        .entries()
+        .iter()
+        .find(|(key, _)| key.namespace() == namespace)
+        .map(|(key, bytes)| (key.clone(), bytes.clone()))
+        .unwrap()
+}
+
+fn state_bytes(ledger: &CanonicalLedger<CanonicalMarketReducerV1>, key: &StateKey) -> Vec<u8> {
+    ledger.state_image().entries().get(key).unwrap().clone()
+}
+
+fn with_unknown_field(bytes: &[u8]) -> Vec<u8> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("unknown_field".to_owned(), serde_json::Value::Bool(true));
+    serde_json::to_vec(&value).unwrap()
+}
+
+fn decode_fact(bytes: &[u8]) -> Result<(), MarketStateError> {
+    MarketFactRecordV1::decode(bytes).map(|_| ())
+}
+
+fn decode_fact_at(key: &StateKey, bytes: &[u8]) -> Result<(), MarketStateError> {
+    MarketFactRecordV1::decode_at(key, bytes).map(|_| ())
+}
+
+fn decode_dex(bytes: &[u8]) -> Result<(), MarketStateError> {
+    DexCurrentRecordV1::decode(bytes).map(|_| ())
+}
+
+fn decode_dex_at(key: &StateKey, bytes: &[u8]) -> Result<(), MarketStateError> {
+    DexCurrentRecordV1::decode_at(key, bytes).map(|_| ())
+}
+
+fn decode_asset(bytes: &[u8]) -> Result<(), MarketStateError> {
+    AssetContextCurrentRecordV1::decode(bytes).map(|_| ())
+}
+
+fn decode_asset_at(key: &StateKey, bytes: &[u8]) -> Result<(), MarketStateError> {
+    AssetContextCurrentRecordV1::decode_at(key, bytes).map(|_| ())
+}
+
+fn decode_market(bytes: &[u8]) -> Result<(), MarketStateError> {
+    MarketCurrentRecordV1::decode(bytes).map(|_| ())
+}
+
+fn decode_market_at(key: &StateKey, bytes: &[u8]) -> Result<(), MarketStateError> {
+    MarketCurrentRecordV1::decode_at(key, bytes).map(|_| ())
+}
+
+fn decode_metadata(bytes: &[u8]) -> Result<(), MarketStateError> {
+    MarketMetadataVersionRecordV1::decode(bytes).map(|_| ())
+}
+
+fn decode_metadata_at(key: &StateKey, bytes: &[u8]) -> Result<(), MarketStateError> {
+    MarketMetadataVersionRecordV1::decode_at(key, bytes).map(|_| ())
+}
+
+fn decode_outcome(bytes: &[u8]) -> Result<(), MarketStateError> {
+    OutcomeCurrentRecordV1::decode(bytes).map(|_| ())
+}
+
+fn decode_outcome_at(key: &StateKey, bytes: &[u8]) -> Result<(), MarketStateError> {
+    OutcomeCurrentRecordV1::decode_at(key, bytes).map(|_| ())
 }
 
 fn ledger(first_height: u64) -> CanonicalLedger<CanonicalMarketReducerV1> {

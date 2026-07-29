@@ -98,12 +98,19 @@ only from the canonical creation values.
 
 Metadata intervals are key-bound by framed market and version identities and
 cannot overlap. A later hash-only `MarketMetadataChanged` must occur at a
-strictly later block with a lexically increasing, unused version. It closes
-the prior interval at the previous block, opens an unresolved interval, and
-removes exact tick, lot, and scale applicability from current state. While
-unresolved, open-interest cap, margin-table, oracle, funding, and outcome
-resolution events fail with `market_state.metadata_unresolved`; the reducer
-does not copy values across an unproven metadata hash.
+strictly later block with a lexically increasing, unused version. It closes the
+prior open interval at the previous block whether that interval is exact or
+unresolved, then opens a new unresolved interval. Consecutive hash-only
+versions therefore remain point-in-time complete without inventing exact
+metadata.
+
+An unresolved transition removes exact tick, lot, scale, cap, margin-table,
+oracle, and funding applicability from current state. Public scale getters
+return `Option<u32>`, and all value-dependent getters return absence while
+metadata is unresolved. Open-interest cap, margin-table, oracle, funding, and
+outcome resolution events fail with `market_state.metadata_unresolved`; the
+reducer does not copy values across an unproven metadata hash. Immutable facts
+retain the prior events without presenting their values as current.
 
 Status changes default-deny: only active-to-halted and halted-to-active are
 valid. Outcomes have immutable market-bound identity and may resolve exactly
@@ -118,7 +125,9 @@ All market-registry record families are bounded to 16 KiB, encoded as strict
 field-ordered JSON with unknown fields denied, and accepted only when canonical
 re-encoding reproduces the exact bytes. Keys use length framing and typed
 `decode_at` helpers reject records presented under another identity. Oversized
-identifiers fail key construction instead of panicking.
+identifiers fail key construction instead of panicking. Key builders compute
+the complete framed size against the 64 KiB ceiling before allocation and use
+fallible exact reservation before copying identities.
 
 This registry is a storage-neutral canonical prerequisite. It does not qualify
 deployed source mapping, authoritative metadata snapshots, external oracle
