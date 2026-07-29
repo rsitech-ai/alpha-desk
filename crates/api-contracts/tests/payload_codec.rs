@@ -1,11 +1,15 @@
 use api_contracts::{
-    PayloadCodecError, WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
-    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireTradeMatched,
-    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
-    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
-    decode_trade_matched, encode_order_accepted, encode_order_cancelled, encode_order_filled,
-    encode_order_modified, encode_order_partially_filled, encode_order_rejected,
-    encode_order_rested, encode_trade_matched,
+    PayloadCodecError, WireAssetContextUpdated, WireDexCreated, WireMarketCreated,
+    WireMarketMetadataChanged, WireOrderAccepted, WireOrderCancelled, WireOrderFilled,
+    WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested,
+    WireTradeMatched, decode_asset_context_updated, decode_dex_created, decode_market_created,
+    decode_market_metadata_changed, decode_order_accepted, decode_order_cancelled,
+    decode_order_filled, decode_order_modified, decode_order_partially_filled,
+    decode_order_rejected, decode_order_rested, decode_trade_matched, encode_asset_context_updated,
+    encode_dex_created, encode_market_created, encode_market_metadata_changed,
+    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
+    encode_order_partially_filled, encode_order_rejected, encode_order_rested,
+    encode_trade_matched,
 };
 
 fn trade() -> WireTradeMatched {
@@ -233,4 +237,138 @@ fn order_outcome_wire_payloads_reject_unsafe_reasons_and_missing_identity() {
             Err(PayloadCodecError::Invalid { .. })
         ));
     }
+}
+
+#[test]
+fn market_metadata_wire_payloads_round_trip_exactly() {
+    let dex = WireDexCreated {
+        dex_id: "validator".to_owned(),
+        name: "Hyperliquid Validator Perpetuals".to_owned(),
+        operator_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+    };
+    assert_eq!(
+        decode_dex_created(&encode_dex_created(&dex).unwrap()).unwrap(),
+        dex
+    );
+
+    let asset = WireAssetContextUpdated {
+        asset_id: "USDC".to_owned(),
+        context_version: "asset-context-7".to_owned(),
+        context_hash: vec![0x22; 32],
+    };
+    assert_eq!(
+        decode_asset_context_updated(&encode_asset_context_updated(&asset).unwrap()).unwrap(),
+        asset
+    );
+
+    let market = WireMarketCreated {
+        market_id: "perp:BTC".to_owned(),
+        dex_id: "validator".to_owned(),
+        base_asset_id: "BTC".to_owned(),
+        quote_asset_id: "USDC".to_owned(),
+        tick_size: "0.100000".to_owned(),
+        lot_size: "0.00001000".to_owned(),
+    };
+    assert_eq!(
+        decode_market_created(&encode_market_created(&market).unwrap()).unwrap(),
+        market
+    );
+
+    let changed = WireMarketMetadataChanged {
+        market_id: "perp:BTC".to_owned(),
+        metadata_version: "market-metadata-8".to_owned(),
+        metadata_hash: vec![0x33; 32],
+    };
+    assert_eq!(
+        decode_market_metadata_changed(&encode_market_metadata_changed(&changed).unwrap()).unwrap(),
+        changed
+    );
+}
+
+#[test]
+fn market_metadata_wire_payloads_reject_ambiguous_or_unbounded_fields() {
+    let invalid_dexes = [
+        WireDexCreated {
+            dex_id: String::new(),
+            name: "Validator".to_owned(),
+            operator_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        },
+        WireDexCreated {
+            dex_id: "validator".to_owned(),
+            name: "Validator\nPerpetuals".to_owned(),
+            operator_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        },
+        WireDexCreated {
+            dex_id: "validator".to_owned(),
+            name: "x".repeat(257),
+            operator_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        },
+    ];
+    for invalid in invalid_dexes {
+        assert!(matches!(
+            encode_dex_created(&invalid),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
+
+    let invalid_assets = [
+        WireAssetContextUpdated {
+            asset_id: " USDC".to_owned(),
+            context_version: "asset-context-7".to_owned(),
+            context_hash: vec![0x22; 32],
+        },
+        WireAssetContextUpdated {
+            asset_id: "USDC".to_owned(),
+            context_version: "asset\ncontext".to_owned(),
+            context_hash: vec![0x22; 32],
+        },
+        WireAssetContextUpdated {
+            asset_id: "USDC".to_owned(),
+            context_version: "asset-context-7".to_owned(),
+            context_hash: vec![0x22; 31],
+        },
+    ];
+    for invalid in invalid_assets {
+        assert!(matches!(
+            encode_asset_context_updated(&invalid),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
+
+    let invalid_market = WireMarketCreated {
+        market_id: "perp:BTC".to_owned(),
+        dex_id: "validator".to_owned(),
+        base_asset_id: "BTC".to_owned(),
+        quote_asset_id: "USDC".to_owned(),
+        tick_size: String::new(),
+        lot_size: "0.00001000".to_owned(),
+    };
+    assert!(matches!(
+        encode_market_created(&invalid_market),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+
+    let invalid_change = WireMarketMetadataChanged {
+        market_id: "perp:BTC".to_owned(),
+        metadata_version: "x".repeat(129),
+        metadata_hash: vec![0x33; 32],
+    };
+    assert!(matches!(
+        encode_market_metadata_changed(&invalid_change),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn market_metadata_wire_payloads_reject_wrong_kind() {
+    let encoded = encode_dex_created(&WireDexCreated {
+        dex_id: "validator".to_owned(),
+        name: "Validator".to_owned(),
+        operator_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+    })
+    .unwrap();
+    assert!(matches!(
+        decode_market_created(&encoded),
+        Err(PayloadCodecError::KindMismatch { .. })
+    ));
 }

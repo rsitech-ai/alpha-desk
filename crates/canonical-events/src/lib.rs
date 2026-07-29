@@ -16,18 +16,22 @@ pub use node_mapping::{
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
-    WireCanonicalEventEnvelope, WireOrderAccepted, WireOrderCancelled, WireOrderFilled,
+    WireAssetContextUpdated, WireCanonicalEventEnvelope, WireDexCreated, WireMarketCreated,
+    WireMarketMetadataChanged, WireOrderAccepted, WireOrderCancelled, WireOrderFilled,
     WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested,
-    WireSourceEvidence, WireTradeMatched, decode_order_accepted, decode_order_cancelled,
-    decode_order_filled, decode_order_modified, decode_order_partially_filled,
-    decode_order_rejected, decode_order_rested, decode_trade_matched, encode_default_event_payload,
+    WireSourceEvidence, WireTradeMatched, decode_asset_context_updated, decode_dex_created,
+    decode_market_created, decode_market_metadata_changed, decode_order_accepted,
+    decode_order_cancelled, decode_order_filled, decode_order_modified,
+    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
+    decode_trade_matched, encode_asset_context_updated, encode_default_event_payload,
+    encode_dex_created, encode_market_created, encode_market_metadata_changed,
     encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
     encode_trade_matched, validate_event_payload,
 };
 use domain_types::{
-    Address, BlockHeight, ChainId, ClientOrderId, EventId, KnownTime, MarketId, OrderId, OrderSide,
-    Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId,
+    Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId, EventId, KnownTime, MarketId,
+    OrderId, OrderSide, Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -261,6 +265,37 @@ pub struct OrderRejected {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DexCreated {
+    pub dex_id: DexId,
+    pub name: String,
+    pub operator_account_id: Address,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetContextUpdated {
+    pub asset_id: AssetId,
+    pub context_version: String,
+    pub context_hash: [u8; HASH_LENGTH],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketCreated {
+    pub market_id: MarketId,
+    pub dex_id: DexId,
+    pub base_asset_id: AssetId,
+    pub quote_asset_id: AssetId,
+    pub tick_size: Price,
+    pub lot_size: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketMetadataChanged {
+    pub market_id: MarketId,
+    pub metadata_version: String,
+    pub metadata_hash: [u8; HASH_LENGTH],
+}
+
 macro_rules! opaque_payloads {
     ($($kind:ident),+ $(,)?) => {
         $(
@@ -284,6 +319,10 @@ macro_rules! opaque_payloads {
             OrderFilled(OrderFilled),
             OrderCancelled(OrderCancelled),
             OrderRejected(OrderRejected),
+            DexCreated(DexCreated),
+            AssetContextUpdated(AssetContextUpdated),
+            MarketCreated(MarketCreated),
+            MarketMetadataChanged(MarketMetadataChanged),
             TradeMatched(TradeMatched),
         }
 
@@ -299,6 +338,10 @@ macro_rules! opaque_payloads {
                     Self::OrderFilled(_) => EventKind::OrderFilled,
                     Self::OrderCancelled(_) => EventKind::OrderCancelled,
                     Self::OrderRejected(_) => EventKind::OrderRejected,
+                    Self::DexCreated(_) => EventKind::DexCreated,
+                    Self::AssetContextUpdated(_) => EventKind::AssetContextUpdated,
+                    Self::MarketCreated(_) => EventKind::MarketCreated,
+                    Self::MarketMetadataChanged(_) => EventKind::MarketMetadataChanged,
                     Self::TradeMatched(_) => EventKind::TradeMatched,
                 }
             }
@@ -365,6 +408,40 @@ macro_rules! opaque_payloads {
                         reason: value.reason.clone(),
                     })
                     .map_err(payload_error),
+                    Self::DexCreated(value) => encode_dex_created(&WireDexCreated {
+                        dex_id: value.dex_id.to_string(),
+                        name: value.name.clone(),
+                        operator_account_id: value.operator_account_id.to_api_string(),
+                    })
+                    .map_err(payload_error),
+                    Self::AssetContextUpdated(value) => {
+                        encode_asset_context_updated(&WireAssetContextUpdated {
+                            asset_id: value.asset_id.to_string(),
+                            context_version: value.context_version.clone(),
+                            context_hash: value.context_hash.to_vec(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::MarketCreated(value) => {
+                        validate_market_created_semantics(value)?;
+                        encode_market_created(&WireMarketCreated {
+                            market_id: value.market_id.to_string(),
+                            dex_id: value.dex_id.to_string(),
+                            base_asset_id: value.base_asset_id.to_string(),
+                            quote_asset_id: value.quote_asset_id.to_string(),
+                            tick_size: value.tick_size.to_string(),
+                            lot_size: value.lot_size.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::MarketMetadataChanged(value) => {
+                        encode_market_metadata_changed(&WireMarketMetadataChanged {
+                            market_id: value.market_id.to_string(),
+                            metadata_version: value.metadata_version.clone(),
+                            metadata_hash: value.metadata_hash.to_vec(),
+                        })
+                        .map_err(payload_error)
+                    }
                     Self::TradeMatched(value) => encode_trade_matched(&WireTradeMatched {
                         trade_id: value.trade_id.as_ref().map(ToString::to_string),
                         market_id: value.market_id.as_ref().map(ToString::to_string),
@@ -419,6 +496,17 @@ macro_rules! opaque_payloads {
                     EventKind::OrderRejected => {
                         decode_order_rejected_payload(bytes).map(Self::OrderRejected)
                     }
+                    EventKind::DexCreated => {
+                        decode_dex_created_payload(bytes).map(Self::DexCreated)
+                    }
+                    EventKind::AssetContextUpdated => {
+                        decode_asset_context_updated_payload(bytes).map(Self::AssetContextUpdated)
+                    }
+                    EventKind::MarketCreated => {
+                        decode_market_created_payload(bytes).map(Self::MarketCreated)
+                    }
+                    EventKind::MarketMetadataChanged => decode_market_metadata_changed_payload(bytes)
+                        .map(Self::MarketMetadataChanged),
                     $(
                         EventKind::$kind => {
                             validate_payload(kind, bytes)?;
@@ -525,12 +613,8 @@ opaque_payloads!(
     MarketResumed,
     OpenInterestCapChanged,
     MarginTableChanged,
-    MarketCreated,
-    MarketMetadataChanged,
     OracleUpdated,
     FundingRateUpdated,
-    AssetContextUpdated,
-    DexCreated,
     OutcomeCreated,
     OutcomeResolved,
 );
@@ -619,6 +703,79 @@ fn decode_order_rejected_payload(bytes: &[u8]) -> Result<OrderRejected, Contract
         reason_code: value.reason_code,
         reason: value.reason,
     })
+}
+
+fn decode_dex_created_payload(bytes: &[u8]) -> Result<DexCreated, ContractError> {
+    let value = decode_dex_created(bytes).map_err(payload_error)?;
+    Ok(DexCreated {
+        dex_id: payload_value(DexId::new(value.dex_id))?,
+        name: value.name,
+        operator_account_id: payload_value(Address::parse_api(&value.operator_account_id))?,
+    })
+}
+
+fn decode_asset_context_updated_payload(
+    bytes: &[u8],
+) -> Result<AssetContextUpdated, ContractError> {
+    let value = decode_asset_context_updated(bytes).map_err(payload_error)?;
+    Ok(AssetContextUpdated {
+        asset_id: payload_value(AssetId::new(value.asset_id))?,
+        context_version: value.context_version,
+        context_hash: hash_array(value.context_hash, "AssetContextUpdated context_hash")?,
+    })
+}
+
+fn decode_market_created_payload(bytes: &[u8]) -> Result<MarketCreated, ContractError> {
+    let value = decode_market_created(bytes).map_err(payload_error)?;
+    let created = MarketCreated {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        dex_id: payload_value(DexId::new(value.dex_id))?,
+        base_asset_id: payload_value(AssetId::new(value.base_asset_id))?,
+        quote_asset_id: payload_value(AssetId::new(value.quote_asset_id))?,
+        tick_size: payload_value(Price::from_str(&value.tick_size))?,
+        lot_size: payload_value(Quantity::from_str(&value.lot_size))?,
+    };
+    validate_market_created_semantics(&created)?;
+    Ok(created)
+}
+
+fn decode_market_metadata_changed_payload(
+    bytes: &[u8],
+) -> Result<MarketMetadataChanged, ContractError> {
+    let value = decode_market_metadata_changed(bytes).map_err(payload_error)?;
+    Ok(MarketMetadataChanged {
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        metadata_version: value.metadata_version,
+        metadata_hash: hash_array(value.metadata_hash, "MarketMetadataChanged metadata_hash")?,
+    })
+}
+
+fn validate_market_created_semantics(value: &MarketCreated) -> Result<(), ContractError> {
+    if value.base_asset_id == value.quote_asset_id {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "MarketCreated base and quote assets must differ".to_owned(),
+        });
+    }
+    if value.tick_size.raw() <= 0 || value.lot_size.raw() <= 0 {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "MarketCreated tick and lot sizes must be positive".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn hash_array(value: Vec<u8>, name: &str) -> Result<[u8; HASH_LENGTH], ContractError> {
+    value
+        .try_into()
+        .map_err(|value: Vec<u8>| ContractError::Invalid {
+            field: "payload",
+            reason: format!(
+                "{name} must contain exactly {HASH_LENGTH} bytes, got {}",
+                value.len()
+            ),
+        })
 }
 
 fn parse_positive_price(value: &str) -> Result<Price, ContractError> {
@@ -717,6 +874,35 @@ fn fixture_payload_bytes(kind: EventKind) -> Result<Vec<u8>, ContractError> {
             reason: "fixture rejection".to_owned(),
         })
         .map_err(payload_error),
+        EventKind::DexCreated => encode_dex_created(&WireDexCreated {
+            dex_id: "validator".to_owned(),
+            name: "Validator Perpetuals".to_owned(),
+            operator_account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+        })
+        .map_err(payload_error),
+        EventKind::AssetContextUpdated => encode_asset_context_updated(&WireAssetContextUpdated {
+            asset_id: "USDC".to_owned(),
+            context_version: "fixture-asset-context".to_owned(),
+            context_hash: vec![0x22; HASH_LENGTH],
+        })
+        .map_err(payload_error),
+        EventKind::MarketCreated => encode_market_created(&WireMarketCreated {
+            market_id: "perp:BTC".to_owned(),
+            dex_id: "validator".to_owned(),
+            base_asset_id: "BTC".to_owned(),
+            quote_asset_id: "USDC".to_owned(),
+            tick_size: "0.100000".to_owned(),
+            lot_size: "0.00001000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::MarketMetadataChanged => {
+            encode_market_metadata_changed(&WireMarketMetadataChanged {
+                market_id: "perp:BTC".to_owned(),
+                metadata_version: "fixture-market-metadata".to_owned(),
+                metadata_hash: vec![0x33; HASH_LENGTH],
+            })
+            .map_err(payload_error)
+        }
         _ => encode_default_event_payload(kind.as_wire_name()).map_err(payload_error),
     }
 }
