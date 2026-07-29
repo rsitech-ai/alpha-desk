@@ -3892,6 +3892,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "state-replay"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "canonical-archive",
+ "canonical-events",
+ "canonical-ledger",
+ "canonical-state-store",
+ "domain-types",
+ "hex",
+ "replay-engine",
+ "serde",
+ "serde_json",
+ "storage-ports",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "storage-ports"
 version = "0.1.0"
 dependencies = [

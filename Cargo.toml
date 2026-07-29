@@ -35,6 +35,7 @@ members = [
   "tools/architecture-check",
   "tools/stage-gate",
   "tools/open-source-audit",
+  "tools/state-replay",
 ]
 
 [workspace.package]
