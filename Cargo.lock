@@ -603,6 +603,12 @@ dependencies = [
 [[package]]
 name = "canonical-ledger"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "canonical-events",
+ "domain-types",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "cargo-platform"

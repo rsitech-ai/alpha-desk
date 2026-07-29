@@ -18,7 +18,7 @@ This is the evidence ledger for the current working repository. The approved des
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
 | 1 — Truth layer | Empty committed-block runtime and one-way failover are synthetic-source proven; stage not passed | Validated byte-preserving observations, strict primary/independent topology, crash-safe hash-chained per-source spools, exact-height create-once failover state, bounded one-record-at-a-time spool verification/replay and central canonical drain, primary and independent node-directory adapters, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive with bounded raw batches, raw-segment provenance and parity, archive-before-journal-before-JetStream-before-cursor coordination, reconnecting PostgreSQL/JetStream sessions, absolute and percentage disk gates, V3 active-source/failover/backlog/capacity status, bounded staggered reconnect backoff, owned runtime lifecycle, restart and no-failback E2E, PostgreSQL/NATS outage-recovery E2E, and bounded synthetic soak evidence | Qualified action-bearing committed mapping and operator corpus, separately operated independent-source qualification, recovery/operator/public/historical transports, overlap reconciliation and explicit failback procedure, real historical upcasts, crash-failpoint matrix, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
-| 2 — State reconstruction | Scaffold-only | Workspace crate boundaries | Deterministic reducers, checkpoints, correction handling, reconciliation, replay, and signed gate |
+| 2 — State reconstruction | Block-atomic foundation implemented; stage not passed | Pure synchronous reducer contract, default-deny kind/schema ownership, contiguous committed watermark, deterministic canonical state bytes and hash, duplicate idempotence, whole-block rollback, bounded mutations, immutable state deltas, and focused adversarial tests | Qualified action-bearing semantic reducers, durable checkpoint adapter, RocksDB atomic batch, archive replay runtime, correction handling, account/book reconciliation, rebuild evidence, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
 | 5 — Alpha laboratory | Scaffold-only | Workspace crate boundaries | Experiment registry, walk-forward evaluation, leakage controls, models, promotion, and signed gate |
@@ -84,6 +84,16 @@ foundation libraries and has no application executable. Therefore the
 repository has a narrow truth-layer runtime, not a live-source product E2E or
 desk application.
 
+`canonical-ledger` now provides the first Stage 2 domain slice: a
+storage-neutral, synchronous block-atomic reducer boundary with a frozen
+reducer-set identity, deterministic sorted state image, domain-separated state
+hash, committed-height continuity, duplicate idempotence, and default-deny
+event/schema support. It is focused-test proven only. No action-bearing
+production reducer, durable checkpoint, RocksDB adapter, archive replay
+entrypoint, or reconciliation result exists yet, so Stage 2 remains
+unqualified. The exact current contract and limitations are recorded in
+[`docs/contracts/deterministic-state-v1.md`](contracts/deterministic-state-v1.md).
+
 The block-batched public trade fixture now maps deterministically through a
 versioned market catalog, but remains auxiliary `ProvisionalSource` evidence.
 It does not establish committed history or production node compatibility.
@@ -96,8 +106,9 @@ It does not establish committed history or production node compatibility.
 - `blocked:live-qualification` — the committed node-directory/source-spool
   runtime, one clean restart, and bounded synthetic node-format soak are locally
   proven, including raw Parquet parity and enforced absolute disk reserve.
-  Action-bearing source semantics, independent-source recovery,
-  multi-hour/load/host restart evidence, API, and UI are still absent.
+  Action-bearing source semantics, separately operated independent-source
+  qualification, retained-overlap reconciliation, multi-hour/load/host restart
+  evidence, API, and UI are still absent.
 
 No validated secret exposure was found by the 2026-07-28 local audit, but normal secret scanning is not sufficient to approve encoded archives or every remote ref for publication.
 
@@ -123,6 +134,8 @@ prove a running Alpha Desk product:
 - `cargo +1.97.1 test -p hl-capture --test raw_segment_archive --locked --offline`
 - `cargo +1.97.1 test -p hl-capture --test disk_reserve --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test event_id --locked --offline`
+- `cargo +1.97.1 test -p canonical-ledger --locked --offline`
+- `cargo +1.97.1 clippy -p canonical-ledger --all-targets --all-features --locked --offline -- -D warnings`
 - `cargo +1.97.1 test -p canonical-events --test input --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test block --locked --offline`
 - `cargo +1.97.1 test -p canonical-events --test node_mapping --locked --offline`
