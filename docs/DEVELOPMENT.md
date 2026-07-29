@@ -175,10 +175,11 @@ cargo +1.97.1 run -p hl-capture --locked --offline -- \
   status --config <retained-capture-config> --json
 ```
 
-The V2 status contract separates downstream publication plans from fsynced
+The V3 status contract separates downstream publication plans from the active
+source's fsynced
 source backlog, reports the oldest pending capture height, and exposes the
 lowest spool/archive filesystem free percentage in basis points. See
-[`contracts/capture-status-v2.md`](contracts/capture-status-v2.md).
+[`contracts/capture-status-v3.md`](contracts/capture-status-v3.md).
 
 The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
@@ -192,6 +193,7 @@ shutdown:
 ```sh
 just capture-e2e
 just capture-outage-e2e
+just capture-failover-e2e
 just capture-soak 10m
 ```
 
@@ -213,9 +215,18 @@ unrelated containers. `runtime.postgres_operation_timeout_millis`
 independently bounds PostgreSQL connection and progress operations; it is not
 coupled to the JetStream publication timeout.
 
+`capture-failover-e2e` uses two synthetic node directories. It withholds the
+second primary height while making a later primary height visible, supplies a
+complete independent range, verifies the exact create-once failover record and
+yellow-ready Status V3 state, performs a clean restart, repairs the primary,
+and proves the runtime still drains from the independent source. It requires
+two five-record spools, ten raw observations, five canonical blocks and
+publications, zero final active backlog, and no automatic failback.
+
 This is a synthetic node-format runtime-mechanics lane. Its report deliberately
 uses `"mode": "synthetic-node-source"` for restart/soak and
-`"mode": "synthetic-node-source-dependency-outage"` for the fault lane. Every
+`"mode": "synthetic-node-source-dependency-outage"` for the fault lane.
+Failover evidence uses `"mode": "synthetic-dual-source-failover"`. Every
 report contains
 `"live_source_qualified": false`. The production `run` command is connected,
 but the committed mapper accepts only structurally valid blocks with no action

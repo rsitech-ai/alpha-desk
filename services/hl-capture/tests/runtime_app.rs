@@ -11,8 +11,8 @@ use hl_capture::coordinator::{
 };
 use hl_capture::progress::InMemoryProgressStore;
 use hl_capture::{
-    CaptureHealth, CaptureRuntime, CaptureRuntimeConfig, CaptureStatus, OwnedTask, StatusWriter,
-    read_status,
+    CaptureHealth, CaptureRuntime, CaptureRuntimeConfig, CaptureSourceHealth, CaptureStatus,
+    CommittedSourceClass, OwnedTask, StatusWriter, read_status,
 };
 use storage_ports::{
     ArchiveError, ArchiveReceipt, ArchivedBlockPlan, CaptureCursor, CaptureProgressStore,
@@ -234,12 +234,21 @@ async fn unavailable_progress_does_not_prevent_owned_work_and_recovers_readiness
     let status_path = directory.path().join("capture-status.json");
     StatusWriter::new(status_path.clone())
         .expect("status writer")
-        .write(&CaptureStatus::new(
-            KnownTime::from_unix_micros(1).expect("known time"),
-            "stale-build",
-            ChainId::new("stale-chain").expect("chain"),
-            CaptureHealth::Green,
-        ))
+        .write(
+            &CaptureStatus::new(
+                KnownTime::from_unix_micros(1).expect("known time"),
+                "stale-build",
+                ChainId::new("stale-chain").expect("chain"),
+                CaptureHealth::Green,
+            )
+            .with_source_state(
+                CommittedSourceClass::LocallyVerifiedCommitted,
+                CaptureSourceHealth::Healthy,
+                None,
+                None,
+                None,
+            ),
+        )
         .expect("stale status fixture");
     let progress = Arc::new(InitiallyUnavailableProgress::new());
     let coordinator = Arc::new(CaptureCoordinator::new(

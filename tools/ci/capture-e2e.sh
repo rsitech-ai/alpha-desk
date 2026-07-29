@@ -26,9 +26,12 @@ readonly block_count="${CAPTURE_E2E_BLOCKS:-3}"
 readonly block_delay_millis="${CAPTURE_E2E_BLOCK_DELAY_MILLIS:-10}"
 readonly minimum_runtime_seconds="${CAPTURE_E2E_MIN_RUNTIME_SECONDS:-0}"
 readonly outage_mode="${CAPTURE_E2E_OUTAGE_MODE:-none}"
+readonly failover_mode="${CAPTURE_E2E_FAILOVER_MODE:-0}"
 readonly first_height="$((9001000000 + ($$ % 100000)))"
 readonly last_height="$((first_height + block_count - 1))"
 readonly chain_id="fixture-e2e-${run_id}"
+readonly independent_source_root="${evidence_root}/independent-node-source"
+readonly independent_source_leaf="${independent_source_root}/1721000000/20260728"
 capture_pid=''
 source_writer_pid=''
 process_started_at_epoch=''
@@ -90,12 +93,28 @@ if [[ "$outage_mode" != 'none' && "$outage_mode" != 'nats-postgres' ]]; then
   printf '%s\n' 'capture-e2e:error CAPTURE_E2E_OUTAGE_MODE must be none or nats-postgres' >&2
   exit 2
 fi
+if [[ "$failover_mode" != '0' && "$failover_mode" != '1' ]]; then
+  printf '%s\n' 'capture-e2e:error CAPTURE_E2E_FAILOVER_MODE must be 0 or 1' >&2
+  exit 2
+fi
+if [[ "$failover_mode" == '1' && "$outage_mode" != 'none' ]]; then
+  printf '%s\n' 'capture-e2e:error failover and dependency-outage modes are separate evidence lanes' >&2
+  exit 2
+fi
+if [[ "$failover_mode" == '1' ]] && ((block_count < 3)); then
+  printf '%s\n' 'capture-e2e:error failover mode requires at least 3 blocks' >&2
+  exit 2
+fi
 if [[ "$outage_mode" == 'nats-postgres' ]] && ((block_count < 5)); then
   printf '%s\n' 'capture-e2e:error nats-postgres outage mode requires at least 5 blocks' >&2
   exit 2
 fi
 
-mkdir -p "$evidence_root" "$archive_path" "$source_leaf"
+mkdir -p \
+  "$evidence_root" \
+  "$archive_path" \
+  "$source_leaf" \
+  "$independent_source_leaf"
 "${repository_root}/tools/dev/ensure-nats-dev-credentials.sh" >/dev/null
 set -a
 # shellcheck disable=SC1091
@@ -209,6 +228,7 @@ chain_id = "${chain_id}"
 first_height = ${first_height}
 archive_path = "${archive_path}"
 status_path = "${status_path}"
+failover_state_path = "${evidence_root}/committed-source-failover.json"
 postgres_url_path = "${postgres_url_file}"
 nats_server_url = "nats://127.0.0.1:${nats_client_port}"
 nats_stream = "HL_CANONICAL"
@@ -246,16 +266,30 @@ queue_capacity = 4096
 max_payload_bytes = 8388608
 adapter = { kind = "node-block-directory", path = "${source_root}", stream_name = "synthetic-fixture", start_height = ${first_height}, poll_interval_millis = 25, replica_cmds_style = "actions-and-responses" }
 EOF
+if [[ "$failover_mode" == '1' ]]; then
+  cat >>"$config_path" <<EOF
+
+[[sources]]
+id = "synthetic-independent"
+source_version = "synthetic-node-v1"
+trust = "independent-committed"
+class = "committed-block"
+queue_capacity = 4096
+max_payload_bytes = 8388608
+adapter = { kind = "node-block-directory", path = "${independent_source_root}", stream_name = "synthetic-independent", start_height = ${first_height}, poll_interval_millis = 25, replica_cmds_style = "actions-and-responses" }
+EOF
+fi
 chmod 600 "$config_path"
 
 cargo +1.97.1 build -p hl-capture -p archive-inspect -p spool-inspect --locked --offline
 : >"$service_stdout"
 : >"$service_stderr"
 
-write_source_block() {
-  local height="$1"
+write_source_block_at() {
+  local source_leaf_path="$1"
+  local height="$2"
   local parent_height="$((height - 1))"
-  local staging="${source_leaf}/.${height}.tmp"
+  local staging="${source_leaf_path}/.${height}.tmp"
   jq -n \
     --argjson height "$height" \
     --argjson parent_height "$parent_height" \
@@ -268,7 +302,15 @@ write_source_block() {
       },
       signed_action_bundles: []
     }' >"$staging"
-  mv "$staging" "${source_leaf}/${height}"
+  mv "$staging" "${source_leaf_path}/${height}"
+}
+
+write_source_block() {
+  write_source_block_at "$source_leaf" "$1"
+}
+
+write_independent_block() {
+  write_source_block_at "$independent_source_leaf" "$1"
 }
 
 start_capture() {
@@ -327,9 +369,33 @@ wait_for_durable_height() {
         --argjson expected "$expected_height" \
         '.ready == true
           and (
-            (.health == "green" and (.last_error_reason // null) == null)
+            (
+              .health == "green"
+              and (.last_error_reason // null) == null
+              and .active_committed_source == "locally-verified-committed"
+            )
             or
-            (.health == "yellow" and .last_error_reason == "capture_disk.low_space")
+            (
+              .health == "yellow"
+              and (
+                (
+                  .last_error_reason == "capture_disk.low_space"
+                  and .active_committed_source == "locally-verified-committed"
+                )
+                or
+                (
+                  .last_error_reason == "capture_failover.independent_source_active"
+                  and .active_committed_source == "independent-committed"
+                  and (
+                    .primary_source_health == "range-unavailable"
+                    or .primary_source_health == "healthy"
+                  )
+                  and .independent_source_health == "healthy"
+                  and (.failover_height | type == "number")
+                  and .failover_reason == "primary-range-unavailable"
+                )
+              )
+            )
           )
           and .durable_height == $expected
           and .pending_blocks == 0
@@ -347,6 +413,7 @@ wait_for_durable_height() {
 
 wait_for_spool_records() {
   local expected_records="$1"
+  local spool_path="${2:-${evidence_root}/spool/synthetic-fixture}"
   local attempt
   local summary
   for attempt in $(seq 1 "$readiness_attempts"); do
@@ -358,7 +425,7 @@ wait_for_spool_records() {
     fi
     sample_process
     summary="$("${repository_root}/target/debug/spool-inspect" \
-      verify "${evidence_root}/spool/synthetic-fixture" 2>/dev/null || true)"
+      verify "$spool_path" 2>/dev/null || true)"
     if [[ "$summary" == *"records=${expected_records}"* ]]; then
       return
     fi
@@ -400,7 +467,43 @@ stop_capture() {
     "$status_path" >/dev/null
 }
 
-if [[ "$outage_mode" == 'nats-postgres' ]]; then
+if [[ "$failover_mode" == '1' ]]; then
+  height="$first_height"
+  while ((height <= last_height)); do
+    write_independent_block "$height"
+    if ((height != first_height + 1)); then
+      write_source_block "$height"
+    fi
+    height="$((height + 1))"
+  done
+  start_capture
+  wait_for_durable_height "$last_height"
+  jq -e \
+    --argjson failover_height "$((first_height + 1))" \
+    '.active_committed_source == "independent-committed"
+      and .failover_height == $failover_height
+      and .failover_reason == "primary-range-unavailable"
+      and .health == "yellow"
+      and .ready == true' \
+    "$status_path" >/dev/null
+  stop_capture "$last_height"
+  restart_count=1
+
+  write_source_block "$((first_height + 1))"
+  start_capture
+  wait_for_durable_height "$last_height"
+  wait_for_spool_records \
+    "$block_count" \
+    "${evidence_root}/spool/synthetic-fixture"
+  jq -e \
+    --argjson failover_height "$((first_height + 1))" \
+    '.active_committed_source == "independent-committed"
+      and .failover_height == $failover_height
+      and .failover_reason == "primary-range-unavailable"
+      and .health == "yellow"
+      and .ready == true' \
+    "$status_path" >/dev/null
+elif [[ "$outage_mode" == 'nats-postgres' ]]; then
   write_source_block "$first_height"
   start_capture
   wait_for_durable_height "$first_height"
@@ -458,9 +561,33 @@ while (( $(date -u '+%s') - process_started_at_epoch < minimum_runtime_seconds )
     --argjson expected "$last_height" \
     '.ready == true
       and (
-        (.health == "green" and (.last_error_reason // null) == null)
+        (
+          .health == "green"
+          and (.last_error_reason // null) == null
+          and .active_committed_source == "locally-verified-committed"
+        )
         or
-        (.health == "yellow" and .last_error_reason == "capture_disk.low_space")
+        (
+          .health == "yellow"
+          and (
+            (
+              .last_error_reason == "capture_disk.low_space"
+              and .active_committed_source == "locally-verified-committed"
+            )
+            or
+            (
+              .last_error_reason == "capture_failover.independent_source_active"
+              and .active_committed_source == "independent-committed"
+              and (
+                .primary_source_health == "range-unavailable"
+                or .primary_source_health == "healthy"
+              )
+              and .independent_source_health == "healthy"
+              and (.failover_height | type == "number")
+              and .failover_reason == "primary-range-unavailable"
+            )
+          )
+        )
       )
       and .durable_height == $expected
       and .pending_blocks == 0
@@ -479,8 +606,14 @@ archive_summary="$("${repository_root}/target/debug/archive-inspect" verify "$ar
   printf '%s\n' 'capture-e2e:error archive block count mismatch' >&2
   exit 1
 }
-[[ "$archive_summary" == *"raw_sources=1"* &&
-  "$archive_summary" == *"raw_observations=${block_count}"* ]] || {
+expected_raw_sources=1
+expected_raw_observations="$block_count"
+if [[ "$failover_mode" == '1' ]]; then
+  expected_raw_sources=2
+  expected_raw_observations="$((block_count * 2))"
+fi
+[[ "$archive_summary" == *"raw_sources=${expected_raw_sources}"* &&
+  "$archive_summary" == *"raw_observations=${expected_raw_observations}"* ]] || {
   printf '%s\n' 'capture-e2e:error raw archive observation count mismatch' >&2
   exit 1
 }
@@ -490,6 +623,15 @@ spool_summary="$("${repository_root}/target/debug/spool-inspect" \
   printf '%s\n' 'capture-e2e:error spool record count mismatch' >&2
   exit 1
 }
+independent_spool_summary=''
+if [[ "$failover_mode" == '1' ]]; then
+  independent_spool_summary="$("${repository_root}/target/debug/spool-inspect" \
+    verify "${evidence_root}/spool/synthetic-independent")"
+  [[ "$independent_spool_summary" == *"records=${block_count}"* ]] || {
+    printf '%s\n' 'capture-e2e:error independent spool record count mismatch' >&2
+    exit 1
+  }
+fi
 archived_blocks="$(docker exec "$postgres_container" \
   psql -U alpha -d alpha -Atqc \
   "SELECT count(*) FROM capture_archived_blocks WHERE chain_id = '${chain_id}' AND state = 'acknowledged'")"
@@ -513,6 +655,8 @@ durable_height="$(docker exec "$postgres_container" \
 }
 
 capture_status_schema_version="$(jq -r '.schema_version' "$status_path")"
+active_committed_source="$(jq -r '.active_committed_source' "$status_path")"
+failover_height="$(jq -r '.failover_height // 0' "$status_path")"
 final_capture_backlog_records="$(jq -r '.capture_backlog_records' "$status_path")"
 final_disk_free_basis_points="$(jq -r '.disk_free_basis_points' "$status_path")"
 nats_outage_capture_backlog_records=0
@@ -541,10 +685,13 @@ jq -n \
   --arg run_id "$run_id" \
   --arg chain_id "$chain_id" \
   --arg outage_mode "$outage_mode" \
+  --arg failover_mode "$failover_mode" \
+  --arg active_committed_source "$active_committed_source" \
+  --argjson failover_height "$failover_height" \
   --argjson first_height "$first_height" \
   --argjson last_height "$last_height" \
   --argjson block_count "$block_count" \
-  --argjson raw_observation_count "$block_count" \
+  --argjson raw_observation_count "$expected_raw_observations" \
   --argjson acknowledged_publications "$acknowledged_publications" \
   --argjson restart_count "$restart_count" \
   --argjson nats_outage_spool_records "$nats_outage_spool_records" \
@@ -561,6 +708,7 @@ jq -n \
   --argjson service_stderr_bytes "$service_stderr_bytes" \
   --arg archive_summary "$archive_summary" \
   --arg spool_summary "$spool_summary" \
+  --arg independent_spool_summary "$independent_spool_summary" \
   --arg binary_sha256 "$binary_sha256" \
   --arg postgres_version "$postgres_version" \
   --arg nats_version "$nats_version" \
@@ -568,9 +716,17 @@ jq -n \
     schema_version: $schema_version,
     capture_status_schema_version: $capture_status_schema_version,
     run_id: $run_id,
-    mode: (if $outage_mode == "none" then "synthetic-node-source" else "synthetic-node-source-dependency-outage" end),
+    mode: (
+      if $failover_mode == "1" then "synthetic-dual-source-failover"
+      elif $outage_mode == "none" then "synthetic-node-source"
+      else "synthetic-node-source-dependency-outage"
+      end
+    ),
     live_source_qualified: false,
     outage_mode: $outage_mode,
+    failover_mode: ($failover_mode == "1"),
+    active_committed_source: $active_committed_source,
+    failover_height: (if $failover_height == 0 then null else $failover_height end),
     chain_id: $chain_id,
     first_height: $first_height,
     last_height: $last_height,
@@ -592,6 +748,9 @@ jq -n \
     service_stderr_bytes: $service_stderr_bytes,
     archive_summary: $archive_summary,
     spool_summary: $spool_summary,
+    independent_spool_summary: (
+      if $independent_spool_summary == "" then null else $independent_spool_summary end
+    ),
     binary_sha256: $binary_sha256,
     postgres_version: $postgres_version,
     nats_version: $nats_version,

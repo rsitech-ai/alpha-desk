@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use domain_types::{BlockHeight, ChainId, SourceId};
-use hl_protocol::{BlockSource, SourceAdmission, SourceError, SourceRequestContext};
+use hl_protocol::{BlockSource, SourceAdmission, SourceError, SourceRequestContext, SourceTrust};
 use storage_ports::{CaptureProgressStore, ProgressError};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -22,8 +22,9 @@ use crate::{
 };
 
 const SPOOL_SCHEMA_VERSION: &str = "spool-v1";
-const ACQUISITION_TASK_NAME: &str = "primary-node-acquisition";
-const DRAIN_TASK_NAME: &str = "primary-node-drain";
+const PRIMARY_ACQUISITION_TASK_NAME: &str = "primary-node-acquisition";
+const INDEPENDENT_ACQUISITION_TASK_NAME: &str = "independent-node-acquisition";
+const DRAIN_TASK_NAME: &str = "committed-source-drain";
 const WRITE_HEADROOM_BYTES: u64 = 1024 * 1024;
 const RAW_ARCHIVE_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 const BACKLOG_POLL_DELAY: Duration = Duration::from_millis(250);
@@ -76,6 +77,7 @@ impl RetryBackoff {
 
 #[derive(Debug, Clone)]
 struct NodeSourceTaskConfig {
+    role: CommittedSourceRole,
     chain_id: ChainId,
     source_id: SourceId,
     source_version: String,
@@ -98,15 +100,57 @@ struct NodeSourceTaskConfig {
     disk_reserve_bytes: u64,
 }
 
-pub(crate) fn primary_node_tasks(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommittedSourceRole {
+    Primary,
+    Independent,
+}
+
+impl CommittedSourceRole {
+    const fn acquisition_task_name(self) -> &'static str {
+        match self {
+            Self::Primary => PRIMARY_ACQUISITION_TASK_NAME,
+            Self::Independent => INDEPENDENT_ACQUISITION_TASK_NAME,
+        }
+    }
+
+    const fn source_class(self) -> crate::CommittedSourceClass {
+        match self {
+            Self::Primary => crate::CommittedSourceClass::LocallyVerifiedCommitted,
+            Self::Independent => crate::CommittedSourceClass::IndependentCommitted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceNotification {
+    Durable,
+    VisibleGap {
+        role: CommittedSourceRole,
+        source_id: SourceId,
+        height: BlockHeight,
+    },
+}
+
+#[derive(Debug)]
+struct CommittedDrainConfig {
+    primary: NodeSourceTaskConfig,
+    independent: Option<NodeSourceTaskConfig>,
+    failover_store: Arc<crate::FailoverStore>,
+    failover_decision: Option<crate::FailoverDecision>,
+}
+
+pub(crate) fn committed_node_tasks(
     config: &CaptureConfig,
     progress: Arc<dyn CaptureProgressStore>,
     coordinator: Arc<CaptureCoordinator>,
     raw_archive: Arc<dyn RawSegmentArchive>,
+    failover_store: Arc<crate::FailoverStore>,
     health: Arc<CaptureRuntimeHealth>,
     cancellation: CancellationToken,
 ) -> Result<Vec<OwnedTask>, SourceRuntimeError> {
-    let mut selected = None;
+    let mut primary = None;
+    let mut independent = None;
     for source in config.sources() {
         let Some(SourceAdapterConfig::NodeBlockDirectory {
             path,
@@ -121,10 +165,16 @@ pub(crate) fn primary_node_tasks(
         let admission = source
             .admission()
             .map_err(|_| SourceRuntimeError::InvalidConfig)?;
-        if !admission.can_advance_committed_watermark() || selected.is_some() {
+        if !admission.can_advance_committed_watermark() {
             return Err(SourceRuntimeError::InvalidConfig);
         }
-        selected = Some(NodeSourceTaskConfig {
+        let role = match source.trust() {
+            SourceTrust::LocallyVerifiedCommitted => CommittedSourceRole::Primary,
+            SourceTrust::IndependentCommitted => CommittedSourceRole::Independent,
+            _ => return Err(SourceRuntimeError::InvalidConfig),
+        };
+        let selected = NodeSourceTaskConfig {
+            role,
             chain_id: config.runtime().chain_id(),
             source_id: SourceId::new(source.id().to_owned())
                 .map_err(|_| SourceRuntimeError::InvalidConfig)?,
@@ -148,51 +198,91 @@ pub(crate) fn primary_node_tasks(
             max_pending_blocks: config.runtime().max_pending_blocks(),
             retained_committed_blocks: config.runtime().retained_committed_blocks(),
             disk_reserve_bytes: config.runtime().disk_reserve_bytes(),
-        });
+        };
+        let slot = match role {
+            CommittedSourceRole::Primary => &mut primary,
+            CommittedSourceRole::Independent => &mut independent,
+        };
+        if slot.replace(selected).is_some() {
+            return Err(SourceRuntimeError::InvalidConfig);
+        }
     }
-    let selected = selected.ok_or(SourceRuntimeError::InvalidConfig)?;
-    let (notification, backlog_notifications) = mpsc::channel(selected.queue_capacity);
-    let acquisition_config = selected.clone();
-    let acquisition_health = Arc::clone(&health);
-    let acquisition_cancellation = cancellation.child_token();
+    let primary = primary.ok_or(SourceRuntimeError::InvalidConfig)?;
+    let failover_decision = failover_store
+        .load()
+        .map_err(SourceRuntimeError::Failover)?;
+    match (&failover_decision, &independent) {
+        (Some(decision), Some(independent)) => decision
+            .validate_topology(
+                &primary.chain_id,
+                &primary.source_id,
+                &independent.source_id,
+            )
+            .map_err(SourceRuntimeError::Failover)?,
+        (Some(_), None) => return Err(SourceRuntimeError::InvalidConfig),
+        (None, _) => {}
+    }
+    health.configure_committed_sources(independent.is_some(), failover_decision.as_ref());
+    let notification_capacity = independent
+        .as_ref()
+        .map_or(primary.queue_capacity, |source| {
+            primary.queue_capacity.max(source.queue_capacity)
+        });
+    let (notification, backlog_notifications) = mpsc::channel(notification_capacity);
     let drain_cancellation = cancellation.child_token();
-    Ok(vec![
-        OwnedTask::new(ACQUISITION_TASK_NAME, async move {
-            run_primary_node_acquisition(
+    let mut tasks = Vec::with_capacity(if independent.is_some() { 3 } else { 2 });
+    for acquisition_config in [Some(primary.clone()), independent.clone()]
+        .into_iter()
+        .flatten()
+    {
+        let task_name = acquisition_config.role.acquisition_task_name();
+        let acquisition_archive = Arc::clone(&raw_archive);
+        let acquisition_notification = notification.clone();
+        let acquisition_health = Arc::clone(&health);
+        let acquisition_cancellation = cancellation.child_token();
+        tasks.push(OwnedTask::new(task_name, async move {
+            run_committed_node_acquisition(
                 acquisition_config,
-                raw_archive,
-                notification,
+                acquisition_archive,
+                acquisition_notification,
                 acquisition_health,
                 acquisition_cancellation,
             )
             .await
             .map_err(|error| AppError::TaskFailed {
-                task: ACQUISITION_TASK_NAME,
+                task: task_name,
                 reason_code: error.reason_code(),
             })
-        }),
-        OwnedTask::new(DRAIN_TASK_NAME, async move {
-            run_primary_node_drain(
-                selected,
-                progress,
-                coordinator,
-                backlog_notifications,
-                health,
-                drain_cancellation,
-            )
-            .await
-            .map_err(|error| AppError::TaskFailed {
-                task: DRAIN_TASK_NAME,
-                reason_code: error.reason_code(),
-            })
-        }),
-    ])
+        }));
+    }
+    drop(notification);
+    tasks.push(OwnedTask::new(DRAIN_TASK_NAME, async move {
+        run_committed_node_drain(
+            CommittedDrainConfig {
+                primary,
+                independent,
+                failover_store,
+                failover_decision,
+            },
+            progress,
+            coordinator,
+            backlog_notifications,
+            health,
+            drain_cancellation,
+        )
+        .await
+        .map_err(|error| AppError::TaskFailed {
+            task: DRAIN_TASK_NAME,
+            reason_code: error.reason_code(),
+        })
+    }));
+    Ok(tasks)
 }
 
-async fn run_primary_node_acquisition(
+async fn run_committed_node_acquisition(
     config: NodeSourceTaskConfig,
     raw_archive: Arc<dyn RawSegmentArchive>,
-    notification: mpsc::Sender<()>,
+    notification: mpsc::Sender<SourceNotification>,
     health: Arc<CaptureRuntimeHealth>,
     cancellation: CancellationToken,
 ) -> Result<(), SourceRuntimeError> {
@@ -247,7 +337,7 @@ async fn run_primary_node_acquisition(
     let adapter_config = NodeBlockDirectoryConfig::new(
         config.source_path,
         config.stream_name,
-        config.source_id,
+        config.source_id.clone(),
         config.source_version,
         config.parser_version,
         config.start_height,
@@ -258,6 +348,7 @@ async fn run_primary_node_acquisition(
     let mut source =
         NodeBlockDirectorySource::open(adapter_config, spool.last_durable_cursor().cloned())
             .map_err(SourceRuntimeError::Source)?;
+    health.record_source_healthy(config.role.source_class());
 
     loop {
         let deadline = Instant::now()
@@ -278,6 +369,39 @@ async fn run_primary_node_acquisition(
                 return Ok(());
             }
             Err(SourceError::BackpressureTimeout) => continue,
+            Err(SourceError::RangeUnavailable) => {
+                let gap_height = match spool.last_durable_cursor() {
+                    Some(cursor) => cursor
+                        .offset()
+                        .checked_add(1)
+                        .ok_or(SourceRuntimeError::InvalidConfig)?,
+                    None => config.start_height,
+                };
+                close_spool(
+                    spool,
+                    raw_archive.as_ref(),
+                    &disk_guard,
+                    &config.chain_id,
+                    raw_archive_config,
+                )
+                .await?;
+                health.record_source_gap(config.role.source_class());
+                let gap = SourceNotification::VisibleGap {
+                    role: config.role,
+                    source_id: config.source_id.clone(),
+                    height: BlockHeight::new(gap_height),
+                };
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok(()),
+                    result = notification.send(gap) => {
+                        if result.is_err() {
+                            return Err(SourceRuntimeError::NotificationClosed);
+                        }
+                    }
+                }
+                cancellation.cancelled().await;
+                return Ok(());
+            }
             Err(error) => {
                 close_spool(
                     spool,
@@ -305,6 +429,7 @@ async fn run_primary_node_acquisition(
         let (receipt, closed_segment) = append.map_err(SourceRuntimeError::Spool)?.into_parts();
         let receipt = receipt.ok_or(SourceRuntimeError::MissingDurabilityReceipt)?;
         health.record_capture(
+            config.role.source_class(),
             BlockHeight::new(receipt.durable_cursor.offset()),
             disk_capacity.free_basis_points(),
         );
@@ -321,25 +446,55 @@ async fn run_primary_node_acquisition(
         source
             .acknowledge_durable(&receipt.durable_cursor)
             .map_err(SourceRuntimeError::Source)?;
-        let _ = notification.try_send(());
+        let _ = notification.try_send(SourceNotification::Durable);
     }
 }
 
-async fn run_primary_node_drain(
-    config: NodeSourceTaskConfig,
+async fn run_committed_node_drain(
+    config: CommittedDrainConfig,
     progress: Arc<dyn CaptureProgressStore>,
     coordinator: Arc<CaptureCoordinator>,
-    mut notifications: mpsc::Receiver<()>,
+    mut notifications: mpsc::Receiver<SourceNotification>,
     health: Arc<CaptureRuntimeHealth>,
     cancellation: CancellationToken,
 ) -> Result<(), SourceRuntimeError> {
-    let mut retry_backoff = RetryBackoff::new(&config.source_id);
+    let CommittedDrainConfig {
+        primary,
+        independent,
+        failover_store,
+        failover_decision,
+    } = config;
+    let mut active_role = if failover_decision.is_some() {
+        CommittedSourceRole::Independent
+    } else {
+        CommittedSourceRole::Primary
+    };
+    if active_role == CommittedSourceRole::Independent && independent.is_none() {
+        return Err(SourceRuntimeError::InvalidConfig);
+    }
+    let mut primary_gap = None;
+    let mut independent_gap = None;
+    let mut retry_backoff = RetryBackoff::new(match active_role {
+        CommittedSourceRole::Primary => &primary.source_id,
+        CommittedSourceRole::Independent => {
+            &independent
+                .as_ref()
+                .ok_or(SourceRuntimeError::InvalidConfig)?
+                .source_id
+        }
+    });
     loop {
         if cancellation.is_cancelled() {
             return Ok(());
         }
+        let active_config = match active_role {
+            CommittedSourceRole::Primary => &primary,
+            CommittedSourceRole::Independent => independent
+                .as_ref()
+                .ok_or(SourceRuntimeError::InvalidConfig)?,
+        };
         match drain_backlog_once(
-            &config,
+            active_config,
             progress.as_ref(),
             coordinator.as_ref(),
             health.as_ref(),
@@ -348,12 +503,80 @@ async fn run_primary_node_drain(
         {
             Ok(()) => {
                 retry_backoff.reset();
-                health.set_ready();
+                if active_role == CommittedSourceRole::Primary {
+                    if let Some(gap_height) = primary_gap {
+                        match attempt_failover(
+                            &primary,
+                            independent.as_ref(),
+                            failover_store.as_ref(),
+                            progress.as_ref(),
+                            gap_height,
+                        )
+                        .await
+                        {
+                            Ok(Some(decision)) => {
+                                active_role = CommittedSourceRole::Independent;
+                                let source = independent
+                                    .as_ref()
+                                    .ok_or(SourceRuntimeError::InvalidConfig)?;
+                                retry_backoff = RetryBackoff::new(&source.source_id);
+                                health.activate_independent(&decision);
+                                continue;
+                            }
+                            Ok(None) => {
+                                health
+                                    .set_latched("capture_failover.independent_height_unavailable");
+                            }
+                            Err(DrainSessionError::Retryable(reason_code)) => {
+                                health.set_retryable(reason_code);
+                            }
+                            Err(DrainSessionError::Latched(reason_code)) => {
+                                health.set_latched(reason_code);
+                            }
+                            Err(DrainSessionError::Fatal(error)) => return Err(error),
+                        }
+                    } else {
+                        health.set_ready();
+                    }
+                } else if independent_gap.is_some() {
+                    health.set_latched("capture_failover.independent_range_unavailable");
+                } else {
+                    health.set_ready();
+                }
                 tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
                     notification = notifications.recv() => {
-                        if notification.is_none() {
-                            return Err(SourceRuntimeError::NotificationClosed);
+                        match notification {
+                            Some(SourceNotification::Durable) => {}
+                            Some(SourceNotification::VisibleGap {
+                                role,
+                                source_id,
+                                height,
+                            }) => {
+                                tracing::warn!(
+                                    source_role = ?role,
+                                    source_id = %source_id.as_str(),
+                                    gap_height = height.get(),
+                                    "committed source exposed a visible height gap"
+                                );
+                                let expected_source = match role {
+                                    CommittedSourceRole::Primary => &primary.source_id,
+                                    CommittedSourceRole::Independent => &independent
+                                        .as_ref()
+                                        .ok_or(SourceRuntimeError::InvalidConfig)?
+                                        .source_id,
+                                };
+                                if source_id != *expected_source {
+                                    return Err(SourceRuntimeError::InvalidConfig);
+                                }
+                                match role {
+                                    CommittedSourceRole::Primary => primary_gap = Some(height),
+                                    CommittedSourceRole::Independent => {
+                                        independent_gap = Some(height);
+                                    }
+                                }
+                            }
+                            None => return Err(SourceRuntimeError::NotificationClosed),
                         }
                     }
                     () = tokio::time::sleep(BACKLOG_POLL_DELAY) => {}
@@ -378,6 +601,91 @@ async fn run_primary_node_drain(
             }
         }
     }
+}
+
+async fn attempt_failover(
+    primary: &NodeSourceTaskConfig,
+    independent: Option<&NodeSourceTaskConfig>,
+    failover_store: &crate::FailoverStore,
+    progress: &dyn CaptureProgressStore,
+    failover_height: BlockHeight,
+) -> Result<Option<crate::FailoverDecision>, DrainSessionError> {
+    let independent = independent.ok_or(DrainSessionError::Latched(
+        "capture_failover.independent_source_missing",
+    ))?;
+    let next_expected = match progress.next_expected_height(&primary.chain_id).await {
+        Ok(height) => height,
+        Err(ProgressError::Storage(_)) => {
+            return Err(DrainSessionError::Retryable("capture_progress.storage"));
+        }
+        Err(error) => {
+            return Err(DrainSessionError::Fatal(SourceRuntimeError::Progress(
+                error,
+            )));
+        }
+    };
+    if next_expected < failover_height {
+        return Ok(None);
+    }
+    if next_expected > failover_height {
+        return Err(DrainSessionError::Fatal(SourceRuntimeError::InvalidConfig));
+    }
+    let spool_path = independent.spool_path.clone();
+    let source_id = independent.source_id.clone();
+    let source_version = independent.source_version.clone();
+    let max_payload_bytes = independent.max_payload_bytes;
+    let expected_offset = failover_height.get();
+    let probe = tokio::task::spawn_blocking(move || {
+        let mut backlog = SpoolBacklog::open(
+            spool_path,
+            source_id,
+            source_version,
+            expected_offset,
+            max_payload_bytes,
+        )?;
+        backlog.next_observation()
+    })
+    .await
+    .map_err(|_| DrainSessionError::Fatal(SourceRuntimeError::BlockingTask))?;
+    match probe {
+        Ok(BacklogRead::Observation(observation))
+            if observation.cursor().offset() == failover_height.get() => {}
+        Ok(BacklogRead::Observation(_)) => {
+            return Err(DrainSessionError::Fatal(SourceRuntimeError::InvalidConfig));
+        }
+        Ok(BacklogRead::CaughtUp { .. }) => return Ok(None),
+        Err(BacklogError::Spool(SpoolError::Io { source, .. }))
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(None);
+        }
+        Err(error @ BacklogError::Gap { .. }) => {
+            tracing::error!(
+                reason_code = error.reason_code(),
+                failover_height = failover_height.get(),
+                "independent committed spool cannot fill the primary gap"
+            );
+            return Err(DrainSessionError::Latched(
+                "capture_failover.independent_range_unavailable",
+            ));
+        }
+        Err(error) => return Err(classify_backlog_error(error)),
+    }
+    let decision = crate::FailoverDecision::try_new(
+        primary.chain_id.clone(),
+        primary.source_id.clone(),
+        independent.source_id.clone(),
+        failover_height,
+        crate::FailoverReason::PrimaryRangeUnavailable,
+    )
+    .map_err(|error| DrainSessionError::Fatal(SourceRuntimeError::Failover(error)))?;
+    let store_path = failover_store.path().to_path_buf();
+    let recorded = decision.clone();
+    tokio::task::spawn_blocking(move || crate::FailoverStore::new(store_path)?.record(&recorded))
+        .await
+        .map_err(|_| DrainSessionError::Fatal(SourceRuntimeError::BlockingTask))?
+        .map_err(|error| DrainSessionError::Fatal(SourceRuntimeError::Failover(error)))?;
+    Ok(Some(decision))
 }
 
 async fn drain_backlog_once(
@@ -592,31 +900,33 @@ fn now_micros() -> Result<i64, SourceRuntimeError> {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SourceRuntimeError {
-    #[error("primary node source runtime configuration is invalid")]
+    #[error("committed node source runtime configuration is invalid")]
     InvalidConfig,
-    #[error("primary node source progress failed: {0}")]
+    #[error("committed-source failover state failed: {0}")]
+    Failover(#[source] crate::FailoverError),
+    #[error("committed node source progress failed: {0}")]
     Progress(#[source] ProgressError),
-    #[error("primary node capture coordinator failed: {0}")]
+    #[error("committed node capture coordinator failed: {0}")]
     Coordinator(#[source] CoordinatorError),
-    #[error("primary node durable backlog failed: {0}")]
+    #[error("committed node durable backlog failed: {0}")]
     Backlog(#[source] BacklogError),
-    #[error("primary node source spool failed: {0}")]
+    #[error("committed node source spool failed: {0}")]
     Spool(#[source] SpoolError),
-    #[error("primary node source adapter failed: {0}")]
+    #[error("committed node source adapter failed: {0}")]
     Source(#[source] SourceError),
-    #[error("primary node canonical pipeline failed: {0}")]
+    #[error("committed node canonical pipeline failed: {0}")]
     Pipeline(#[from] PipelineError),
-    #[error("primary node raw archive failed: {0}")]
+    #[error("committed node raw archive failed: {0}")]
     RawArchive(#[source] RawSegmentArchiveError),
-    #[error("primary node disk reserve failed: {0}")]
+    #[error("committed node disk reserve failed: {0}")]
     Disk(#[from] DiskReserveError),
-    #[error("primary node committed append produced no durability receipt")]
+    #[error("committed node append produced no durability receipt")]
     MissingDurabilityReceipt,
-    #[error("primary node backlog notification channel closed")]
+    #[error("committed node backlog notification channel closed")]
     NotificationClosed,
-    #[error("primary node blocking task failed")]
+    #[error("committed node blocking task failed")]
     BlockingTask,
-    #[error("primary node runtime clock failed")]
+    #[error("committed node runtime clock failed")]
     Clock,
 }
 
@@ -624,6 +934,7 @@ impl SourceRuntimeError {
     const fn reason_code(&self) -> &'static str {
         match self {
             Self::InvalidConfig => "capture_source.invalid_config",
+            Self::Failover(error) => error.reason_code(),
             Self::Progress(error) => error.reason_code(),
             Self::Coordinator(error) => error.reason_code(),
             Self::Backlog(error) => error.reason_code(),
@@ -642,11 +953,34 @@ impl SourceRuntimeError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use domain_types::SourceId;
+    use bytes::Bytes;
+    use canonical_archive::{ArchiveConfig, LocalParquetArchive};
+    use domain_types::{BlockHeight, ChainId, KnownTime, SourceId};
+    use hl_protocol::{
+        ObservationClass, ReceiveTimestamps, SourceAdmission, SourceCursor, SourceObservation,
+        SourceTrust,
+    };
+    use storage_ports::{CaptureProgressStore, RawObservationArchive};
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
-    use super::RetryBackoff;
+    use crate::app::CaptureRuntimeHealth;
+    use crate::progress::InMemoryProgressStore;
+    use crate::spool::{
+        DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolRotationPolicy, inspect_spool,
+    };
+    use crate::{BlockingRawSegmentArchive, FailoverStore, RawSegmentArchive};
+
+    use super::{
+        CommittedSourceRole, DrainSessionError, NodeSourceTaskConfig, RetryBackoff,
+        SourceNotification, attempt_failover, run_committed_node_acquisition,
+    };
 
     #[test]
     fn retry_backoff_is_bounded_deterministic_and_source_staggered() {
@@ -687,5 +1021,289 @@ mod tests {
         backoff.reset();
 
         assert_eq!(backoff.next_delay(), first);
+    }
+
+    fn write_block(root: &Path, height: u64, payload: &[u8]) {
+        let directory = root.join("1721000000").join("20260729");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(height.to_string()), payload).unwrap();
+    }
+
+    fn acquisition_config(
+        root: &TempDir,
+        role: CommittedSourceRole,
+        source_id: &str,
+        source_path: &Path,
+    ) -> NodeSourceTaskConfig {
+        let trust = match role {
+            CommittedSourceRole::Primary => SourceTrust::LocallyVerifiedCommitted,
+            CommittedSourceRole::Independent => SourceTrust::IndependentCommitted,
+        };
+        NodeSourceTaskConfig {
+            role,
+            chain_id: ChainId::new("mainnet").unwrap(),
+            source_id: SourceId::new(source_id).unwrap(),
+            source_version: "hyperliquid-node-v1".to_owned(),
+            admission: SourceAdmission::new(trust, ObservationClass::CommittedBlock).unwrap(),
+            parser_version: "parser-v1".to_owned(),
+            source_path: source_path.to_path_buf(),
+            stream_name: format!("{source_id}-replica-cmds"),
+            first_height: BlockHeight::new(100),
+            start_height: 100,
+            poll_interval: Duration::from_millis(5),
+            queue_capacity: 32,
+            max_payload_bytes: 1024 * 1024,
+            spool_path: root.path().join("spool").join(source_id),
+            archive_path: root.path().join("archive"),
+            segment_target_bytes: 1024 * 1024,
+            rotation_interval: Duration::from_secs(60),
+            backpressure_timeout: Duration::from_millis(100),
+            max_pending_blocks: 32,
+            retained_committed_blocks: 32,
+            disk_reserve_bytes: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn primary_visible_gap_parks_only_primary_while_independent_spooling_continues() {
+        let root = TempDir::new().unwrap();
+        let primary_source = root.path().join("primary-source");
+        let independent_source = root.path().join("independent-source");
+        write_block(&primary_source, 100, b"primary-100");
+        write_block(&primary_source, 102, b"primary-102");
+        write_block(&independent_source, 100, b"independent-100");
+        write_block(&independent_source, 101, b"independent-101");
+        write_block(&independent_source, 102, b"independent-102");
+
+        let archive = Arc::new(
+            LocalParquetArchive::open(
+                root.path().join("archive"),
+                ArchiveConfig::deterministic_fixture(
+                    "dual-acquisition-test",
+                    KnownTime::from_unix_micros(1_000).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let raw_port: Arc<dyn RawObservationArchive> = archive;
+        let raw_archive: Arc<dyn RawSegmentArchive> =
+            Arc::new(BlockingRawSegmentArchive::new(raw_port));
+        let health = Arc::new(CaptureRuntimeHealth::new());
+        let cancellation = CancellationToken::new();
+        let (notifications, mut received) = mpsc::channel(32);
+        let primary_config = acquisition_config(
+            &root,
+            CommittedSourceRole::Primary,
+            "primary-node",
+            &primary_source,
+        );
+        let independent_config = acquisition_config(
+            &root,
+            CommittedSourceRole::Independent,
+            "independent-node",
+            &independent_source,
+        );
+        let primary_spool = primary_config.spool_path.clone();
+        let independent_spool = independent_config.spool_path.clone();
+
+        let primary = tokio::spawn(run_committed_node_acquisition(
+            primary_config,
+            Arc::clone(&raw_archive),
+            notifications.clone(),
+            Arc::clone(&health),
+            cancellation.child_token(),
+        ));
+        let independent = tokio::spawn(run_committed_node_acquisition(
+            independent_config,
+            raw_archive,
+            notifications,
+            health,
+            cancellation.child_token(),
+        ));
+
+        let gap = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(notification @ SourceNotification::VisibleGap { .. }) =
+                    received.recv().await
+                {
+                    return notification;
+                }
+            }
+        })
+        .await
+        .expect("primary gap signal");
+        assert_eq!(
+            gap,
+            SourceNotification::VisibleGap {
+                role: CommittedSourceRole::Primary,
+                source_id: SourceId::new("primary-node").unwrap(),
+                height: BlockHeight::new(101),
+            }
+        );
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let primary_records = inspect_spool(&primary_spool)
+                    .map(|inspection| inspection.records())
+                    .unwrap_or(0);
+                let independent_records = inspect_spool(&independent_spool)
+                    .map(|inspection| inspection.records())
+                    .unwrap_or(0);
+                if primary_records == 1 && independent_records == 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both source spools reach expected durable cursors");
+        assert!(!primary.is_finished(), "primary acquisition must park");
+        assert!(
+            !independent.is_finished(),
+            "independent acquisition must keep polling"
+        );
+
+        cancellation.cancel();
+        primary.await.unwrap().unwrap();
+        independent.await.unwrap().unwrap();
+        assert_eq!(inspect_spool(primary_spool).unwrap().records(), 1);
+        assert_eq!(inspect_spool(independent_spool).unwrap().records(), 3);
+    }
+
+    fn write_spool_observation(config: &NodeSourceTaskConfig, height: u64) {
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new(
+                config.spool_path.clone(),
+                config.source_id.clone(),
+                config.source_version.clone(),
+                "spool-v1",
+                [0x42; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(1024 * 1024, Duration::from_secs(60)).unwrap(),
+            )
+            .unwrap(),
+            1_000,
+        )
+        .unwrap();
+        let observation = SourceObservation::new(
+            config.source_id.clone(),
+            config.source_version.clone(),
+            ObservationClass::CommittedBlock,
+            SourceCursor::new("independent-epoch", height).unwrap(),
+            ReceiveTimestamps::new(1_000, height).unwrap(),
+            "parser-v1",
+            Bytes::from_static(b"independent-evidence"),
+            Vec::new(),
+            config.max_payload_bytes,
+        )
+        .unwrap();
+        spool.append(&observation, 1_001).unwrap();
+        spool.shutdown(1_002).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failover_is_recorded_only_after_exact_independent_evidence_is_durable() {
+        let root = TempDir::new().unwrap();
+        let source_root = root.path().join("unused-source");
+        fs::create_dir(&source_root).unwrap();
+        let primary = acquisition_config(
+            &root,
+            CommittedSourceRole::Primary,
+            "primary-node",
+            &source_root,
+        );
+        let independent = acquisition_config(
+            &root,
+            CommittedSourceRole::Independent,
+            "independent-node",
+            &source_root,
+        );
+        let progress = InMemoryProgressStore::new(16).unwrap();
+        progress
+            .initialize_chain(&primary.chain_id, BlockHeight::new(100))
+            .await
+            .unwrap();
+        let state_path = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("state/failover.json");
+        let store = FailoverStore::new(state_path).unwrap();
+
+        assert!(
+            attempt_failover(
+                &primary,
+                Some(&independent),
+                &store,
+                &progress,
+                BlockHeight::new(100),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(store.load().unwrap().is_none());
+
+        write_spool_observation(&independent, 100);
+        let decision = attempt_failover(
+            &primary,
+            Some(&independent),
+            &store,
+            &progress,
+            BlockHeight::new(100),
+        )
+        .await
+        .unwrap()
+        .expect("exact independent evidence activates failover");
+        assert_eq!(decision.failover_height(), BlockHeight::new(100));
+        assert_eq!(store.load().unwrap(), Some(decision));
+    }
+
+    #[tokio::test]
+    async fn independent_spool_gap_does_not_create_a_failover_decision() {
+        let root = TempDir::new().unwrap();
+        let source_root = root.path().join("unused-source");
+        fs::create_dir(&source_root).unwrap();
+        let primary = acquisition_config(
+            &root,
+            CommittedSourceRole::Primary,
+            "primary-node",
+            &source_root,
+        );
+        let independent = acquisition_config(
+            &root,
+            CommittedSourceRole::Independent,
+            "independent-node",
+            &source_root,
+        );
+        write_spool_observation(&independent, 101);
+        let progress = InMemoryProgressStore::new(16).unwrap();
+        progress
+            .initialize_chain(&primary.chain_id, BlockHeight::new(100))
+            .await
+            .unwrap();
+        let store = FailoverStore::new(
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join("state/failover.json"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            attempt_failover(
+                &primary,
+                Some(&independent),
+                &store,
+                &progress,
+                BlockHeight::new(100),
+            )
+            .await,
+            Err(DrainSessionError::Latched(
+                "capture_failover.independent_range_unavailable"
+            ))
+        ));
+        assert!(store.load().unwrap().is_none());
     }
 }

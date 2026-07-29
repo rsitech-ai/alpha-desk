@@ -14,7 +14,7 @@ use crate::coordinator::{
 };
 use crate::progress::ReconnectingPostgresProgressStore;
 use crate::secret::read_protected_secret;
-use crate::source_runtime::primary_node_tasks;
+use crate::source_runtime::committed_node_tasks;
 use crate::{
     AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig,
     CaptureRuntimeError, OwnedTask, RawSegmentArchive, StatusWriter, synthetic_fixture_block,
@@ -31,6 +31,7 @@ pub struct ConnectedCapture {
     coordinator: Arc<CaptureCoordinator>,
     progress: Arc<dyn CaptureProgressStore>,
     raw_archive: Arc<dyn RawSegmentArchive>,
+    failover_store: Arc<crate::FailoverStore>,
     infrastructure_tasks: Vec<OwnedTask>,
 }
 
@@ -49,11 +50,12 @@ impl std::fmt::Debug for ConnectedCapture {
 impl ConnectedCapture {
     pub async fn run(mut self, cancellation: CancellationToken) -> Result<(), CaptureRuntimeError> {
         let health = self.runtime.health();
-        let source_tasks = primary_node_tasks(
+        let source_tasks = committed_node_tasks(
             &self.config,
             Arc::clone(&self.progress),
             Arc::clone(&self.coordinator),
             Arc::clone(&self.raw_archive),
+            Arc::clone(&self.failover_store),
             health,
             cancellation.child_token(),
         )
@@ -154,6 +156,13 @@ pub async fn connect_capture(
     let raw_observation_archive: Arc<dyn RawObservationArchive> = archive;
     let raw_archive: Arc<dyn RawSegmentArchive> =
         Arc::new(BlockingRawSegmentArchive::new(raw_observation_archive));
+    let failover_store = Arc::new(
+        crate::FailoverStore::new(config.runtime().failover_state_path().to_path_buf())
+            .map_err(|_| RuntimeConnectError::FailoverState)?,
+    );
+    failover_store
+        .load()
+        .map_err(|_| RuntimeConnectError::FailoverState)?;
     let publisher_config = JetStreamConfig::try_new(
         config.runtime().nats_server_url(),
         JetStreamAuthentication::UserPasswordFile {
@@ -199,6 +208,7 @@ pub async fn connect_capture(
         coordinator,
         progress,
         raw_archive,
+        failover_store,
         infrastructure_tasks: Vec::new(),
     })
 }
@@ -251,6 +261,8 @@ pub enum RuntimeConnectError {
     RuntimeConfig,
     #[error("capture status initialization failed")]
     Status,
+    #[error("capture committed-source failover state is invalid")]
+    FailoverState,
 }
 
 impl RuntimeConnectError {
@@ -264,6 +276,7 @@ impl RuntimeConnectError {
             Self::NatsConfig => "capture_connect.nats_config",
             Self::RuntimeConfig => "capture_connect.runtime_config",
             Self::Status => "capture_connect.status",
+            Self::FailoverState => "capture_connect.failover_state",
         }
     }
 }

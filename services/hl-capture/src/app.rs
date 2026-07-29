@@ -9,7 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coordinator::{CaptureCoordinator, CoordinatorError};
 use crate::{
-    AppError, CaptureHealth, CaptureStatus, OwnedTask, StatusError, StatusWriter, read_status,
+    AppError, CaptureHealth, CaptureSourceHealth, CaptureStatus, CommittedSourceClass,
+    FailoverDecision, FailoverReason, OwnedTask, StatusError, StatusWriter, read_status,
     run_owned_tasks,
 };
 
@@ -27,7 +28,13 @@ pub(crate) struct RuntimeHealthSnapshot {
     health: CaptureHealth,
     ready: bool,
     reason_code: Option<&'static str>,
-    latest_captured_height: Option<BlockHeight>,
+    active_committed_source: CommittedSourceClass,
+    primary_source_health: CaptureSourceHealth,
+    independent_source_health: Option<CaptureSourceHealth>,
+    failover_height: Option<BlockHeight>,
+    failover_reason: Option<FailoverReason>,
+    latest_primary_height: Option<BlockHeight>,
+    latest_independent_height: Option<BlockHeight>,
     next_expected_capture_height: Option<BlockHeight>,
     capture_backlog_records: u64,
     oldest_pending_capture_height: Option<BlockHeight>,
@@ -40,12 +47,18 @@ pub(crate) struct CaptureRuntimeHealth {
 }
 
 impl CaptureRuntimeHealth {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (sender, _receiver) = watch::channel(RuntimeHealthSnapshot {
             health: CaptureHealth::Red,
             ready: false,
             reason_code: Some(RECOVERING_REASON),
-            latest_captured_height: None,
+            active_committed_source: CommittedSourceClass::LocallyVerifiedCommitted,
+            primary_source_health: CaptureSourceHealth::Healthy,
+            independent_source_health: None,
+            failover_height: None,
+            failover_reason: None,
+            latest_primary_height: None,
+            latest_independent_height: None,
             next_expected_capture_height: None,
             capture_backlog_records: 0,
             oldest_pending_capture_height: None,
@@ -56,7 +69,38 @@ impl CaptureRuntimeHealth {
 
     pub(crate) fn set_ready(&self) {
         self.sender.send_modify(|snapshot| {
-            if snapshot
+            let active_health = match snapshot.active_committed_source {
+                CommittedSourceClass::LocallyVerifiedCommitted => snapshot.primary_source_health,
+                CommittedSourceClass::IndependentCommitted => snapshot
+                    .independent_source_health
+                    .unwrap_or(CaptureSourceHealth::Starting),
+            };
+            match active_health {
+                CaptureSourceHealth::Starting => {
+                    snapshot.health = CaptureHealth::Yellow;
+                    snapshot.ready = false;
+                    snapshot.reason_code = Some("capture_source.active_starting");
+                    return;
+                }
+                CaptureSourceHealth::RangeUnavailable => {
+                    snapshot.health = CaptureHealth::Red;
+                    snapshot.ready = false;
+                    snapshot.reason_code = Some(match snapshot.active_committed_source {
+                        CommittedSourceClass::LocallyVerifiedCommitted => {
+                            "capture_source.primary_range_unavailable"
+                        }
+                        CommittedSourceClass::IndependentCommitted => {
+                            "capture_failover.independent_range_unavailable"
+                        }
+                    });
+                    return;
+                }
+                CaptureSourceHealth::Healthy => {}
+            }
+            if snapshot.active_committed_source == CommittedSourceClass::IndependentCommitted {
+                snapshot.health = CaptureHealth::Yellow;
+                snapshot.reason_code = Some("capture_failover.independent_source_active");
+            } else if snapshot
                 .disk_free_basis_points
                 .is_some_and(|basis_points| basis_points < DISK_HEALTHY_BASIS_POINTS)
             {
@@ -78,6 +122,59 @@ impl CaptureRuntimeHealth {
         });
     }
 
+    pub(crate) fn configure_committed_sources(
+        &self,
+        has_independent: bool,
+        failover: Option<&FailoverDecision>,
+    ) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.primary_source_health = CaptureSourceHealth::Starting;
+            snapshot.independent_source_health =
+                has_independent.then_some(CaptureSourceHealth::Starting);
+            if let Some(decision) = failover {
+                snapshot.active_committed_source = CommittedSourceClass::IndependentCommitted;
+                snapshot.failover_height = Some(decision.failover_height());
+                snapshot.failover_reason = Some(decision.reason());
+            }
+            refresh_capture_backlog(snapshot);
+        });
+    }
+
+    pub(crate) fn activate_independent(&self, decision: &FailoverDecision) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.active_committed_source = CommittedSourceClass::IndependentCommitted;
+            snapshot.failover_height = Some(decision.failover_height());
+            snapshot.failover_reason = Some(decision.reason());
+            snapshot.independent_source_health = Some(CaptureSourceHealth::Healthy);
+            snapshot.health = CaptureHealth::Yellow;
+            snapshot.ready = true;
+            snapshot.reason_code = Some("capture_failover.independent_source_active");
+            refresh_capture_backlog(snapshot);
+        });
+    }
+
+    pub(crate) fn record_source_gap(&self, source: CommittedSourceClass) {
+        self.sender.send_modify(|snapshot| match source {
+            CommittedSourceClass::LocallyVerifiedCommitted => {
+                snapshot.primary_source_health = CaptureSourceHealth::RangeUnavailable;
+            }
+            CommittedSourceClass::IndependentCommitted => {
+                snapshot.independent_source_health = Some(CaptureSourceHealth::RangeUnavailable);
+            }
+        });
+    }
+
+    pub(crate) fn record_source_healthy(&self, source: CommittedSourceClass) {
+        self.sender.send_modify(|snapshot| match source {
+            CommittedSourceClass::LocallyVerifiedCommitted => {
+                snapshot.primary_source_health = CaptureSourceHealth::Healthy;
+            }
+            CommittedSourceClass::IndependentCommitted => {
+                snapshot.independent_source_health = Some(CaptureSourceHealth::Healthy);
+            }
+        });
+    }
+
     pub(crate) fn set_latched(&self, reason_code: &'static str) {
         self.sender.send_modify(|snapshot| {
             snapshot.health = CaptureHealth::Red;
@@ -86,13 +183,31 @@ impl CaptureRuntimeHealth {
         });
     }
 
-    pub(crate) fn record_capture(&self, captured_height: BlockHeight, disk_free_basis_points: u16) {
+    pub(crate) fn record_capture(
+        &self,
+        source: CommittedSourceClass,
+        captured_height: BlockHeight,
+        disk_free_basis_points: u16,
+    ) {
         self.sender.send_modify(|snapshot| {
-            snapshot.latest_captured_height = Some(
-                snapshot
-                    .latest_captured_height
-                    .map_or(captured_height, |current| current.max(captured_height)),
-            );
+            match source {
+                CommittedSourceClass::LocallyVerifiedCommitted => {
+                    snapshot.latest_primary_height = Some(
+                        snapshot
+                            .latest_primary_height
+                            .map_or(captured_height, |current| current.max(captured_height)),
+                    );
+                    snapshot.primary_source_health = CaptureSourceHealth::Healthy;
+                }
+                CommittedSourceClass::IndependentCommitted => {
+                    snapshot.latest_independent_height = Some(
+                        snapshot
+                            .latest_independent_height
+                            .map_or(captured_height, |current| current.max(captured_height)),
+                    );
+                    snapshot.independent_source_health = Some(CaptureSourceHealth::Healthy);
+                }
+            }
             snapshot.disk_free_basis_points = Some(disk_free_basis_points);
             refresh_capture_backlog(snapshot);
         });
@@ -117,7 +232,11 @@ impl CaptureRuntimeHealth {
 }
 
 fn refresh_capture_backlog(snapshot: &mut RuntimeHealthSnapshot) {
-    let Some(latest) = snapshot.latest_captured_height else {
+    let latest = match snapshot.active_committed_source {
+        CommittedSourceClass::LocallyVerifiedCommitted => snapshot.latest_primary_height,
+        CommittedSourceClass::IndependentCommitted => snapshot.latest_independent_height,
+    };
+    let Some(latest) = latest else {
         snapshot.capture_backlog_records = 0;
         snapshot.oldest_pending_capture_height = None;
         return;
@@ -330,6 +449,7 @@ impl CaptureRuntime {
             .err()
             .map(|error| error.reason_code().to_owned());
         let terminal_time = now()?;
+        let terminal_source_state = self.health.snapshot();
         let terminal = match read_status(self.status_writer.path()) {
             Ok(status) => status.into_terminal(terminal_time, final_health, final_reason.clone()),
             _ => CaptureStatus::new(
@@ -337,6 +457,13 @@ impl CaptureRuntime {
                 &self.config.build_id,
                 self.config.chain_id.clone(),
                 final_health,
+            )
+            .with_source_state(
+                terminal_source_state.active_committed_source,
+                terminal_source_state.primary_source_health,
+                terminal_source_state.independent_source_health,
+                terminal_source_state.failover_height,
+                terminal_source_state.failover_reason,
             )
             .with_last_error_reason(final_reason),
         };
@@ -405,6 +532,13 @@ impl StatusContext {
             runtime_health.health,
         )
         .with_readiness(runtime_health.ready)
+        .with_source_state(
+            runtime_health.active_committed_source,
+            runtime_health.primary_source_health,
+            runtime_health.independent_source_health,
+            runtime_health.failover_height,
+            runtime_health.failover_reason,
+        )
         .with_durable_height(cursor.map(|cursor| cursor.committed_block_height()))
         .with_pending_blocks(pending_blocks)
         .with_capture_capacity(
@@ -437,6 +571,13 @@ impl StatusContext {
             .with_readiness(runtime_health.ready)
             .with_last_error_reason(runtime_health.reason_code.map(str::to_owned)),
         }
+        .with_source_state(
+            runtime_health.active_committed_source,
+            runtime_health.primary_source_health,
+            runtime_health.independent_source_health,
+            runtime_health.failover_height,
+            runtime_health.failover_reason,
+        )
         .with_capture_capacity(
             runtime_health.capture_backlog_records,
             runtime_health.oldest_pending_capture_height,
@@ -505,7 +646,9 @@ fn status_error(_error: StatusError) -> CaptureRuntimeError {
 
 #[cfg(test)]
 mod tests {
-    use domain_types::BlockHeight;
+    use domain_types::{BlockHeight, ChainId, SourceId};
+
+    use crate::{CommittedSourceClass, FailoverDecision, FailoverReason};
 
     use super::CaptureRuntimeHealth;
 
@@ -513,7 +656,11 @@ mod tests {
     fn capture_telemetry_tracks_backlog_boundary_and_disk_percentage() {
         let health = CaptureRuntimeHealth::new();
         health.record_next_expected(BlockHeight::new(41));
-        health.record_capture(BlockHeight::new(43), 2_345);
+        health.record_capture(
+            CommittedSourceClass::LocallyVerifiedCommitted,
+            BlockHeight::new(43),
+            2_345,
+        );
 
         let snapshot = health.snapshot();
         assert_eq!(snapshot.capture_backlog_records, 3);
@@ -541,5 +688,51 @@ mod tests {
         assert_eq!(snapshot.health, super::CaptureHealth::Yellow);
         assert!(snapshot.ready);
         assert_eq!(snapshot.reason_code, Some("capture_disk.low_space"));
+    }
+
+    #[test]
+    fn configured_source_must_open_healthy_before_readiness() {
+        let health = CaptureRuntimeHealth::new();
+        health.configure_committed_sources(true, None);
+
+        health.set_ready();
+
+        let starting = health.snapshot();
+        assert_eq!(starting.health, super::CaptureHealth::Yellow);
+        assert!(!starting.ready);
+        assert_eq!(starting.reason_code, Some("capture_source.active_starting"));
+
+        health.record_source_healthy(CommittedSourceClass::LocallyVerifiedCommitted);
+        health.set_ready();
+        assert!(health.snapshot().ready);
+    }
+
+    #[test]
+    fn recovery_cannot_promote_an_active_independent_source_to_green() {
+        let health = CaptureRuntimeHealth::new();
+        let decision = FailoverDecision::try_new(
+            ChainId::new("mainnet").unwrap(),
+            SourceId::new("primary-node").unwrap(),
+            SourceId::new("independent-node").unwrap(),
+            BlockHeight::new(42),
+            FailoverReason::PrimaryRangeUnavailable,
+        )
+        .unwrap();
+        health.configure_committed_sources(true, Some(&decision));
+        health.record_source_healthy(CommittedSourceClass::IndependentCommitted);
+
+        health.set_ready();
+
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.health, super::CaptureHealth::Yellow);
+        assert!(snapshot.ready);
+        assert_eq!(
+            snapshot.reason_code,
+            Some("capture_failover.independent_source_active")
+        );
+        assert_eq!(
+            snapshot.independent_source_health,
+            Some(crate::CaptureSourceHealth::Healthy)
+        );
     }
 }
