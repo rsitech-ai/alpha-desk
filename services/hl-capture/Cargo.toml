@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+async-nats.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
 bytes.workspace = true
@@ -23,8 +24,11 @@ hex.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+storage-ports = { path = "../../crates/storage-ports", version = "=0.1.0" }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true

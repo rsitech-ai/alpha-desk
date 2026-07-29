@@ -70,12 +70,13 @@ postgres-migration-smoke:
     ./tools/ci/check-postgres-migrations.sh
 
 dev-up:
-    docker compose -f infra/docker-compose/compose.yaml up -d --wait --wait-timeout 120
-    ./tools/ci/wait-for-dev-stack.sh
+    ./tools/dev/with-dev-secrets.sh docker compose -f infra/docker-compose/compose.yaml up -d
+    ./tools/dev/with-dev-secrets.sh ./tools/ci/wait-for-dev-stack.sh
+    ./tools/dev/with-dev-secrets.sh docker compose -f infra/docker-compose/compose.yaml run --rm --no-deps --entrypoint /bin/sh nats-init /opt/alpha-desk/test-permissions.sh
 
 dev-down:
-    docker compose -f infra/docker-compose/compose.yaml down --timeout 60 --remove-orphans
+    ./tools/dev/with-dev-secrets.sh docker compose -f infra/docker-compose/compose.yaml down --timeout 60 --remove-orphans
 
 dev-reset:
     printf '%s\n' 'WARNING: dev-reset destroys all alpha-desk-dev local data volumes.' >&2
-    docker compose -f infra/docker-compose/compose.yaml down --timeout 60 --volumes --remove-orphans
+    ./tools/dev/with-dev-secrets.sh docker compose -f infra/docker-compose/compose.yaml down --timeout 60 --volumes --remove-orphans

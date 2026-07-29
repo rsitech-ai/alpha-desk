@@ -46,6 +46,7 @@ readme = "README.md"
 [workspace.dependencies]
 anyhow = "1.0"
 arrow = { version = "=58.4.0", default-features = false }
+async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream", "nkeys", "ring", "server_2_14"] }
 async-trait = "0.1"
 blake3 = "1.8"
 bytes = "1.10"
@@ -72,6 +73,7 @@ sha2 = "0.11"
 tempfile = "3.20"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+tokio-postgres = { version = "=0.7.18", default-features = false, features = ["runtime"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "1.0"
 tonic = { version = "0.14", features = ["transport"] }

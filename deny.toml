@@ -63,15 +63,30 @@ deny = []
 # Exact transition exceptions only. Each is one side of a verified two-version
 # line; skip-tree is intentionally empty so no transitive crate is hidden.
 skip = [
+  { crate = "block-buffer@0.10.4", reason = "async-nats 0.50.0 nkeys authentication uses the RustCrypto 0.10 digest line while the workspace archive hashes use digest/block-buffer 0.11/0.12" },
+  { crate = "const-oid@0.9.6", reason = "async-nats 0.50.0 reaches const-oid 0.9 through nkeys 0.4.5 signing while workspace SHA-2 0.11 uses const-oid 0.10" },
+  { crate = "cpufeatures@0.2.17", reason = "async-nats 0.50.0 nkeys signing retains RustCrypto cpufeatures 0.2 while workspace SHA-2 0.11 and BLAKE3 use cpufeatures 0.3" },
+  { crate = "crypto-common@0.1.7", reason = "async-nats 0.50.0 nkeys authentication uses digest 0.10 and crypto-common 0.1 while workspace SHA-2 0.11 uses crypto-common 0.2" },
+  { crate = "digest@0.10.7", reason = "async-nats 0.50.0 nkeys authentication requires digest 0.10 while the workspace uses the newer SHA-2/digest 0.11 line" },
   { crate = "getrandom@0.2.17", reason = "Arrow/Parquet all-target validation reaches ahash compile-time-rng through const-random while native ahash and workspace randomness use getrandom 0.3" },
   { crate = "getrandom@0.4.3", reason = "tempfile 3.27.0 and prost-build 0.14.4 require getrandom 0.4 while rand_core 0.9.5 still requires 0.3" },
   { crate = "foldhash@0.2.0", reason = "jsonschema 0.48.5 reaches foldhash 0.2 through referencing 0.48.5 while prost-build 0.14.4 retains foldhash 0.1 through petgraph 0.8.3" },
   { crate = "hashbrown@0.14.5", reason = "DataFusion 54.1.0 reaches hashbrown 0.14 through dashmap 6.2.1 while Arrow 58.4.0 and indexmap use 0.17" },
   { crate = "hashbrown@0.15.5", reason = "prost-build 0.14.4 reaches hashbrown 0.15 through petgraph 0.8.3 while indexmap 2.14.0 uses 0.17" },
+  { crate = "phf@0.13.1", reason = "tokio-postgres 0.7.18 uses phf 0.13 for PostgreSQL type metadata while the pinned Arrow time-zone graph retains phf 0.12" },
+  { crate = "phf_shared@0.13.1", reason = "tokio-postgres 0.7.18 reaches phf-shared 0.13 through phf 0.13 while the pinned Arrow time-zone graph retains phf-shared 0.12" },
+  { crate = "rand@0.8.7", reason = "async-nats 0.50.0 reaches rand 0.8 through nkeys 0.4.5 while DataFusion uses rand 0.9 and async-nats transport internals use rand 0.10" },
+  { crate = "rand@0.10.2", reason = "async-nats 0.50.0 transport internals require rand 0.10 while the reviewed analytics and test graph remains on rand 0.9" },
+  { crate = "rand_chacha@0.3.1", reason = "async-nats 0.50.0 reaches rand_chacha 0.3 through nkeys 0.4.5 while the analytics graph uses rand_chacha 0.9" },
+  { crate = "rand_core@0.6.4", reason = "async-nats 0.50.0 reaches rand_core 0.6 through nkeys 0.4.5 while analytics uses 0.9 and transport internals use 0.10" },
+  { crate = "rand_core@0.10.1", reason = "async-nats 0.50.0 transport internals require rand_core 0.10 while the reviewed analytics graph uses rand_core 0.9" },
   { crate = "r-efi@6.0.0", reason = "getrandom 0.4.3 requires r-efi 6 while the retained getrandom 0.3.4 branch requires r-efi 5" },
+  { crate = "sha2@0.10.9", reason = "async-nats 0.50.0 nkeys signing retains SHA-2 0.10 while archive and publication content hashing use SHA-2 0.11" },
   { crate = "syn@2.0.119", reason = "prost, futures, tokio, tracing, and wasm macro paths remain on syn 2 while serde, thiserror 2, and async-trait have moved to syn 3" },
   { crate = "thiserror@1.0.69", reason = "prometheus 0.14.0 reaches thiserror 1 through protobuf 3.7.2 while workspace and telemetry APIs use thiserror 2" },
   { crate = "thiserror-impl@1.0.69", reason = "proc-macro companion of the protobuf 3.7.2 thiserror 1 transition; workspace error derives use thiserror-impl 2" },
+  { crate = "wasi@0.14.7+wasi-0.2.4", reason = "tokio-postgres 0.7.18 reaches WASI 0.2 through whoami 2.1.2 and wasite while getrandom retains the legacy wasi 0.11 target package" },
+  { crate = "windows-sys@0.52.0", reason = "async-nats 0.50.0 native TLS certificate discovery retains schannel/windows-sys 0.52 while the current Tokio and filesystem graph uses windows-sys 0.61" },
 ]
 skip-tree = []
 
