@@ -707,6 +707,14 @@ Parquet archive, private local checkpoints.
   defaults and the complete independent negative matrix were also added.
   Final re-review returned GO. Parent verification passed 98 affected tests,
   strict all-target/all-feature Clippy, formatting, and diff checks.
+- 2026-07-29: Task 2 completed at `ace439b`. Eight fee, funding, reward,
+  account-mode, margin-mode, and leverage payloads are strict typed contracts.
+  Maker rebates retain their negative signed rate and credit direction;
+  charged fee types require positive rates. Independent review held only for
+  incomplete boundary evidence, then returned GO after public encoder/direct
+  decoder limits, all amount/identity fields, funding signs, and fixed-point
+  precision 38/39 were covered. Parent verification passed 144 affected
+  tests, strict all-target/all-feature Clippy, formatting, and diff checks.
 
 ## Rollback / Recovery
 
