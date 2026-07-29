@@ -31,7 +31,9 @@ The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-2
 - Independent and recovery source transports behind the implemented
   trust/admission boundary, with proprietary operator-feed material kept
   outside the public repository.
-- Deterministic canonicalization, continuity/quarantine, immutable archive, and replayable publication.
+- Complete qualified source-to-canonical mappings and upcasters on the
+  implemented stable event/block identity boundary.
+- Continuity/quarantine, immutable archive, and replayable publication.
 - Only after those foundations: a long-running capture service and meaningful restart/replay/soak evidence.
 
 ## Deliberately deferred

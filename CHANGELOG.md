@@ -19,6 +19,9 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Exhaustive source-trust admission policy that keeps public, provisional,
   recovery, snapshot, auxiliary, and mempool evidence out of the committed
   watermark lane.
+- Source-independent V1 event IDs, validated production canonical-event
+  construction, deterministic canonical block hashes, and fail-closed block
+  ordering/boundary invariants.
 - Fail-closed OSS classification and content audit with seeded leak canaries.
 - Contributor, governance, support, security, architecture, status, and release documentation.
 
@@ -31,6 +34,6 @@ All notable changes will be documented in this file. The format follows [Keep a 
 - Stage 0 gate remains on `HOLD`.
 - Independent/recovery transports, proprietary operator-feed integration,
   real-node corpus qualification, the long-running capture runtime,
-  canonicalization, APIs, research workflows, and native applications are not
-  yet implemented.
+  exhaustive source-to-canonical mapping, continuity, archive publication,
+  APIs, research workflows, and native applications are not yet implemented.
 - No public release, supported version, production deployment, or performance qualification exists.

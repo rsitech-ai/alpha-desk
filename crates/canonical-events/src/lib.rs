@@ -1,5 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod block;
+mod event_id;
+mod input;
+
+pub use block::{BlockEnvelope, BlockError};
+pub use event_id::{EventIdentityInput, compute_event_id};
+pub use input::CanonicalEventInput;
+
 use api_contracts::{
     WireCanonicalEventEnvelope, WireSourceEvidence, WireTradeMatched, decode_trade_matched,
     encode_default_event_payload, encode_trade_matched, validate_event_payload,
@@ -382,6 +390,42 @@ pub struct SourceEvidence {
     content_hash: [u8; HASH_LENGTH],
 }
 
+impl SourceEvidence {
+    pub fn try_new(
+        source_id: SourceId,
+        source_version: impl Into<String>,
+        source_offset: impl Into<String>,
+        content_hash: [u8; HASH_LENGTH],
+    ) -> Result<Self, ContractError> {
+        Ok(Self {
+            source_id,
+            source_version: required(source_version.into(), "source_evidence.source_version")?,
+            source_offset: required(source_offset.into(), "source_evidence.source_offset")?,
+            content_hash,
+        })
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    #[must_use]
+    pub fn source_version(&self) -> &str {
+        &self.source_version
+    }
+
+    #[must_use]
+    pub fn source_offset(&self) -> &str {
+        &self.source_offset
+    }
+
+    #[must_use]
+    pub const fn content_hash(&self) -> [u8; HASH_LENGTH] {
+        self.content_hash
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventOrderingKey<'a> {
     pub chain_id: &'a str,
@@ -420,6 +464,52 @@ impl CanonicalEventEnvelope {
 
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, ContractError> {
         Ok(self.to_wire()?.encode_to_vec())
+    }
+
+    pub fn from_input(input: CanonicalEventInput) -> Result<Self, ContractError> {
+        validate_schema_version(&input.schema_version)?;
+        if input.source_evidence.is_empty() {
+            return Err(ContractError::Missing("source_evidence"));
+        }
+        if input.observed_at > input.ingested_at || input.ingested_at > input.canonicalized_at {
+            return Err(ContractError::Invalid {
+                field: "lifecycle_times",
+                reason: "expected observed_at <= ingested_at <= canonicalized_at".to_owned(),
+            });
+        }
+        let parser_version = required(input.parser_version, "parser_version")?;
+        let payload_bytes = input.payload.encode_to_vec()?;
+        let payload_hash = *blake3::hash(&payload_bytes).as_bytes();
+        let event_id = compute_event_id(&EventIdentityInput {
+            chain_id: &input.chain_id,
+            block_height: input.block_height,
+            transaction_identity: &input.transaction_id,
+            canonical_event_index: input.canonical_event_index,
+            event_kind: input.payload.kind(),
+            schema_major: SCHEMA_MAJOR,
+        });
+
+        Ok(Self {
+            schema_version: input.schema_version,
+            chain_id: input.chain_id,
+            block_height: input.block_height,
+            block_time: input.block_time,
+            transaction_id: input.transaction_id,
+            transaction_index: input.transaction_index,
+            event_index: input.canonical_event_index,
+            event_id,
+            market_ids: input.market_ids,
+            account_ids: input.account_ids,
+            source_evidence: input.source_evidence,
+            confirmation_class: input.confirmation_class,
+            observed_at: input.observed_at,
+            ingested_at: input.ingested_at,
+            canonicalized_at: input.canonicalized_at,
+            payload_hash,
+            parser_version,
+            payload: input.payload,
+            encoded_payload: payload_bytes,
+        })
     }
 
     /// Builds a deterministic, fixture-safe envelope.
@@ -551,6 +641,11 @@ impl CanonicalEventEnvelope {
     }
 
     #[must_use]
+    pub const fn chain_id(&self) -> &ChainId {
+        &self.chain_id
+    }
+
+    #[must_use]
     pub const fn block_height(&self) -> BlockHeight {
         self.block_height
     }
@@ -581,6 +676,33 @@ impl CanonicalEventEnvelope {
     }
 
     #[must_use]
+    pub fn expected_event_id(&self) -> EventId {
+        compute_event_id(&EventIdentityInput {
+            chain_id: &self.chain_id,
+            block_height: self.block_height,
+            transaction_identity: &self.transaction_id,
+            canonical_event_index: self.event_index,
+            event_kind: self.payload.kind(),
+            schema_major: SCHEMA_MAJOR,
+        })
+    }
+
+    #[must_use]
+    pub const fn transaction_id(&self) -> &TransactionId {
+        &self.transaction_id
+    }
+
+    #[must_use]
+    pub const fn transaction_index(&self) -> u32 {
+        self.transaction_index
+    }
+
+    #[must_use]
+    pub const fn canonical_event_index(&self) -> u32 {
+        self.event_index
+    }
+
+    #[must_use]
     pub const fn event_kind(&self) -> EventKind {
         self.payload.kind()
     }
@@ -598,6 +720,16 @@ impl CanonicalEventEnvelope {
     #[must_use]
     pub fn account_addresses(&self) -> &[Address] {
         &self.account_ids
+    }
+
+    #[must_use]
+    pub fn source_evidence(&self) -> &[SourceEvidence] {
+        &self.source_evidence
+    }
+
+    #[must_use]
+    pub fn parser_version(&self) -> &str {
+        &self.parser_version
     }
 
     #[must_use]

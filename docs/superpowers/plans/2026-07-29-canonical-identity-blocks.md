@@ -360,7 +360,7 @@ source-independent exclusions in `docs/formats/canonical-block-v1.md`.
 - Modify: `CHANGELOG.md`
 - Modify: `docs/STATUS.md`
 - Modify: `docs/ROADMAP.md`
-- Modify: `justfile`
+- Modify: `tools/ci/check-generated.sh`
 
 **Interfaces:**
 - Consumes the verified identity/input/block implementation.
@@ -393,7 +393,7 @@ Review `git diff --stat`, `git diff --check`, and the intentional file list,
 then commit:
 
 ```bash
-git add crates/canonical-events docs/formats/event-id-v1.md docs/formats/canonical-block-v1.md docs/STATUS.md docs/ROADMAP.md README.md CHANGELOG.md justfile
+git add crates/canonical-events docs/formats/event-id-v1.md docs/formats/canonical-block-v1.md docs/STATUS.md docs/ROADMAP.md README.md CHANGELOG.md tools/ci/check-generated.sh
 git commit -m "feat(canonical): add stable event and block identity"
 ```
 
