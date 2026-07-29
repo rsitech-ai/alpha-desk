@@ -412,9 +412,11 @@ local order report at
 20 generated blocks, four independent rebuilds, a checkpoint after block 8,
 80 facts and transitions, 20 current orders, 10 filled orders, 10 cancelled
 orders, and 10 fact-only rejections. The retained local market report at
-`target/evidence/state-replay-market/20260729T202402Z-10401/report.json` covers
+`target/evidence/state-replay-market/20260729T211159Z-40107/report.json` covers
 20 generated blocks, four independent rebuilds, a checkpoint after block 8,
-124 facts, one DEX, two asset contexts, one exact active market/version, one
-resolved outcome, hash-only metadata suppression, and atomic invalid and
-unsupported rejection. Runnable replay evidence remains generated canonical-
-event evidence with source qualification explicitly unassessed.
+119 facts, one DEX, two asset contexts, one active current market with
+unresolved metadata, two metadata versions spanning one closed exact interval
+and one open unresolved interval, one resolved outcome, metadata-unresolved
+value suppression, and atomic invalid and unsupported rejection. Runnable
+replay evidence remains generated canonical-event evidence with source
+qualification explicitly unassessed.
