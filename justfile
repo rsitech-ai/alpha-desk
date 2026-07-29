@@ -81,6 +81,12 @@ capture-failover-e2e:
 capture-soak duration="10m":
     DURATION={{quote(duration)}} ./tools/ci/capture-soak.sh
 
+state-replay-e2e blocks="100" checkpoint_after="50" iterations="3":
+    run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"; output="target/evidence/state-replay/$run_id"; mkdir -p "target/evidence/state-replay"; cargo +1.97.1 run -p state-replay --locked --offline -- fixture-e2e --output "$output" --blocks {{quote(blocks)}} --checkpoint-after {{quote(checkpoint_after)}} --iterations {{quote(iterations)}}; printf 'state-replay-report:%s/report.json\n' "$output"
+
+state-replay-soak blocks="1000" checkpoint_after="500" iterations="100":
+    run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"; output="target/evidence/state-replay/$run_id"; mkdir -p "target/evidence/state-replay"; cargo +1.97.1 run --release -p state-replay --locked --offline -- fixture-e2e --output "$output" --blocks {{quote(blocks)}} --checkpoint-after {{quote(checkpoint_after)}} --iterations {{quote(iterations)}}; printf 'state-replay-soak-report:%s/report.json\n' "$output"
+
 dev-up:
     ./tools/dev/with-dev-secrets.sh docker compose -f infra/docker-compose/compose.yaml up -d
     ./tools/dev/with-dev-secrets.sh ./tools/ci/wait-for-dev-stack.sh

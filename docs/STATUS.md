@@ -42,6 +42,7 @@ synthetic-source capture runtime:
 - `hl-capture status --json`
 - `hl-capture run`
 - `hl-capture fixture-replay`
+- `state-replay fixture-e2e`
 
 `hl-capture run` constructs the real node-directory adapter, raw-first source
 spool, local raw/canonical Parquet archive, PostgreSQL progress adapter,
@@ -93,10 +94,15 @@ bounded serial replay over explicitly ordered immutable archive manifests.
 Replay preflights chain, range, schema, count, and starting-state compatibility,
 applies only at block boundaries, and emits deterministic completed/cancelled
 receipts. These paths are focused-test proven only. No action-bearing production
-reducer, RocksDB adapter, runnable replay process, or reconciliation result
-exists yet, so Stage 2 remains unqualified. The exact current contract and
-limitations are recorded in
+reducer, RocksDB adapter, production archive/replay service, or reconciliation
+result exists yet. A bounded `state-replay fixture-e2e` process now generates
+explicit synthetic evidence for repeated rebuild, local checkpoint resume, and
+poison-block atomicity.
+Stage 2 remains unqualified. The exact current contract and limitations are
+recorded in
 [`docs/contracts/deterministic-state-v1.md`](contracts/deterministic-state-v1.md).
+Operator commands and evidence interpretation are documented in
+[`docs/runbooks/state-replay-evidence.md`](runbooks/state-replay-evidence.md).
 
 The block-batched public trade fixture now maps deterministically through a
 versioned market catalog, but remains auxiliary `ProvisionalSource` evidence.

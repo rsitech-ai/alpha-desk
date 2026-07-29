@@ -5,9 +5,11 @@ Hyperliquid Alpha Desk is a local-first, read-only market-intelligence and resea
 This repository is not yet a complete desk application. It contains a runnable
 read-only capture service for the currently qualified empty committed-block
 mapping, plus substantial Stage 0 foundations, canonical identity, continuity,
-durable publication, and immutable archive work. The Stage 0 release gate
-remains on `HOLD`; action-bearing source mapping, independent recovery sources,
-canonical state, APIs, research workflows, and native UI remain planned work.
+durable publication, immutable archive work, deterministic watermark-only
+state, private local checkpoints, and a synthetic replay evidence runner. The
+Stage 0 release gate remains on `HOLD`; action-bearing source mapping and state
+reducers, production hot-state storage, APIs, research workflows, and native UI
+remain incomplete.
 
 ## Current state
 
@@ -19,7 +21,8 @@ canonical state, APIs, research workflows, and native UI remain planned work.
 | Dependency stack | Defined for local development; runtime smoke still required for each release candidate | [`infra/docker-compose/README.md`](infra/docker-compose/README.md) |
 | Source observation, strict recoverable spool, primary-node adapter, source-trust admission, conservative committed mapper, and canonical sequencing | Runnable and locally restart/soak tested with synthetic empty node-format blocks; not live-source qualified | [`docs/STATUS.md`](docs/STATUS.md) |
 | Immutable canonical/raw Parquet archive, verified compaction, replay reads, and offline inspection | Canonical blocks and verified closed-spool raw observations are wired; compaction remains an offline operation | [`docs/formats/archive-manifest-v1.md`](docs/formats/archive-manifest-v1.md) |
-| Complete durable capture and canonical truth-layer runtime | Partially implemented; action mappings, independent sources, gap recovery, canonical state, and replay service remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Deterministic state, local checkpoints, and serial replay | Watermark-only reducer and synthetic replay/checkpoint evidence are runnable; action-bearing state and production RocksDB remain unqualified | [`docs/runbooks/state-replay-evidence.md`](docs/runbooks/state-replay-evidence.md) |
+| Complete durable capture and canonical truth-layer runtime | Partially implemented; action mappings, real independent-source qualification, overlap reconciliation, and production replay service remain | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Long-running services, REST/WebSocket API, macOS/iOS apps | Not implemented | [`docs/STATUS.md`](docs/STATUS.md) |
 | Public OSS release | Prepare-only; blocked by export, legal, history, runtime, and external publication gates | [`docs/RELEASE.md`](docs/RELEASE.md) |
 
@@ -65,6 +68,7 @@ just generated
 just spool-verify
 cargo +1.97.1 test -p hl-analytics --test archive --locked --offline
 cargo +1.97.1 test -p archive-inspect --locked --offline
+just state-replay-e2e
 ```
 
 `just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
@@ -72,6 +76,9 @@ cargo +1.97.1 test -p archive-inspect --locked --offline
 The committed synthetic spool fixture can be inspected independently with `just spool-verify`.
 Parser fuzzing additionally requires the pinned `nightly-2026-07-16` toolchain and
 `cargo-fuzz`; run `just spool-fuzz`.
+`just state-replay-e2e` runs the bounded synthetic Stage 2 evidence path; use
+`just state-replay-soak` for the longer repeated rebuild profile. Neither
+qualifies live source semantics or Stage 2.
 
 To validate the local dependency stack separately:
 
@@ -90,7 +97,8 @@ For focused commands and development conventions, read [docs/DEVELOPMENT.md](doc
 - `schemas/` — versioned Protobuf and JSON contracts
 - `fixtures/` — deterministic synthetic fixtures and provenance-labeled normalized public schema examples
 - `infra/` — local dependency and future deployment scaffolding
-- `tools/` — schema, architecture, provenance, fixture, spool/archive inspection, and stage-gate tooling
+- `tools/` — schema, architecture, provenance, fixture, spool/archive
+  inspection, state replay evidence, and stage-gate tooling
 - `docs/superpowers/` — approved design, stage plans, traceability, and reviews
 
 ## Safety boundary

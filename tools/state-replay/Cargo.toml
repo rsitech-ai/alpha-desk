@@ -1,0 +1,28 @@
+[package]
+name = "state-replay"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic state replay and checkpoint evidence runner for Hyperliquid Alpha Desk."
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+
+[dependencies]
+blake3.workspace = true
+canonical-archive = { path = "../../crates/canonical-archive", version = "=0.1.0" }
+canonical-events = { path = "../../crates/canonical-events", version = "=0.1.0" }
+canonical-ledger = { path = "../../crates/canonical-ledger", version = "=0.1.0" }
+canonical-state-store = { path = "../../crates/canonical-state-store", version = "=0.1.0" }
+domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
+hex.workspace = true
+replay-engine = { path = "../../crates/replay-engine", version = "=0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+storage-ports = { path = "../../crates/storage-ports", version = "=0.1.0" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
