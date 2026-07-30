@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod account;
 mod checkpoint;
 mod error;
 mod ledger;
@@ -10,6 +11,13 @@ mod state;
 mod trade;
 mod watermark_only;
 
+pub use account::{
+    AccountFactRecordV1, AccountModeCurrentRecordV1, AccountQuantityFlowCurrentRecordV1,
+    AccountQuantityFlowScopeV1, AccountQuoteFlowCurrentRecordV1, AccountQuoteFlowScopeV1,
+    AccountStateError, AccountVaultRelationCurrentRecordV1, CanonicalAccountReducerV1,
+    LeverageCurrentRecordV1, MarginModeCurrentRecordV1, SubaccountMasterCurrentRecordV1,
+    VaultPrincipalFlowCurrentRecordV1, VaultShareFlowCurrentRecordV1,
+};
 pub use checkpoint::{CheckpointArtifact, CheckpointCompatibility};
 pub use error::{CheckpointError, LedgerError, ReducerError, StateImageError, StateKeyError};
 pub use ledger::{
