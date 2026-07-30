@@ -86,6 +86,51 @@ Hard-coded literal byte vectors freeze all four V1 and all four V2 values,
 including field order, hashes, lowercase roles, and explicit optional nulls;
 the reducer output and key-bound decoders must match those vectors exactly.
 
+`CanonicalPositionReducerV1` reconstructs exact source-anchored
+account-market position quantity under reducer-set version
+`hyperliquid-alpha-desk-canonical-position@1.0.0`. It permanently owns only
+participant-bearing `TradeMatched@1.0.0`; participant-free legacy trades and
+all order-fill, liquidation, settlement, and funding events remain outside its
+support boundary.
+
+An enriched trade is accepted only when its payload and envelope identities
+match buyer then seller exactly and an existing key-bound
+`market-current.v1` record provides exact tick, lot, price-scale, and
+quantity-scale metadata. The reducer expands price, fill, both source start
+positions, and both result positions upward to those active scales without
+rounding. It then requires tick-aligned price and lot-aligned fill, starts, and
+results. Exact quote-notional multiplication occurs after normalization as a
+validation boundary; Task 4 does not persist that value. Buyer adds the fill
+and seller subtracts it with checked signed fixed-point arithmetic.
+
+The first observed trade accepts each source start position as authoritative
+and records `first_observation`. A later known current must match the next
+source start exactly after upward normalization and records `continued`. A
+valid seeded unresolved current accepts the source start as a new
+authoritative anchor and records `reanchored_from_unresolved`; its immutable
+unresolved-cause facts remain untouched. A never-anchored unresolved current
+sets its first anchor to that re-anchoring trade, while a previously anchored
+current preserves its original first anchor.
+
+Each accepted trade emits two immutable `position-effect-fact.v1` records,
+keyed by framed trade identity and lowercase buyer/seller role, plus two
+replaceable `position-quantity-current.v1` records keyed by framed raw account
+bytes and market identity. `position-unresolved-cause-fact.v1` freezes the
+lowercase `backstop_liquidation` cause and frames account, market, event, and
+liquidation identities. Task 4 defines and validates this cause record but
+does not create it or consume backstop events; the distinct later liquidation
+reducer owns those mutations.
+
+All position keys use checked u64 big-endian length frames. Key builders cap
+preallocation at 64 KiB, record codecs cap canonical field-ordered JSON at
+16 KiB, `decode_at` binds every stored identity to its key, and production
+ledger mutation limits impose a stricter 4 KiB encoded-key ceiling. Existing
+effect values are decoded and key-bound before a valid immutable collision is
+reported. Any late invalid leg or event rejects the whole candidate block.
+These records prove deterministic arithmetic over synthetic source-declared
+anchors; they do not prove deployed source authority, position episodes,
+realized PnL, margin, liquidation, or live execution state.
+
 `CanonicalOrderReducerV1` freezes the exact V1 order lifecycle under reducer-set
 version `hyperliquid-alpha-desk-canonical-order@1.0.0`. It owns only exact
 schema `1.0.0` events for `OrderAccepted`, `OrderRested`, `OrderModified`,
@@ -241,8 +286,9 @@ These records are observed-flow state only. They do not establish an opening
 balance, current venue balance, current vault holding or share supply,
 clearinghouse route, complete account hierarchy, authoritative
 portfolio-margin state, position, PnL, liquidation price, or deployed-source
-qualification. The production market/order/trade/account composite and
-position reconstruction remain a later contract.
+qualification. Source-anchored position quantity is a separate reducer
+contract described above; the production market/order/trade/account/position
+composite remains later work.
 
 ## Block atomicity
 
@@ -486,6 +532,11 @@ Focused tests prove:
   whole-block rollback; valid, corrupt, and key-mismatched prior-fact
   rejection; bounded canonical codec/key binding; and mixed legacy/enriched
   archive replay/checkpoint equivalence; and
+- exact synthetic source-anchored position quantity with buyer/seller
+  symmetry, first/continued/unresolved re-anchor transitions, strict
+  market-scale/tick/lot prerequisites, checked arithmetic, immutable effects,
+  preserved unresolved causes, key-bound bounded codecs, deterministic mixed
+  legacy/enriched block application, and late-event whole-block rollback; and
 - a bounded operator-visible synthetic trade runner proving repeated mixed
   rebuild, per-version decoded record cardinality, private composite checkpoint
   resume, store-level direct V1/V2 component-checkpoint publication and exact
@@ -514,13 +565,14 @@ Focused tests prove:
   permissions.
 
 This proves stored V1 canonical trade-fact reconciliation, synthetic
-source-declared V2 buyer/seller anchors and effects, and exact synthetic
+source-declared V2 buyer/seller anchors and effects, exact synthetic
+source-anchored position-quantity continuity, and exact synthetic
 order-lifecycle and market-registry contracts. It does not prove deployed
 action-bearing source compatibility, maker/taker roles, authoritative market
-metadata, external oracle or snapshot reconciliation, current account
-position, margin, book, signal, or execution state, RocksDB durability, a
-production replay service, or Stage 2 readiness. The retained
-local order report at
+metadata, external oracle or snapshot reconciliation, authoritative live
+position, analytical episodes, margin, book, signal, or execution state,
+RocksDB durability, a production replay service, or Stage 2 readiness. The
+retained local order report at
 `target/evidence/state-replay-order/20260729T185537Z-82818/report.json` covers
 20 generated blocks, four independent rebuilds, a checkpoint after block 8,
 80 facts and transitions, 20 current orders, 10 filled orders, 10 cancelled
