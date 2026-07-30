@@ -285,41 +285,108 @@ V1/enriched archive replay fixture.
 
 ```rust
 pub struct PositionQuantityCurrentRecordV1 {
-    pub account_id: Address,
-    pub market_id: MarketId,
-    pub known_quantity: Option<PositionQuantity>,
-    pub first_anchor_event_id: Option<EventId>,
-    pub last_event_id: EventId,
-    pub last_block_height: BlockHeight,
+    account_id: Address,
+    market_id: MarketId,
+    known_quantity: Option<PositionQuantity>,
+    first_anchor_event_id: Option<EventId>,
+    last_event_id: EventId,
+    last_block_height: BlockHeight,
 }
 
 pub enum PositionUnresolvedCauseV1 {
     BackstopLiquidation,
 }
 
+pub enum PositionAnchorTransitionV1 {
+    FirstObservation,
+    Continued,
+    ReanchoredFromUnresolved,
+}
+
 pub struct PositionUnresolvedCauseFactRecordV1 {
-    pub account_id: Address,
-    pub market_id: MarketId,
-    pub event_id: EventId,
-    pub liquidation_id: LiquidationId,
-    pub cause: PositionUnresolvedCauseV1,
+    account_id: Address,
+    market_id: MarketId,
+    event_id: EventId,
+    liquidation_id: LiquidationId,
+    cause: PositionUnresolvedCauseV1,
 }
 
 pub struct PositionEffectFactRecordV1 {
-    pub event_id: EventId,
-    pub trade_id: TradeId,
-    pub account_id: Address,
-    pub market_id: MarketId,
-    pub role: TradeParticipantRoleV1,
-    pub start_position: PositionQuantity,
-    pub fill_quantity: Quantity,
-    pub result_position: PositionQuantity,
-    pub rule_version: String,
+    event_id: EventId,
+    trade_id: TradeId,
+    account_id: Address,
+    market_id: MarketId,
+    role: TradeParticipantRoleV1,
+    anchor_transition: PositionAnchorTransitionV1,
+    start_position: PositionQuantity,
+    fill_quantity: Quantity,
+    result_position: PositionQuantity,
+    rule_version: String,
 }
 ```
 
 `PositionUnresolvedCauseV1` has the exact lowercase wire variant
 `backstop_liquidation`; adding another cause is a schema-version change.
+`PositionAnchorTransitionV1` has exact lowercase wire variants
+`first_observation`, `continued`, and `reanchored_from_unresolved`; adding
+another transition is a schema-version change. Record fields remain private
+and invariant-bearing records expose validated decoders and read-only
+accessors.
+
+Freeze these identities:
+
+```text
+CanonicalPositionReducerV1::VERSION =
+  hyperliquid-alpha-desk-canonical-position@1.0.0
+
+position-quantity-current.v1
+  hyperliquid-alpha-desk/position-quantity-current/v1
+  key: frame(raw account) + frame(market_id)
+
+position-effect-fact.v1
+  hyperliquid-alpha-desk/position-effect-fact/v1
+  key: frame(trade_id) + frame(role)
+
+position-unresolved-cause-fact.v1
+  hyperliquid-alpha-desk/position-unresolved-cause-fact/v1
+  key: frame(raw account) + frame(market_id) + frame(event_id)
+       + frame(liquidation_id)
+```
+
+Every `frame` is checked `[u64 big-endian length][bytes]`. The exact effect
+`rule_version` is `CanonicalPositionReducerV1::VERSION`. Roles are lowercase
+`buyer` and `seller`. Codecs accept at most 16 KiB of canonical JSON, key
+builders precompute and `try_reserve_exact` at most 64 KiB, and reducer
+mutations remain subject to the production ledger's 4 KiB encoded-key limit.
+Existing immutable effect/unresolved values must pass `decode_at` before a
+normal identity collision is reported.
+
+Freeze reducer reason codes:
+
+```text
+position_state.unsupported_event
+position_state.identity_mismatch
+position_state.market_prerequisite_missing
+position_state.market_prerequisite_invalid
+position_state.market_metadata_unresolved
+position_state.scale_normalization
+position_state.price_tick_misaligned
+position_state.quantity_lot_misaligned
+position_state.notional_arithmetic
+position_state.position_arithmetic
+position_state.current_record_invalid
+position_state.start_position_mismatch
+position_state.effect_collision
+position_state.unresolved_cause_collision
+position_state.duplicate_mutation_key
+position_state.codec.invalid_key
+position_state.codec.decode
+position_state.codec.noncanonical
+position_state.codec.invalid_record
+position_state.codec.key_mismatch
+position_state.codec.limit_exceeded
+```
+
 Record invariants are:
 
 - `known_quantity = Some` requires `first_anchor_event_id = Some`;
@@ -332,6 +399,11 @@ Record invariants are:
 participant-bearing `TradeMatched`; the composite skips participant-free
 legacy trades while the V1 trade reducer retains their fact-only behavior.
 Direct invocation on a participant-free trade returns unsupported-event.
+This reducer remains trade-only permanently. Task 6B owns backstop creation
+and position invalidation through a distinct non-trade reducer/version.
+Task 4 defines and tests the unresolved-cause/current codecs and may seed
+valid unresolved state solely to prove later trade re-anchoring; it does not
+consume `BackstopLiquidation`.
 
 One enriched `TradeMatched` event emits two immutable effects and two current
 updates.
@@ -349,17 +421,26 @@ and owns the corresponding partial-or-complete episode transition.
 - [ ] Write red tests for first nonzero anchor, buyer/seller symmetry, long and
   short add/reduce/flat/reversal, mixed scales, overflow, missing participants,
   reordered identities, unresolved metadata, duplicate effect, start-position
-  mismatch, unresolved-backstop re-anchor, multiple preserved unresolved
-  causes, all four known-quantity/first-anchor combinations, corrupt current
-  state, mixed legacy/enriched archive replay, and late block rollback.
+  mismatch, seeded unresolved-state re-anchor, all four
+  known-quantity/first-anchor combinations, corrupt current state, mixed
+  legacy/enriched test-dispatcher application, and late block rollback.
 - [ ] Require exact current market metadata. Normalize price to the active
   price scale and fill/start/result quantities to the active quantity scale
   only by exact upward rescaling; then require price tick alignment and fill,
   both starts, and both results to be lot-aligned. Perform exact notional
-  multiplication only after this normalization.
+  multiplication only after this normalization. The notional is
+  validation-only in Task 4; `trade.v2` owns the source price and Task 5B owns
+  analytical notional persistence.
 - [ ] Ensure order-fill events are unsupported by this reducer and cannot
   double count.
-- [ ] Add strict key-bound 16 KiB codecs and 64 KiB preallocation bounds.
+- [ ] Add strict key-bound 16 KiB codecs and 64 KiB preallocation bounds;
+  test the ledger's stricter 4 KiB mutation-key ceiling separately.
+- [ ] Use a test-only dispatcher that evaluates market,
+  `CanonicalTradeReducerSetV2`, and `CanonicalPositionReducerV1` against the
+  same pre-event state, skips position reduction for legacy trades, and
+  rejects cross-child key collisions. Production mixed archive/checkpoint
+  replay remains Task 7/8 under `CanonicalStateReducerV1::VERSION =
+  "hyperliquid-alpha-desk-canonical-state@1.0.0"`.
 - [ ] Run ledger/replay tests and strict gates.
 - [ ] Commit with `feat(state): reconstruct anchored position quantity`.
 
