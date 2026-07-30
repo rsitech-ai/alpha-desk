@@ -134,6 +134,75 @@ deployed source mapping, authoritative metadata snapshots, external oracle
 reconciliation, account or position effects, margin formulas, order books, or
 Stage 2 readiness.
 
+`CanonicalAccountReducerV1` reconstructs the source-observed account flows,
+direct relations, and asserted mode transitions under reducer-set version
+`hyperliquid-alpha-desk-canonical-account@1.0.0`. It owns only exact schema
+`1.0.0` events for deposits, withdrawals, spot/perpetual/subaccount transfers,
+vault deposits and withdrawals, fees, builder fees, funding paid and received,
+referral rewards, account-mode changes, margin-mode changes, and leverage
+changes.
+
+Every accepted event creates one immutable `account-fact.v1` record. Facts
+retain the exact ordered envelope account and market identities, including
+literal duplicates, together with the event kind, payload asset or vault
+identity where present, block height, payload hash, and reducer version.
+Missing, extra, reordered, or deduplicated envelope identities fail closed. A
+fact key that already exists is an immutable event-identity collision; it is
+never overwritten.
+
+Current records use these exact namespaces:
+
+- `account-quantity-flow-current.v1` for asset and vault-share `Quantity`
+  credits and debits;
+- `account-quote-flow-current.v1` for default perpetual quote, market funding,
+  and vault-principal `QuoteAmount` credits and debits;
+- `vault-principal-flow-current.v1` and `vault-share-flow-current.v1` for
+  observed vault deposit/withdrawal principal and issued/redeemed shares;
+- `account-subaccount-master.v1` for one observed direct master per
+  subaccount;
+- `account-vault-relation.v1` for an observed account and vault interaction;
+  and
+- `account-mode-current.v1`, `account-margin-mode-current.v1`, and
+  `account-leverage-current.v1` for predecessor-bound asserted settings.
+
+Quantity and quote records are separate Rust types and namespaces. Existing
+totals and an incoming amount are normalized only upward to their greatest
+scale before checked addition. This is exact and never rounds or downscales.
+Overflow, impossible scale expansion, corrupt current bytes, key mismatch, or
+two mutations for the same event key rejects the complete candidate block.
+Deposits and withdrawals affect only external-asset flow. Transfer and builder
+fee legs are equal debit/credit observations in their source-proven scopes.
+Fee direction follows the frozen fee type: maker rebates credit; every other
+supported fee type debits. Funding direction follows the event kind, not the
+sign of the separately retained funding rate. Referral rewards credit only the
+explicit referrer; no debit source is invented.
+
+Vault events atomically emit account principal, account shares, observed vault
+principal, observed vault shares, and the observed relation. Account and vault
+amounts reconcile separately within the principal and share units; principal
+is never compared with shares. A subaccount transfer establishes or refreshes
+exactly one direct relation only when the asserted master is exactly one
+transfer endpoint. Three-distinct-account scope, a conflicting later master,
+or an inferred transitive hierarchy is rejected. First mode and leverage
+events retain the asserted predecessor; later events must name the current
+value exactly. Legal cycles back to the initially asserted predecessor remain
+valid.
+
+Every account event carrying an asset identity requires a current
+`asset-context-current.v1` record decoded at its exact key. Funding,
+margin-mode, and leverage events similarly require a key-bound
+`market-current.v1` record with exact metadata resolution. Missing, corrupt,
+key-mismatched, or unresolved prerequisites fail closed. Perpetual transfers
+and vault events do not carry an authoritative asset or market identity, so
+the reducer does not synthesize either prerequisite.
+
+These records are observed-flow state only. They do not establish an opening
+balance, current venue balance, current vault holding or share supply,
+clearinghouse route, complete account hierarchy, authoritative
+portfolio-margin state, position, PnL, liquidation price, or deployed-source
+qualification. The production market/order/trade/account composite and
+position reconstruction remain a later contract.
+
 ## Block atomicity
 
 The ledger:
