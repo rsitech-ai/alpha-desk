@@ -1373,6 +1373,8 @@ substitution or fallback is permitted.
 - Modify: `crates/canonical-ledger/src/reducer.rs`
 - Modify: `crates/canonical-ledger/src/ledger.rs`
 - Modify: `crates/canonical-ledger/src/lib.rs`
+- Modify: `crates/canonical-ledger/src/position/codec.rs`
+- Modify: `crates/canonical-ledger/src/position/episodes.rs`
 - Modify: `crates/canonical-ledger/tests/atomic.rs`
 - Create: `crates/canonical-ledger/tests/block_delta_validation.rs`
 
@@ -1380,10 +1382,10 @@ Add a backward-compatible default trait method:
 
 ```rust
 pub struct BlockDeltaEntry<'a> {
-    pub key: &'a StateKey,
-    pub block_start_value: Option<&'a [u8]>,
-    pub block_final_value: Option<&'a [u8]>,
-    pub write_count: u32,
+    key: &'a StateKey,
+    block_start_value: Option<&'a [u8]>,
+    block_final_value: Option<&'a [u8]>,
+    write_count: u32,
 }
 
 pub struct BlockDeltaView<'a> {
@@ -1400,33 +1402,139 @@ fn validate_block_delta(
 }
 ```
 
-The ledger builds entries in deterministic `StateKey` byte order. Repeated
-writes in separate events collapse to one entry with the block-start previous
-value, block-final current value, and checked write count; per-event duplicate
-keys still fail earlier and are not hidden. Freeze production limits for
-the normalized view:
+Both types are public read-only views with no public constructors.
+`BlockDeltaEntry` exposes `key`, `block_start_value`, `block_final_value`, and
+`write_count` accessors. `BlockDeltaView` exposes `entries`, `len`, `is_empty`,
+and `iter`; `IntoIterator for &BlockDeltaView` yields the same slice order.
+Entries are sorted by the existing `StateKey::Ord` order: namespace UTF-8
+bytes, then raw key bytes. No hash-map iteration or first-observation order may
+leak into this API.
+
+`validate_block_delta` is the sole ledger bridge to block validation. Its
+default implementation calls `self.validate_block(final_state, context)`
+exactly once. The ledger calls only `validate_block_delta`, including for an
+empty block with an empty view; it must not also call `validate_block`.
+Existing reducers that override only `validate_block` therefore preserve
+exactly-once behavior without source changes. Composite reducers may override
+both methods for direct-call compatibility, but the ledger path remains
+delta-only.
+
+The ledger tracks normalized delta state while applying each successful
+mutation. A new key captures its value from the immutable block-start state,
+not the state after an earlier event. Every successful put counts as a write,
+including a byte-identical no-op put. Every successful delete counts as a
+write; deletion of a missing key still fails before delta insertion or
+increment. Repeated writes in separate events collapse to one entry with the
+first block-start value, current block-final value, and checked `u32`
+`write_count`; per-event duplicate keys still fail earlier and are not hidden.
+An absent block-start and absent block-final value is retained when a key is
+created and deleted in the same block.
+
+Referenced-byte accounting is exact and independent from the existing raw
+mutation-byte ceiling. For each unique key it counts once:
+
+```text
+StateKey::encoded_len()
++ block_start_value.len() when present
++ block_final_value.len() when present
+```
+
+The tracker uses checked add/subtract on every successful write, replacing the
+prior final-value contribution with the new contribution. It enforces entry
+and referenced-byte limits while accumulating, so a transient normalized
+candidate that breaches a limit rejects even if a later event would shrink it.
+The final sorted view is built from this already-bounded tracker; do not first
+allocate or clone an unbounded entry vector.
+
+Freeze production-default limits for the normalized view:
 
 ```text
 MAX_BLOCK_DELTA_ENTRIES = 1_000_000
 MAX_BLOCK_DELTA_REFERENCED_BYTES = 256 * 1024 * 1024
 ```
 
-Add both limits to `LedgerLimits`; custom limits must be nonzero and no larger
-than the existing block work ceilings. Count each unique key once plus its
-block-start and block-final values when present, using checked arithmetic,
-before reserving the entry vector. Enforce the existing mutation-byte ceiling
-independently because repeated writes are intentionally collapsed in the
-normalized view. Every child reducer receives the same normalized view.
+These are the values returned by `LedgerLimits::production`, not global hard
+caps. Custom limits may exceed these defaults when they still satisfy every
+relationship below; do not add an implicit `<= MAX_*` rule.
 
-The episode child uses this bounded delta to validate both touched
-`position-quantity-current.v1` and `position-episode-current.v1` namespaces in
-both directions. It rejects orphan touched records and rechecks the
-known-nonzero/resolved, known-zero/no-open, and unknown/interrupted matrix
-against the final candidate state without scanning untouched global state.
+Append both values to the public `LedgerLimits::try_new` argument list after
+the existing five arguments; migrate every call site explicitly. The first
+five arguments keep their current meaning and order. All seven limits must be
+nonzero. `max_events_per_block` must fit `u32`; this plus the existing
+one-write-per-key-per-event rule bounds a valid public `write_count`.
+`max_block_delta_entries` must not exceed the checked product
+`max_events_per_block * max_mutations_per_event`, and
+`max_block_delta_referenced_bytes` must not exceed the existing raw
+`max_block_delta_bytes`. Existing key/value-to-raw-block constraints remain.
+Any zero, conversion/product overflow, or ordering violation returns
+`LedgerError::InvalidLimits`. Runtime entry, referenced-byte, or internal
+checked-write-count overflow returns `LedgerError::MutationLimitExceeded`.
+Add read-only accessors for the two new limits. Unit-test the internal
+write-count overflow branch with a private test seam initialized at
+`u32::MAX`; do not weaken public limit validation to reach it.
 
-- [ ] Write red tests for deterministic order, put/update/delete, repeated
-  writes, block-start/final values, write-count overflow, byte/entry limits,
-  default compatibility, late delta-invariant failure, and full rollback.
+The episode child scans the bounded delta in three phases:
+
+1. In delta-key order, derive touched account/market pairs from exact framed
+   `position-quantity-current.v1` and `position-episode-current.v1` keys,
+   including create-then-delete entries whose two values are absent.
+2. Treat touched `position-episode.v1` records as triggers too. Decode and
+   key-bind every present block-start and block-final episode value and add
+   both referenced account/market pairs. A touched episode entry with neither
+   value cannot establish its pair and fails closed.
+3. Sort unique pairs by their canonical quantity-current `StateKey`, then
+   validate each pair against the final candidate state.
+
+The current-key parser accepts exactly two nonempty unsigned-u64-big-endian
+length frames and no trailing bytes. Every length conversion/addition,
+truncation, empty frame, or trailing byte fails. The first frame must be
+exactly 20 bytes and becomes `Address::from_bytes`; the second must be valid
+UTF-8 accepted by `MarketId::new`. Quantity-current parser failures map to
+`position_episode.quantity_current_invalid`; episode-current parser failures
+map to `position_episode.episode_current_invalid`. For a touched episode entry,
+phase 2 decodes and key-binds block-start before block-final when both are
+present, freezing which corrupt value wins.
+
+Trigger extraction maps malformed quantity-current keys/values to
+`position_episode.quantity_current_invalid`, malformed episode-current
+keys/values to `position_episode.episode_current_invalid`, and malformed or
+unidentifiable touched episode records to
+`position_episode.episode_prior_invalid`. For each derived pair, final
+validation has total precedence:
+
+```text
+quantity current decode/key binding
+episode current decode/key binding
+resolved episode existence/decode/key binding/account/market/open status
+quantity/current structural matrix
+```
+
+The corresponding reason codes are
+`position_episode.quantity_current_invalid`,
+`position_episode.episode_current_invalid`,
+`position_episode.episode_reference_invalid`, and
+`position_episode.current_pair_mismatch`. Both currents absent is a valid
+complete deletion; exactly one current present is a mismatch. Known nonzero
+requires `Resolved` and a matching open episode; known zero requires
+`NoOpenEpisode`; unknown requires `Interrupted`. Historical unreferenced
+episode records may remain after a pair deletion, but deleting or replacing a
+currently referenced episode must fail reference validation. Every child
+reducer receives the same immutable normalized view object.
+
+- [ ] Write red tests for the public read-only API and exact ordering;
+  empty-block exactly-once default compatibility; put/update/delete,
+  create-delete, no-op puts, repeated writes, block-start/final values;
+  public limit validation, internal write-count overflow, independent raw
+  mutation versus normalized entry/byte limits; and late delta-invariant
+  failure with full rollback.
+- [ ] Prove a transient normalized referenced-byte breach rejects immediately
+  even when a later write or delete would have shrunk the final view below the
+  configured limit.
+- [ ] Test touched-pair extraction from all three namespaces, current
+  create/delete/orphan combinations, touched episode start/final identities,
+  corrupt/key-mismatched trigger records, corrupt quantity before current,
+  corrupt current before reference, reference before matrix mismatch,
+  deterministic multi-pair failure order, and unchanged unrelated pairs.
 - [ ] Run full ledger/replay/strict gates and commit with
   `feat(ledger): expose bounded block delta validation`.
 
@@ -1439,34 +1547,193 @@ against the final candidate state without scanning untouched global state.
 - Modify: `crates/canonical-ledger/src/lib.rs`
 - Create: `crates/canonical-ledger/tests/composite_account_state.rs`
 
-`CanonicalStateReducerV1` dispatches in fixed order:
+`CanonicalStateReducerV1` contains eight direct children in fixed order:
 
 ```text
-market -> order -> trade-v1-fact -> trade-v2-fact -> account-flow
-  -> position-quantity -> position-episode -> position-liquidation
+market
+order
+trade-v1
+trade-v2
+account
+position-quantity
+position-episode
+position-liquidation
 ```
 
-All components see the same pre-event state; later events see all prior
-candidate mutations. Merge component mutations with explicit cross-component
-key-collision denial. Freeze
-`CanonicalStateReducerV1::VERSION =
-"hyperliquid-alpha-desk-canonical-state@1.0.0"` with explicit component
-versions including `CanonicalTradeReducerV2`. Restore rejects any checkpoint
-whose reducer-set version differs. Composite block validation passes the same
-`BlockDeltaView` to every child in fixed component order.
-The frozen component set includes both `CanonicalTradeReducerV1 @1.0.0` and
-`CanonicalTradeReducerV2 @2.0.0`; removing either is a reducer-set version
-change. Position quantity, analytical episode, and liquidation/settlement are
-three separately versioned children; none may be collapsed into or silently
-substituted for another.
+The exact ordered component manifest is:
 
-- [ ] Test same-event pre-state visibility, cross-component collision, current
-  overwrite across separate events, immutable collision, late reducer failure,
-  late child delta-invariant failure, component version mismatch, V1
-  checkpoint refusal, and full rollback.
+```text
+market               = hyperliquid-alpha-desk-canonical-market@1.0.0
+order                = hyperliquid-alpha-desk-canonical-order@1.0.0
+trade_v1             = hyperliquid-alpha-desk-canonical-trade@1.0.0
+trade_v2             = hyperliquid-alpha-desk-canonical-trade@2.0.0
+account              = hyperliquid-alpha-desk-canonical-account@1.0.0
+position_quantity    = hyperliquid-alpha-desk-canonical-position@1.0.0
+position_episode     = hyperliquid-alpha-desk-canonical-position-episode@1.0.0
+position_liquidation = hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0
+```
+
+Expose each row as a public read-only
+`CanonicalStateComponentVersionV1 { name, version }` with `name()` and
+`version()` accessors; `component_manifest()` returns the exact
+`&'static [CanonicalStateComponentVersionV1; 8]`. Freeze
+`CanonicalStateError::ComponentVersionMismatch { component, expected, actual }`
+as the constructor error, with all three values retained for diagnostics. The
+manifest-entry fields are private, and the production constructor signature is
+exactly `try_new() -> Result<Self, CanonicalStateError>`.
+
+Use direct `CanonicalTradeReducerV1` and `CanonicalTradeReducerV2` children;
+nesting `CanonicalTradeReducerSetV2` is forbidden because it would duplicate
+V1 ownership and hide the manifest. The composite fields and constructor
+inputs remain private. `CanonicalStateReducerV1::try_new` validates the exact
+ordered child constants against the frozen manifest before returning a value;
+there is no `Default`, public struct literal, unchecked constructor, or
+caller-supplied child substitution. Expose the manifest through a read-only
+ordered accessor. A private test seam may validate an injected manifest but
+must not construct a production reducer from it. Prove the negative public API
+boundary with `compile_fail` doctests for `Default`, struct-literal
+construction, and an unchecked constructor; prove manifest mismatch through
+the private unit-test seam.
+
+Freeze
+`CanonicalStateReducerV1::VERSION =
+"hyperliquid-alpha-desk-canonical-state@1.0.0"`. Changing child order/version,
+ownership fanout, mutation-merge semantics, or block-validation semantics
+requires a composite version bump and full replay; component checkpoint
+substitution is never migration. Restore rejects any checkpoint whose
+reducer-set version differs.
+
+For exact schema `1.0.0`, freeze event ownership/fanout:
+
+```text
+DexCreated, AssetContextUpdated, MarketCreated, MarketMetadataChanged,
+MarketHalted, MarketResumed, OpenInterestCapChanged, MarginTableChanged,
+OracleUpdated, FundingRateUpdated, OutcomeCreated, OutcomeResolved
+  -> market
+
+OrderAccepted, OrderRested, OrderModified, OrderPartiallyFilled, OrderFilled,
+OrderCancelled, OrderRejected
+  -> order
+
+TradeMatched without enriched participants
+  -> trade-v1
+
+TradeMatched with enriched participants
+  -> trade-v1, trade-v2, position-quantity, position-episode
+
+FundingPaid, FundingReceived
+  -> account, position-episode
+
+DepositCredited, WithdrawalDebited, SpotTransfer, PerpTransfer,
+SubaccountTransfer, VaultDeposit, VaultWithdrawal, FeeCharged,
+BuilderFeeCharged, ReferralReward, AccountModeChanged, MarginModeChanged,
+LeverageChanged
+  -> account
+
+LiquidationStarted, LiquidationFill, BackstopLiquidation, PositionSettled
+  -> position-liquidation
+
+TriggerOrderActivated, TwapStarted, TwapSliceFilled, TwapCompleted
+  -> unsupported
+```
+
+Every non-`1.0.0` event is unsupported even if a child later broadens its own
+surface. Composite `supports` returns true only when this table selects at
+least one owner. During reduction the table, not a generic child-`supports`
+union, selects owners; every selected child must still report support or the
+composite fails with `canonical_state.component_support_mismatch`. This
+prevents an unversioned child change from silently altering production
+ownership.
+
+Direct `EventReducer::reduce` on an unsupported schema/event returns
+`canonical_state.unsupported_event`. The ledger path never invokes that method:
+after composite `supports` returns false,
+`CanonicalLedger::prepare_block` returns its existing
+`LedgerError::UnsupportedEvent` / `ledger.unsupported_event` boundary error.
+Test both surfaces independently.
+
+All selected children evaluate against the exact same pre-event `StateView`;
+no child observes another child's same-event mutations. Later events see the
+fully merged candidate state from prior events. Invoke selected children in
+manifest order. After each child returns, scan its mutations in emission order
+for both same-child and cross-child duplicate keys before invoking the next
+selected child. Any duplicate fails as
+`canonical_state.duplicate_mutation_key`; an earlier duplicate therefore
+precedes a later child error. A private merge-helper test seam may inject
+synthetic mutation vectors, but the production composite has no injectable
+children. Rewriting the same current key in separate events remains valid and
+increments the block-delta write count.
+
+Permit a private `cfg(test)` dispatch harness which uses the same production
+owner-order and merge helpers but supplies scripted per-child
+`Result<Vec<StateMutation>, ReducerError>` values plus an invocation log. It
+must not be exported or accepted by `CanonicalStateReducerV1::try_new`. Use it
+to prove an earlier same-child or cross-child duplicate prevents invocation of
+a later failing child.
+
+Freeze composite-local error precedence:
+
+```text
+unsupported schema/event
+frozen ownership/component support mismatch
+for each selected child in manifest order:
+  child error unchanged
+  same-child/cross-child duplicate mutation key
+```
+
+The composite reason codes are `canonical_state.unsupported_event`,
+`canonical_state.component_support_mismatch`, and
+`canonical_state.duplicate_mutation_key`; constructor manifest failure is the
+typed `CanonicalStateError::ComponentVersionMismatch`. Do not wrap or rewrite
+stable child reason codes.
+
+`validate_block_delta` calls all eight direct children exactly once in
+manifest order and passes the same `final_state`, `BlockDeltaView` object, and
+`ApplyContext` references to each. It stops at the first child error.
+`validate_block` remains implemented for direct callers and fans out to all
+eight child `validate_block` methods in the same order. The ledger never calls
+both composite methods for one block. A private fanout helper used by the
+production implementation may accept scripted outcomes and observer callbacks
+under `cfg(test)` to prove order, pointer identity, first-error precedence, and
+early stop; it must not permit runtime child injection. Separately prove real
+late episode-invariant failure rolls back the complete block.
+
+Freeze the explicit pre-composite checkpoint refusal regression table:
+
+```text
+hyperliquid-alpha-desk-canonical-market@1.0.0
+hyperliquid-alpha-desk-canonical-order@1.0.0
+hyperliquid-alpha-desk-canonical-trade@1.0.0
+hyperliquid-alpha-desk-canonical-trade@2.0.0
+hyperliquid-alpha-desk-canonical-trade-set@2.0.0
+hyperliquid-alpha-desk-canonical-account@1.0.0
+hyperliquid-alpha-desk-canonical-position@1.0.0
+hyperliquid-alpha-desk-canonical-position-episode@1.0.0
+hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0
+```
+
+Watermark-only and test-dispatcher versions are not historical component
+checkpoints and are excluded from this named regression table, although the
+ledger's exact-version comparison rejects them generically too.
+
+- [ ] Test the exact ordered manifest and non-bypassable constructor; every
+  ownership/fanout row; direct V1/V2 trade children without nested-set
+  duplication; unsupported trigger/TWAP and non-`1.0.0` boundaries; all-owner
+  same-prestate behavior; same-child/cross-child collision precedence over a
+  later child error; separate-event current rewrites and delta write counts;
+  immutable collision, late reducer failure, and full rollback.
+- [ ] Test identical delta/context/view object forwarding to all eight children
+  in fixed order, first-child validation failure precedence, direct
+  `validate_block` compatibility, late episode delta-invariant rollback,
+  component version mismatch, and every pre-composite/component V1 checkpoint
+  refusal.
 - [ ] Prove one trade plus associated order lifecycle events applies each
-  participant exactly once. Mixed legacy participant-free and enriched trades
-  keep V1 facts while only enriched trades produce positions.
+  participant to signed position state exactly once: one buyer `+quantity`,
+  one seller `-quantity`, and exactly two position-effect facts. Associated
+  order lifecycle events produce zero position writes. Assert intentional V1
+  and V2 trade representation/participant record counts separately. Mixed
+  legacy participant-free and enriched trades keep V1 facts while only
+  enriched trades produce positions.
 - [ ] Commit with `feat(state): compose canonical account state`.
 
 ---
@@ -1625,6 +1892,13 @@ fixed.
   independent focused reviews returned GO after provenance, precedence,
   replay, known-zero, enriched-trade recovery, and funding-attribution
   coverage remediation.
+- 2026-07-30: Tasks 7A and 7B entered design HOLD before RED. The corrected
+  contracts now freeze the public bounded-delta API, exactly-once validation
+  bridge, high-water accounting and limits, exact current-key parser,
+  three-namespace episode audit, eight direct production children, exhaustive
+  43-kind ownership table, non-bypassable version manifest, merge/validation
+  precedence, and explicit component-checkpoint refusal matrix. Independent
+  re-reviews returned GO for both tasks before implementation.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
