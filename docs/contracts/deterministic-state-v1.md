@@ -194,6 +194,66 @@ source-reported realized PnL and excludes fees and funding. Partial, open, and
 interrupted episodes return no metric. Repeated clean replay and checkpoint
 resume are required to reproduce byte-identical episode state.
 
+`CanonicalLiquidationReducerV1` owns exact schema `1.0.0`
+`LiquidationStarted`, `LiquidationFill`, `BackstopLiquidation`, and
+`PositionSettled` events under reducer-set version
+`hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0`. These direct
+canonical observations do not require retained market metadata. Each event is
+reduced atomically from its pre-event state; a later event in the same block
+sees the complete candidate state produced by earlier events.
+
+A start writes an immutable source fact and a globally unique liquidation
+current. Fills and backstops require that current, the exact liquidated
+account, and strictly advancing block, transaction, and canonical-event
+position with a distinct event identity. A retained fill flow must be
+coherent with the process observation: equal positions require the same event
+identity, otherwise the flow position and identity are strictly earlier. The
+incoming fill must also have a distinct identity and position strictly after
+the flow. Incoherent flow provenance fails before account-pair validation or
+quantity arithmetic. A fill preserves process status and first-backstop provenance,
+advances its last observation, and accumulates source quantity only in its
+exact liquidation/account/market flow. Flow inputs are rescaled upward to
+their maximum scale and added exactly. Backstop quantities never enter fill
+flow. The first backstop changes status to `backstop_observed`; later
+backstops preserve the first provenance.
+
+Known signed positions are reduced toward zero without computing an absolute
+signed magnitude: a long subtracts the incoming unsigned quantity and a short
+adds it. Inputs are rescaled upward to their maximum scale with checked exact
+arithmetic. A liquidation fill that crosses zero, or targets known flat state,
+rejects atomically as `liquidation_state.fill_overrun`. Absent or already
+unknown state admits the source fact, process observation, and flow but leaves
+quantity unknown. Settlement uses the same exact arithmetic when direction is
+known; absent, unknown, known-flat, or overrun settlement is instead admitted
+as unknown attribution. Settlement remains independent of liquidation process
+state, writes no liquidation flow or account quote flow, and retains signed
+source realized PnL only in its immutable fact.
+
+Every non-trade quantity transition interrupts a resolved old episode. Exact
+flat state leaves `no_open_episode`; an exact nonzero remainder opens a new
+`partial_from_first_observation` episode at ordinal `1`; ambiguous state leaves
+`interrupted`. The old interruption and zero-valued effect use ordinal `0`.
+These effects never close an episode and never manufacture basis, notional,
+funding, entry price, transfer price, or realized PnL. Quantity zeros retain
+the transition scale, funding zeros use scale zero, and notional zeros encode
+canonically as `0`.
+
+A backstop processes the literal account order `[liquidated, backstop]`.
+For each account it writes an immutable unresolved-cause fact, preserves any
+first position anchor, sets quantity unknown, and interrupts a resolved
+episode. An unseen account receives an unknown quantity/current pair without a
+fabricated anchor. Preparation failure for either account rejects the complete
+fact, process, and both account bundles.
+
+Mutation order is fact, fill flow when present, liquidation current when
+present, then each account bundle as unresolved cause when present, ordinal
+`0`/`1` effects, old/new episode records, quantity current, and episode
+current. Existing immutable identities are decoded and key-bound before valid
+collisions are reported, proposed quantity/episode pairs are validated before
+return, and duplicate mutation keys fail closed. Fresh replay, whole-block
+repeat, and exact-version checkpoint resume must reproduce identical canonical
+state bytes and hashes; reducer-set version substitution is refused.
+
 `CanonicalOrderReducerV1` freezes the exact V1 order lifecycle under reducer-set
 version `hyperliquid-alpha-desk-canonical-order@1.0.0`. It owns only exact
 schema `1.0.0` events for `OrderAccepted`, `OrderRested`, `OrderModified`,
