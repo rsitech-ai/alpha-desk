@@ -73,7 +73,10 @@ participant-bearing trades and participant-free legacy trades, starting with
 an enriched trade. The composite
 `hyperliquid-alpha-desk-canonical-trade-set@2.0.0` reducer preserves the frozen
 V1 facts for every trade and adds V2 participant-anchor facts only for enriched
-trades. The run:
+trades. The deterministic archive producer identity is
+`state-replay-trade-e2e-v2`, and generated envelopes bind parser version
+`state-replay-trade-fixture-v2`; both identities are recorded in the V2 report.
+The run:
 
 1. requires all independent rebuild state and receipt hashes to match;
 2. publishes, verifies, loads, and resumes a prefix checkpoint;

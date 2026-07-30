@@ -8,13 +8,28 @@ use canonical_ledger::{
     ApplyContext, ApplyOutcome, CanonicalLedger, CanonicalTradeReducerSetV2,
     CanonicalTradeReducerV1, CanonicalTradeReducerV2, EventReducer, LedgerLimits, ReducerError,
     StateImageLimits, StateMutation, StateView, TradeParticipantRecordV1, TradeParticipantRecordV2,
-    TradeReconciliationRecordV1, TradeReconciliationRecordV2, TradeStateRecordV1,
+    TradeReconciliationRecordV1, TradeReconciliationRecordV2, TradeStateError, TradeStateRecordV1,
     TradeStateRecordV2,
 };
 use domain_types::{
     Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, PositionQuantity,
     Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
 };
+
+const V1_EVENT_ID: &str = "evt_2b06fda7df986e0310c53f6394fd50caf1d11d05f594526c5413982778b9030a";
+const V1_PAYLOAD_HASH: &str = "76297046b138d7b4333609e10f34b3bf8784eccc0c8bbc31a49074bfbaf0caf2";
+const V1_EVIDENCE_HASH: &str = "9cf9ffaa1f59af89374a06eaa74588b10e40436dfa37f4a0efdfba324bab689c";
+const V1_TRADE_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-state/v1","event_id":"evt_2b06fda7df986e0310c53f6394fd50caf1d11d05f594526c5413982778b9030a","trade_id":"trd-v1-frozen","market_id":"perp:BTC","price":"65000.000000","quantity":"0.01000000","participant_0":"0x1111111111111111111111111111111111111111","participant_1":"0x2222222222222222222222222222222222222222","block_height":950,"payload_blake3":"76297046b138d7b4333609e10f34b3bf8784eccc0c8bbc31a49074bfbaf0caf2"}"#;
+const V1_BUYER_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-participant/v1","event_id":"evt_2b06fda7df986e0310c53f6394fd50caf1d11d05f594526c5413982778b9030a","trade_id":"trd-v1-frozen","ordinal":0,"participant":"0x1111111111111111111111111111111111111111","quantity":"0.01000000","block_height":950}"#;
+const V1_SELLER_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-participant/v1","event_id":"evt_2b06fda7df986e0310c53f6394fd50caf1d11d05f594526c5413982778b9030a","trade_id":"trd-v1-frozen","ordinal":1,"participant":"0x2222222222222222222222222222222222222222","quantity":"0.01000000","block_height":950}"#;
+const V1_RECONCILIATION_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-quantity-symmetry/v1","check_version":"trade-quantity-symmetry@1.0.0","status":"passed","event_id":"evt_2b06fda7df986e0310c53f6394fd50caf1d11d05f594526c5413982778b9030a","trade_id":"trd-v1-frozen","market_id":"perp:BTC","quantity":"0.01000000","participant_count":2,"block_height":950,"evidence_blake3":"9cf9ffaa1f59af89374a06eaa74588b10e40436dfa37f4a0efdfba324bab689c"}"#;
+const V2_EVENT_ID: &str = "evt_713654a539015bd03eaf460f17ba6fbf8c4cc6d3642d6afd1714e8b64dd9fafc";
+const V2_PAYLOAD_HASH: &str = "ed63f2a04709ced342b324054881a0fd230c7458c13ff4d76a6e09783f239f29";
+const V2_EVIDENCE_HASH: &str = "348706efd6f856ab1f4d23f5c2d9e62a2b30e77b838d104202abdc53554c42e2";
+const V2_TRADE_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-state/v2","event_id":"evt_713654a539015bd03eaf460f17ba6fbf8c4cc6d3642d6afd1714e8b64dd9fafc","trade_id":"trd-v2-frozen","market_id":"perp:BTC","price":"65000.000000","quantity":"0.01000000","buyer_account_id":"0x1111111111111111111111111111111111111111","seller_account_id":"0x2222222222222222222222222222222222222222","buyer_start_position":"1.25000000","seller_start_position":"-2.50000000","buyer_order_id":"buyer-order-960","seller_order_id":"seller-order-960","buyer_twap_id":91,"seller_twap_id":null,"buyer_client_order_id":"0x11111111111111111111111111111111","seller_client_order_id":null,"block_height":960,"payload_blake3":"ed63f2a04709ced342b324054881a0fd230c7458c13ff4d76a6e09783f239f29"}"#;
+const V2_BUYER_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-participant/v2","event_id":"evt_713654a539015bd03eaf460f17ba6fbf8c4cc6d3642d6afd1714e8b64dd9fafc","trade_id":"trd-v2-frozen","ordinal":0,"role":"buyer","account_id":"0x1111111111111111111111111111111111111111","start_position":"1.25000000","order_id":"buyer-order-960","twap_id":91,"client_order_id":"0x11111111111111111111111111111111","fill_quantity":"0.01000000","position_effect":"0.01000000","block_height":960}"#;
+const V2_SELLER_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-participant/v2","event_id":"evt_713654a539015bd03eaf460f17ba6fbf8c4cc6d3642d6afd1714e8b64dd9fafc","trade_id":"trd-v2-frozen","ordinal":1,"role":"seller","account_id":"0x2222222222222222222222222222222222222222","start_position":"-2.50000000","order_id":"seller-order-960","twap_id":null,"client_order_id":null,"fill_quantity":"0.01000000","position_effect":"-0.01000000","block_height":960}"#;
+const V2_RECONCILIATION_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/trade-reconciliation/v2","check_version":"trade-position-symmetry@2.0.0","status":"passed","event_id":"evt_713654a539015bd03eaf460f17ba6fbf8c4cc6d3642d6afd1714e8b64dd9fafc","trade_id":"trd-v2-frozen","market_id":"perp:BTC","absolute_quantity":"0.01000000","buyer_effect":"0.01000000","seller_effect":"-0.01000000","participant_count":2,"block_height":960,"evidence_blake3":"348706efd6f856ab1f4d23f5c2d9e62a2b30e77b838d104202abdc53554c42e2"}"#;
 
 #[test]
 fn exact_trade_creates_one_fact_two_ordinal_legs_and_stored_reconciliation() {
@@ -474,13 +489,11 @@ fn v2_codecs_reject_corrupt_noncanonical_and_key_mismatched_records() {
 
     let trade_key = TradeStateRecordV2::state_key(&trade_id).unwrap();
     let trade_bytes = entries.get(&trade_key).unwrap();
-    for corrupt in [
-        trade_bytes[..trade_bytes.len() - 1].to_vec(),
-        [trade_bytes.as_slice(), b" "].concat(),
-        b"{}".to_vec(),
-    ] {
-        assert!(TradeStateRecordV2::decode(&corrupt).is_err());
-    }
+    assert_v2_codec_boundaries(
+        trade_bytes,
+        "hyperliquid-alpha-desk/trade-state/v2",
+        TradeStateRecordV2::decode,
+    );
     let wrong_trade_key =
         TradeStateRecordV2::state_key(&TradeId::new("trd-other-v2").unwrap()).unwrap();
     assert_eq!(
@@ -492,6 +505,11 @@ fn v2_codecs_reject_corrupt_noncanonical_and_key_mismatched_records() {
 
     let participant_key = TradeParticipantRecordV2::state_key(&trade_id, 0).unwrap();
     let participant_bytes = entries.get(&participant_key).unwrap();
+    assert_v2_codec_boundaries(
+        participant_bytes,
+        "hyperliquid-alpha-desk/trade-participant/v2",
+        TradeParticipantRecordV2::decode,
+    );
     let wrong_participant_key =
         TradeParticipantRecordV2::state_key(&TradeId::new("trd-other-v2").unwrap(), 0).unwrap();
     assert_eq!(
@@ -504,6 +522,11 @@ fn v2_codecs_reject_corrupt_noncanonical_and_key_mismatched_records() {
 
     let reconciliation_key = TradeReconciliationRecordV2::state_key(&trade_id).unwrap();
     let reconciliation_bytes = entries.get(&reconciliation_key).unwrap();
+    assert_v2_codec_boundaries(
+        reconciliation_bytes,
+        "hyperliquid-alpha-desk/trade-reconciliation/v2",
+        TradeReconciliationRecordV2::decode,
+    );
     let wrong_reconciliation_key =
         TradeReconciliationRecordV2::state_key(&TradeId::new("trd-other-v2").unwrap()).unwrap();
     assert_eq!(
@@ -634,7 +657,7 @@ fn corrupt_or_key_mismatched_prior_v2_fact_rejects_without_replacing_state() {
 }
 
 #[test]
-fn v1_trade_record_bytes_remain_frozen_when_participant_anchors_are_absent() {
+fn every_v1_trade_value_remains_frozen_as_literal_bytes() {
     let event = trade_event(
         950,
         0,
@@ -648,19 +671,216 @@ fn v1_trade_record_bytes_remain_frozen_when_participant_anchors_are_absent() {
         .apply_block(&block(950, vec![event.clone()]))
         .unwrap();
     let trade_id = TradeId::new("trd-v1-frozen").unwrap();
-    let key = TradeStateRecordV1::state_key(&trade_id).unwrap();
-    let actual = ledger.state_image().entries().get(&key).unwrap();
-    let expected = format!(
-        "{{\"schema\":\"hyperliquid-alpha-desk/trade-state/v1\",\"event_id\":\"{}\",\"trade_id\":\"trd-v1-frozen\",\"market_id\":\"perp:BTC\",\"price\":\"65000.000000\",\"quantity\":\"0.01000000\",\"participant_0\":\"0x1111111111111111111111111111111111111111\",\"participant_1\":\"0x2222222222222222222222222222222222222222\",\"block_height\":950,\"payload_blake3\":\"{}\"}}",
-        event.event_id(),
-        hex::encode(event.payload_hash())
-    );
-    assert_eq!(actual, expected.as_bytes());
+    let entries = ledger.state_image().entries();
+    let trade_key = TradeStateRecordV1::state_key(&trade_id).unwrap();
+    let buyer_key = TradeParticipantRecordV1::state_key(&trade_id, 0).unwrap();
+    let seller_key = TradeParticipantRecordV1::state_key(&trade_id, 1).unwrap();
+    let reconciliation_key = TradeReconciliationRecordV1::state_key(&trade_id).unwrap();
+
+    assert_eq!(entries.get(&trade_key).unwrap(), V1_TRADE_GOLDEN);
+    assert_eq!(entries.get(&buyer_key).unwrap(), V1_BUYER_GOLDEN);
+    assert_eq!(entries.get(&seller_key).unwrap(), V1_SELLER_GOLDEN);
     assert_eq!(
-        TradeStateRecordV1::decode_at(&key, expected.as_bytes())
-            .unwrap()
-            .payload_hash(),
-        event.payload_hash()
+        entries.get(&reconciliation_key).unwrap(),
+        V1_RECONCILIATION_GOLDEN
+    );
+
+    let trade = TradeStateRecordV1::decode_at(&trade_key, V1_TRADE_GOLDEN).unwrap();
+    assert_eq!(trade.event_id().as_str(), V1_EVENT_ID);
+    assert_eq!(trade.trade_id().as_str(), "trd-v1-frozen");
+    assert_eq!(trade.market_id().as_str(), "perp:BTC");
+    assert_eq!(trade.price().to_string(), "65000.000000");
+    assert_eq!(trade.quantity().to_string(), "0.01000000");
+    assert_eq!(
+        trade.participants(),
+        [
+            Address::from_bytes([0x11; 20]),
+            Address::from_bytes([0x22; 20])
+        ]
+    );
+    assert_eq!(trade.block_height(), BlockHeight::new(950));
+    assert_eq!(hex::encode(trade.payload_hash()), V1_PAYLOAD_HASH);
+
+    for (ordinal, literal, participant) in [
+        (0, V1_BUYER_GOLDEN, Address::from_bytes([0x11; 20])),
+        (1, V1_SELLER_GOLDEN, Address::from_bytes([0x22; 20])),
+    ] {
+        let key = TradeParticipantRecordV1::state_key(&trade_id, ordinal).unwrap();
+        let record = TradeParticipantRecordV1::decode_at(&key, literal).unwrap();
+        assert_eq!(record.event_id().as_str(), V1_EVENT_ID);
+        assert_eq!(record.trade_id(), &trade_id);
+        assert_eq!(record.ordinal(), ordinal);
+        assert_eq!(record.participant(), participant);
+        assert_eq!(record.quantity().to_string(), "0.01000000");
+        assert_eq!(record.block_height(), BlockHeight::new(950));
+    }
+
+    let reconciliation =
+        TradeReconciliationRecordV1::decode_at(&reconciliation_key, V1_RECONCILIATION_GOLDEN)
+            .unwrap();
+    assert!(reconciliation.passed());
+    assert_eq!(reconciliation.event_id().as_str(), V1_EVENT_ID);
+    assert_eq!(reconciliation.trade_id(), &trade_id);
+    assert_eq!(reconciliation.market_id().as_str(), "perp:BTC");
+    assert_eq!(reconciliation.quantity().to_string(), "0.01000000");
+    assert_eq!(reconciliation.participant_count(), 2);
+    assert_eq!(reconciliation.block_height(), BlockHeight::new(950));
+    assert_eq!(
+        hex::encode(reconciliation.evidence_hash()),
+        V1_EVIDENCE_HASH
+    );
+}
+
+#[test]
+fn every_v2_trade_value_is_frozen_as_literal_bytes() {
+    let event = enriched_trade_event(960, 0, "trd-v2-frozen");
+    let mut ledger = CanonicalLedger::try_new(
+        ChainId::new("mainnet").unwrap(),
+        BlockHeight::new(960),
+        CanonicalTradeReducerV2,
+        LedgerLimits::production(),
+    )
+    .unwrap();
+    ledger.apply_block(&block(960, vec![event])).unwrap();
+    let trade_id = TradeId::new("trd-v2-frozen").unwrap();
+    let entries = ledger.state_image().entries();
+    let trade_key = TradeStateRecordV2::state_key(&trade_id).unwrap();
+    let buyer_key = TradeParticipantRecordV2::state_key(&trade_id, 0).unwrap();
+    let seller_key = TradeParticipantRecordV2::state_key(&trade_id, 1).unwrap();
+    let reconciliation_key = TradeReconciliationRecordV2::state_key(&trade_id).unwrap();
+
+    assert_eq!(entries.get(&trade_key).unwrap(), V2_TRADE_GOLDEN);
+    assert_eq!(entries.get(&buyer_key).unwrap(), V2_BUYER_GOLDEN);
+    assert_eq!(entries.get(&seller_key).unwrap(), V2_SELLER_GOLDEN);
+    assert_eq!(
+        entries.get(&reconciliation_key).unwrap(),
+        V2_RECONCILIATION_GOLDEN
+    );
+
+    let trade = TradeStateRecordV2::decode_at(&trade_key, V2_TRADE_GOLDEN).unwrap();
+    assert_eq!(trade.event_id().as_str(), V2_EVENT_ID);
+    assert_eq!(trade.trade_id(), &trade_id);
+    assert_eq!(trade.market_id().as_str(), "perp:BTC");
+    assert_eq!(trade.price().to_string(), "65000.000000");
+    assert_eq!(trade.quantity().to_string(), "0.01000000");
+    assert_eq!(trade.buyer_account_id(), Address::from_bytes([0x11; 20]));
+    assert_eq!(trade.seller_account_id(), Address::from_bytes([0x22; 20]));
+    assert_eq!(trade.buyer_start_position().to_string(), "1.25000000");
+    assert_eq!(trade.seller_start_position().to_string(), "-2.50000000");
+    assert_eq!(trade.buyer_order_id().as_str(), "buyer-order-960");
+    assert_eq!(trade.seller_order_id().as_str(), "seller-order-960");
+    assert_eq!(trade.buyer_twap_id(), Some(TwapId::new(91)));
+    assert_eq!(trade.seller_twap_id(), None);
+    assert_eq!(
+        trade.buyer_client_order_id().unwrap().as_str(),
+        "0x11111111111111111111111111111111"
+    );
+    assert_eq!(trade.seller_client_order_id(), None);
+    assert_eq!(trade.block_height(), BlockHeight::new(960));
+    assert_eq!(hex::encode(trade.payload_hash()), V2_PAYLOAD_HASH);
+
+    for (ordinal, literal, role, account, start, order, twap, cloid, effect) in [
+        (
+            0,
+            V2_BUYER_GOLDEN,
+            TradeParticipantRoleV1::Buyer,
+            Address::from_bytes([0x11; 20]),
+            "1.25000000",
+            "buyer-order-960",
+            Some(TwapId::new(91)),
+            Some("0x11111111111111111111111111111111"),
+            "0.01000000",
+        ),
+        (
+            1,
+            V2_SELLER_GOLDEN,
+            TradeParticipantRoleV1::Seller,
+            Address::from_bytes([0x22; 20]),
+            "-2.50000000",
+            "seller-order-960",
+            None,
+            None,
+            "-0.01000000",
+        ),
+    ] {
+        let key = TradeParticipantRecordV2::state_key(&trade_id, ordinal).unwrap();
+        let participant = TradeParticipantRecordV2::decode_at(&key, literal).unwrap();
+        assert_eq!(participant.event_id().as_str(), V2_EVENT_ID);
+        assert_eq!(participant.trade_id(), &trade_id);
+        assert_eq!(participant.ordinal(), ordinal);
+        assert_eq!(participant.role(), role);
+        assert_eq!(participant.account_id(), account);
+        assert_eq!(participant.start_position().to_string(), start);
+        assert_eq!(participant.order_id().as_str(), order);
+        assert_eq!(participant.twap_id(), twap);
+        assert_eq!(
+            participant.client_order_id().map(ClientOrderId::as_str),
+            cloid
+        );
+        assert_eq!(participant.fill_quantity().to_string(), "0.01000000");
+        assert_eq!(participant.position_effect().to_string(), effect);
+        assert_eq!(participant.block_height(), BlockHeight::new(960));
+    }
+
+    let reconciliation =
+        TradeReconciliationRecordV2::decode_at(&reconciliation_key, V2_RECONCILIATION_GOLDEN)
+            .unwrap();
+    assert!(reconciliation.passed());
+    assert_eq!(reconciliation.event_id().as_str(), V2_EVENT_ID);
+    assert_eq!(reconciliation.trade_id(), &trade_id);
+    assert_eq!(reconciliation.market_id().as_str(), "perp:BTC");
+    assert_eq!(reconciliation.absolute_quantity().to_string(), "0.01000000");
+    assert_eq!(reconciliation.buyer_effect().to_string(), "0.01000000");
+    assert_eq!(reconciliation.seller_effect().to_string(), "-0.01000000");
+    assert_eq!(reconciliation.participant_count(), 2);
+    assert_eq!(reconciliation.block_height(), BlockHeight::new(960));
+    assert_eq!(
+        hex::encode(reconciliation.evidence_hash()),
+        V2_EVIDENCE_HASH
+    );
+}
+
+fn assert_v2_codec_boundaries<T: std::fmt::Debug>(
+    encoded: &[u8],
+    schema: &str,
+    decode: fn(&[u8]) -> Result<T, TradeStateError>,
+) {
+    let truncated = &encoded[..encoded.len() - 1];
+    assert_eq!(
+        decode(truncated).unwrap_err().reason_code(),
+        "trade_state.codec.decode"
+    );
+    let noncanonical = [encoded, b" "].concat();
+    assert_eq!(
+        decode(&noncanonical).unwrap_err().reason_code(),
+        "trade_state.codec.noncanonical"
+    );
+    let unknown = [&encoded[..encoded.len() - 1], br#","unknown":true}"#].concat();
+    assert_eq!(
+        decode(&unknown).unwrap_err().reason_code(),
+        "trade_state.codec.decode"
+    );
+    let duplicate_schema = [
+        &encoded[..encoded.len() - 1],
+        br#","schema":""#,
+        schema.as_bytes(),
+        br#""}"#,
+    ]
+    .concat();
+    assert_eq!(
+        decode(&duplicate_schema).unwrap_err().reason_code(),
+        "trade_state.codec.decode"
+    );
+
+    let exact_limit = vec![b' '; 16 * 1024];
+    assert_ne!(
+        decode(&exact_limit).unwrap_err().reason_code(),
+        "trade_state.codec.limit_exceeded"
+    );
+    let over_limit = vec![b' '; 16 * 1024 + 1];
+    assert_eq!(
+        decode(&over_limit).unwrap_err().reason_code(),
+        "trade_state.codec.limit_exceeded"
     );
 }
 

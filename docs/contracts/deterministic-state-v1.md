@@ -71,6 +71,10 @@ trades run through V1 only. Enriched trades run through V1 and V2 against the
 same pre-event state, preserving the byte-exact V1 surface while adding V2
 facts. It never accepts a direct V1 or direct V2 component checkpoint under the
 composite version; recovery must rebuild from immutable archive events.
+The synthetic mixed replay binds archive producer identity
+`state-replay-trade-e2e-v2` and parser version
+`state-replay-trade-fixture-v2`; the report records both rather than retaining
+V1 provenance names under V2 semantics.
 
 These V2 records retain source-observed anchors and per-trade signed effects.
 They do not themselves maintain current account-market position quantity,
@@ -78,6 +82,9 @@ prove continuity between adjacent `start_position` values, infer maker/taker,
 or qualify a deployed source. Optional identities serialize explicitly as JSON
 values or `null`; client-order identities accept only the canonical lowercase
 `0x` plus 32 lowercase hexadecimal digits.
+Hard-coded literal byte vectors freeze all four V1 and all four V2 values,
+including field order, hashes, lowercase roles, and explicit optional nulls;
+the reducer output and key-bound decoders must match those vectors exactly.
 
 `CanonicalOrderReducerV1` freezes the exact V1 order lifecycle under reducer-set
 version `hyperliquid-alpha-desk-canonical-order@1.0.0`. It owns only exact
