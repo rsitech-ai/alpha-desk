@@ -621,7 +621,7 @@ insertion and must decode any existing effect at the target key before
 rejecting it as `position_episode.effect_identity_collision`; identical bytes
 are not an idempotent overwrite.
 
-- [ ] Write red codec/key tests for the literal deterministic ID, every ID
+- [x] Write red codec/key tests for the literal deterministic ID, every ID
   input perturbation, both opening/effect ordinals, all literal
   schema/enum/record/key vectors, current pointers, completeness and opening
   position, derived-ID mismatch, the complete status/close-cause matrix,
@@ -630,9 +630,9 @@ are not an idempotent overwrite.
   same-event two-effect key separation, state-aware missing/corrupt/
   key-mismatched/wrong-identity/non-open pointer targets, exact 16 KiB values,
   exact 64 KiB keys and each +1 rejection.
-- [ ] Implement records/codecs only; no transition logic.
-- [ ] Run focused/full ledger tests and strict gates.
-- [ ] Commit with `feat(state): add position episode records`.
+- [x] Implement records/codecs only; no transition logic.
+- [x] Run focused/full ledger tests and strict gates.
+- [x] Commit with `feat(state): add position episode records`.
 
 ---
 
@@ -1010,6 +1010,15 @@ fixed.
   opening-position and mutation provenance, status/cause matrices, exact
   numeric invariants, and structural versus state-aware current-pointer
   validation. Independent re-review returned GO before implementation.
+- 2026-07-30: Task 5A completed at `a1372bd`. Strict episode, current-pointer,
+  and immutable effect-delta records now freeze exact BLAKE3 identities,
+  literal wire/key compatibility, opening and mutation provenance,
+  status/cause matrices, exact notional/value/key bounds, and state-aware
+  open-reference validation. Parent gates passed 9 focused record tests,
+  3 internal reference tests, full ledger/replay suites, strict Clippy,
+  formatting, and diff checks. Independent review returned GO after literal
+  key, cross-family negative, independent 513-bit, wrong-key, and fixed
+  episode-key remediation. Transition logic remains Task 5B.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
