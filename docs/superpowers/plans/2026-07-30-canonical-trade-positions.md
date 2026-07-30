@@ -1106,10 +1106,10 @@ most 16 KiB. Constructors validate private fields; `decode_at` recomputes the
 exact key. The later production `StateImage` retains its separate 4 KiB key
 limit.
 
-- [ ] Write red codec/key tests for every record, process status, account
+- [x] Write red codec/key tests for every record, process status, account
   binding, per-market separation, duplicates, canonical JSON, key mismatch,
   16 KiB values, and 64 KiB keys.
-- [ ] Implement records only, run full ledger/replay/strict gates, and commit
+- [x] Implement records only, run full ledger/replay/strict gates, and commit
   with `feat(state): add liquidation fact records`.
 
 ---
