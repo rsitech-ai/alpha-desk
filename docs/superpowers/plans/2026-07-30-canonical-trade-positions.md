@@ -221,8 +221,11 @@ as buyer/seller IDs.
 ### Task 3: Make trade facts retain exact participant anchors
 
 **Files:**
+- Modify: `crates/canonical-ledger/src/lib.rs`
 - Modify: `crates/canonical-ledger/src/trade.rs`
 - Modify: `crates/canonical-ledger/tests/trade_state.rs`
+- Modify: `tools/state-replay/src/lib.rs`
+- Modify: `tools/state-replay/src/main.rs`
 - Modify: `tools/state-replay/src/trade.rs`
 - Modify: `tools/state-replay/tests/trade_e2e.rs`
 - Modify: `tools/state-replay/tests/cli.rs`
@@ -247,19 +250,24 @@ Do not change `trade.v1`, its reducer, or its persisted record bytes.
 Participant-free legacy events remain accepted by the V1 fact path only.
 Enriched events run through both reducers: V1 preserves the existing
 byte-compatible fact surface and V2 adds the participant-bearing state.
-The later composite freezes its own new reducer-set version and rejects old
-checkpoints by reducer version; recovery rebuilds from the immutable archive,
-never by accepting an old state hash under new semantics. Preserve byte-exact
-V1 decode fixtures and retain a mixed V1/enriched archive replay fixture.
+`CanonicalTradeReducerSetV2` owns that composition with exact version
+`hyperliquid-alpha-desk-canonical-trade-set@2.0.0`; both component reducers
+evaluate the same pre-event state before their disjoint mutations are
+concatenated atomically. Mixed replay reports and checkpoints bind to the set
+version and reject V1 or direct-V2 component checkpoints. Recovery rebuilds
+from the immutable archive, never by accepting an old state hash under new
+semantics. Preserve byte-exact V1 decode fixtures and retain a mixed
+V1/enriched archive replay fixture.
 
-- [ ] Write red codec/reducer/migration tests first.
-- [ ] `CanonicalTradeReducerV2` supports only participant-bearing enriched
+- [x] Write red codec/reducer/migration tests first.
+- [x] `CanonicalTradeReducerV2` supports only participant-bearing enriched
   trades. Preserve fact-only V1 behavior for prior synthetic envelopes.
-- [ ] Reject trade-ID collision and corrupt/key-mismatched prior facts.
-- [ ] Regenerate all affected replay report fixtures and bind report schemas
-  to the V2 reducer version; refuse V1 checkpoints under V2/composite restore.
-- [ ] Run ledger/replay tests and strict gates.
-- [ ] Commit with `feat(ledger): retain trade position anchors`.
+- [x] Reject trade-ID collision and corrupt/key-mismatched prior facts.
+- [x] Regenerate all affected replay report fixtures and bind report schemas
+  to the V2 reducer-set version; refuse V1 and direct-V2 component checkpoints
+  under composite restore.
+- [x] Run ledger/replay tests and strict gates.
+- [x] Commit with `feat(ledger): retain trade position anchors`.
 
 ---
 
@@ -803,6 +811,15 @@ fixed.
   hexadecimal digits at both wire and node-mapping boundaries. Parent and
   independent review passed the full domain/API/event suites, generated-drift
   proof, strict Clippy, formatting, and diff checks.
+- 2026-07-30: Task 3 completed at `9b23b7c` plus persisted-version remediation
+  `fd20805`. V1 facts remain byte-frozen; enriched trades add exact V2
+  participant anchors and checked buyer-positive/seller-negative
+  reconciliation through the separately versioned V2 reducer set. Mixed
+  replay binds V2 producer/parser identities, refuses component checkpoints
+  at both store and reducer-version boundaries, and keeps every qualification
+  flag false. Parent and independent review passed full ledger/replay suites,
+  eight literal persisted-record goldens, the V2 codec boundary matrix,
+  strict Clippy, formatting, and diff checks.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
