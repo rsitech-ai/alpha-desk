@@ -1354,7 +1354,7 @@ checkpoint-resumed replay must produce byte-identical state and hashes.
 Checkpoint restore requires the exact reducer-set version; no version
 substitution or fallback is permitted.
 
-- [ ] Test ID collision, missing start, wrong account, per-market multiple
+- [x] Test ID collision, missing start, wrong account, per-market multiple
   fills, fill overrun, repeated fill, invalid account/process transitions,
   backstop on both known and unseen accounts, multiple unresolved causes,
   partial-liquidation same-event ordinal `0`/`1` separation followed by trade
@@ -1362,7 +1362,7 @@ substitution or fallback is permitted.
   recovery, settlement partial/full/ambiguous, partial-settlement same-event
   ordinal `0`/`1` separation followed by funding, fact-only settlement PnL,
   and proof that settlement never closes a liquidation process.
-- [ ] Run full ledger/replay/strict gates and commit with
+- [x] Run full ledger/replay/strict gates and commit with
   `feat(state): reduce conservative liquidation state`.
 
 ---
@@ -1615,6 +1615,16 @@ fixed.
   corrected contract now defines a separate episode reducer, a shared Task 4
   validation kernel, exact transition/funding tables, inductive validation
   until Task 7A's bounded delta audit, and explicit composite children.
+- 2026-07-30: Task 6B completed at `af0162d`. The liquidation reducer now
+  atomically owns start, fill, backstop, and settlement observations; keeps
+  exact source facts and conservative position/episode transitions; rejects
+  process or flow provenance rewinds; preserves first-backstop and position
+  anchors; and admits ambiguity without manufacturing basis or realized PnL.
+  Parent gates passed 22 focused liquidation tests, full canonical-ledger and
+  replay-engine suites, strict Clippy, formatting, and diff checks. Two
+  independent focused reviews returned GO after provenance, precedence,
+  replay, known-zero, enriched-trade recovery, and funding-attribution
+  coverage remediation.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
