@@ -6,11 +6,12 @@ use canonical_events::{
     AssetContextUpdated, CanonicalEventEnvelope, ConfirmationClass, ContractError, DexCreated,
     EventKind, EventPayload, FundingRateUpdated, MarginTableChanged, MarketCreated, MarketHalted,
     MarketMetadataChanged, MarketResumed, OpenInterestCapChanged, OracleUpdated, OutcomeCreated,
-    OutcomeResolved, TradeMatched,
+    OutcomeResolved, TradeMatched, TradeParticipantRoleV1, TradeParticipantV1,
 };
 use domain_types::{
-    Address, AssetId, BlockHeight, DexId, EventId, FundingRate, KnownTime, MarketId, OrderId,
-    OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, TradeId, TransactionId,
+    Address, AssetId, BlockHeight, ClientOrderId, DexId, EventId, FundingRate, KnownTime, MarketId,
+    OrderId, OutcomeId, PositionQuantity, Price, ProtocolTime, Quantity, QuoteAmount, TradeId,
+    TransactionId, TwapId,
 };
 
 fn task_4_envelope(schema_version: &str) -> Result<CanonicalEventEnvelope, ContractError> {
@@ -82,6 +83,7 @@ fn trade_payload_round_trip_preserves_non_empty_v1_identities() {
         price: Price::parse_at_scale("65000", 6).unwrap(),
         quantity: Quantity::parse_at_scale("0.01", 8).unwrap(),
         deterministic_seed: 7,
+        participants: None,
     });
     let encoded = payload.encode_to_vec().unwrap();
 
@@ -104,6 +106,154 @@ fn trade_payload_round_trip_preserves_non_empty_v1_identities() {
         reencoded.payload_hash,
         blake3::hash(&reencoded.payload).as_bytes()
     );
+}
+
+fn enriched_trade() -> TradeMatched {
+    TradeMatched {
+        trade_id: Some(TradeId::new("trade-42").unwrap()),
+        market_id: Some(MarketId::new("perp:BTC").unwrap()),
+        maker_order_id: Some(OrderId::new("maker-7").unwrap()),
+        taker_order_id: Some(OrderId::new("taker-9").unwrap()),
+        price: Price::parse_at_scale("65000", 6).unwrap(),
+        quantity: Quantity::parse_at_scale("0.01", 8).unwrap(),
+        deterministic_seed: 7,
+        participants: Some(Box::new([
+            TradeParticipantV1 {
+                role: TradeParticipantRoleV1::Buyer,
+                account_id: Address::from_bytes([0x11; 20]),
+                start_position: PositionQuantity::parse_at_scale("996.67", 2).unwrap(),
+                order_id: OrderId::new("12212201265").unwrap(),
+                twap_id: Some(TwapId::new(91)),
+                client_order_id: Some(
+                    ClientOrderId::new("0x11111111111111111111111111111111").unwrap(),
+                ),
+            },
+            TradeParticipantV1 {
+                role: TradeParticipantRoleV1::Seller,
+                account_id: Address::from_bytes([0x22; 20]),
+                start_position: PositionQuantity::parse_at_scale("-996.7", 1).unwrap(),
+                order_id: OrderId::new("12212198275").unwrap(),
+                twap_id: None,
+                client_order_id: None,
+            },
+        ])),
+    }
+}
+
+#[test]
+fn enriched_trade_round_trip_preserves_exact_signed_participant_anchors() {
+    let payload = EventPayload::TradeMatched(enriched_trade());
+    let encoded = payload.encode_to_vec().unwrap();
+
+    assert_eq!(
+        EventPayload::decode(EventKind::TradeMatched, &encoded).unwrap(),
+        payload
+    );
+}
+
+#[test]
+fn canonical_trade_rejects_nonpositive_price_or_fill_before_envelope_construction() {
+    let mut zero_price = enriched_trade();
+    zero_price.price = Price::parse_at_scale("0", 6).unwrap();
+    assert!(
+        EventPayload::TradeMatched(zero_price)
+            .encode_to_vec()
+            .is_err()
+    );
+
+    let mut zero_quantity = enriched_trade();
+    zero_quantity.quantity = Quantity::parse_at_scale("0", 8).unwrap();
+    assert!(
+        EventPayload::TradeMatched(zero_quantity)
+            .encode_to_vec()
+            .is_err()
+    );
+}
+
+#[test]
+fn enriched_trade_requires_exact_envelope_account_order() {
+    let build = |accounts| {
+        CanonicalEventEnvelope::try_new(
+            "1.0.0",
+            "mainnet",
+            BlockHeight::new(42),
+            ProtocolTime::from_unix_micros(1_721_779_200_000_042).unwrap(),
+            TransactionId::new("fixture-tx-42-0").unwrap(),
+            0,
+            0,
+            EventId::new("fixture-mainnet-42-0-0").unwrap(),
+            vec![MarketId::new("perp:BTC").unwrap()],
+            accounts,
+            ConfirmationClass::CommittedPrimary,
+            EventPayload::TradeMatched(enriched_trade()),
+            "fixture-parser-v1",
+        )
+    };
+
+    let valid = build(vec![
+        Address::from_bytes([0x11; 20]),
+        Address::from_bytes([0x22; 20]),
+    ])
+    .unwrap();
+    let mut swapped_wire =
+        WireCanonicalEventEnvelope::decode(&valid.encode_to_vec().unwrap()).unwrap();
+    swapped_wire.account_ids.swap(0, 1);
+    assert!(CanonicalEventEnvelope::decode(&swapped_wire.encode_to_vec()).is_err());
+    assert!(
+        build(vec![
+            Address::from_bytes([0x22; 20]),
+            Address::from_bytes([0x11; 20])
+        ])
+        .is_err()
+    );
+    assert!(build(vec![Address::from_bytes([0x11; 20])]).is_err());
+}
+
+#[test]
+fn participant_absent_trade_payload_retains_the_frozen_v1_bytes() {
+    let encoded = EventPayload::TradeMatched(TradeMatched::without_identities(
+        Price::parse_at_scale("65000", 6).unwrap(),
+        Quantity::parse_at_scale("0.01", 8).unwrap(),
+        7,
+    ))
+    .encode_to_vec()
+    .unwrap();
+
+    assert_eq!(
+        encoded.as_slice(),
+        b"\x0a\x0cTradeMatched\x12\x20\x2a\x0e\x0a\x0c65000.000000\
+          \x32\x0c\x0a\x0a0.01000000\x38\x07"
+    );
+}
+
+#[test]
+fn trade_decode_rejects_one_or_three_participants() {
+    let encoded = EventPayload::TradeMatched(enriched_trade())
+        .encode_to_vec()
+        .unwrap();
+    let with_participant_count = |count: usize| {
+        mutate_typed_payload(&encoded, |message| {
+            let fields = split_protobuf_fields(message);
+            let first_participant = fields
+                .iter()
+                .find(|field| field.number == 8)
+                .expect("enriched fixture participant")
+                .encoded
+                .clone();
+            let mut result = fields
+                .into_iter()
+                .filter(|field| field.number != 8)
+                .flat_map(|field| field.encoded)
+                .collect::<Vec<_>>();
+            for _ in 0..count {
+                result.extend_from_slice(&first_participant);
+            }
+            result
+        })
+    };
+
+    assert!(EventPayload::decode(EventKind::TradeMatched, &with_participant_count(1)).is_err());
+    assert!(EventPayload::decode(EventKind::TradeMatched, &with_participant_count(3)).is_err());
 }
 
 #[test]

@@ -447,6 +447,7 @@ fn trade_block(height: u64) -> BlockEnvelope {
         price: Price::parse_at_scale("65000", 6).expect("price"),
         quantity: Quantity::parse_at_scale("0.01", 8).expect("quantity"),
         deterministic_seed: 1,
+        participants: None,
     });
     let payload_hash = *blake3::hash(&payload.encode_to_vec().expect("payload")).as_bytes();
     let event = CanonicalEventEnvelope::from_input(CanonicalEventInput {

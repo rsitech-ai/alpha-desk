@@ -16,17 +16,18 @@ pub use node_mapping::{
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
 use api_contracts::{
-    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, WireAccountModeChanged, WireAssetContextUpdated,
-    WireBackstopLiquidation, WireBuilderFeeCharged, WireCanonicalEventEnvelope,
-    WireDepositCredited, WireDexCreated, WireFeeCharged, WireFundingPaid, WireFundingRateUpdated,
-    WireFundingReceived, WireLeverageChanged, WireLiquidationFill, WireLiquidationStarted,
-    WireMarginModeChanged, WireMarginTableChanged, WireMarketCreated, WireMarketHalted,
-    WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated,
-    WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
-    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
-    WireOutcomeResolved, WirePerpTransfer, WirePositionSettled, WireReferralReward,
-    WireSourceEvidence, WireSpotTransfer, WireSubaccountTransfer, WireTradeMatched,
-    WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, MAX_CANONICAL_TRADE_PAYLOAD_BYTES, WireAccountModeChanged,
+    WireAssetContextUpdated, WireBackstopLiquidation, WireBuilderFeeCharged,
+    WireCanonicalEventEnvelope, WireDepositCredited, WireDexCreated, WireFeeCharged,
+    WireFundingPaid, WireFundingRateUpdated, WireFundingReceived, WireLeverageChanged,
+    WireLiquidationFill, WireLiquidationStarted, WireMarginModeChanged, WireMarginTableChanged,
+    WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed,
+    WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted, WireOrderCancelled,
+    WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected,
+    WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer,
+    WirePositionSettled, WireReferralReward, WireSourceEvidence, WireSpotTransfer,
+    WireSubaccountTransfer, WireTradeMatched, WireTradeParticipantV1, WireVaultDeposit,
+    WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
     decode_asset_context_updated, decode_backstop_liquidation, decode_builder_fee_charged,
     decode_deposit_credited, decode_dex_created, decode_fee_charged, decode_funding_paid,
     decode_funding_rate_updated, decode_funding_received, decode_leverage_changed,
@@ -56,8 +57,8 @@ use api_contracts::{
 use domain_types::{
     AccountAbstractionModeV1, Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId,
     EventId, FeeRate, FeeTypeV1, FundingRate, KnownTime, Leverage, LiquidationId, MarginModeV1,
-    MarketId, OrderId, OrderSide, OutcomeId, Price, ProtocolTime, Quantity, QuoteAmount, SourceId,
-    TradeId, TransactionId, UsdAmount, VaultId,
+    MarketId, OrderId, OrderSide, OutcomeId, PositionQuantity, Price, ProtocolTime, Quantity,
+    QuoteAmount, SourceId, TradeId, TransactionId, TwapId, UsdAmount, VaultId,
 };
 use semver::Version;
 use std::str::FromStr;
@@ -215,6 +216,23 @@ pub struct TradeMatched {
     pub price: Price,
     pub quantity: Quantity,
     pub deterministic_seed: u64,
+    pub participants: Option<Box<[TradeParticipantV1; 2]>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeParticipantRoleV1 {
+    Buyer,
+    Seller,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeParticipantV1 {
+    pub role: TradeParticipantRoleV1,
+    pub account_id: Address,
+    pub start_position: PositionQuantity,
+    pub order_id: OrderId,
+    pub twap_id: Option<TwapId>,
+    pub client_order_id: Option<ClientOrderId>,
 }
 
 impl TradeMatched {
@@ -228,7 +246,42 @@ impl TradeMatched {
             price,
             quantity,
             deterministic_seed,
+            participants: None,
         }
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.price.raw() <= 0 {
+            return Err(ContractError::Invalid {
+                field: "payload",
+                reason: "TradeMatched price must be positive".to_owned(),
+            });
+        }
+        if self.quantity.raw() <= 0 {
+            return Err(ContractError::Invalid {
+                field: "payload",
+                reason: "TradeMatched quantity must be positive".to_owned(),
+            });
+        }
+        if let Some(participants) = &self.participants {
+            let [buyer, seller] = participants.as_ref();
+            if buyer.role != TradeParticipantRoleV1::Buyer
+                || seller.role != TradeParticipantRoleV1::Seller
+            {
+                return Err(ContractError::Invalid {
+                    field: "payload",
+                    reason: "TradeMatched participants must be ordered buyer then seller"
+                        .to_owned(),
+                });
+            }
+            if buyer.account_id == seller.account_id {
+                return Err(ContractError::Invalid {
+                    field: "payload",
+                    reason: "TradeMatched participant accounts must differ".to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1058,16 +1111,39 @@ macro_rules! opaque_payloads {
                         })
                         .map_err(payload_error)
                     }
-                    Self::TradeMatched(value) => encode_trade_matched(&WireTradeMatched {
-                        trade_id: value.trade_id.as_ref().map(ToString::to_string),
-                        market_id: value.market_id.as_ref().map(ToString::to_string),
-                        maker_order_id: value.maker_order_id.as_ref().map(ToString::to_string),
-                        taker_order_id: value.taker_order_id.as_ref().map(ToString::to_string),
-                        price: value.price.to_string(),
-                        quantity: value.quantity.to_string(),
-                        deterministic_seed: value.deterministic_seed,
-                    })
-                    .map_err(payload_error),
+                    Self::TradeMatched(value) => {
+                        value.validate()?;
+                        encode_trade_matched(&WireTradeMatched {
+                            trade_id: value.trade_id.as_ref().map(ToString::to_string),
+                            market_id: value.market_id.as_ref().map(ToString::to_string),
+                            maker_order_id: value.maker_order_id.as_ref().map(ToString::to_string),
+                            taker_order_id: value.taker_order_id.as_ref().map(ToString::to_string),
+                            price: value.price.to_string(),
+                            quantity: value.quantity.to_string(),
+                            deterministic_seed: value.deterministic_seed,
+                            participants: value.participants.as_deref().map(|participants| {
+                                std::array::from_fn(|index| {
+                                    let participant = &participants[index];
+                                    WireTradeParticipantV1 {
+                                    role: match participant.role {
+                                        TradeParticipantRoleV1::Buyer => "buyer",
+                                        TradeParticipantRoleV1::Seller => "seller",
+                                    }
+                                    .to_owned(),
+                                    account_id: participant.account_id.to_api_string(),
+                                    start_position: participant.start_position.to_string(),
+                                    order_id: participant.order_id.to_string(),
+                                    twap_id: participant.twap_id.map(TwapId::get),
+                                        client_order_id: participant
+                                            .client_order_id
+                                            .as_ref()
+                                            .map(ToString::to_string),
+                                    }
+                                })
+                            }),
+                        })
+                        .map_err(payload_error)
+                    }
                 }?;
                 validate_account_payload_size(self.kind(), &bytes)?;
                 Ok(bytes)
@@ -1216,7 +1292,7 @@ macro_rules! opaque_payloads {
                     )+
                     EventKind::TradeMatched => {
                         let value = decode_trade_matched(bytes).map_err(payload_error)?;
-                        Ok(Self::TradeMatched(TradeMatched {
+                        let trade = TradeMatched {
                             trade_id: value
                                 .trade_id
                                 .map(TradeId::new)
@@ -1266,7 +1342,18 @@ macro_rules! opaque_payloads {
                                 }
                             })?,
                             deterministic_seed: value.deterministic_seed,
-                        }))
+                            participants: value
+                                .participants
+                                .map(|[buyer, seller]| {
+                                    Ok::<Box<[TradeParticipantV1; 2]>, ContractError>(Box::new([
+                                        decode_trade_participant(buyer)?,
+                                        decode_trade_participant(seller)?,
+                                    ]))
+                                })
+                                .transpose()?,
+                        };
+                        trade.validate()?;
+                        Ok(Self::TradeMatched(trade))
                     }
                 }
             }
@@ -2360,6 +2447,7 @@ impl CanonicalEventEnvelope {
         }
         let parser_version = required(input.parser_version, "parser_version")?;
         let payload_bytes = input.payload.encode_to_vec()?;
+        validate_trade_account_binding(&input.payload, &input.account_ids)?;
         let payload_hash = *blake3::hash(&payload_bytes).as_bytes();
         let event_id = compute_event_id(&EventIdentityInput {
             chain_id: &input.chain_id,
@@ -2419,6 +2507,7 @@ impl CanonicalEventEnvelope {
         let chain_id = parse_id(chain_id.to_owned(), "chain_id", ChainId::new)?;
         let parser_version = required(parser_version.to_owned(), "parser_version")?;
         let payload_bytes = payload.encode_to_vec()?;
+        validate_trade_account_binding(&payload, &account_ids)?;
         let payload_hash = *blake3::hash(&payload_bytes).as_bytes();
         let lifecycle_time =
             KnownTime::from_unix_micros(block_time.unix_micros()).map_err(|error| {
@@ -2761,6 +2850,17 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
                 reason: "does not match the canonical payload bytes".to_owned(),
             });
         }
+        let account_ids = value
+            .account_ids
+            .into_iter()
+            .map(|id| {
+                Address::parse_api(&id).map_err(|error| ContractError::Invalid {
+                    field: "account_ids",
+                    reason: error.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_trade_account_binding(&payload, &account_ids)?;
 
         Ok(Self {
             schema_version: required(value.schema_version, "schema_version")?,
@@ -2776,16 +2876,7 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
                 .into_iter()
                 .map(|id| parse_list_id(id, "market_ids", MarketId::new))
                 .collect::<Result<_, _>>()?,
-            account_ids: value
-                .account_ids
-                .into_iter()
-                .map(|id| {
-                    Address::parse_api(&id).map_err(|error| ContractError::Invalid {
-                        field: "account_ids",
-                        reason: error.to_string(),
-                    })
-                })
-                .collect::<Result<_, _>>()?,
+            account_ids,
             source_evidence: value
                 .source_evidence
                 .into_iter()
@@ -2928,11 +3019,84 @@ fn fixed_hash(value: Vec<u8>, field: &'static str) -> Result<[u8; HASH_LENGTH], 
     })
 }
 
+fn decode_trade_participant(
+    value: WireTradeParticipantV1,
+) -> Result<TradeParticipantV1, ContractError> {
+    let role = match value.role.as_str() {
+        "buyer" => TradeParticipantRoleV1::Buyer,
+        "seller" => TradeParticipantRoleV1::Seller,
+        _ => {
+            return Err(ContractError::Invalid {
+                field: "payload",
+                reason: "invalid TradeMatched participant role".to_owned(),
+            });
+        }
+    };
+    Ok(TradeParticipantV1 {
+        role,
+        account_id: Address::parse_api(&value.account_id).map_err(|error| {
+            ContractError::Invalid {
+                field: "payload",
+                reason: format!("invalid TradeMatched participant account_id: {error}"),
+            }
+        })?,
+        start_position: PositionQuantity::from_str(&value.start_position).map_err(|error| {
+            ContractError::Invalid {
+                field: "payload",
+                reason: format!("invalid TradeMatched participant start_position: {error}"),
+            }
+        })?,
+        order_id: OrderId::new(value.order_id).map_err(|error| ContractError::Invalid {
+            field: "payload",
+            reason: format!("invalid TradeMatched participant order_id: {error}"),
+        })?,
+        twap_id: value.twap_id.map(TwapId::new),
+        client_order_id: value
+            .client_order_id
+            .map(ClientOrderId::new)
+            .transpose()
+            .map_err(|error| ContractError::Invalid {
+                field: "payload",
+                reason: format!("invalid TradeMatched participant client_order_id: {error}"),
+            })?,
+    })
+}
+
+fn validate_trade_account_binding(
+    payload: &EventPayload,
+    account_ids: &[Address],
+) -> Result<(), ContractError> {
+    let EventPayload::TradeMatched(TradeMatched {
+        participants: Some(participants),
+        ..
+    }) = payload
+    else {
+        return Ok(());
+    };
+    let [buyer, seller] = participants.as_ref();
+    let expected = [buyer.account_id, seller.account_id];
+    if account_ids != expected {
+        return Err(ContractError::Invalid {
+            field: "account_ids",
+            reason:
+                "TradeMatched envelope accounts must exactly match participant buyer/seller order"
+                    .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_payload(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
     validate_event_payload(kind.as_wire_name(), bytes).map_err(payload_error)
 }
 
 fn validate_account_payload_size(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
+    if kind == EventKind::TradeMatched && bytes.len() > MAX_CANONICAL_TRADE_PAYLOAD_BYTES {
+        return Err(ContractError::Invalid {
+            field: "payload",
+            reason: "canonical trade payload exceeds the 16384-byte limit".to_owned(),
+        });
+    }
     if matches!(
         kind,
         EventKind::DepositCredited

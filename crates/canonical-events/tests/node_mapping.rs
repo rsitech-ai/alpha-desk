@@ -4,7 +4,7 @@ use std::path::Path;
 use canonical_events::{
     CommittedNodeV1MappingContext, ConfirmationClass, EventPayload, EvidenceOnlyReason,
     MappingDisposition, MappingError, MarketCatalogV1, NodeV1MappingContext,
-    map_committed_node_v1_block, map_node_v1_record,
+    TradeParticipantRoleV1, map_committed_node_v1_block, map_node_v1_record,
 };
 use domain_types::{BlockHeight, ChainId, KnownTime, MarketId, SourceId};
 use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
@@ -209,6 +209,109 @@ fn complete_block_batched_trade_maps_without_inventing_maker_taker_semantics() {
     assert_eq!(trade.maker_order_id, None);
     assert_eq!(trade.taker_order_id, None);
     assert_eq!(trade.deterministic_seed, 0);
+    let [buyer, seller] = trade
+        .participants
+        .as_deref()
+        .expect("documented side_info must be retained");
+    assert_eq!(buyer.role, TradeParticipantRoleV1::Buyer);
+    assert_eq!(buyer.account_id, event.account_addresses()[0]);
+    assert_eq!(buyer.start_position.to_string(), "996.67");
+    assert_eq!(buyer.order_id.as_str(), "12212201265");
+    assert_eq!(buyer.twap_id, None);
+    assert_eq!(buyer.client_order_id, None);
+    assert_eq!(seller.role, TradeParticipantRoleV1::Seller);
+    assert_eq!(seller.account_id, event.account_addresses()[1]);
+    assert_eq!(seller.start_position.to_string(), "-996.7");
+    assert_eq!(seller.order_id.as_str(), "12212198275");
+    assert_eq!(seller.twap_id, None);
+    assert_eq!(seller.client_order_id, None);
+    assert_eq!(
+        event.source_evidence()[0].content_hash(),
+        *record.content_hash().as_bytes()
+    );
+}
+
+#[test]
+fn documented_trade_optionals_are_retained_without_inventing_maker_taker() {
+    let mut batch: serde_json::Value =
+        serde_json::from_slice(&fixture("trade-batch.json")).expect("batch JSON");
+    batch["events"][0]["side_info"][0]["twap_id"] = serde_json::json!(91);
+    batch["events"][0]["side_info"][0]["cloid"] =
+        serde_json::json!("0x11111111111111111111111111111111");
+    let record = parse_node_record(
+        NodeStreamKind::Trades,
+        serde_json::to_vec(&batch).unwrap().into(),
+    )
+    .unwrap();
+
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("complete trade batch must map");
+    };
+    let EventPayload::TradeMatched(trade) = events[0].payload() else {
+        panic!("trade source must map to TradeMatched");
+    };
+    let buyer = &trade.participants.as_ref().unwrap()[0];
+    assert_eq!(buyer.twap_id.unwrap().get(), 91);
+    assert_eq!(
+        buyer.client_order_id.as_ref().unwrap().as_str(),
+        "0x11111111111111111111111111111111"
+    );
+    assert_eq!(trade.maker_order_id, None);
+    assert_eq!(trade.taker_order_id, None);
+}
+
+#[test]
+fn malformed_or_incomplete_trade_participants_fail_closed() {
+    let base: serde_json::Value =
+        serde_json::from_slice(&fixture("trade-batch.json")).expect("batch JSON");
+    let mut cases = Vec::new();
+
+    let mut wrong_length = base.clone();
+    wrong_length["events"][0]["side_info"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    cases.push(wrong_length);
+
+    for field in ["user", "start_pos", "oid", "twap_id", "cloid"] {
+        let mut missing = base.clone();
+        missing["events"][0]["side_info"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        cases.push(missing);
+    }
+
+    for (field, invalid) in [
+        ("start_pos", serde_json::json!("not-a-position")),
+        ("oid", serde_json::json!(0)),
+        ("twap_id", serde_json::json!("91")),
+        ("cloid", serde_json::json!(91)),
+        ("cloid", serde_json::json!("")),
+    ] {
+        let mut malformed = base.clone();
+        malformed["events"][0]["side_info"][0][field] = invalid;
+        cases.push(malformed);
+    }
+    let mut duplicate_accounts = base.clone();
+    duplicate_accounts["events"][0]["side_info"][1]["user"] =
+        duplicate_accounts["events"][0]["side_info"][0]["user"].clone();
+    cases.push(duplicate_accounts);
+
+    for case in cases {
+        let Ok(record) = parse_node_record(
+            NodeStreamKind::Trades,
+            serde_json::to_vec(&case).unwrap().into(),
+        ) else {
+            continue;
+        };
+        assert!(
+            map_node_v1_record(&record, &catalog(), &context()).is_err(),
+            "malformed side_info must not be partially mapped: {case}"
+        );
+    }
 }
 
 #[test]

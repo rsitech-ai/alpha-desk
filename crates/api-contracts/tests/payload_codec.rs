@@ -1,34 +1,35 @@
 use api_contracts::{
-    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAccountModeChanged,
-    WireAssetContextUpdated, WireBackstopLiquidation, WireBuilderFeeCharged, WireDepositCredited,
-    WireDexCreated, WireFeeCharged, WireFundingPaid, WireFundingRateUpdated, WireFundingReceived,
-    WireLeverageChanged, WireLiquidationFill, WireLiquidationStarted, WireMarginModeChanged,
-    WireMarginTableChanged, WireMarketCreated, WireMarketHalted, WireMarketMetadataChanged,
-    WireMarketResumed, WireOpenInterestCapChanged, WireOracleUpdated, WireOrderAccepted,
-    WireOrderCancelled, WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled,
-    WireOrderRejected, WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer,
-    WirePositionSettled, WireReferralReward, WireSpotTransfer, WireSubaccountTransfer,
-    WireTradeMatched, WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited,
-    decode_account_mode_changed, decode_asset_context_updated, decode_backstop_liquidation,
-    decode_builder_fee_charged, decode_deposit_credited, decode_dex_created, decode_fee_charged,
-    decode_funding_paid, decode_funding_rate_updated, decode_funding_received,
-    decode_leverage_changed, decode_liquidation_fill, decode_liquidation_started,
-    decode_margin_mode_changed, decode_margin_table_changed, decode_market_created,
-    decode_market_halted, decode_market_metadata_changed, decode_market_resumed,
-    decode_open_interest_cap_changed, decode_oracle_updated, decode_order_accepted,
-    decode_order_cancelled, decode_order_filled, decode_order_modified,
-    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
-    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_position_settled,
-    decode_referral_reward, decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched,
-    decode_vault_deposit, decode_vault_withdrawal, decode_withdrawal_debited,
-    encode_account_mode_changed, encode_asset_context_updated, encode_backstop_liquidation,
-    encode_builder_fee_charged, encode_default_event_payload, encode_deposit_credited,
-    encode_dex_created, encode_fee_charged, encode_funding_paid, encode_funding_rate_updated,
-    encode_funding_received, encode_leverage_changed, encode_liquidation_fill,
-    encode_liquidation_started, encode_margin_mode_changed, encode_margin_table_changed,
-    encode_market_created, encode_market_halted, encode_market_metadata_changed,
-    encode_market_resumed, encode_open_interest_cap_changed, encode_oracle_updated,
-    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, MAX_CANONICAL_TRADE_PAYLOAD_BYTES, PayloadCodecError,
+    WireAccountModeChanged, WireAssetContextUpdated, WireBackstopLiquidation,
+    WireBuilderFeeCharged, WireDepositCredited, WireDexCreated, WireFeeCharged, WireFundingPaid,
+    WireFundingRateUpdated, WireFundingReceived, WireLeverageChanged, WireLiquidationFill,
+    WireLiquidationStarted, WireMarginModeChanged, WireMarginTableChanged, WireMarketCreated,
+    WireMarketHalted, WireMarketMetadataChanged, WireMarketResumed, WireOpenInterestCapChanged,
+    WireOracleUpdated, WireOrderAccepted, WireOrderCancelled, WireOrderFilled, WireOrderModified,
+    WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
+    WireOutcomeResolved, WirePerpTransfer, WirePositionSettled, WireReferralReward,
+    WireSpotTransfer, WireSubaccountTransfer, WireTradeMatched, WireTradeParticipantV1,
+    WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
+    decode_asset_context_updated, decode_backstop_liquidation, decode_builder_fee_charged,
+    decode_deposit_credited, decode_dex_created, decode_fee_charged, decode_funding_paid,
+    decode_funding_rate_updated, decode_funding_received, decode_leverage_changed,
+    decode_liquidation_fill, decode_liquidation_started, decode_margin_mode_changed,
+    decode_margin_table_changed, decode_market_created, decode_market_halted,
+    decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
+    decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
+    decode_order_modified, decode_order_partially_filled, decode_order_rejected,
+    decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_perp_transfer,
+    decode_position_settled, decode_referral_reward, decode_spot_transfer,
+    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
+    decode_vault_withdrawal, decode_withdrawal_debited, encode_account_mode_changed,
+    encode_asset_context_updated, encode_backstop_liquidation, encode_builder_fee_charged,
+    encode_default_event_payload, encode_deposit_credited, encode_dex_created, encode_fee_charged,
+    encode_funding_paid, encode_funding_rate_updated, encode_funding_received,
+    encode_leverage_changed, encode_liquidation_fill, encode_liquidation_started,
+    encode_margin_mode_changed, encode_margin_table_changed, encode_market_created,
+    encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
+    encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
+    encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
     encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_position_settled,
     encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched,
@@ -48,7 +49,29 @@ fn trade() -> WireTradeMatched {
         price: "65000".to_owned(),
         quantity: "0.01".to_owned(),
         deterministic_seed: 7,
+        participants: None,
     }
+}
+
+fn trade_participants() -> [WireTradeParticipantV1; 2] {
+    [
+        WireTradeParticipantV1 {
+            role: "buyer".to_owned(),
+            account_id: primary_account(),
+            start_position: "996.67".to_owned(),
+            order_id: "12212201265".to_owned(),
+            twap_id: Some(91),
+            client_order_id: Some("0x11111111111111111111111111111111".to_owned()),
+        },
+        WireTradeParticipantV1 {
+            role: "seller".to_owned(),
+            account_id: secondary_account(),
+            start_position: "-996.7".to_owned(),
+            order_id: "12212198275".to_owned(),
+            twap_id: None,
+            client_order_id: None,
+        },
+    ]
 }
 
 fn deposit_with_asset_bytes(asset_bytes: usize) -> WireDepositCredited {
@@ -277,6 +300,73 @@ fn trade_identities_round_trip_when_full_partial_or_absent() {
         decode_trade_matched(&encode_trade_matched(&partial).unwrap()).unwrap(),
         partial
     );
+}
+
+#[test]
+fn trade_participants_round_trip_in_canonical_buyer_seller_order() {
+    let value = WireTradeMatched {
+        participants: Some(trade_participants()),
+        ..trade()
+    };
+    let first = encode_trade_matched(&value).unwrap();
+    let second = encode_trade_matched(&value).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(decode_trade_matched(&first).unwrap(), value);
+}
+
+#[test]
+fn trade_participants_reject_wrong_roles_duplicate_accounts_and_invalid_values() {
+    let mut wrong_order = trade_participants();
+    wrong_order.swap(0, 1);
+    let mut duplicate = trade_participants();
+    duplicate[1].account_id = duplicate[0].account_id.clone();
+    let mut missing_order = trade_participants();
+    missing_order[0].order_id.clear();
+    let mut invalid_start = trade_participants();
+    invalid_start[0].start_position = "--1".to_owned();
+
+    for participants in [wrong_order, duplicate, missing_order, invalid_start] {
+        assert!(matches!(
+            encode_trade_matched(&WireTradeMatched {
+                participants: Some(participants),
+                ..trade()
+            }),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
+
+    for (price, quantity) in [("0", "0.01"), ("65000", "0"), ("-1", "0.01")] {
+        assert!(matches!(
+            encode_trade_matched(&WireTradeMatched {
+                price: price.to_owned(),
+                quantity: quantity.to_owned(),
+                ..trade()
+            }),
+            Err(PayloadCodecError::Invalid { .. })
+        ));
+    }
+}
+
+#[test]
+fn trade_payloads_apply_the_16_kib_preflight_on_encode_and_decode() {
+    let oversized = WireTradeMatched {
+        maker_order_id: Some("x".repeat(MAX_CANONICAL_TRADE_PAYLOAD_BYTES)),
+        ..trade()
+    };
+    assert!(matches!(
+        encode_trade_matched(&oversized),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
+
+    let encoded = encode_trade_matched(&trade()).unwrap();
+    let exact = pad_outer_unknown_to_exact_size(&encoded, MAX_CANONICAL_TRADE_PAYLOAD_BYTES);
+    assert!(decode_trade_matched(&exact).is_ok());
+    let oversized = append_outer_unknown_padding(&exact, 1);
+    assert!(matches!(
+        decode_trade_matched(&oversized),
+        Err(PayloadCodecError::Invalid { .. })
+    ));
 }
 
 #[test]

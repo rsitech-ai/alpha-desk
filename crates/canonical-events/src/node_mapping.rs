@@ -3,15 +3,16 @@ use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDateTime};
 use domain_types::{
-    Address, BlockHeight, ChainId, KnownTime, MarketId, Price, ProtocolTime, Quantity, SourceId,
-    TradeId, TransactionId,
+    Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, PositionQuantity,
+    Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
 };
 use hl_protocol::node::v1::{NodeRecordKind, NodeRecordV1, NodeStreamKind};
 use serde::Deserialize;
 
 use crate::{
     BlockEnvelope, BlockError, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass,
-    ContractError, EventPayload, SourceEvidence, TradeMatched,
+    ContractError, EventPayload, SourceEvidence, TradeMatched, TradeParticipantRoleV1,
+    TradeParticipantV1,
 };
 
 const TRADE_ID_CONTEXT: &str = "hyperliquid-alpha-desk/trade-id/node-v1";
@@ -185,6 +186,10 @@ struct NodeTrade {
 #[derive(Debug, Deserialize)]
 struct TradeSide {
     user: String,
+    start_pos: String,
+    oid: u64,
+    twap_id: serde_json::Value,
+    cloid: serde_json::Value,
 }
 
 pub fn map_committed_node_v1_block(
@@ -399,6 +404,10 @@ fn map_trade(
         Address::parse_api(&trade.side_info[0].user).map_err(|_| MappingError::InvalidAddress)?;
     let seller =
         Address::parse_api(&trade.side_info[1].user).map_err(|_| MappingError::InvalidAddress)?;
+    let participants = [
+        map_trade_participant(&trade.side_info[0], TradeParticipantRoleV1::Buyer, buyer)?,
+        map_trade_participant(&trade.side_info[1], TradeParticipantRoleV1::Seller, seller)?,
+    ];
     let price = Price::from_str(&trade.px).map_err(|error| MappingError::InvalidDecimal {
         field: "price",
         reason: error.to_string(),
@@ -462,9 +471,68 @@ fn map_trade(
             price,
             quantity,
             deterministic_seed: 0,
+            participants: Some(Box::new(participants)),
         }),
     })
     .map_err(Into::into)
+}
+
+fn map_trade_participant(
+    source: &TradeSide,
+    role: TradeParticipantRoleV1,
+    account_id: Address,
+) -> Result<TradeParticipantV1, MappingError> {
+    let start_position = PositionQuantity::from_str(&source.start_pos).map_err(|error| {
+        MappingError::InvalidDecimal {
+            field: "start_position",
+            reason: error.to_string(),
+        }
+    })?;
+    if source.oid == 0 {
+        return Err(MappingError::MalformedRecord {
+            reason: "trade participant oid must be positive".to_owned(),
+        });
+    }
+    let twap_id = match &source.twap_id {
+        serde_json::Value::Null => None,
+        serde_json::Value::Number(value) => Some(TwapId::new(value.as_u64().ok_or_else(|| {
+            MappingError::MalformedRecord {
+                reason: "trade participant twap_id must be an unsigned integer or null".to_owned(),
+            }
+        })?)),
+        _ => {
+            return Err(MappingError::MalformedRecord {
+                reason: "trade participant twap_id must be an unsigned integer or null".to_owned(),
+            });
+        }
+    };
+    let client_order_id = match &source.cloid {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) => {
+            Some(ClientOrderId::new(value.clone()).map_err(|error| {
+                MappingError::MalformedRecord {
+                    reason: format!("invalid trade participant cloid: {error}"),
+                }
+            })?)
+        }
+        _ => {
+            return Err(MappingError::MalformedRecord {
+                reason: "trade participant cloid must be a string or null".to_owned(),
+            });
+        }
+    };
+    Ok(TradeParticipantV1 {
+        role,
+        account_id,
+        start_position,
+        order_id: OrderId::new(source.oid.to_string()).map_err(|error| {
+            MappingError::MalformedRecord {
+                reason: format!("invalid trade participant oid: {error}"),
+            }
+        })?,
+        twap_id,
+        client_order_id,
+    })
 }
 
 fn parse_block_time(value: &str) -> Result<ProtocolTime, MappingError> {
