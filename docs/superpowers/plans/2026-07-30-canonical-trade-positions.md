@@ -160,9 +160,14 @@ no canonical division.
 - Modify: `crates/canonical-events/src/node_mapping.rs`
 - Modify: `crates/canonical-events/tests/node_mapping.rs`
 - Modify: `crates/canonical-events/tests/payload.rs`
-- Modify: `crates/canonical-events/tests/envelope.rs`
-- Modify: generated schema/baseline files only through the repository's
-  deterministic generator.
+- Modify: `crates/canonical-ledger/tests/trade_state.rs`
+- Modify: `crates/replay-engine/tests/serial_replay.rs`
+- Modify: `tools/state-replay/src/trade.rs`
+- Modify: `crates/telemetry/schema-fingerprint-v1.material`
+- Modify: `fixtures/canonical/node-v1/expected.json`
+- Modify: generated schema artifacts only through the repository's
+  deterministic generator; the compatibility baseline descriptor remains
+  unchanged because the extension is additive.
 
 **Produces:**
 
@@ -193,23 +198,23 @@ synthetic V1 envelopes, but any source-qualified position effect requires
 `Some([Buyer, Seller])`. Do not reinterpret the existing maker/taker order IDs
 as buyer/seller IDs.
 
-- [ ] Write red tests for exact participant order, roles, account-envelope
+- [x] Write red tests for exact participant order, roles, account-envelope
   binding, signed start positions, positive fill quantity/price, distinct
   accounts, required order IDs, optional TWAP/client IDs, 16 KiB preflight,
   unknown-field preservation through the enclosing envelope, and deterministic
   re-encoding.
-- [ ] Extend `NodeTrade` mapping to parse all documented `side_info` fields.
+- [x] Extend `NodeTrade` mapping to parse all documented `side_info` fields.
   Reject wrong array length, invalid start positions, missing order IDs,
   malformed optionals, or account mismatch. Preserve source index order and
   bind index 0 to Buyer and index 1 to Seller; the source has no independent
   role tag with which to detect producer-side swapping. Never infer
   maker/taker.
-- [ ] Keep source evidence and original record bytes/hash unchanged.
-- [ ] Regenerate schema artifacts deterministically and pass generated-drift
+- [x] Keep source evidence and original record bytes/hash unchanged.
+- [x] Regenerate schema artifacts deterministically and pass generated-drift
   checks.
-- [ ] Run domain/API/event focused and full tests, strict Clippy, formatting,
+- [x] Run domain/API/event focused and full tests, strict Clippy, formatting,
   and diff checks.
-- [ ] Commit with `feat(events): retain canonical trade participants`.
+- [x] Commit with `feat(events): retain canonical trade participants`.
 
 ---
 
@@ -791,6 +796,13 @@ fixed.
   bounded canonical `ExactQuoteNotional`, no public arbitrary-`BigInt`
   admission, and checked upward-only normalization. Parent and independent
   review passed 53 domain tests, strict Clippy, formatting, and diff checks.
+- 2026-07-30: Task 2 completed at `c4335f5` plus canonical-CLOID remediation
+  `5d890d3`. Enriched trades retain exact buyer/seller participant anchors,
+  preserve participant-free V1 bytes, and keep node output provisional.
+  Hyperliquid CLOIDs are accepted only as lowercase `0x` plus 32 lowercase
+  hexadecimal digits at both wire and node-mapping boundaries. Parent and
+  independent review passed the full domain/API/event suites, generated-drift
+  proof, strict Clippy, formatting, and diff checks.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
