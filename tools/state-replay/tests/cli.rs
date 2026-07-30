@@ -82,7 +82,7 @@ fn cli_runs_the_canonical_trade_evidence_path_without_overclaiming() {
     assert_eq!(success.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(success.stdout).expect("UTF-8"),
-        "PASS evidence_class=synthetic_canonical_trade state_semantics=canonical_trade_facts stage_1_qualified=false stage_2_qualified=false live_source_qualified=false\n"
+        "PASS evidence_class=synthetic_canonical_trade state_semantics=canonical_trade_facts_and_exact_participant_anchors stage_1_qualified=false stage_2_qualified=false live_source_qualified=false\n"
     );
     assert!(success.stderr.is_empty());
     assert!(output.join("report.json").is_file());

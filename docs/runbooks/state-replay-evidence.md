@@ -68,27 +68,38 @@ just state-replay-trade-e2e
 
 The command writes a new private directory under
 `target/evidence/state-replay-trade/`. Each generated committed block contains
-one exact `TradeMatched@1.0.0` event. The run:
+one exact `TradeMatched@1.0.0` event. Blocks alternate between enriched
+participant-bearing trades and participant-free legacy trades, starting with
+an enriched trade. The composite
+`hyperliquid-alpha-desk-canonical-trade-set@2.0.0` reducer preserves the frozen
+V1 facts for every trade and adds V2 participant-anchor facts only for enriched
+trades. The run:
 
 1. requires all independent rebuild state and receipt hashes to match;
 2. publishes, verifies, loads, and resumes a prefix checkpoint;
-3. decodes every trade fact, both ordinal participant legs, and every stored
-   quantity-symmetry reconciliation record;
-4. requires exact expected record cardinality and a passed reconciliation for
-   every generated trade;
-5. requires a malformed trade to fail with
+3. publishes genuine direct V1 and direct V2 component checkpoint artifacts,
+   then proves the local checkpoint store rejects both under composite
+   compatibility with the exact underlying incompatibility;
+4. decodes every V1 fact and reconciliation, plus every enriched V2 trade,
+   buyer/seller participant fact, and position-symmetry reconciliation;
+5. requires exact per-namespace cardinality, opposite signed effects, and a
+   passed reconciliation for every applicable generated trade;
+6. requires a malformed trade to fail with
    `trade_state.invalid_trade_id`/`ledger.reducer_failed` without state change;
    and
-6. requires an unsupported trade schema to fail with
+7. requires an unsupported trade schema to fail with
    `ledger.unsupported_event` without state change.
 
 The report declares
 `evidence_class = "synthetic_canonical_trade"`,
-`state_semantics = "canonical_trade_facts"`,
+`state_semantics = "canonical_trade_facts_and_exact_participant_anchors"`,
 `source_qualification = "synthetic_unassessed"`, Stage 1 and Stage 2 false,
 live-source qualification false, and account/order/position qualification
-false. Participant indices are stable ordinals only; they are not buyer/seller
-or maker/taker claims.
+false. V1 participant indices remain stable evidence ordinals with no semantic
+role claim. V2 ordinal 0 is the source-declared buyer with positive quantity
+effect and ordinal 1 is the source-declared seller with negative quantity
+effect. These are exact synthetic contract facts, not deployed-source or
+account-position qualification.
 
 For a longer bounded run:
 
@@ -253,9 +264,10 @@ qualified. Do not relabel such a stop as archive corruption.
 A successful fixture report is `runtime-proven:synthetic` evidence for
 deterministic serial replay, local checkpoint resume, and poison-block
 atomicity. A successful trade report additionally proves the exact implemented
-canonical trade-fact and stored quantity-symmetry contracts against generated
-canonical events. Neither proves RocksDB durability, deployed Hyperliquid
-source compatibility, external account/book reconciliation, complete
+frozen V1 trade-fact contract and enriched V2 buyer/seller anchor and signed
+effect reconciliation contracts against generated canonical events. Neither
+proves RocksDB durability, deployed Hyperliquid source compatibility, external
+account/book reconciliation, a current position reducer, complete
 action-bearing state, service readiness, or the Stage 2 gate.
 
 Retain the complete evidence directory when comparing runs. The archive,

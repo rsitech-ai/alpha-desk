@@ -38,8 +38,9 @@ pub use state::{
     AppliedMutation, StateImage, StateImageLimits, StateKey, StateMutation, StateView,
 };
 pub use trade::{
-    CanonicalTradeReducerV1, TradeParticipantRecordV1, TradeReconciliationRecordV1,
-    TradeStateError, TradeStateRecordV1,
+    CanonicalTradeReducerSetV2, CanonicalTradeReducerV1, CanonicalTradeReducerV2,
+    TradeParticipantRecordV1, TradeParticipantRecordV2, TradeReconciliationRecordV1,
+    TradeReconciliationRecordV2, TradeStateError, TradeStateRecordV1, TradeStateRecordV2,
 };
 pub use watermark_only::WatermarkOnlyReducerV1;
 

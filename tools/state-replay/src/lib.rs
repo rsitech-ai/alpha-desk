@@ -19,17 +19,18 @@ use std::{
 use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use canonical_events::{
     BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, EventPayload,
-    SourceEvidence, TradeMatched,
+    SourceEvidence, TradeMatched, TradeParticipantRoleV1, TradeParticipantV1,
 };
 use canonical_ledger::{
-    CanonicalLedger, CanonicalTradeReducerV1, CheckpointArtifact, CheckpointCompatibility,
-    LedgerLimits, StateImageLimits, TradeParticipantRecordV1, TradeReconciliationRecordV1,
-    TradeStateRecordV1, WatermarkOnlyReducerV1,
+    CanonicalLedger, CanonicalTradeReducerSetV2, CanonicalTradeReducerV1, CanonicalTradeReducerV2,
+    CheckpointArtifact, CheckpointCompatibility, LedgerLimits, StateImageLimits,
+    TradeParticipantRecordV1, TradeParticipantRecordV2, TradeReconciliationRecordV1,
+    TradeReconciliationRecordV2, TradeStateRecordV1, TradeStateRecordV2, WatermarkOnlyReducerV1,
 };
 use canonical_state_store::LocalCheckpointStore;
 use domain_types::{
-    Address, BlockHeight, BlockRange, ChainId, KnownTime, MarketId, Price, ProtocolTime, Quantity,
-    SourceId, TradeId, TransactionId,
+    Address, BlockHeight, BlockRange, ChainId, ClientOrderId, KnownTime, MarketId, OrderId,
+    PositionQuantity, Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
 };
 use replay_engine::{
     ReplayCancellation, ReplayLimits, ReplayOutcome, ReplayRequest, SerialReplayEngine,
@@ -47,7 +48,7 @@ pub use trade::run_trade_e2e;
 
 const REPORT_SCHEMA: &str = "hyperliquid-alpha-desk/state-replay-e2e-report/v1";
 const ARCHIVE_REPORT_SCHEMA: &str = "hyperliquid-alpha-desk/state-replay-archive-e2e-report/v1";
-const TRADE_REPORT_SCHEMA: &str = "hyperliquid-alpha-desk/state-replay-trade-e2e-report/v1";
+const TRADE_REPORT_SCHEMA: &str = "hyperliquid-alpha-desk/state-replay-trade-e2e-report/v2";
 const EVIDENCE_CLASS: &str = "synthetic_fixture";
 const ARCHIVE_EVIDENCE_CLASS: &str = "operator_archive";
 const TRADE_EVIDENCE_CLASS: &str = "synthetic_canonical_trade";

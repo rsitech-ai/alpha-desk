@@ -55,7 +55,7 @@ fn run_trade(arguments: impl Iterator<Item = OsString>) -> Result<(), CliError> 
     let config = TradeRunConfig::new(output, blocks, checkpoint_after, iterations);
     let _evidence = run_trade_e2e(&config)?;
     println!(
-        "PASS evidence_class=synthetic_canonical_trade state_semantics=canonical_trade_facts stage_1_qualified=false stage_2_qualified=false live_source_qualified=false"
+        "PASS evidence_class=synthetic_canonical_trade state_semantics=canonical_trade_facts_and_exact_participant_anchors stage_1_qualified=false stage_2_qualified=false live_source_qualified=false"
     );
     Ok(())
 }

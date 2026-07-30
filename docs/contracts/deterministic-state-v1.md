@@ -45,6 +45,40 @@ decode and canonical re-encode reproduce the exact bytes. State keys bind the
 trade identity and participant ordinal; typed `decode_at` helpers reject a
 record presented under another key.
 
+`CanonicalTradeReducerV2` is an additive enriched-trade fact reducer under
+version `hyperliquid-alpha-desk-canonical-trade@2.0.0`. It supports only exact
+`TradeMatched@1.0.0` events whose canonical payload retains buyer then seller
+participant anchors matching the envelope account order. It emits only:
+
+- one `trade.v2` record retaining both accounts, signed starting positions,
+  order identities, explicit optional TWAP/client-order identities, price,
+  quantity, market, block, and payload hash;
+- two `trade-participant.v2` records, with ordinal 0 as buyer and a positive
+  quantity effect and ordinal 1 as seller and a negative quantity effect; and
+- one passed `trade-reconciliation.v2` record under
+  `trade-position-symmetry@2.0.0`, binding equal absolute quantities and
+  opposite signed effects.
+
+All four target keys are computed and any existing values are strictly decoded
+and key-bound before collision is reported. Corrupt, noncanonical, or
+wrong-key prior facts fail closed with `trade_state.prior_fact_invalid`; valid
+prior facts fail as an immutable trade-identity collision. No V2 mutation is
+returned unless every prior-fact check and every record encoding succeeds.
+
+`CanonicalTradeReducerSetV2` freezes the composite version
+`hyperliquid-alpha-desk-canonical-trade-set@2.0.0`. Participant-free legacy
+trades run through V1 only. Enriched trades run through V1 and V2 against the
+same pre-event state, preserving the byte-exact V1 surface while adding V2
+facts. It never accepts a direct V1 or direct V2 component checkpoint under the
+composite version; recovery must rebuild from immutable archive events.
+
+These V2 records retain source-observed anchors and per-trade signed effects.
+They do not themselves maintain current account-market position quantity,
+prove continuity between adjacent `start_position` values, infer maker/taker,
+or qualify a deployed source. Optional identities serialize explicitly as JSON
+values or `null`; client-order identities accept only the canonical lowercase
+`0x` plus 32 lowercase hexadecimal digits.
+
 `CanonicalOrderReducerV1` freezes the exact V1 order lifecycle under reducer-set
 version `hyperliquid-alpha-desk-canonical-order@1.0.0`. It owns only exact
 schema `1.0.0` events for `OrderAccepted`, `OrderRested`, `OrderModified`,
@@ -440,14 +474,16 @@ Focused tests prove:
 - read-only operator-archive planning, repeated rebuild, exact-boundary
   checkpoint resume, explicit unqualified evidence, and unchanged archive
   inspection before/after; and
-- exact canonical trade fact, two-leg, and stored symmetry records; malformed
-  late-event whole-block rollback; duplicate trade-identity rejection; bounded
-  canonical codec/key binding; and archive replay/checkpoint equivalence for a
-  three-block synthetic trade sequence; and
-- a bounded operator-visible synthetic trade runner proving repeated rebuild,
-  decoded record cardinality, private checkpoint resume, malformed-trade
-  reducer failure, unsupported-schema quarantine, and private evidence
-  publication; and
+- frozen V1 canonical trade facts and enriched V2 buyer/seller anchors, exact
+  signed effects, and stored position-symmetry records; malformed late-event
+  whole-block rollback; valid, corrupt, and key-mismatched prior-fact
+  rejection; bounded canonical codec/key binding; and mixed legacy/enriched
+  archive replay/checkpoint equivalence; and
+- a bounded operator-visible synthetic trade runner proving repeated mixed
+  rebuild, per-version decoded record cardinality, private composite checkpoint
+  resume, store-level direct V1/V2 component-checkpoint publication and exact
+  incompatibility refusal, malformed-trade reducer failure,
+  unsupported-schema quarantine, and private evidence publication; and
 - exact order acceptance, resting, modification, partial fill, terminal fill,
   cancellation, and rejection state; immutable fact and hash-linked transition
   records; strict identity/key/codec binding; checked overfill and remainder
@@ -470,12 +506,13 @@ Focused tests prove:
   rollback; schema `1.1.0` quarantine; and recursively owner-only evidence
   permissions.
 
-This proves stored canonical trade-fact reconciliation and exact synthetic
+This proves stored V1 canonical trade-fact reconciliation, synthetic
+source-declared V2 buyer/seller anchors and effects, and exact synthetic
 order-lifecycle and market-registry contracts. It does not prove deployed
-action-bearing source compatibility, buyer/seller or maker/taker roles,
-authoritative market metadata, external oracle or snapshot reconciliation,
-account, position, margin, book, signal, or execution state, RocksDB
-durability, a production replay service, or Stage 2 readiness. The retained
+action-bearing source compatibility, maker/taker roles, authoritative market
+metadata, external oracle or snapshot reconciliation, current account
+position, margin, book, signal, or execution state, RocksDB durability, a
+production replay service, or Stage 2 readiness. The retained
 local order report at
 `target/evidence/state-replay-order/20260729T185537Z-82818/report.json` covers
 20 generated blocks, four independent rebuilds, a checkpoint after block 8,
