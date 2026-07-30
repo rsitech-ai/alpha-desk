@@ -1496,7 +1496,7 @@ exactly 20 bytes and becomes `Address::from_bytes`; the second must be valid
 UTF-8 accepted by `MarketId::new`. Quantity-current parser failures map to
 `position_episode.quantity_current_invalid`; episode-current parser failures
 map to `position_episode.episode_current_invalid`. For a touched episode entry,
-phase 2 decodes and key-binds block-start before block-final when both are
+phase 3 decodes and key-binds block-start before block-final when both are
 present, freezing which corrupt value wins.
 
 Trigger extraction maps malformed quantity-current keys/values to
@@ -1525,21 +1525,21 @@ episode records may remain after a pair deletion, but deleting or replacing a
 currently referenced episode must fail reference validation. Every child
 reducer receives the same immutable normalized view object.
 
-- [ ] Write red tests for the public read-only API and exact ordering;
+- [x] Write red tests for the public read-only API and exact ordering;
   empty-block exactly-once default compatibility; put/update/delete,
   create-delete, no-op puts, repeated writes, block-start/final values;
   public limit validation, internal write-count overflow, independent raw
   mutation versus normalized entry/byte limits; and late delta-invariant
   failure with full rollback.
-- [ ] Prove a transient normalized referenced-byte breach rejects immediately
+- [x] Prove a transient normalized referenced-byte breach rejects immediately
   even when a later write or delete would have shrunk the final view below the
   configured limit.
-- [ ] Test touched-pair extraction from all three namespaces, current
+- [x] Test touched-pair extraction from all three namespaces, current
   create/delete/orphan combinations, touched episode start/final identities,
   corrupt/key-mismatched trigger records, corrupt quantity before current,
   corrupt current before reference, reference before matrix mismatch,
   deterministic multi-pair failure order, and unchanged unrelated pairs.
-- [ ] Run full ledger/replay/strict gates and commit with
+- [x] Run full ledger/replay/strict gates and commit with
   `feat(ledger): expose bounded block delta validation`.
 
 ---
@@ -1909,6 +1909,14 @@ fixed.
   triggers first, episode-current triggers second, and each family in
   deterministic delta-key order. Final pair validation remains quantity,
   current, reference, then matrix.
+- 2026-07-30: Task 7A completed at `ffc8614` after precedence clarification
+  `3ece7ab`. The ledger now exposes a public read-only bounded block-delta
+  view, preserves exactly-once legacy validation, accounts exact start/final
+  references and write counts under transient high-water limits, and runs the
+  episode child's three-namespace final-pair audit without scanning untouched
+  state. Parent and two independent reviews passed 14 focused delta tests,
+  full canonical-ledger and replay-engine suites, the full workspace suite,
+  strict all-feature Clippy, formatting, and diff checks.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
