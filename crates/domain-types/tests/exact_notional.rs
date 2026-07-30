@@ -46,12 +46,20 @@ fn product_preserves_the_exact_scale_sum_up_to_76() {
 
 #[test]
 fn constructor_canonicalizes_zero_and_decimal_trailing_zeros() {
-    let zero = ExactQuoteNotional::from_coefficient(BigInt::from(0), 76).unwrap();
+    let zero = ExactQuoteNotional::checked_product(
+        Price::from_raw(0, 38).unwrap(),
+        Quantity::from_raw(1, 38).unwrap(),
+    )
+    .unwrap();
     assert_eq!(zero.coefficient(), &BigInt::from(0));
     assert_eq!(zero.scale(), 0);
     assert_eq!(zero.to_string(), "0");
 
-    let normalized = ExactQuoteNotional::from_coefficient(BigInt::from(1_200), 3).unwrap();
+    let normalized = ExactQuoteNotional::checked_product(
+        Price::from_raw(120, 2).unwrap(),
+        Quantity::from_raw(10, 1).unwrap(),
+    )
+    .unwrap();
     assert_eq!(normalized.coefficient(), &BigInt::from(12));
     assert_eq!(normalized.scale(), 1);
     assert_eq!(normalized.to_string(), "1.2");
@@ -64,11 +72,11 @@ fn coefficient_bound_counts_magnitude_bits_for_both_signs() {
     let bit_513 = BigInt::from(1_u8) << 512_usize;
 
     for coefficient in [bit_511, -bit_512.clone(), bit_512] {
-        assert!(ExactQuoteNotional::from_coefficient(coefficient, 0).is_ok());
+        assert!(ExactQuoteNotional::from_str(&coefficient.to_string()).is_ok());
     }
     for coefficient in [bit_513.clone(), -bit_513] {
         assert_eq!(
-            ExactQuoteNotional::from_coefficient(coefficient, 0),
+            ExactQuoteNotional::from_str(&coefficient.to_string()),
             Err(ValueError::OutOfRange)
         );
     }
@@ -122,10 +130,50 @@ fn checked_add_and_subtract_align_upward_without_rounding() {
 }
 
 #[test]
+fn checked_coefficient_view_only_normalizes_upward_within_every_bound() {
+    let value = ExactQuoteNotional::from_str("-1.2").unwrap();
+    assert_eq!(
+        value.checked_coefficient_at_scale(3),
+        Ok(BigInt::from(-1_200))
+    );
+    assert_eq!(
+        value.checked_coefficient_at_scale(0),
+        Err(ValueError::DownwardExactRescale {
+            source_scale: 1,
+            target_scale: 0,
+        })
+    );
+    assert_eq!(
+        value.checked_coefficient_at_scale(MAX_NOTIONAL_SCALE + 1),
+        Err(ValueError::ScaleOutOfRange {
+            scale: MAX_NOTIONAL_SCALE + 1,
+            maximum: MAX_NOTIONAL_SCALE,
+        })
+    );
+}
+
+#[test]
+fn upward_coefficient_view_and_cross_scale_arithmetic_reject_intermediate_overflow() {
+    let maximum = ExactQuoteNotional::from_str(
+        &((BigInt::from(1_u8) << 512_usize) - BigInt::from(1_u8)).to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        maximum.checked_coefficient_at_scale(1),
+        Err(ValueError::OutOfRange)
+    );
+    assert_eq!(
+        maximum.checked_add(&ExactQuoteNotional::from_str("0.1").unwrap()),
+        Err(ValueError::OutOfRange)
+    );
+}
+
+#[test]
 fn arithmetic_revalidates_the_coefficient_bound_after_each_result() {
     let maximum = (BigInt::from(1_u8) << 512_usize) - BigInt::from(1_u8);
-    let positive = ExactQuoteNotional::from_coefficient(maximum.clone(), 0).unwrap();
-    let negative = ExactQuoteNotional::from_coefficient(-maximum, 0).unwrap();
+    let positive = ExactQuoteNotional::from_str(&maximum.to_string()).unwrap();
+    let negative = ExactQuoteNotional::from_str(&(-maximum).to_string()).unwrap();
     let one = ExactQuoteNotional::from_str("1").unwrap();
 
     assert_eq!(positive.checked_add(&one), Err(ValueError::OutOfRange));
@@ -171,7 +219,10 @@ fn equality_hashing_and_ordering_are_numeric_and_deterministic() {
         ["-2", "-1.5", "0", "0.01", "1", "1.2", "10"]
     );
 
-    let canonical = ExactQuoteNotional::from_coefficient(BigInt::from(1_200), 3).unwrap();
+    let canonical = ExactQuoteNotional::from_str("1.23")
+        .unwrap()
+        .checked_sub(&ExactQuoteNotional::from_str("0.03").unwrap())
+        .unwrap();
     let parsed = ExactQuoteNotional::from_str("1.2").unwrap();
     assert_eq!(canonical, parsed);
     let mut set = HashSet::new();

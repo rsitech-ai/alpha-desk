@@ -44,6 +44,50 @@ fn position_quantity_accepts_scale_38_and_rejects_scale_39() {
 }
 
 #[test]
+fn position_quantity_only_rescales_upward_and_never_rounds() {
+    let quantity = PositionQuantity::from_raw(-123, 2).unwrap();
+    let normalized = quantity.checked_rescale_up(5).unwrap();
+    assert_eq!(normalized.raw(), -123_000);
+    assert_eq!(normalized.scale(), 5);
+    assert_eq!(quantity.checked_rescale_up(2), Ok(quantity));
+    assert_eq!(
+        normalized.checked_rescale_up(1),
+        Err(ValueError::DownwardExactRescale {
+            source_scale: 5,
+            target_scale: 1,
+        })
+    );
+    assert_eq!(
+        quantity.checked_rescale_up(MAX_DECIMAL_SCALE + 1),
+        Err(ValueError::ScaleOutOfRange {
+            scale: MAX_DECIMAL_SCALE + 1,
+            maximum: MAX_DECIMAL_SCALE,
+        })
+    );
+}
+
+#[test]
+fn position_quantity_equality_ordering_hashing_and_serde_are_numeric() {
+    let one_at_scale_one = PositionQuantity::from_raw(10, 1).unwrap();
+    let one_at_scale_zero = PositionQuantity::from_raw(1, 0).unwrap();
+    let negative = PositionQuantity::from_raw(-1, 0).unwrap();
+
+    assert_eq!(one_at_scale_one, one_at_scale_zero);
+    assert!(negative < one_at_scale_one);
+    let mut values = HashSet::new();
+    values.insert(one_at_scale_one);
+    values.insert(one_at_scale_zero);
+    assert_eq!(values.len(), 1);
+
+    let encoded = serde_json::to_string(&PositionQuantity::from_raw(-123, 2).unwrap()).unwrap();
+    assert_eq!(encoded, "\"-1.23\"");
+    assert_eq!(
+        serde_json::from_str::<PositionQuantity>(&encoded).unwrap(),
+        PositionQuantity::from_raw(-123, 2).unwrap()
+    );
+}
+
+#[test]
 fn downscaling_requires_an_explicit_rounding_mode() {
     let price = Price::from_str("1.005").unwrap();
     assert_eq!(

@@ -41,6 +41,8 @@ pub enum ValueError {
     ScaleOutOfRange { scale: u8, maximum: u8 },
     #[error("scales differ: left={left}, right={right}")]
     ScaleMismatch { left: u8, right: u8 },
+    #[error("exact rescale cannot reduce scale from {source_scale} to {target_scale}")]
+    DownwardExactRescale { source_scale: u8, target_scale: u8 },
     #[error("value is outside the permitted range")]
     OutOfRange,
     #[error("division by zero")]
@@ -457,9 +459,65 @@ macro_rules! decimal_newtype {
     };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PositionQuantity(Decimal);
+
+impl PositionQuantity {
+    pub fn from_raw(raw: i128, scale: u8) -> Result<Self, ValueError> {
+        Decimal::from_raw(raw, scale).map(Self)
+    }
+
+    pub fn parse_at_scale(input: &str, scale: u8) -> Result<Self, ValueError> {
+        Decimal::parse_at_scale(input, scale).map(Self)
+    }
+
+    pub const fn raw(self) -> i128 {
+        self.0.raw()
+    }
+
+    pub const fn scale(self) -> u8 {
+        self.0.scale()
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Result<Self, ValueError> {
+        self.0.checked_add(rhs.0).map(Self)
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Result<Self, ValueError> {
+        self.0.checked_sub(rhs.0).map(Self)
+    }
+
+    pub fn checked_rescale_up(self, target_scale: u8) -> Result<Self, ValueError> {
+        validate_scale(target_scale)?;
+        if target_scale < self.scale() {
+            return Err(ValueError::DownwardExactRescale {
+                source_scale: self.scale(),
+                target_scale,
+            });
+        }
+        self.0
+            .rescale(target_scale, RoundingMode::TowardZero)
+            .map(Self)
+    }
+}
+
+impl FromStr for PositionQuantity {
+    type Err = ValueError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        input.parse::<Decimal>().map(Self)
+    }
+}
+
+impl fmt::Display for PositionQuantity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 decimal_newtype!(Price);
 decimal_newtype!(Quantity);
-decimal_newtype!(PositionQuantity);
 decimal_newtype!(QuoteAmount);
 decimal_newtype!(BaseAmount);
 decimal_newtype!(UsdAmount);
@@ -476,7 +534,7 @@ pub struct ExactQuoteNotional {
 }
 
 impl ExactQuoteNotional {
-    pub fn from_coefficient(coefficient: BigInt, scale: u8) -> Result<Self, ValueError> {
+    fn from_coefficient(coefficient: BigInt, scale: u8) -> Result<Self, ValueError> {
         validate_notional_scale(scale)?;
         let (coefficient, scale) = canonicalize_notional(coefficient, scale);
         validate_notional_coefficient(&coefficient)?;
@@ -500,21 +558,34 @@ impl ExactQuoteNotional {
         &self.coefficient
     }
 
+    pub fn checked_coefficient_at_scale(&self, target_scale: u8) -> Result<BigInt, ValueError> {
+        validate_notional_scale(target_scale)?;
+        if target_scale < self.scale {
+            return Err(ValueError::DownwardExactRescale {
+                source_scale: self.scale,
+                target_scale,
+            });
+        }
+        let coefficient = &self.coefficient * pow10_big(u32::from(target_scale - self.scale));
+        validate_notional_coefficient(&coefficient)?;
+        Ok(coefficient)
+    }
+
     pub fn checked_add(&self, rhs: &Self) -> Result<Self, ValueError> {
         let target_scale = self.scale.max(rhs.scale);
-        let left = self.coefficient_at_scale(target_scale);
-        let right = rhs.coefficient_at_scale(target_scale);
+        let left = self.checked_coefficient_at_scale(target_scale)?;
+        let right = rhs.checked_coefficient_at_scale(target_scale)?;
         Self::from_coefficient(left + right, target_scale)
     }
 
     pub fn checked_sub(&self, rhs: &Self) -> Result<Self, ValueError> {
         let target_scale = self.scale.max(rhs.scale);
-        let left = self.coefficient_at_scale(target_scale);
-        let right = rhs.coefficient_at_scale(target_scale);
+        let left = self.checked_coefficient_at_scale(target_scale)?;
+        let right = rhs.checked_coefficient_at_scale(target_scale)?;
         Self::from_coefficient(left - right, target_scale)
     }
 
-    fn coefficient_at_scale(&self, target_scale: u8) -> BigInt {
+    fn coefficient_at_scale_for_ordering(&self, target_scale: u8) -> BigInt {
         debug_assert!(target_scale >= self.scale);
         &self.coefficient * pow10_big(u32::from(target_scale - self.scale))
     }
@@ -623,8 +694,8 @@ impl PartialOrd for ExactQuoteNotional {
 impl Ord for ExactQuoteNotional {
     fn cmp(&self, other: &Self) -> Ordering {
         let target_scale = self.scale.max(other.scale);
-        self.coefficient_at_scale(target_scale)
-            .cmp(&other.coefficient_at_scale(target_scale))
+        self.coefficient_at_scale_for_ordering(target_scale)
+            .cmp(&other.coefficient_at_scale_for_ordering(target_scale))
     }
 }
 
