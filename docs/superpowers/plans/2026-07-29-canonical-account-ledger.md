@@ -538,6 +538,17 @@ on them.
 
 ### Task 5: Compose reducers and reconstruct ordinary positions and episodes
 
+> **HOLD / superseded before implementation (2026-07-30):** Do not execute
+> this task as written. Independent design review proved that it would invent
+> an opening-flat position, collapse non-terminating VWAP into a rounded
+> canonical `Price`, attribute identity-less asset fees to quote positions,
+> and leave fill ownership ambiguous between trade and order events. The
+> corrected source-anchor-first sequence is
+> [2026-07-30-canonical-trade-positions.md](2026-07-30-canonical-trade-positions.md).
+> Task 6 remains blocked until replacement-plan Task 7B is implemented,
+> verified, and independently code-reviewed GO. Design-plan review alone does
+> not unblock evidence work.
+
 **Files:**
 - Create: `crates/canonical-ledger/src/composite.rs`
 - Create: `crates/canonical-ledger/src/account/positions.rs`
@@ -643,6 +654,13 @@ on them.
 
 ### Task 6: Add retained composite account replay evidence
 
+> **Re-sequenced (2026-07-30):** After replacement-plan Task 7B receives
+> implementation review GO, this task creates the committed baseline
+> account-flow/composite `account-e2e` runner. Position-, episode-,
+> liquidation-, and settlement-specific scenarios are then added by
+> replacement-plan Task 8. Use the replacement plan's exact accounting
+> semantics; the superseded Task 5 expectations below are not authoritative.
+
 **Files:**
 - Create: `tools/state-replay/src/account.rs`
 - Modify: `tools/state-replay/src/lib.rs`
@@ -680,12 +698,14 @@ on them.
   ```
 
   Assert at least two independent full replays, a checkpoint suffix that
-  crosses a position reversal and funding event, identical final state/full
-  receipt hashes, strict namespace counts, exact debit/credit symmetry,
-  position/episode cardinalities, metadata-unresolved suppression, backstop
-  unresolved-basis behavior, late-invalid atomic rollback, schema `1.1.0`
-  denial, unsafe/existing output refusal, and recursive `0700`/`0600`
-  permissions.
+  crosses vault flow and account/margin-mode changes, identical final
+  state/full-receipt hashes, strict account-flow/relation/mode namespace
+  counts, exact debit/credit symmetry, typed asset/market prerequisite denial,
+  cross-component late-invalid atomic rollback, schema `1.1.0` denial,
+  unsafe/existing output refusal, and recursive `0700`/`0600` permissions.
+  This baseline does not assert position/episode cardinalities, trade reversal,
+  funding-to-episode attribution, backstop, liquidation, or settlement
+  behavior; replacement-plan Task 8 owns those scenarios.
 
 - [ ] **Step 2: Run red**
 
@@ -699,14 +719,15 @@ on them.
 
   ```text
   evidence_class = synthetic_canonical_account
-  state_semantics = exact_cashflow_and_supported_position_state
+  state_semantics = exact_observed_account_flows_relations_and_modes
   source_qualification = synthetic_unassessed
   reducer_version = hyperliquid-alpha-desk-canonical-state@1.0.0
   ```
 
-  Only `synthetic_account_contract_proven` may be true. Explicitly keep Stage
-  1, Stage 2, deployed/live source, authoritative opening balance, venue
-  balance reconciliation, TWAP position completeness, backstop cost basis,
+  Only `synthetic_account_flow_contract_proven` may be true. Explicitly keep
+  position, episode, liquidation, settlement, funding attribution, Stage 1,
+  Stage 2, deployed/live source, authoritative opening balance, venue balance
+  reconciliation, TWAP position completeness, backstop cost basis,
   standard/unified/portfolio margin, liquidation-price, book, signal, and
   execution qualification false.
 
