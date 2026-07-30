@@ -22,6 +22,25 @@ use domain_types::{
 const BUYER: Address = Address::from_bytes([0x11; 20]);
 const SELLER: Address = Address::from_bytes([0x22; 20]);
 const OPERATOR: Address = Address::from_bytes([0x33; 20]);
+const CURRENT_KEY_GOLDEN: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 20, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0, 0, 0, 0, 0, 0, 0, 8, b'p', b'e', b'r',
+    b'p', b':', b'B', b'T', b'C',
+];
+const EFFECT_KEY_GOLDEN: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 7, b't', b'r', b'd', b'-', b'k', b'e', b'y', 0, 0, 0, 0, 0, 0, 0, 5, b'b',
+    b'u', b'y', b'e', b'r',
+];
+const UNRESOLVED_KEY_GOLDEN: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 20, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0, 0, 0, 0, 0, 0, 0, 8, b'p', b'e', b'r',
+    b'p', b':', b'B', b'T', b'C', 0, 0, 0, 0, 0, 0, 0, 7, b'e', b'v', b't', b'-', b'k', b'e', b'y',
+    0, 0, 0, 0, 0, 0, 0, 7, b'l', b'i', b'q', b'-', b'k', b'e', b'y',
+];
+const FROZEN_CURRENT_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/position-quantity-current/v1","account_id":"0x1111111111111111111111111111111111111111","market_id":"perp:BTC","known_quantity":"1.50000000","first_anchor_event_id":"evt_18ac8b13b4ee099927a91a75838317a1ef672ed5bd8b2b7bce036c466785c50e","last_event_id":"evt_18ac8b13b4ee099927a91a75838317a1ef672ed5bd8b2b7bce036c466785c50e","last_block_height":1601}"#;
+const FROZEN_BUYER_EFFECT_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/position-effect-fact/v1","event_id":"evt_18ac8b13b4ee099927a91a75838317a1ef672ed5bd8b2b7bce036c466785c50e","trade_id":"trd-position-frozen","account_id":"0x1111111111111111111111111111111111111111","market_id":"perp:BTC","role":"buyer","anchor_transition":"first_observation","start_position":"1.25000000","fill_quantity":"0.25000000","result_position":"1.50000000","rule_version":"hyperliquid-alpha-desk-canonical-position@1.0.0"}"#;
+const FROZEN_SELLER_EFFECT_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/position-effect-fact/v1","event_id":"evt_18ac8b13b4ee099927a91a75838317a1ef672ed5bd8b2b7bce036c466785c50e","trade_id":"trd-position-frozen","account_id":"0x2222222222222222222222222222222222222222","market_id":"perp:BTC","role":"seller","anchor_transition":"first_observation","start_position":"-2.50000000","fill_quantity":"0.25000000","result_position":"-2.75000000","rule_version":"hyperliquid-alpha-desk-canonical-position@1.0.0"}"#;
+const FROZEN_UNRESOLVED_GOLDEN: &[u8] = br#"{"schema":"hyperliquid-alpha-desk/position-unresolved-cause-fact/v1","account_id":"0x1111111111111111111111111111111111111111","market_id":"perp:BTC","event_id":"evt_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","liquidation_id":"liq-frozen","cause":"backstop_liquidation"}"#;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct TestDispatcher {
@@ -255,6 +274,221 @@ fn dispatcher_and_ledger_reject_duplicate_or_oversized_mutation_keys() {
 }
 
 #[test]
+fn framed_keys_and_exact_codec_limits_are_literal_and_inclusive() {
+    assert_eq!(
+        PositionQuantityCurrentRecordV1::state_key(&BUYER, &market())
+            .unwrap()
+            .key(),
+        CURRENT_KEY_GOLDEN
+    );
+    assert_eq!(
+        PositionEffectFactRecordV1::state_key(
+            &TradeId::new("trd-key").unwrap(),
+            TradeParticipantRoleV1::Buyer,
+        )
+        .unwrap()
+        .key(),
+        EFFECT_KEY_GOLDEN
+    );
+    assert_eq!(
+        PositionUnresolvedCauseFactRecordV1::state_key(
+            &BUYER,
+            &market(),
+            &EventId::new("evt-key").unwrap(),
+            &LiquidationId::new("liq-key").unwrap(),
+        )
+        .unwrap()
+        .key(),
+        UNRESOLVED_KEY_GOLDEN
+    );
+
+    let exact_key_trade = TradeId::new("x".repeat(64 * 1024 - 21)).unwrap();
+    let exact_key =
+        PositionEffectFactRecordV1::state_key(&exact_key_trade, TradeParticipantRoleV1::Buyer)
+            .unwrap();
+    assert_eq!(exact_key.key().len(), 64 * 1024);
+    let too_long_trade = TradeId::new("x".repeat(64 * 1024 - 20)).unwrap();
+    assert_eq!(
+        PositionEffectFactRecordV1::state_key(&too_long_trade, TradeParticipantRoleV1::Buyer,)
+            .unwrap_err()
+            .reason_code(),
+        "position_state.codec.invalid_key"
+    );
+
+    let exact_record = exact_sized_current_wire(16 * 1024);
+    assert_eq!(exact_record.len(), 16 * 1024);
+    PositionQuantityCurrentRecordV1::decode(&exact_record).unwrap();
+    let mut too_large_record = exact_record;
+    too_large_record.push(b' ');
+    assert_eq!(
+        PositionQuantityCurrentRecordV1::decode(&too_large_record)
+            .unwrap_err()
+            .reason_code(),
+        "position_state.codec.limit_exceeded"
+    );
+}
+
+#[test]
+fn frozen_position_values_decode_at_and_match_reducer_emission() {
+    let mut ledger = seeded_ledger(1600);
+    let trade = trade_event(
+        1601,
+        0,
+        "trd-position-frozen",
+        "65000",
+        "0.25",
+        "1.25",
+        "-2.5",
+        [BUYER, SELLER],
+        "1.0.0",
+    );
+    ledger
+        .apply_block(&block(1601, vec![trade.clone()]))
+        .unwrap();
+    let trade_id = TradeId::new("trd-position-frozen").unwrap();
+    let current_key = PositionQuantityCurrentRecordV1::state_key(&BUYER, &market()).unwrap();
+    let buyer_key =
+        PositionEffectFactRecordV1::state_key(&trade_id, TradeParticipantRoleV1::Buyer).unwrap();
+    let seller_key =
+        PositionEffectFactRecordV1::state_key(&trade_id, TradeParticipantRoleV1::Seller).unwrap();
+    let entries = ledger.state_image().entries();
+    assert_eq!(entries.get(&current_key).unwrap(), FROZEN_CURRENT_GOLDEN);
+    assert_eq!(entries.get(&buyer_key).unwrap(), FROZEN_BUYER_EFFECT_GOLDEN);
+    assert_eq!(
+        entries.get(&seller_key).unwrap(),
+        FROZEN_SELLER_EFFECT_GOLDEN
+    );
+
+    let current =
+        PositionQuantityCurrentRecordV1::decode_at(&current_key, FROZEN_CURRENT_GOLDEN).unwrap();
+    assert_eq!(current.account_id(), BUYER);
+    assert_eq!(current.market_id(), &market());
+    assert_eq!(current.known_quantity().unwrap().to_string(), "1.50000000");
+    assert_eq!(current.first_anchor_event_id(), Some(trade.event_id()));
+    assert_eq!(current.last_event_id(), trade.event_id());
+    assert_eq!(current.last_block_height(), BlockHeight::new(1601));
+
+    let buyer =
+        PositionEffectFactRecordV1::decode_at(&buyer_key, FROZEN_BUYER_EFFECT_GOLDEN).unwrap();
+    assert_eq!(buyer.event_id(), trade.event_id());
+    assert_eq!(buyer.trade_id(), &trade_id);
+    assert_eq!(buyer.role(), TradeParticipantRoleV1::Buyer);
+    assert_eq!(buyer.account_id(), BUYER);
+    assert_eq!(buyer.market_id(), &market());
+    assert_eq!(
+        buyer.anchor_transition(),
+        PositionAnchorTransitionV1::FirstObservation
+    );
+    assert_eq!(buyer.start_position().to_string(), "1.25000000");
+    assert_eq!(buyer.fill_quantity().to_string(), "0.25000000");
+    assert_eq!(buyer.result_position().to_string(), "1.50000000");
+    assert_eq!(
+        buyer.rule_version(),
+        "hyperliquid-alpha-desk-canonical-position@1.0.0"
+    );
+    let seller =
+        PositionEffectFactRecordV1::decode_at(&seller_key, FROZEN_SELLER_EFFECT_GOLDEN).unwrap();
+    assert_eq!(seller.event_id(), trade.event_id());
+    assert_eq!(seller.trade_id(), &trade_id);
+    assert_eq!(seller.role(), TradeParticipantRoleV1::Seller);
+    assert_eq!(seller.account_id(), SELLER);
+    assert_eq!(seller.market_id(), &market());
+    assert_eq!(
+        seller.anchor_transition(),
+        PositionAnchorTransitionV1::FirstObservation
+    );
+    assert_eq!(seller.start_position().to_string(), "-2.50000000");
+    assert_eq!(seller.fill_quantity().to_string(), "0.25000000");
+    assert_eq!(seller.result_position().to_string(), "-2.75000000");
+    assert_eq!(
+        seller.rule_version(),
+        "hyperliquid-alpha-desk-canonical-position@1.0.0"
+    );
+
+    let unresolved_event = fixture_event_id();
+    let unresolved_key = PositionUnresolvedCauseFactRecordV1::state_key(
+        &BUYER,
+        &market(),
+        &unresolved_event,
+        &LiquidationId::new("liq-frozen").unwrap(),
+    )
+    .unwrap();
+    let unresolved =
+        PositionUnresolvedCauseFactRecordV1::decode_at(&unresolved_key, FROZEN_UNRESOLVED_GOLDEN)
+            .unwrap();
+    assert_eq!(unresolved.account_id(), BUYER);
+    assert_eq!(unresolved.market_id(), &market());
+    assert_eq!(unresolved.event_id(), &unresolved_event);
+    assert_eq!(unresolved.liquidation_id().as_str(), "liq-frozen");
+    assert_eq!(
+        unresolved.cause(),
+        PositionUnresolvedCauseV1::BackstopLiquidation
+    );
+}
+
+#[test]
+fn every_invalid_prior_effect_reports_its_codec_cause_without_collision_or_advance() {
+    let target_trade = trade_event(
+        1701,
+        0,
+        "trd-prior-effect",
+        "65000",
+        "0.01",
+        "0",
+        "0",
+        [BUYER, SELLER],
+        "1.0.0",
+    );
+    let target_key = PositionEffectFactRecordV1::state_key(
+        &TradeId::new("trd-prior-effect").unwrap(),
+        TradeParticipantRoleV1::Buyer,
+    )
+    .unwrap();
+    let valid_wrong_identity = effect_wire(
+        target_trade.event_id(),
+        "trd-other-effect",
+        BUYER,
+        TradeParticipantRoleV1::Buyer,
+        "0.00000000",
+        "0.01000000",
+        "0.01000000",
+    );
+    let valid_target = effect_wire(
+        target_trade.event_id(),
+        "trd-prior-effect",
+        BUYER,
+        TradeParticipantRoleV1::Buyer,
+        "0.00000000",
+        "0.01000000",
+        "0.01000000",
+    );
+    for (prior, expected) in [
+        (b"corrupt".to_vec(), "position_state.codec.decode"),
+        (valid_wrong_identity, "position_state.codec.key_mismatch"),
+        (
+            [valid_target.as_slice(), b" "].concat(),
+            "position_state.codec.noncanonical",
+        ),
+    ] {
+        let mut ledger = injected_ledger(1700, vec![StateMutation::put(target_key.clone(), prior)]);
+        let before_bytes = ledger.state_image().canonical_bytes();
+        let before_hash = ledger.state_hash();
+        let before_checkpoint = ledger.checkpoint().unwrap();
+        let error = ledger
+            .apply_block(&block(1701, vec![target_trade.clone()]))
+            .expect_err("invalid prior effect must fail before collision");
+        assert_eq!(error.reducer_reason_code(), Some(expected));
+        assert_ne!(
+            error.reducer_reason_code(),
+            Some("position_state.effect_collision")
+        );
+        assert_eq!(ledger.state_image().canonical_bytes(), before_bytes);
+        assert_eq!(ledger.state_hash(), before_hash);
+        assert_eq!(ledger.checkpoint().unwrap(), before_checkpoint);
+    }
+}
+
+#[test]
 fn first_nonzero_observation_anchors_both_sides_and_applies_opposite_effects() {
     let mut ledger = seeded_ledger(100);
     let trade = trade_event(
@@ -334,6 +568,10 @@ fn first_nonzero_observation_anchors_both_sides_and_applies_opposite_effects() {
         "0.25000000",
         "1.50000000",
     );
+    assert_eq!(
+        effect(&ledger, &trade, BUYER).anchor_transition(),
+        PositionAnchorTransitionV1::FirstObservation
+    );
     assert_effect(
         &ledger,
         &trade,
@@ -342,6 +580,10 @@ fn first_nonzero_observation_anchors_both_sides_and_applies_opposite_effects() {
         "-2.50000000",
         "0.25000000",
         "-2.75000000",
+    );
+    assert_eq!(
+        effect(&ledger, &trade, SELLER).anchor_transition(),
+        PositionAnchorTransitionV1::FirstObservation
     );
 }
 
@@ -392,11 +634,27 @@ fn continued_anchor_preserves_first_event_and_halted_exact_market_remains_usable
     ledger
         .apply_block(&block(1503, vec![continued.clone()]))
         .unwrap();
-    let current = current(&ledger, BUYER);
-    assert_eq!(current.first_anchor_event_id(), Some(&first_event_id));
-    assert_eq!(current.known_quantity().unwrap().to_string(), "0.20000000");
+    let buyer_current = current(&ledger, BUYER);
+    assert_eq!(buyer_current.first_anchor_event_id(), Some(&first_event_id));
+    assert_eq!(
+        buyer_current.known_quantity().unwrap().to_string(),
+        "0.20000000"
+    );
     assert_eq!(
         effect(&ledger, &continued, BUYER).anchor_transition(),
+        PositionAnchorTransitionV1::Continued
+    );
+    let seller_current = current(&ledger, SELLER);
+    assert_eq!(
+        seller_current.first_anchor_event_id(),
+        Some(&first_event_id)
+    );
+    assert_eq!(
+        seller_current.known_quantity().unwrap().to_string(),
+        "-0.20000000"
+    );
+    assert_eq!(
+        effect(&ledger, &continued, SELLER).anchor_transition(),
         PositionAnchorTransitionV1::Continued
     );
 }
@@ -808,15 +1066,24 @@ fn key_bound_codecs_reject_corrupt_noncanonical_oversized_and_mismatched_values(
         900,
     );
 
-    for corrupt in [
-        encoded[..encoded.len() - 1].to_vec(),
-        [encoded.as_slice(), b" "].concat(),
-        b"{}".to_vec(),
-        vec![b'x'; 16 * 1024 + 1],
+    for (corrupt, expected) in [
+        (
+            encoded[..encoded.len() - 1].to_vec(),
+            "position_state.codec.decode",
+        ),
+        (
+            [encoded.as_slice(), b" "].concat(),
+            "position_state.codec.noncanonical",
+        ),
+        (b"{}".to_vec(), "position_state.codec.decode"),
+        (
+            vec![b'x'; 16 * 1024 + 1],
+            "position_state.codec.limit_exceeded",
+        ),
     ] {
         let error =
             PositionQuantityCurrentRecordV1::decode(&corrupt).expect_err("strict current codec");
-        assert!(error.reason_code().starts_with("position_state.codec"));
+        assert_eq!(error.reason_code(), expected);
     }
 
     let key = PositionQuantityCurrentRecordV1::state_key(&BUYER, &market()).unwrap();
@@ -830,7 +1097,12 @@ fn key_bound_codecs_reject_corrupt_noncanonical_oversized_and_mismatched_values(
     );
 
     let oversized = vec![b'x'; 64 * 1024 + 1];
-    assert!(PositionQuantityCurrentRecordV1::decode(&oversized).is_err());
+    assert_eq!(
+        PositionQuantityCurrentRecordV1::decode(&oversized)
+            .unwrap_err()
+            .reason_code(),
+        "position_state.codec.limit_exceeded"
+    );
 }
 
 #[test]
@@ -913,6 +1185,16 @@ fn unresolved_backstop_reanchors_without_deleting_any_preserved_cause() {
         1100,
     );
     let current_key = PositionQuantityCurrentRecordV1::state_key(&BUYER, &market()).unwrap();
+    let seller_current = current_wire(
+        &SELLER.to_api_string(),
+        market().as_str(),
+        None,
+        Some(&anchor),
+        &anchor,
+        1100,
+    );
+    let seller_current_key =
+        PositionQuantityCurrentRecordV1::state_key(&SELLER, &market()).unwrap();
     let cause_event_a =
         EventId::new("evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .unwrap();
@@ -939,6 +1221,7 @@ fn unresolved_backstop_reanchors_without_deleting_any_preserved_cause() {
         1100,
         vec![
             StateMutation::put(current_key, current),
+            StateMutation::put(seller_current_key, seller_current),
             StateMutation::put(cause_key_a.clone(), cause_a),
             StateMutation::put(cause_key_b.clone(), cause_b),
         ],
@@ -967,10 +1250,22 @@ fn unresolved_backstop_reanchors_without_deleting_any_preserved_cause() {
         &event_id,
         1101,
     );
+    assert_current(
+        &ledger,
+        SELLER,
+        Some("-0.25000000"),
+        Some(&anchor),
+        &event_id,
+        1101,
+    );
     assert!(ledger.state_image().entries().contains_key(&cause_key_a));
     assert!(ledger.state_image().entries().contains_key(&cause_key_b));
     assert_eq!(
         effect(&ledger, &trade, BUYER).anchor_transition(),
+        PositionAnchorTransitionV1::ReanchoredFromUnresolved
+    );
+    assert_eq!(
+        effect(&ledger, &trade, SELLER).anchor_transition(),
         PositionAnchorTransitionV1::ReanchoredFromUnresolved
     );
 }
@@ -1515,6 +1810,27 @@ fn market() -> MarketId {
 
 fn fixture_event_id() -> EventId {
     EventId::new("evt_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc").unwrap()
+}
+
+fn exact_sized_current_wire(target_len: usize) -> Vec<u8> {
+    let seed = EventId::new("e").unwrap();
+    let base = current_wire(
+        &BUYER.to_api_string(),
+        market().as_str(),
+        None,
+        None,
+        &seed,
+        1,
+    );
+    let expanded = EventId::new("e".repeat(1 + target_len - base.len())).unwrap();
+    current_wire(
+        &BUYER.to_api_string(),
+        market().as_str(),
+        None,
+        None,
+        &expanded,
+        1,
+    )
 }
 
 fn current_wire(
