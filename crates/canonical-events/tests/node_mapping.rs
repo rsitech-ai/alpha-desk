@@ -290,6 +290,26 @@ fn malformed_or_incomplete_trade_participants_fail_closed() {
         ("twap_id", serde_json::json!("91")),
         ("cloid", serde_json::json!(91)),
         ("cloid", serde_json::json!("")),
+        (
+            "cloid",
+            serde_json::json!("11111111111111111111111111111111"),
+        ),
+        (
+            "cloid",
+            serde_json::json!("0x1111111111111111111111111111111"),
+        ),
+        (
+            "cloid",
+            serde_json::json!("0x111111111111111111111111111111111"),
+        ),
+        (
+            "cloid",
+            serde_json::json!("0xA1111111111111111111111111111111"),
+        ),
+        (
+            "cloid",
+            serde_json::json!("0xg1111111111111111111111111111111"),
+        ),
     ] {
         let mut malformed = base.clone();
         malformed["events"][0]["side_info"][0][field] = invalid;

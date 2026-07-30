@@ -36,6 +36,7 @@ use api_contracts::{
     encode_vault_deposit, encode_vault_withdrawal, encode_withdrawal_debited,
     validate_event_payload,
 };
+use prost::Message;
 
 const ACCOUNT_PAYLOAD_LIMIT: usize = MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES;
 const ACCOUNT_PAYLOAD_SIZE_REASON: &str = "canonical account payload exceeds the 16384-byte limit";
@@ -72,6 +73,64 @@ fn trade_participants() -> [WireTradeParticipantV1; 2] {
             client_order_id: None,
         },
     ]
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct TestTypedPayloadEnvelope {
+    #[prost(string, tag = "1")]
+    event_kind: String,
+    #[prost(bytes = "vec", tag = "2")]
+    message: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct TestDecimalValue {
+    #[prost(string, tag = "1")]
+    value: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct TestTradeParticipantV1 {
+    #[prost(int32, tag = "1")]
+    role: i32,
+    #[prost(string, tag = "2")]
+    account_id: String,
+    #[prost(string, tag = "3")]
+    start_position: String,
+    #[prost(string, tag = "4")]
+    order_id: String,
+    #[prost(uint64, optional, tag = "5")]
+    twap_id: Option<u64>,
+    #[prost(string, tag = "6")]
+    client_order_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct TestTradeMatched {
+    #[prost(string, tag = "1")]
+    trade_id: String,
+    #[prost(string, tag = "2")]
+    market_id: String,
+    #[prost(string, tag = "3")]
+    maker_order_id: String,
+    #[prost(string, tag = "4")]
+    taker_order_id: String,
+    #[prost(message, optional, tag = "5")]
+    price: Option<TestDecimalValue>,
+    #[prost(message, optional, tag = "6")]
+    quantity: Option<TestDecimalValue>,
+    #[prost(uint64, tag = "7")]
+    deterministic_seed: u64,
+    #[prost(message, repeated, tag = "8")]
+    participants: Vec<TestTradeParticipantV1>,
+}
+
+fn rewrite_first_trade_cloid(encoded: &[u8], cloid: &str) -> Vec<u8> {
+    let mut envelope = TestTypedPayloadEnvelope::decode(encoded).unwrap();
+    let mut trade = TestTradeMatched::decode(envelope.message.as_slice()).unwrap();
+    trade.participants[0].client_order_id = cloid.to_owned();
+    envelope.message = trade.encode_to_vec();
+    envelope.encode_to_vec()
 }
 
 fn deposit_with_asset_bytes(asset_bytes: usize) -> WireDepositCredited {
@@ -313,6 +372,64 @@ fn trade_participants_round_trip_in_canonical_buyer_seller_order() {
 
     assert_eq!(first, second);
     assert_eq!(decode_trade_matched(&first).unwrap(), value);
+}
+
+#[test]
+fn trade_participant_cloids_require_exact_lowercase_128_bit_hex_on_encode_and_decode() {
+    let invalid = [
+        "11111111111111111111111111111111",
+        "0x1111111111111111111111111111111",
+        "0x111111111111111111111111111111111",
+        "0xA1111111111111111111111111111111",
+        "0xg1111111111111111111111111111111",
+        "",
+    ];
+
+    for cloid in invalid {
+        let mut participants = trade_participants();
+        participants[0].client_order_id = Some(cloid.to_owned());
+        assert!(
+            matches!(
+                encode_trade_matched(&WireTradeMatched {
+                    participants: Some(participants),
+                    ..trade()
+                }),
+                Err(PayloadCodecError::Invalid { .. })
+            ),
+            "encoder admitted non-canonical trade cloid {cloid:?}"
+        );
+    }
+
+    let valid = WireTradeMatched {
+        participants: Some(trade_participants()),
+        ..trade()
+    };
+    let encoded = encode_trade_matched(&valid).unwrap();
+    for cloid in &invalid[..invalid.len() - 1] {
+        assert!(
+            matches!(
+                decode_trade_matched(&rewrite_first_trade_cloid(&encoded, cloid)),
+                Err(PayloadCodecError::Invalid { .. })
+            ),
+            "decoder admitted non-canonical trade cloid {cloid:?}"
+        );
+    }
+
+    assert_eq!(decode_trade_matched(&encoded).unwrap(), valid);
+    let null = WireTradeMatched {
+        participants: Some([
+            WireTradeParticipantV1 {
+                client_order_id: None,
+                ..trade_participants()[0].clone()
+            },
+            trade_participants()[1].clone(),
+        ]),
+        ..trade()
+    };
+    assert_eq!(
+        decode_trade_matched(&encode_trade_matched(&null).unwrap()).unwrap(),
+        null
+    );
 }
 
 #[test]
