@@ -825,28 +825,28 @@ Return `Some(sell - buy)` only for `CompleteFromFlat` episodes whose status is
 `Closed` and cause is `TradeFlat` or `TradeReversal`; use checked subtraction.
 Return `None` for partial, open, or interrupted episodes.
 
-- [ ] Test buyer/seller flat-open/add/reduce/flat/reversal; first partial
+- [x] Test buyer/seller flat-open/add/reduce/flat/reversal; first partial
   same-side/reduce/flat/reversal; unresolved re-anchor from flat/nonzero;
   both reversal ordinals/IDs; split quantity/notional conservation;
   non-terminating VWAP pairs; mixed-scale increases; tick/lot/downscale,
   checked-magnitude, signed quantity, exact notional, cumulative quantity, and
   cumulative notional overflow.
-- [ ] Test every invalid quantity/episode prestate pair, corrupt/key-mismatched
+- [x] Test every invalid quantity/episode prestate pair, corrupt/key-mismatched
   records, closed immutability, state-aware reference validation, start
   mismatch, effect/new-episode collision after decoding corrupt,
   key-mismatched, and identical prior bytes, and reducer-local/cross-child
   duplicate keys.
-- [ ] Test paid/received funding attribution, upward scale alignment, all three
+- [x] Test paid/received funding attribution, upward scale alignment, all three
   byte-empty suppression states, stale flat/nonzero mismatch, exact market and
   ordered identity failures, and proof that account funding flow remains a
   sibling while fees are unsupported.
-- [ ] Test same-event prestate behavior, later same-block visibility, buyer
+- [x] Test same-event prestate behavior, later same-block visibility, buyer
   success plus seller failure rollback, late child failure rollback, mixed
   legacy/enriched ownership, checkpoint refusal, and repeated/resumed replay
   byte identity under the test reducer set.
-- [ ] Document exact analytical-only metric availability and the missing fee
+- [x] Document exact analytical-only metric availability and the missing fee
   execution identity.
-- [ ] Run ledger/replay tests and strict gates.
+- [x] Run ledger/replay tests and strict gates.
 - [ ] Commit with `feat(state): add exact analytical position episodes`.
 
 ---

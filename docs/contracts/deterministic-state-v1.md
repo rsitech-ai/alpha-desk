@@ -128,8 +128,71 @@ ledger mutation limits impose a stricter 4 KiB encoded-key ceiling. Existing
 effect values are decoded and key-bound before a valid immutable collision is
 reported. Any late invalid leg or event rejects the whole candidate block.
 These records prove deterministic arithmetic over synthetic source-declared
-anchors; they do not prove deployed source authority, position episodes,
+anchors; they do not prove deployed source authority, protocol-reported
 realized PnL, margin, liquidation, or live execution state.
+
+`CanonicalPositionEpisodeReducerV1` adds an analytical episode projection
+under reducer-set version
+`hyperliquid-alpha-desk-canonical-position-episode@1.0.0`. It owns only exact
+participant-bearing `TradeMatched@1.0.0`, `FundingPaid@1.0.0`, and
+`FundingReceived@1.0.0`. Fees remain outside this projection because V1 fee
+events carry no execution identity; time proximity is never used to attach
+them to a position.
+
+The quantity and episode reducers consume the same crate-private validated
+trade result against the same pre-event state. That shared boundary performs
+exact market lookup, upward-only scale normalization, tick/lot checks, signed
+buyer/seller arithmetic, and full exact quote-notional multiplication.
+Neither reducer consumes the other's same-event mutations. The paired current
+state must satisfy exactly one of these conditions:
+
+- both current records are absent;
+- known zero quantity is paired with `no_open_episode`;
+- known nonzero quantity is paired with a key-bound open episode; or
+- unknown quantity is paired with `interrupted`.
+
+Corrupt records, orphan currents, a missing or terminal resolved target, and
+all cross-family mismatches fail closed. A known quantity must equal the next
+source start after exact upward normalization. An absent or interrupted pair
+may re-anchor from that source start.
+
+An episode opened from observed flat state is
+`complete_from_flat`. A first observation or unresolved re-anchor at nonzero
+position is `partial_from_first_observation`, preserving the explicit opening
+position without manufacturing earlier basis. Buyer activity always
+increments observed buy quantity/notional and seller activity always
+increments observed sell quantity/notional, whether the fill adds, reduces,
+closes, or reverses the position. Quantities accumulate only after exact
+upward scale alignment. Notionals retain exact integer coefficient and scale
+pairs; canonical state never divides to derive VWAP.
+
+A flat result closes the active episode as `trade_flat`. A reversal uses
+checked signed magnitude, assigns only the closing quantity and notional to
+ordinal 0, closes it as `trade_reversal`, and opens the residual from flat as
+ordinal 1. The two quantities and two exact notionals must conserve the full
+fill exactly. Episode identities are BLAKE3-derived from length-framed account,
+market, opening event, and opening ordinal under the frozen V1 context.
+Immutable per-event effects are keyed by event, account, market, and leg
+ordinal. Existing effect and newly derived episode identities are decoded and
+key-bound before a valid collision is reported; identical prior bytes are
+still collisions.
+
+Funding is attributed only when the paired current state is known nonzero and
+resolves to an open episode. It exactly accumulates the named paid or received
+side after upward-aligning the existing paid total, existing received total,
+and incoming amount to their common maximum scale. Both persisted totals and
+both effect deltas use that scale. It emits a zero-trade-delta episode effect
+and refreshes provenance.
+Funding observed before any position, while flat, or while attribution is
+interrupted produces no episode bytes. The independent account reducer still
+records its funding flow, including suppressed episode-attribution cases.
+
+`observed_signed_trade_notional_delta` is available only for
+`complete_from_flat` episodes closed by `trade_flat` or `trade_reversal`. It is
+the checked exact difference `sell_notional - buy_notional`; it is not
+source-reported realized PnL and excludes fees and funding. Partial, open, and
+interrupted episodes return no metric. Repeated clean replay and checkpoint
+resume are required to reproduce byte-identical episode state.
 
 `CanonicalOrderReducerV1` freezes the exact V1 order lifecycle under reducer-set
 version `hyperliquid-alpha-desk-canonical-order@1.0.0`. It owns only exact

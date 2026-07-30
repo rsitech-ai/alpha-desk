@@ -56,75 +56,14 @@ impl EventReducer for CanonicalPositionReducerV1 {
                 "position reducer received an unsupported event",
             ));
         }
-        let EventPayload::TradeMatched(trade) = event.payload() else {
-            return Err(reducer_error(
-                "position_state.unsupported_event",
-                "position reducer received an unsupported event",
-            ));
-        };
-        let trade_id = trade.trade_id.as_ref().ok_or_else(identity_mismatch)?;
-        let market_id = trade.market_id.as_ref().ok_or_else(identity_mismatch)?;
-        let Some([buyer, seller]) = trade.participants.as_deref() else {
-            return Err(identity_mismatch());
-        };
-        if buyer.role != TradeParticipantRoleV1::Buyer
-            || seller.role != TradeParticipantRoleV1::Seller
-            || buyer.account_id == seller.account_id
-            || event.market_ids() != std::slice::from_ref(market_id)
-            || event.account_addresses() != [buyer.account_id, seller.account_id]
-        {
-            return Err(identity_mismatch());
-        }
-
-        let market = load_market(state, market_id)?;
-        let (price_scale, quantity_scale, tick_size, lot_size) = exact_market_contract(&market)?;
-        let price = normalize_price(trade.price, price_scale)?;
-        let fill = normalize_quantity(trade.quantity, quantity_scale)?;
-        if price.raw() <= 0 || price.raw() % tick_size.raw() != 0 {
-            return Err(reducer_error(
-                "position_state.price_tick_misaligned",
-                "trade price is not positive and tick aligned",
-            ));
-        }
-        if fill.raw() <= 0 || fill.raw() % lot_size.raw() != 0 {
-            return Err(quantity_lot_misaligned());
-        }
-
-        let legs = [
-            (
-                TradeParticipantRoleV1::Buyer,
-                buyer.account_id,
-                buyer.start_position,
-            ),
-            (
-                TradeParticipantRoleV1::Seller,
-                seller.account_id,
-                seller.start_position,
-            ),
-        ];
+        let validated =
+            validate_enriched_trade(state, event).map_err(map_trade_validation_for_quantity)?;
         let mut effect_mutations = Vec::with_capacity(2);
         let mut current_mutations = Vec::with_capacity(2);
-        for (role, account_id, source_start) in legs {
-            let start = normalize_position(source_start, quantity_scale)?;
-            if start.raw() % lot_size.raw() != 0 {
-                return Err(quantity_lot_misaligned());
-            }
-            let effect = PositionQuantity::from_raw(fill.raw(), quantity_scale)
-                .map_err(|_| position_arithmetic())?;
-            let result = match role {
-                TradeParticipantRoleV1::Buyer => start
-                    .checked_add(effect)
-                    .map_err(|_| position_arithmetic())?,
-                TradeParticipantRoleV1::Seller => start
-                    .checked_sub(effect)
-                    .map_err(|_| position_arithmetic())?,
-            };
-            if result.raw() % lot_size.raw() != 0 {
-                return Err(quantity_lot_misaligned());
-            }
-
-            let current_key = PositionQuantityCurrentRecordV1::state_key(&account_id, market_id)
-                .map_err(codec_reducer_error)?;
+        for leg in validated.legs {
+            let current_key =
+                PositionQuantityCurrentRecordV1::state_key(&leg.account_id, &validated.market_id)
+                    .map_err(codec_reducer_error)?;
             let (anchor_transition, first_anchor_event_id) =
                 match load_current(state, &current_key)? {
                     None => (
@@ -133,8 +72,8 @@ impl EventReducer for CanonicalPositionReducerV1 {
                     ),
                     Some(current) => match current.known_quantity {
                         Some(known) => {
-                            let known = normalize_position(known, quantity_scale)?;
-                            if known != start {
+                            let known = normalize_position(known, validated.quantity_scale)?;
+                            if known != leg.start {
                                 return Err(reducer_error(
                                     "position_state.start_position_mismatch",
                                     "source start position does not match known current position",
@@ -156,25 +95,25 @@ impl EventReducer for CanonicalPositionReducerV1 {
                     },
                 };
 
-            let effect_key = PositionEffectFactRecordV1::state_key(trade_id, role)
+            let effect_key = PositionEffectFactRecordV1::state_key(&validated.trade_id, leg.role)
                 .map_err(codec_reducer_error)?;
             reject_prior_effect(state, &effect_key)?;
             let effect_record = PositionEffectFactRecordV1 {
                 event_id: event.event_id().clone(),
-                trade_id: trade_id.clone(),
-                account_id,
-                market_id: market_id.clone(),
-                role,
+                trade_id: validated.trade_id.clone(),
+                account_id: leg.account_id,
+                market_id: validated.market_id.clone(),
+                role: leg.role,
                 anchor_transition,
-                start_position: start,
-                fill_quantity: fill,
-                result_position: result,
+                start_position: leg.start,
+                fill_quantity: validated.fill,
+                result_position: leg.result,
                 rule_version: Self::VERSION.to_owned(),
             };
             let current_record = PositionQuantityCurrentRecordV1::try_new(
-                account_id,
-                market_id.clone(),
-                Some(result),
+                leg.account_id,
+                validated.market_id.clone(),
+                Some(leg.result),
                 Some(first_anchor_event_id),
                 event.event_id().clone(),
                 event.block_height(),
@@ -189,20 +128,261 @@ impl EventReducer for CanonicalPositionReducerV1 {
                 current_record.encode().map_err(codec_reducer_error)?,
             ));
         }
-        // This validation deliberately follows normalization/alignment of
-        // price, fill, both starts, and both results. Trade V2 retains source
-        // price and analytical episodes own persisted notionals.
-        ExactQuoteNotional::checked_product(price, fill).map_err(|_| {
-            reducer_error(
-                "position_state.notional_arithmetic",
-                "normalized exact notional cannot be represented",
-            )
-        })?;
         let mut mutations = effect_mutations;
         mutations.extend(current_mutations);
         ensure_unique_mutation_keys(&mutations)?;
         Ok(mutations)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TradeValidationError {
+    Identity,
+    MarketMissing,
+    MarketInvalid,
+    MarketUnresolved,
+    ScaleNormalization,
+    PriceTick,
+    QuantityLot,
+    PositionArithmetic,
+    NotionalArithmetic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ValidatedTradeLeg {
+    pub(super) role: TradeParticipantRoleV1,
+    pub(super) account_id: Address,
+    pub(super) start: PositionQuantity,
+    pub(super) result: PositionQuantity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SourceTradeLeg {
+    pub(super) role: TradeParticipantRoleV1,
+    pub(super) account_id: Address,
+    source_start: PositionQuantity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NormalizedTradeLeg {
+    pub(super) role: TradeParticipantRoleV1,
+    pub(super) account_id: Address,
+    pub(super) start: PositionQuantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TradePrerequisites {
+    trade_id: TradeId,
+    pub(super) market_id: MarketId,
+    source_price: Price,
+    source_fill: Quantity,
+    price_scale: u8,
+    pub(super) quantity_scale: u8,
+    tick_size: Price,
+    lot_size: Quantity,
+    pub(super) legs: [SourceTradeLeg; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PreparedTrade {
+    trade_id: TradeId,
+    pub(super) market_id: MarketId,
+    pub(super) price: Price,
+    pub(super) fill: Quantity,
+    pub(super) quantity_scale: u8,
+    lot_size: Quantity,
+    legs: [SourceTradeLeg; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ValidatedTrade {
+    pub(super) trade_id: TradeId,
+    pub(super) market_id: MarketId,
+    pub(super) price: Price,
+    pub(super) fill: Quantity,
+    pub(super) full_notional: ExactQuoteNotional,
+    pub(super) quantity_scale: u8,
+    pub(super) legs: [ValidatedTradeLeg; 2],
+}
+
+pub(super) fn validate_enriched_trade(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+) -> Result<ValidatedTrade, TradeValidationError> {
+    finish_prepared_enriched_trade(prepare_enriched_trade(
+        validate_enriched_trade_prerequisites(state, event)?,
+    )?)
+}
+
+pub(super) fn validate_enriched_trade_prerequisites(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+) -> Result<TradePrerequisites, TradeValidationError> {
+    let EventPayload::TradeMatched(trade) = event.payload() else {
+        return Err(TradeValidationError::Identity);
+    };
+    let trade_id = trade
+        .trade_id
+        .as_ref()
+        .ok_or(TradeValidationError::Identity)?;
+    let market_id = trade
+        .market_id
+        .as_ref()
+        .ok_or(TradeValidationError::Identity)?;
+    let Some([buyer, seller]) = trade.participants.as_deref() else {
+        return Err(TradeValidationError::Identity);
+    };
+    if buyer.role != TradeParticipantRoleV1::Buyer
+        || seller.role != TradeParticipantRoleV1::Seller
+        || buyer.account_id == seller.account_id
+        || event.market_ids() != std::slice::from_ref(market_id)
+        || event.account_addresses() != [buyer.account_id, seller.account_id]
+    {
+        return Err(TradeValidationError::Identity);
+    }
+
+    let (price_scale, quantity_scale, tick_size, lot_size) =
+        validate_exact_market(state, market_id)?;
+    Ok(TradePrerequisites {
+        trade_id: trade_id.clone(),
+        market_id: market_id.clone(),
+        source_price: trade.price,
+        source_fill: trade.quantity,
+        price_scale,
+        quantity_scale,
+        tick_size,
+        lot_size,
+        legs: [
+            SourceTradeLeg {
+                role: TradeParticipantRoleV1::Buyer,
+                account_id: buyer.account_id,
+                source_start: buyer.start_position,
+            },
+            SourceTradeLeg {
+                role: TradeParticipantRoleV1::Seller,
+                account_id: seller.account_id,
+                source_start: seller.start_position,
+            },
+        ],
+    })
+}
+
+pub(super) fn prepare_enriched_trade(
+    prerequisites: TradePrerequisites,
+) -> Result<PreparedTrade, TradeValidationError> {
+    let price = normalize_price_validated(prerequisites.source_price, prerequisites.price_scale)?;
+    let fill =
+        normalize_quantity_validated(prerequisites.source_fill, prerequisites.quantity_scale)?;
+    if price.raw() <= 0 || price.raw() % prerequisites.tick_size.raw() != 0 {
+        return Err(TradeValidationError::PriceTick);
+    }
+    if fill.raw() <= 0 || fill.raw() % prerequisites.lot_size.raw() != 0 {
+        return Err(TradeValidationError::QuantityLot);
+    }
+
+    Ok(PreparedTrade {
+        trade_id: prerequisites.trade_id,
+        market_id: prerequisites.market_id,
+        price,
+        fill,
+        quantity_scale: prerequisites.quantity_scale,
+        lot_size: prerequisites.lot_size,
+        legs: prerequisites.legs,
+    })
+}
+
+pub(super) fn normalize_prepared_trade_leg(
+    prepared: &PreparedTrade,
+    index: usize,
+) -> Result<NormalizedTradeLeg, TradeValidationError> {
+    let source = prepared
+        .legs
+        .get(index)
+        .ok_or(TradeValidationError::Identity)?;
+    Ok(NormalizedTradeLeg {
+        role: source.role,
+        account_id: source.account_id,
+        start: normalize_position_validated(source.source_start, prepared.quantity_scale)?,
+    })
+}
+
+pub(super) fn normalize_prerequisite_trade_leg(
+    prerequisites: &TradePrerequisites,
+    index: usize,
+) -> Result<NormalizedTradeLeg, TradeValidationError> {
+    let source = prerequisites
+        .legs
+        .get(index)
+        .ok_or(TradeValidationError::Identity)?;
+    Ok(NormalizedTradeLeg {
+        role: source.role,
+        account_id: source.account_id,
+        start: normalize_position_validated(source.source_start, prerequisites.quantity_scale)?,
+    })
+}
+
+pub(super) fn finish_prepared_enriched_trade(
+    prepared: PreparedTrade,
+) -> Result<ValidatedTrade, TradeValidationError> {
+    let effect = PositionQuantity::from_raw(prepared.fill.raw(), prepared.quantity_scale)
+        .map_err(|_| TradeValidationError::PositionArithmetic)?;
+    let mut legs = [
+        ValidatedTradeLeg {
+            role: prepared.legs[0].role,
+            account_id: prepared.legs[0].account_id,
+            start: PositionQuantity::from_raw(0, prepared.quantity_scale)
+                .map_err(|_| TradeValidationError::PositionArithmetic)?,
+            result: PositionQuantity::from_raw(0, prepared.quantity_scale)
+                .map_err(|_| TradeValidationError::PositionArithmetic)?,
+        },
+        ValidatedTradeLeg {
+            role: prepared.legs[1].role,
+            account_id: prepared.legs[1].account_id,
+            start: PositionQuantity::from_raw(0, prepared.quantity_scale)
+                .map_err(|_| TradeValidationError::PositionArithmetic)?,
+            result: PositionQuantity::from_raw(0, prepared.quantity_scale)
+                .map_err(|_| TradeValidationError::PositionArithmetic)?,
+        },
+    ];
+    for (index, slot) in legs.iter_mut().enumerate() {
+        let source = normalize_prepared_trade_leg(&prepared, index)?;
+        if source.start.raw() % prepared.lot_size.raw() != 0 {
+            return Err(TradeValidationError::QuantityLot);
+        }
+        let result = match source.role {
+            TradeParticipantRoleV1::Buyer => source.start.checked_add(effect),
+            TradeParticipantRoleV1::Seller => source.start.checked_sub(effect),
+        }
+        .map_err(|_| TradeValidationError::PositionArithmetic)?;
+        if result.raw() % prepared.lot_size.raw() != 0 {
+            return Err(TradeValidationError::QuantityLot);
+        }
+        *slot = ValidatedTradeLeg {
+            role: source.role,
+            account_id: source.account_id,
+            start: source.start,
+            result,
+        };
+    }
+    let full_notional = ExactQuoteNotional::checked_product(prepared.price, prepared.fill)
+        .map_err(|_| TradeValidationError::NotionalArithmetic)?;
+    Ok(ValidatedTrade {
+        trade_id: prepared.trade_id,
+        market_id: prepared.market_id,
+        price: prepared.price,
+        fill: prepared.fill,
+        full_notional,
+        quantity_scale: prepared.quantity_scale,
+        legs,
+    })
+}
+
+pub(super) fn validate_exact_market(
+    state: &StateView<'_>,
+    market_id: &MarketId,
+) -> Result<(u8, u8, Price, Quantity), TradeValidationError> {
+    let market = load_market_validated(state, market_id)?;
+    exact_market_contract_validated(&market)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,38 +869,21 @@ struct PositionUnresolvedCauseFactWireV1 {
     cause: String,
 }
 
-fn load_market(
+fn load_market_validated(
     state: &StateView<'_>,
     market_id: &MarketId,
-) -> Result<MarketCurrentRecordV1, ReducerError> {
-    let key = MarketCurrentRecordV1::state_key(market_id).map_err(|_| {
-        reducer_error(
-            "position_state.market_prerequisite_invalid",
-            "market prerequisite key construction failed",
-        )
-    })?;
-    let bytes = state.get(&key).ok_or_else(|| {
-        reducer_error(
-            "position_state.market_prerequisite_missing",
-            "market prerequisite is missing",
-        )
-    })?;
-    MarketCurrentRecordV1::decode_at(&key, bytes).map_err(|_| {
-        reducer_error(
-            "position_state.market_prerequisite_invalid",
-            "market prerequisite is corrupt or key mismatched",
-        )
-    })
+) -> Result<MarketCurrentRecordV1, TradeValidationError> {
+    let key = MarketCurrentRecordV1::state_key(market_id)
+        .map_err(|_| TradeValidationError::MarketInvalid)?;
+    let bytes = state.get(&key).ok_or(TradeValidationError::MarketMissing)?;
+    MarketCurrentRecordV1::decode_at(&key, bytes).map_err(|_| TradeValidationError::MarketInvalid)
 }
 
-fn exact_market_contract(
+fn exact_market_contract_validated(
     market: &MarketCurrentRecordV1,
-) -> Result<(u8, u8, Price, Quantity), ReducerError> {
+) -> Result<(u8, u8, Price, Quantity), TradeValidationError> {
     if market.metadata_resolution() != MarketMetadataResolutionV1::Exact {
-        return Err(reducer_error(
-            "position_state.market_metadata_unresolved",
-            "market prerequisite metadata is unresolved",
-        ));
+        return Err(TradeValidationError::MarketUnresolved);
     }
     let price_scale = market
         .price_scale()
@@ -742,38 +905,48 @@ fn exact_market_contract(
         {
             Ok((price_scale, quantity_scale, tick, lot))
         }
-        _ => Err(reducer_error(
-            "position_state.market_prerequisite_invalid",
-            "exact market prerequisite is internally invalid",
-        )),
+        _ => Err(TradeValidationError::MarketInvalid),
     }
 }
 
-fn normalize_price(value: Price, target_scale: u8) -> Result<Price, ReducerError> {
+fn normalize_price_validated(
+    value: Price,
+    target_scale: u8,
+) -> Result<Price, TradeValidationError> {
     if value.scale() > target_scale {
-        return Err(scale_normalization());
+        return Err(TradeValidationError::ScaleNormalization);
     }
     value
         .rescale(target_scale, RoundingMode::TowardZero)
-        .map_err(|_| scale_normalization())
+        .map_err(|_| TradeValidationError::ScaleNormalization)
 }
 
-fn normalize_quantity(value: Quantity, target_scale: u8) -> Result<Quantity, ReducerError> {
+fn normalize_quantity_validated(
+    value: Quantity,
+    target_scale: u8,
+) -> Result<Quantity, TradeValidationError> {
     if value.scale() > target_scale {
-        return Err(scale_normalization());
+        return Err(TradeValidationError::ScaleNormalization);
     }
     value
         .rescale(target_scale, RoundingMode::TowardZero)
-        .map_err(|_| scale_normalization())
+        .map_err(|_| TradeValidationError::ScaleNormalization)
+}
+
+fn normalize_position_validated(
+    value: PositionQuantity,
+    target_scale: u8,
+) -> Result<PositionQuantity, TradeValidationError> {
+    value
+        .checked_rescale_up(target_scale)
+        .map_err(|_| TradeValidationError::ScaleNormalization)
 }
 
 fn normalize_position(
     value: PositionQuantity,
     target_scale: u8,
 ) -> Result<PositionQuantity, ReducerError> {
-    value
-        .checked_rescale_up(target_scale)
-        .map_err(|_| scale_normalization())
+    normalize_position_validated(value, target_scale).map_err(map_trade_validation_for_quantity)
 }
 
 fn load_current(
@@ -831,32 +1004,45 @@ fn decode_role(value: &str) -> Result<TradeParticipantRoleV1, PositionStateError
     }
 }
 
-fn identity_mismatch() -> ReducerError {
-    reducer_error(
-        "position_state.identity_mismatch",
-        "trade payload and envelope identities must match exactly",
-    )
-}
-
-fn scale_normalization() -> ReducerError {
-    reducer_error(
-        "position_state.scale_normalization",
-        "trade values cannot be normalized upward exactly",
-    )
-}
-
-fn quantity_lot_misaligned() -> ReducerError {
-    reducer_error(
-        "position_state.quantity_lot_misaligned",
-        "trade quantity or position is not lot aligned",
-    )
-}
-
-fn position_arithmetic() -> ReducerError {
-    reducer_error(
-        "position_state.position_arithmetic",
-        "position arithmetic cannot be represented exactly",
-    )
+fn map_trade_validation_for_quantity(error: TradeValidationError) -> ReducerError {
+    match error {
+        TradeValidationError::Identity => reducer_error(
+            "position_state.identity_mismatch",
+            "trade payload and envelope identities must match exactly",
+        ),
+        TradeValidationError::MarketMissing => reducer_error(
+            "position_state.market_prerequisite_missing",
+            "market prerequisite is missing",
+        ),
+        TradeValidationError::MarketInvalid => reducer_error(
+            "position_state.market_prerequisite_invalid",
+            "market prerequisite is corrupt, key mismatched, or internally invalid",
+        ),
+        TradeValidationError::MarketUnresolved => reducer_error(
+            "position_state.market_metadata_unresolved",
+            "market prerequisite metadata is unresolved",
+        ),
+        TradeValidationError::ScaleNormalization => reducer_error(
+            "position_state.scale_normalization",
+            "trade values cannot be normalized upward exactly",
+        ),
+        TradeValidationError::PriceTick => reducer_error(
+            "position_state.price_tick_misaligned",
+            "trade price is not positive and tick aligned",
+        ),
+        TradeValidationError::QuantityLot => reducer_error(
+            "position_state.quantity_lot_misaligned",
+            "trade quantity or position is not lot aligned",
+        ),
+        TradeValidationError::PositionArithmetic => reducer_error(
+            "position_state.position_arithmetic",
+            "position arithmetic cannot be represented exactly",
+        ),
+        TradeValidationError::NotionalArithmetic => reducer_error(
+            "position_state.notional_arithmetic",
+            "normalized exact notional cannot be represented",
+        ),
+    }
 }
 
 fn current_record_invalid() -> ReducerError {
