@@ -382,7 +382,7 @@ block-atomic tests. The final review covers the complete Task 4 range. This
 keeps unit/storage contracts reviewable before state-machine behavior depends
 on them.
 
-- [ ] **Step 1: Write failing reducer and codec tests**
+- [x] **Step 1: Write failing reducer and codec tests**
 
   Assert one immutable fact per accepted event; exact debit/credit symmetry;
   fee/funding direction; builder/referrer counterpart totals; vault principal
@@ -393,7 +393,7 @@ on them.
   pre-allocation key bounds; unsupported schema denial; and whole-block
   rollback after a late invalid transfer.
 
-- [ ] **Step 2: Run red**
+- [x] **Step 2: Run red**
 
   ```bash
   cargo +1.97.1 test -p canonical-ledger --test account_cashflow --locked --offline
@@ -483,7 +483,7 @@ on them.
   exact and requires no rounding. Name all totals `flow`, never `balance`: V1
   lacks an opening snapshot and cannot prove venue balance.
 
-- [ ] **Step 4: Implement transitions and invariants**
+- [x] **Step 4: Implement transitions and invariants**
 
   Enforce exact ordered payload/envelope identity lists for every owned event.
   Deposits/withdrawals affect external-asset flow only. Spot and perp
@@ -523,7 +523,7 @@ on them.
   prerequisite. Tests seed market/asset prerequisites through a test-only
   fixed dispatcher; the production composite remains Task 5.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
   ```bash
   cargo +1.97.1 test -p canonical-ledger --test account_cashflow --locked --offline
@@ -830,6 +830,16 @@ on them.
   passed for the worker, parent, and independent reviewer. The independent
   exact-range review returned GO with no findings. Reducer transitions,
   prerequisites, collisions, and block-atomic behavior remain Slice B.
+- 2026-07-30: Task 4 Slice B completed at `8d5aca6`. The account reducer now
+  owns all fifteen exact-schema cash-flow/reward/mode kinds, emits immutable
+  facts, enforces ordered envelope identities and decoded prerequisites,
+  updates unit-separated observed flows with exact upward scaling, and
+  preserves direct relation and predecessor semantics atomically. Worker,
+  parent, and independent review reproduced 16 focused account tests, 79
+  ledger tests, 9 replay tests, strict Clippy, formatting, and exact-range
+  diff checks. Independent review returned GO with no findings. The result is
+  repo-ready observed-flow state, not balance, position, margin, or
+  deployed-source proof.
 
 ## Rollback / Recovery
 
