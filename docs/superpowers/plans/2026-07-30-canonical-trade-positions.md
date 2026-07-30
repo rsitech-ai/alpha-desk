@@ -1473,16 +1473,20 @@ Add read-only accessors for the two new limits. Unit-test the internal
 write-count overflow branch with a private test seam initialized at
 `u32::MAX`; do not weaken public limit validation to reach it.
 
-The episode child scans the bounded delta in three phases:
+The episode child scans the bounded delta in four phases:
 
-1. In delta-key order, derive touched account/market pairs from exact framed
-   `position-quantity-current.v1` and `position-episode-current.v1` keys,
-   including create-then-delete entries whose two values are absent.
-2. Treat touched `position-episode.v1` records as triggers too. Decode and
+1. Scan `position-quantity-current.v1` entries in delta-key order and derive
+   their exact framed account/market pairs, including create-then-delete
+   entries whose two values are absent.
+2. Then scan `position-episode-current.v1` entries in delta-key order and
+   derive the same identity. Quantity-family trigger errors therefore precede
+   episode-current trigger errors even though the episode-current namespace
+   sorts first globally.
+3. Treat touched `position-episode.v1` records as triggers too. Decode and
    key-bind every present block-start and block-final episode value and add
    both referenced account/market pairs. A touched episode entry with neither
    value cannot establish its pair and fails closed.
-3. Sort unique pairs by their canonical quantity-current `StateKey`, then
+4. Sort unique pairs by their canonical quantity-current `StateKey`, then
    validate each pair against the final candidate state.
 
 The current-key parser accepts exactly two nonempty unsigned-u64-big-endian
@@ -1899,6 +1903,12 @@ fixed.
   43-kind ownership table, non-bypassable version manifest, merge/validation
   precedence, and explicit component-checkpoint refusal matrix. Independent
   re-reviews returned GO for both tasks before implementation.
+- 2026-07-30: Task 7A RED exposed that global `StateKey` order would make the
+  episode-current namespace mask a corrupt quantity-current trigger. The
+  contract was clarified before implementation acceptance to scan quantity
+  triggers first, episode-current triggers second, and each family in
+  deterministic delta-key order. Final pair validation remains quantity,
+  current, reference, then matrix.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
