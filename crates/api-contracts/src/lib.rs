@@ -61,6 +61,18 @@ const CANONICAL_ACCOUNT_PAYLOAD_SIZE_REASON: &str =
     "canonical account payload exceeds the 16384-byte limit";
 const CANONICAL_TRADE_PAYLOAD_SIZE_REASON: &str =
     "canonical trade payload exceeds the 16384-byte limit";
+
+/// Returns whether a trade participant client order ID is the canonical
+/// lowercase representation of a 128-bit value.
+pub fn is_canonical_trade_client_order_id(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("0x") else {
+        return false;
+    };
+    hex.len() == 32
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
 const MAX_SCHEMA_FILES: usize = 4_096;
 const MAX_SCHEMA_MATERIAL_BYTES: usize = 64 * 1024 * 1024;
 
@@ -2482,9 +2494,7 @@ fn validate_trade_participants(
         participant.client_order_id = participant
             .client_order_id
             .take()
-            .map(|value| {
-                required_bounded_text("TradeMatched", "participants.client_order_id", value, 256)
-            })
+            .map(validate_trade_client_order_id)
             .transpose()?;
     }
     if participants[0].role != "buyer" || participants[1].role != "seller" {
@@ -2501,6 +2511,16 @@ fn validate_trade_participants(
         &participants[1].account_id,
     )?;
     Ok(participants)
+}
+
+fn validate_trade_client_order_id(value: String) -> Result<String, PayloadCodecError> {
+    if !is_canonical_trade_client_order_id(&value) {
+        return Err(PayloadCodecError::Invalid {
+            kind: "TradeMatched".to_owned(),
+            reason: "participants.client_order_id must be lowercase 0x followed by exactly 32 lowercase hexadecimal digits".to_owned(),
+        });
+    }
+    Ok(value)
 }
 
 fn encode_trade_participant(

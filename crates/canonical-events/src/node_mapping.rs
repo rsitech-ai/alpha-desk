@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
+use api_contracts::is_canonical_trade_client_order_id;
 use chrono::{DateTime, NaiveDateTime};
 use domain_types::{
     Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, PositionQuantity,
@@ -509,6 +510,11 @@ fn map_trade_participant(
     let client_order_id = match &source.cloid {
         serde_json::Value::Null => None,
         serde_json::Value::String(value) => {
+            if !is_canonical_trade_client_order_id(value) {
+                return Err(MappingError::MalformedRecord {
+                    reason: "trade participant cloid must be lowercase 0x followed by exactly 32 lowercase hexadecimal digits".to_owned(),
+                });
+            }
             Some(ClientOrderId::new(value.clone()).map_err(|error| {
                 MappingError::MalformedRecord {
                     reason: format!("invalid trade participant cloid: {error}"),
