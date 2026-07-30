@@ -1,14 +1,21 @@
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
+use canonical_events::{CanonicalEventEnvelope, EventKind, EventPayload, TradeParticipantRoleV1};
 use domain_types::{
     Address, BlockHeight, EventId, ExactQuoteNotional, MarketId, PositionEpisodeId,
-    PositionQuantity, Quantity, QuoteAmount,
+    PositionQuantity, Quantity, QuoteAmount, RoundingMode,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{StateKey, StateView};
+use crate::{ApplyContext, EventReducer, ReducerError, StateKey, StateMutation, StateView};
 
 use super::codec::{PositionStateError, decode_wire, encode_wire, require_record_bytes, state_key};
+use super::quantity::{
+    NormalizedTradeLeg, PositionQuantityCurrentRecordV1, TradeValidationError, ValidatedTrade,
+    ValidatedTradeLeg, finish_prepared_enriched_trade, normalize_prerequisite_trade_leg,
+    prepare_enriched_trade, validate_enriched_trade_prerequisites, validate_exact_market,
+};
 
 const EPISODE_NAMESPACE: &str = "position-episode.v1";
 const EPISODE_SCHEMA: &str = "hyperliquid-alpha-desk/position-episode/v1";
@@ -22,6 +29,67 @@ const MAX_IDENTITY_BYTES: usize = 64 * 1024;
 const FRAME_BYTES: usize = size_of::<u64>();
 const MAX_LEG_ORDINAL: u8 = 1;
 const EPISODE_RULE_VERSION: &str = "hyperliquid-alpha-desk-canonical-position-episode@1.0.0";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CanonicalPositionEpisodeReducerV1;
+
+impl CanonicalPositionEpisodeReducerV1 {
+    pub const VERSION: &'static str = EPISODE_RULE_VERSION;
+}
+
+impl EventReducer for CanonicalPositionEpisodeReducerV1 {
+    fn reducer_set_version(&self) -> &str {
+        Self::VERSION
+    }
+
+    fn supports(&self, event: &CanonicalEventEnvelope) -> bool {
+        if event.schema_version() != "1.0.0" {
+            return false;
+        }
+        match event.payload() {
+            EventPayload::TradeMatched(trade) => trade.participants.is_some(),
+            EventPayload::FundingPaid(_) | EventPayload::FundingReceived(_) => true,
+            _ => false,
+        }
+    }
+
+    fn reduce(
+        &self,
+        state: &StateView<'_>,
+        event: &CanonicalEventEnvelope,
+        _context: &ApplyContext<'_>,
+    ) -> Result<Vec<StateMutation>, ReducerError> {
+        if !self.supports(event) {
+            return Err(episode_error(
+                "position_episode.unsupported_event",
+                "position episode reducer received an unsupported event",
+            ));
+        }
+        match event.payload() {
+            EventPayload::TradeMatched(_) => reduce_trade(state, event),
+            EventPayload::FundingPaid(funding) => reduce_funding(
+                state,
+                event,
+                funding.account_id,
+                &funding.market_id,
+                funding.amount,
+                true,
+            ),
+            EventPayload::FundingReceived(funding) => reduce_funding(
+                state,
+                event,
+                funding.account_id,
+                &funding.market_id,
+                funding.amount,
+                false,
+            ),
+            _ => Err(episode_error(
+                "position_episode.unsupported_event",
+                "position episode reducer received an unsupported event",
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpisodeCompletenessV1 {
@@ -466,6 +534,26 @@ impl PositionEpisodeRecordV1 {
     pub const fn last_block_height(&self) -> BlockHeight {
         self.last_block_height
     }
+
+    /// Returns the trade-only signed notional delta for a fully observed
+    /// episode. This is analytical evidence, not source-provided realized PnL.
+    pub fn observed_signed_trade_notional_delta(
+        &self,
+    ) -> Result<Option<ExactQuoteNotional>, PositionStateError> {
+        if self.completeness != EpisodeCompletenessV1::CompleteFromFlat
+            || self.status != EpisodeStatusV1::Closed
+            || !matches!(
+                self.close_cause,
+                Some(EpisodeCloseCauseV1::TradeFlat | EpisodeCloseCauseV1::TradeReversal)
+            )
+        {
+            return Ok(None);
+        }
+        self.sell_notional
+            .checked_sub(&self.buy_notional)
+            .map(Some)
+            .map_err(|_| PositionStateError::InvalidRecord)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -853,6 +941,843 @@ impl PositionEpisodeEffectFactRecordV1 {
     }
 }
 
+#[derive(Debug, Clone)]
+enum LoadedEpisodePair {
+    Absent,
+    NoOpenEpisode,
+    Resolved {
+        episode: Box<PositionEpisodeRecordV1>,
+        known_quantity: PositionQuantity,
+    },
+    Interrupted,
+}
+
+fn reduce_trade(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    let prerequisites = validate_enriched_trade_prerequisites(state, event)
+        .map_err(map_trade_validation_for_episode)?;
+    let loaded = [
+        load_episode_pair(
+            state,
+            &prerequisites.legs[0].account_id,
+            &prerequisites.market_id,
+        )?,
+        load_episode_pair(
+            state,
+            &prerequisites.legs[1].account_id,
+            &prerequisites.market_id,
+        )?,
+    ];
+    for (index, loaded_pair) in loaded.iter().enumerate() {
+        let leg = normalize_prerequisite_trade_leg(&prerequisites, index)
+            .map_err(map_trade_validation_for_episode)?;
+        validate_loaded_trade_start(loaded_pair, leg, prerequisites.quantity_scale)?;
+    }
+    let prepared =
+        prepare_enriched_trade(prerequisites).map_err(map_trade_validation_for_episode)?;
+    let validated =
+        finish_prepared_enriched_trade(prepared).map_err(map_trade_validation_for_episode)?;
+    let mut mutations = Vec::new();
+    for (leg, loaded) in validated.legs.into_iter().zip(loaded) {
+        mutations.extend(stage_trade_leg(state, event, &validated, leg, loaded)?);
+    }
+    ensure_unique_episode_mutation_keys(&mutations)?;
+    Ok(mutations)
+}
+
+fn validate_loaded_trade_start(
+    loaded: &LoadedEpisodePair,
+    leg: NormalizedTradeLeg,
+    quantity_scale: u8,
+) -> Result<(), ReducerError> {
+    match loaded {
+        LoadedEpisodePair::NoOpenEpisode if leg.start.raw() != 0 => {
+            return Err(start_position_mismatch());
+        }
+        LoadedEpisodePair::Resolved { known_quantity, .. } => {
+            let known = known_quantity
+                .checked_rescale_up(quantity_scale)
+                .map_err(|_| quantity_arithmetic())?;
+            if known != leg.start {
+                return Err(start_position_mismatch());
+            }
+        }
+        LoadedEpisodePair::Absent
+        | LoadedEpisodePair::NoOpenEpisode
+        | LoadedEpisodePair::Interrupted => {}
+    }
+    Ok(())
+}
+
+fn stage_trade_leg(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+    trade: &ValidatedTrade,
+    leg: ValidatedTradeLeg,
+    loaded: LoadedEpisodePair,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    let (mut episode, is_new) = match loaded {
+        LoadedEpisodePair::Absent => (
+            new_trade_episode(event, trade, leg, completeness_for_start(leg.start), 0)?,
+            true,
+        ),
+        LoadedEpisodePair::NoOpenEpisode => {
+            if leg.start.raw() != 0 {
+                return Err(start_position_mismatch());
+            }
+            (
+                new_trade_episode(
+                    event,
+                    trade,
+                    leg,
+                    EpisodeCompletenessV1::CompleteFromFlat,
+                    0,
+                )?,
+                true,
+            )
+        }
+        LoadedEpisodePair::Interrupted => (
+            new_trade_episode(event, trade, leg, completeness_for_start(leg.start), 0)?,
+            true,
+        ),
+        LoadedEpisodePair::Resolved {
+            episode: existing,
+            known_quantity,
+        } => {
+            let known = known_quantity
+                .checked_rescale_up(trade.quantity_scale)
+                .map_err(|_| quantity_arithmetic())?;
+            if known != leg.start {
+                return Err(start_position_mismatch());
+            }
+            (*existing, false)
+        }
+    };
+
+    let start_sign = leg.start.raw().signum();
+    let result_sign = leg.result.raw().signum();
+    let reversal = start_sign != 0 && result_sign != 0 && start_sign != result_sign;
+
+    let mut effects = Vec::with_capacity(if reversal { 2 } else { 1 });
+    let mut episodes = Vec::with_capacity(if reversal { 2 } else { 1 });
+    let current = if reversal {
+        let magnitude = checked_position_magnitude(leg.start)?;
+        let closed_raw = magnitude.min(trade.fill.raw());
+        let residual_raw = trade
+            .fill
+            .raw()
+            .checked_sub(closed_raw)
+            .ok_or_else(quantity_arithmetic)?;
+        if closed_raw <= 0 || residual_raw <= 0 {
+            return Err(quantity_arithmetic());
+        }
+        let closed_quantity = Quantity::from_raw(closed_raw, trade.quantity_scale)
+            .map_err(|_| quantity_arithmetic())?;
+        let residual_quantity = Quantity::from_raw(residual_raw, trade.quantity_scale)
+            .map_err(|_| quantity_arithmetic())?;
+        let closed_notional = ExactQuoteNotional::checked_product(trade.price, closed_quantity)
+            .map_err(|_| notional_arithmetic())?;
+        let residual_notional = ExactQuoteNotional::checked_product(trade.price, residual_quantity)
+            .map_err(|_| notional_arithmetic())?;
+        if closed_quantity
+            .checked_add(residual_quantity)
+            .map_err(|_| quantity_arithmetic())?
+            != trade.fill
+            || closed_notional
+                .checked_add(&residual_notional)
+                .map_err(|_| notional_arithmetic())?
+                != trade.full_notional
+        {
+            return Err(notional_arithmetic());
+        }
+
+        apply_trade_delta(
+            &mut episode,
+            leg.role,
+            closed_quantity,
+            &closed_notional,
+            event,
+            Some(EpisodeCloseCauseV1::TradeReversal),
+        )?;
+        let old_effect = trade_effect(
+            event,
+            &leg,
+            &trade.market_id,
+            0,
+            episode.episode_id.clone(),
+            EpisodeEffectKindV1::Closed,
+            closed_quantity,
+            closed_notional,
+            Some(EpisodeCloseCauseV1::TradeReversal),
+        )?;
+        effects.push((0, old_effect));
+        episodes.push((is_new, episode));
+
+        let mut residual_episode = new_trade_episode(
+            event,
+            trade,
+            ValidatedTradeLeg {
+                start: PositionQuantity::from_raw(0, trade.quantity_scale)
+                    .map_err(|_| quantity_arithmetic())?,
+                ..leg
+            },
+            EpisodeCompletenessV1::CompleteFromFlat,
+            1,
+        )?;
+        apply_trade_delta(
+            &mut residual_episode,
+            leg.role,
+            residual_quantity,
+            &residual_notional,
+            event,
+            None,
+        )?;
+        let residual_effect = trade_effect(
+            event,
+            &leg,
+            &trade.market_id,
+            1,
+            residual_episode.episode_id.clone(),
+            EpisodeEffectKindV1::Opened,
+            residual_quantity,
+            residual_notional,
+            None,
+        )?;
+        effects.push((1, residual_effect));
+        let residual_id = residual_episode.episode_id.clone();
+        episodes.push((true, residual_episode));
+        PositionEpisodeCurrentRecordV1::try_new(
+            leg.account_id,
+            trade.market_id.clone(),
+            Some(residual_id),
+            EpisodeAttributionResolutionV1::Resolved,
+            event.event_id().clone(),
+            event.block_height(),
+        )
+        .map_err(|_| current_pair_mismatch())?
+    } else {
+        let close = (leg.result.raw() == 0).then_some(EpisodeCloseCauseV1::TradeFlat);
+        apply_trade_delta(
+            &mut episode,
+            leg.role,
+            trade.fill,
+            &trade.full_notional,
+            event,
+            close,
+        )?;
+        let kind = if close.is_some() {
+            EpisodeEffectKindV1::Closed
+        } else if is_new {
+            EpisodeEffectKindV1::Opened
+        } else {
+            EpisodeEffectKindV1::Updated
+        };
+        let effect = trade_effect(
+            event,
+            &leg,
+            &trade.market_id,
+            0,
+            episode.episode_id.clone(),
+            kind,
+            trade.fill,
+            trade.full_notional.clone(),
+            close,
+        )?;
+        effects.push((0, effect));
+        let open_id = (close.is_none()).then(|| episode.episode_id.clone());
+        episodes.push((is_new, episode));
+        PositionEpisodeCurrentRecordV1::try_new(
+            leg.account_id,
+            trade.market_id.clone(),
+            open_id,
+            if close.is_some() {
+                EpisodeAttributionResolutionV1::NoOpenEpisode
+            } else {
+                EpisodeAttributionResolutionV1::Resolved
+            },
+            event.event_id().clone(),
+            event.block_height(),
+        )
+        .map_err(|_| current_pair_mismatch())?
+    };
+    validate_proposed_pair(
+        Some(leg.result),
+        &current,
+        episodes.iter().map(|(_, record)| record),
+    )?;
+
+    let mut mutations = Vec::with_capacity(effects.len() + episodes.len() + 1);
+    for (ordinal, effect) in effects {
+        let key = PositionEpisodeEffectFactRecordV1::state_key(
+            event.event_id(),
+            &leg.account_id,
+            &trade.market_id,
+            ordinal,
+        )
+        .map_err(|_| effect_prior_invalid())?;
+        reject_prior_episode_effect(state, &key)?;
+        mutations.push(StateMutation::put(
+            key,
+            effect.encode().map_err(|_| effect_prior_invalid())?,
+        ));
+    }
+    for (new_identity, record) in episodes {
+        let key = PositionEpisodeRecordV1::state_key(record.episode_id())
+            .map_err(|_| episode_prior_invalid())?;
+        if new_identity {
+            reject_prior_episode(state, &key)?;
+        }
+        mutations.push(StateMutation::put(
+            key,
+            record.encode().map_err(|_| episode_prior_invalid())?,
+        ));
+    }
+    let current_key = PositionEpisodeCurrentRecordV1::state_key(&leg.account_id, &trade.market_id)
+        .map_err(|_| episode_current_invalid())?;
+    mutations.push(StateMutation::put(
+        current_key,
+        current.encode().map_err(|_| episode_current_invalid())?,
+    ));
+    Ok(mutations)
+}
+
+fn new_trade_episode(
+    event: &CanonicalEventEnvelope,
+    trade: &ValidatedTrade,
+    leg: ValidatedTradeLeg,
+    completeness: EpisodeCompletenessV1,
+    opening_leg_ordinal: u8,
+) -> Result<PositionEpisodeRecordV1, ReducerError> {
+    let episode_id = derive_position_episode_id(
+        &leg.account_id,
+        &trade.market_id,
+        event.event_id(),
+        opening_leg_ordinal,
+    )
+    .map_err(|_| episode_prior_invalid())?;
+    PositionEpisodeRecordV1::try_new(
+        episode_id,
+        leg.account_id,
+        trade.market_id.clone(),
+        event.event_id().clone(),
+        opening_leg_ordinal,
+        leg.start,
+        None,
+        None,
+        completeness,
+        zero_quantity(trade.quantity_scale)?,
+        zero_notional(),
+        zero_quantity(trade.quantity_scale)?,
+        zero_notional(),
+        zero_quote(0)?,
+        zero_quote(0)?,
+        EpisodeStatusV1::Open,
+        event.event_id().clone(),
+        event.block_height(),
+    )
+    .map_err(|_| episode_prior_invalid())
+}
+
+fn apply_trade_delta(
+    episode: &mut PositionEpisodeRecordV1,
+    role: TradeParticipantRoleV1,
+    quantity: Quantity,
+    notional: &ExactQuoteNotional,
+    event: &CanonicalEventEnvelope,
+    close_cause: Option<EpisodeCloseCauseV1>,
+) -> Result<(), ReducerError> {
+    match role {
+        TradeParticipantRoleV1::Buyer => {
+            episode.buy_quantity = add_quantities(episode.buy_quantity, quantity)?;
+            episode.buy_notional = episode
+                .buy_notional
+                .checked_add(notional)
+                .map_err(|_| notional_arithmetic())?;
+        }
+        TradeParticipantRoleV1::Seller => {
+            episode.sell_quantity = add_quantities(episode.sell_quantity, quantity)?;
+            episode.sell_notional = episode
+                .sell_notional
+                .checked_add(notional)
+                .map_err(|_| notional_arithmetic())?;
+        }
+    }
+    episode.close_event_id = close_cause.map(|_| event.event_id().clone());
+    episode.close_cause = close_cause;
+    episode.status = if close_cause.is_some() {
+        EpisodeStatusV1::Closed
+    } else {
+        EpisodeStatusV1::Open
+    };
+    episode.last_event_id = event.event_id().clone();
+    episode.last_block_height = event.block_height();
+    episode.validate().map_err(|_| quantity_arithmetic())
+}
+
+#[allow(clippy::too_many_arguments, reason = "effect facts are explicit")]
+fn trade_effect(
+    event: &CanonicalEventEnvelope,
+    leg: &ValidatedTradeLeg,
+    market_id: &MarketId,
+    ordinal: u8,
+    episode_id: PositionEpisodeId,
+    kind: EpisodeEffectKindV1,
+    quantity: Quantity,
+    notional: ExactQuoteNotional,
+    close_cause: Option<EpisodeCloseCauseV1>,
+) -> Result<PositionEpisodeEffectFactRecordV1, ReducerError> {
+    let zero_quantity = zero_quantity(quantity.scale())?;
+    let (buy_quantity, buy_notional, sell_quantity, sell_notional) = match leg.role {
+        TradeParticipantRoleV1::Buyer => (quantity, notional, zero_quantity, zero_notional()),
+        TradeParticipantRoleV1::Seller => (zero_quantity, zero_notional(), quantity, notional),
+    };
+    PositionEpisodeEffectFactRecordV1::try_new(
+        event.event_id().clone(),
+        leg.account_id,
+        market_id.clone(),
+        ordinal,
+        episode_id,
+        kind,
+        buy_quantity,
+        buy_notional,
+        sell_quantity,
+        sell_notional,
+        zero_quote(0)?,
+        zero_quote(0)?,
+        close_cause,
+    )
+    .map_err(|_| effect_prior_invalid())
+}
+
+fn reduce_funding(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+    account_id: Address,
+    market_id: &MarketId,
+    amount: QuoteAmount,
+    paid: bool,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    if event.event_kind()
+        != if paid {
+            EventKind::FundingPaid
+        } else {
+            EventKind::FundingReceived
+        }
+        || event.market_ids() != std::slice::from_ref(market_id)
+        || event.account_addresses() != [account_id]
+        || amount.raw() <= 0
+    {
+        return Err(identity_mismatch());
+    }
+    validate_exact_market(state, market_id).map_err(map_funding_market_validation)?;
+    let LoadedEpisodePair::Resolved {
+        episode,
+        known_quantity,
+    } = load_episode_pair(state, &account_id, market_id)?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut episode = *episode;
+    let (paid_total, received_total, incoming) =
+        align_funding_amounts(episode.funding_paid, episode.funding_received, amount)?;
+    let zero_delta = zero_quote(incoming.scale())?;
+    let (funding_paid_delta, funding_received_delta) = if paid {
+        episode.funding_paid = paid_total
+            .checked_add(incoming)
+            .map_err(|_| funding_arithmetic())?;
+        episode.funding_received = received_total;
+        (incoming, zero_delta)
+    } else {
+        episode.funding_paid = paid_total;
+        episode.funding_received = received_total
+            .checked_add(incoming)
+            .map_err(|_| funding_arithmetic())?;
+        (zero_delta, incoming)
+    };
+    episode.last_event_id = event.event_id().clone();
+    episode.last_block_height = event.block_height();
+    episode.validate().map_err(|_| funding_arithmetic())?;
+
+    let zero_quantity = zero_quantity(
+        episode
+            .buy_quantity
+            .scale()
+            .max(episode.sell_quantity.scale()),
+    )?;
+    let effect = PositionEpisodeEffectFactRecordV1::try_new(
+        event.event_id().clone(),
+        account_id,
+        market_id.clone(),
+        0,
+        episode.episode_id.clone(),
+        EpisodeEffectKindV1::Updated,
+        zero_quantity,
+        zero_notional(),
+        zero_quantity,
+        zero_notional(),
+        funding_paid_delta,
+        funding_received_delta,
+        None,
+    )
+    .map_err(|_| effect_prior_invalid())?;
+    let effect_key =
+        PositionEpisodeEffectFactRecordV1::state_key(event.event_id(), &account_id, market_id, 0)
+            .map_err(|_| effect_prior_invalid())?;
+    reject_prior_episode_effect(state, &effect_key)?;
+    let episode_key = PositionEpisodeRecordV1::state_key(episode.episode_id())
+        .map_err(|_| episode_prior_invalid())?;
+    let current = PositionEpisodeCurrentRecordV1::try_new(
+        account_id,
+        market_id.clone(),
+        Some(episode.episode_id.clone()),
+        EpisodeAttributionResolutionV1::Resolved,
+        event.event_id().clone(),
+        event.block_height(),
+    )
+    .map_err(|_| episode_current_invalid())?;
+    let current_key = PositionEpisodeCurrentRecordV1::state_key(&account_id, market_id)
+        .map_err(|_| episode_current_invalid())?;
+    validate_proposed_pair(Some(known_quantity), &current, std::iter::once(&episode))?;
+    let mutations = vec![
+        StateMutation::put(
+            effect_key,
+            effect.encode().map_err(|_| effect_prior_invalid())?,
+        ),
+        StateMutation::put(
+            episode_key,
+            episode.encode().map_err(|_| episode_prior_invalid())?,
+        ),
+        StateMutation::put(
+            current_key,
+            current.encode().map_err(|_| episode_current_invalid())?,
+        ),
+    ];
+    ensure_unique_episode_mutation_keys(&mutations)?;
+    Ok(mutations)
+}
+
+fn load_episode_pair(
+    state: &StateView<'_>,
+    account_id: &Address,
+    market_id: &MarketId,
+) -> Result<LoadedEpisodePair, ReducerError> {
+    let quantity_key = PositionQuantityCurrentRecordV1::state_key(account_id, market_id)
+        .map_err(|_| quantity_current_invalid())?;
+    let episode_key = PositionEpisodeCurrentRecordV1::state_key(account_id, market_id)
+        .map_err(|_| episode_current_invalid())?;
+    let quantity = state
+        .get(&quantity_key)
+        .map(|bytes| {
+            PositionQuantityCurrentRecordV1::decode_at(&quantity_key, bytes)
+                .map_err(|_| quantity_current_invalid())
+        })
+        .transpose()?;
+    let current = state
+        .get(&episode_key)
+        .map(|bytes| {
+            PositionEpisodeCurrentRecordV1::decode_at(&episode_key, bytes)
+                .map_err(|_| episode_current_invalid())
+        })
+        .transpose()?;
+    match (quantity, current) {
+        (None, None) => Ok(LoadedEpisodePair::Absent),
+        (Some(quantity), Some(current)) => match (
+            quantity.known_quantity(),
+            current.attribution_resolution(),
+            current.episode_id(),
+        ) {
+            (Some(value), EpisodeAttributionResolutionV1::NoOpenEpisode, None)
+                if value.raw() == 0 =>
+            {
+                Ok(LoadedEpisodePair::NoOpenEpisode)
+            }
+            (None, EpisodeAttributionResolutionV1::Interrupted, None) => {
+                Ok(LoadedEpisodePair::Interrupted)
+            }
+            (Some(value), EpisodeAttributionResolutionV1::Resolved, Some(target))
+                if value.raw() != 0 =>
+            {
+                let target_key = PositionEpisodeRecordV1::state_key(target)
+                    .map_err(|_| episode_reference_invalid())?;
+                let bytes = state
+                    .get(&target_key)
+                    .ok_or_else(episode_reference_invalid)?;
+                let episode = PositionEpisodeRecordV1::decode_at(&target_key, bytes)
+                    .map_err(|_| episode_reference_invalid())?;
+                if episode.account_id != *account_id
+                    || episode.market_id != *market_id
+                    || episode.status != EpisodeStatusV1::Open
+                {
+                    return Err(episode_reference_invalid());
+                }
+                Ok(LoadedEpisodePair::Resolved {
+                    episode: Box::new(episode),
+                    known_quantity: value,
+                })
+            }
+            _ => Err(current_pair_mismatch()),
+        },
+        _ => Err(current_pair_mismatch()),
+    }
+}
+
+fn validate_proposed_pair<'a>(
+    known_quantity: Option<PositionQuantity>,
+    current: &PositionEpisodeCurrentRecordV1,
+    episodes: impl IntoIterator<Item = &'a PositionEpisodeRecordV1>,
+) -> Result<(), ReducerError> {
+    let episodes: Vec<_> = episodes.into_iter().collect();
+    match (
+        known_quantity,
+        current.attribution_resolution,
+        current.episode_id.as_ref(),
+    ) {
+        (Some(quantity), EpisodeAttributionResolutionV1::NoOpenEpisode, None)
+            if quantity.raw() == 0 =>
+        {
+            Ok(())
+        }
+        (None, EpisodeAttributionResolutionV1::Interrupted, None) => Ok(()),
+        (Some(quantity), EpisodeAttributionResolutionV1::Resolved, Some(target))
+            if quantity.raw() != 0 =>
+        {
+            let Some(episode) = episodes
+                .iter()
+                .copied()
+                .find(|episode| episode.episode_id == *target)
+            else {
+                return Err(current_pair_mismatch());
+            };
+            if episode.account_id != current.account_id
+                || episode.market_id != current.market_id
+                || episode.status != EpisodeStatusV1::Open
+            {
+                return Err(current_pair_mismatch());
+            }
+            Ok(())
+        }
+        _ => Err(current_pair_mismatch()),
+    }
+}
+
+fn completeness_for_start(start: PositionQuantity) -> EpisodeCompletenessV1 {
+    if start.raw() == 0 {
+        EpisodeCompletenessV1::CompleteFromFlat
+    } else {
+        EpisodeCompletenessV1::PartialFromFirstObservation
+    }
+}
+
+fn checked_position_magnitude(position: PositionQuantity) -> Result<i128, ReducerError> {
+    if position.raw() < 0 {
+        position.raw().checked_neg().ok_or_else(quantity_arithmetic)
+    } else {
+        Ok(position.raw())
+    }
+}
+
+fn add_quantities(left: Quantity, right: Quantity) -> Result<Quantity, ReducerError> {
+    let scale = left.scale().max(right.scale());
+    let left = left
+        .rescale(scale, RoundingMode::TowardZero)
+        .map_err(|_| quantity_arithmetic())?;
+    let right = right
+        .rescale(scale, RoundingMode::TowardZero)
+        .map_err(|_| quantity_arithmetic())?;
+    left.checked_add(right).map_err(|_| quantity_arithmetic())
+}
+
+fn align_funding_amounts(
+    paid: QuoteAmount,
+    received: QuoteAmount,
+    incoming: QuoteAmount,
+) -> Result<(QuoteAmount, QuoteAmount, QuoteAmount), ReducerError> {
+    let scale = paid.scale().max(received.scale()).max(incoming.scale());
+    let paid = paid
+        .rescale(scale, RoundingMode::TowardZero)
+        .map_err(|_| funding_arithmetic())?;
+    let received = received
+        .rescale(scale, RoundingMode::TowardZero)
+        .map_err(|_| funding_arithmetic())?;
+    let incoming = incoming
+        .rescale(scale, RoundingMode::TowardZero)
+        .map_err(|_| funding_arithmetic())?;
+    Ok((paid, received, incoming))
+}
+
+fn zero_quantity(scale: u8) -> Result<Quantity, ReducerError> {
+    Quantity::from_raw(0, scale).map_err(|_| quantity_arithmetic())
+}
+
+fn zero_quote(scale: u8) -> Result<QuoteAmount, ReducerError> {
+    QuoteAmount::from_raw(0, scale).map_err(|_| funding_arithmetic())
+}
+
+fn zero_notional() -> ExactQuoteNotional {
+    ExactQuoteNotional::from_str("0").expect("literal zero notional is valid")
+}
+
+fn reject_prior_episode_effect(state: &StateView<'_>, key: &StateKey) -> Result<(), ReducerError> {
+    let Some(bytes) = state.get(key) else {
+        return Ok(());
+    };
+    PositionEpisodeEffectFactRecordV1::decode_at(key, bytes).map_err(|_| effect_prior_invalid())?;
+    Err(episode_error(
+        "position_episode.effect_identity_collision",
+        "position episode effect identity is already present",
+    ))
+}
+
+fn reject_prior_episode(state: &StateView<'_>, key: &StateKey) -> Result<(), ReducerError> {
+    let Some(bytes) = state.get(key) else {
+        return Ok(());
+    };
+    PositionEpisodeRecordV1::decode_at(key, bytes).map_err(|_| episode_prior_invalid())?;
+    Err(episode_error(
+        "position_episode.episode_identity_collision",
+        "position episode identity is already present",
+    ))
+}
+
+fn ensure_unique_episode_mutation_keys(mutations: &[StateMutation]) -> Result<(), ReducerError> {
+    let mut keys = BTreeSet::new();
+    if mutations.iter().all(|mutation| keys.insert(mutation.key())) {
+        Ok(())
+    } else {
+        Err(episode_error(
+            "position_episode.duplicate_mutation_key",
+            "position episode event produced duplicate mutation keys",
+        ))
+    }
+}
+
+fn map_trade_validation_for_episode(error: TradeValidationError) -> ReducerError {
+    match error {
+        TradeValidationError::Identity => identity_mismatch(),
+        TradeValidationError::MarketMissing => episode_error(
+            "position_episode.market_prerequisite_missing",
+            "market prerequisite is missing",
+        ),
+        TradeValidationError::MarketInvalid => episode_error(
+            "position_episode.market_prerequisite_invalid",
+            "market prerequisite is corrupt, key mismatched, or internally invalid",
+        ),
+        TradeValidationError::MarketUnresolved => episode_error(
+            "position_episode.market_prerequisite_unresolved",
+            "market prerequisite metadata is unresolved",
+        ),
+        TradeValidationError::NotionalArithmetic => notional_arithmetic(),
+        TradeValidationError::ScaleNormalization
+        | TradeValidationError::PriceTick
+        | TradeValidationError::QuantityLot
+        | TradeValidationError::PositionArithmetic => quantity_arithmetic(),
+    }
+}
+
+fn map_funding_market_validation(error: TradeValidationError) -> ReducerError {
+    match error {
+        TradeValidationError::MarketMissing => episode_error(
+            "position_episode.market_prerequisite_missing",
+            "market prerequisite is missing",
+        ),
+        TradeValidationError::MarketInvalid => episode_error(
+            "position_episode.market_prerequisite_invalid",
+            "market prerequisite is corrupt, key mismatched, or internally invalid",
+        ),
+        TradeValidationError::MarketUnresolved => episode_error(
+            "position_episode.market_prerequisite_unresolved",
+            "market prerequisite metadata is unresolved",
+        ),
+        _ => episode_error(
+            "position_episode.market_prerequisite_invalid",
+            "market prerequisite validation failed",
+        ),
+    }
+}
+
+fn identity_mismatch() -> ReducerError {
+    episode_error(
+        "position_episode.identity_mismatch",
+        "payload and envelope identities must match exactly",
+    )
+}
+
+fn quantity_current_invalid() -> ReducerError {
+    episode_error(
+        "position_episode.quantity_current_invalid",
+        "position quantity current is corrupt or key mismatched",
+    )
+}
+
+fn episode_current_invalid() -> ReducerError {
+    episode_error(
+        "position_episode.episode_current_invalid",
+        "position episode current is corrupt or key mismatched",
+    )
+}
+
+fn episode_reference_invalid() -> ReducerError {
+    episode_error(
+        "position_episode.episode_reference_invalid",
+        "resolved position episode reference is missing or invalid",
+    )
+}
+
+fn current_pair_mismatch() -> ReducerError {
+    episode_error(
+        "position_episode.current_pair_mismatch",
+        "position quantity and episode currents disagree",
+    )
+}
+
+fn start_position_mismatch() -> ReducerError {
+    episode_error(
+        "position_episode.start_position_mismatch",
+        "source start position does not match known current position",
+    )
+}
+
+fn quantity_arithmetic() -> ReducerError {
+    episode_error(
+        "position_episode.quantity_arithmetic",
+        "position episode quantity arithmetic failed",
+    )
+}
+
+fn notional_arithmetic() -> ReducerError {
+    episode_error(
+        "position_episode.notional_arithmetic",
+        "position episode notional arithmetic failed",
+    )
+}
+
+fn funding_arithmetic() -> ReducerError {
+    episode_error(
+        "position_episode.funding_arithmetic",
+        "position episode funding arithmetic failed",
+    )
+}
+
+fn effect_prior_invalid() -> ReducerError {
+    episode_error(
+        "position_episode.effect_prior_invalid",
+        "prior position episode effect is invalid",
+    )
+}
+
+fn episode_prior_invalid() -> ReducerError {
+    episode_error(
+        "position_episode.episode_prior_invalid",
+        "prior position episode is invalid",
+    )
+}
+
+fn episode_error(reason_code: &'static str, message: &'static str) -> ReducerError {
+    ReducerError::from_static(reason_code, message)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PositionEpisodeWireV1 {
@@ -1148,5 +2073,19 @@ mod tests {
                 Ok(())
             );
         }
+    }
+
+    #[test]
+    fn reducer_local_duplicate_mutation_keys_are_rejected() {
+        let key = StateKey::try_new("position-episode-test.v1", b"same".to_vec()).unwrap();
+        let error = ensure_unique_episode_mutation_keys(&[
+            StateMutation::put(key.clone(), vec![1]),
+            StateMutation::put(key, vec![2]),
+        ])
+        .expect_err("duplicate reducer-local keys must fail");
+        assert_eq!(
+            error.reason_code(),
+            "position_episode.duplicate_mutation_key"
+        );
     }
 }
