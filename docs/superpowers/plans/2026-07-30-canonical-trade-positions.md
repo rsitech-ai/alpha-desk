@@ -1123,14 +1123,75 @@ limit.
 - Modify: `crates/canonical-ledger/src/position/episodes.rs`
 - Modify: `docs/contracts/deterministic-state-v1.md`
 
+Freeze `CanonicalLiquidationReducerV1` as the sole atomic owner of
+`LiquidationStarted`, `LiquidationFill`, `BackstopLiquidation`, and
+`PositionSettled` for schema `1.0.0`. It returns one mutation vector built
+entirely from the event's pre-state view. It does not invoke the trade-only
+quantity or episode reducers against partially staged state.
+
+No Task 6B event requires a `MarketCurrentRecordV1` prerequisite. These are
+already-canonical direct source observations and must not be discarded because
+metadata arrived later. Facts and liquidation flow retain source decimal
+scales. Position arithmetic aligns the known signed position and incoming
+unsigned quantity upward to their maximum scale with checked exact rescaling;
+it never downscales or rounds. Classify results by the sign of the checked
+candidate; never compute an absolute signed magnitude. Therefore
+`i128::MIN + positive_fill` is a valid exact partial short reduction when the
+checked result remains negative. Rescaling, addition, subtraction, and
+aggregate overflow are deterministic arithmetic errors.
+
+Freeze the valid quantity/episode pre-state pairs:
+
+```text
+quantity absent                    + episode-current absent
+known zero + anchor                + NoOpenEpisode
+known nonzero + anchor             + Resolved(open referenced episode)
+known None + optional prior anchor + Interrupted
+```
+
+Every other cross-family combination, corrupt/key-mismatched current, or
+invalid episode reference is rejected before any effect is returned.
+Non-trade transitions preserve an existing `first_anchor_event_id`; an absent
+pair first written as unresolved uses `None`. Every written quantity current
+advances `last_event_id` and `last_block_height`.
+
 `LiquidationFill` records its immutable explicit-price quantity and may reduce
 known position quantity only when the exact current sign makes direction
-unambiguous. Every applied non-trade quantity mutation interrupts the active
-episode, even when a same-side nonzero quantity remains. Flat leaves
-`NoOpenEpisode`; a known nonzero result opens a new
-`PartialFromFirstObservation` episode anchored at the liquidation-fill event;
-an ambiguous result leaves attribution `Interrupted`. It never manufactures
-entry basis.
+unambiguous. Position arithmetic is:
+
+```text
+known long q > 0:  candidate = q - fill
+known short q < 0: candidate = q + fill
+```
+
+A same-sign nonzero candidate is an exact partial reduction. Zero is exact
+flat. An opposite-sign candidate, or any fill against known zero, is
+`liquidation_state.fill_overrun` and rejects the whole event; V1 never converts
+a liquidation fill into a reversal. An absent or already-unknown position does
+not establish direction, so the source fact, process observation, and
+per-market flow remain admissible while the position is created/refreshed as
+`known_quantity = None` and attribution `Interrupted`.
+
+Every applied non-trade quantity mutation interrupts the active episode, even
+when a same-side nonzero quantity remains. Flat leaves `NoOpenEpisode`; a known
+nonzero result opens a new `PartialFromFirstObservation` episode anchored at
+the liquidation-fill event; an ambiguous result leaves attribution
+`Interrupted`. It never manufactures entry basis.
+
+`LiquidationStarted` requires no retained position. After exact envelope
+binding, an invalid existing current is `process_prior_invalid`; any valid
+existing current for the globally unique liquidation ID is
+`process_identity_collision`, including a byte-identical or same-account
+repeat. Otherwise it emits the start fact followed by a `Started` current.
+
+`LiquidationFill` and `BackstopLiquidation` require a valid retained process,
+the exact liquidated account, and an event position strictly greater than the
+retained last observation. Fills are accepted in both `Started` and
+`BackstopObserved`; status and first-backstop provenance are preserved while
+last-observation provenance advances. Each fill updates only its exact
+`(liquidation, account, market)` flow. Existing and incoming flow quantities
+are aligned upward to their maximum scale and added exactly. Backstop quantity
+never enters this fill aggregate.
 
 `BackstopLiquidation` records both accounts, writes an independent unresolved
 cause for each account/market even when no prior current record exists, sets
@@ -1138,18 +1199,160 @@ cause for each account/market even when no prior current record exists, sets
 funding cannot attach to stale state. The next enriched trade may re-anchor
 from its source `start_pos`; unresolved facts remain immutable history.
 
-`PositionSettled` remains independent from liquidation process state. Freeze
-this V1 rule: when current quantity is known and its sign makes reduction
-unambiguous, reduce by `settled_quantity` toward zero and apply the explicit
-source `realized_pnl` only to the immutable settlement fact; otherwise keep
-the event fact-only and mark quantity unresolved. It may close or interrupt an
-episode, but never closes a liquidation process.
+The first backstop sets `BackstopObserved` and first-backstop provenance.
+Strictly later repeated backstops preserve that first provenance and update
+only the last observation. The reducer handles accounts in literal envelope
+order `[liquidated, backstop]`. For each it emits an independent unresolved
+cause fact, preserves any prior quantity anchor, writes unknown quantity, and
+interrupts a resolved episode. If preparation for either account fails, no
+mutation for either account or the process/fact is returned.
 
-Freeze settlement `realized_pnl` as settlement-fact-only in V1: it does not
-create or update an account quote-flow family. Every settlement that mutates
-known quantity interrupts the active episode; a known nonzero result opens a
-new `PartialFromFirstObservation` episode at the settlement event, while flat
+`PositionSettled` remains independent from liquidation process state. When
+current quantity is known and its sign makes reduction unambiguous, reduce by
+`settled_quantity` toward zero and retain the explicit source `realized_pnl`
+only in the immutable settlement fact. Settlement uses the same toward-zero
+candidate arithmetic, but unlike a liquidation fill, absent, unknown,
+known-zero, or overrun state is an admitted fact-only ambiguity: write
+`known_quantity = None` and attribution `Interrupted`. It never reads or
+writes liquidation current or liquidation flow.
+
+Settlement price may be zero. `realized_pnl` remains signed, creates no account
+quote-flow, and appears only in the settlement fact. Every exact settlement
+interrupts the active episode; a known nonzero result opens a new
+`PartialFromFirstObservation` episode at the settlement event, while flat
 leaves `NoOpenEpisode`. Ambiguous settlement leaves attribution interrupted.
+
+Freeze episode behavior for every non-trade transition:
+
+```text
+resolved old + exact nonzero result:
+  old episode/effect ordinal 0 -> Interrupted with event cause
+  new episode/effect ordinal 1 -> Open, PartialFromFirstObservation,
+                                  opening_position = exact result
+  current -> Resolved(new)
+
+resolved old + exact flat:
+  old episode/effect ordinal 0 -> Interrupted with event cause
+  no new episode
+  current -> NoOpenEpisode
+
+resolved old + ambiguous result:
+  old episode/effect ordinal 0 -> Interrupted with event cause
+  no new episode
+  current -> Interrupted
+
+absent, NoOpenEpisode, or already Interrupted + ambiguous result:
+  no fabricated episode or effect
+  current -> Interrupted
+```
+
+The causes are `LiquidationFill`, `Settlement`, and `BackstopInterrupted`.
+These events never set an episode to `Closed`; exact flat changes the pointer
+to `NoOpenEpisode` while the prior episode remains `Interrupted`. All
+non-trade episode effects have zero buy/sell quantity, notional, and funding
+deltas. Existing cumulative trade/funding totals are unchanged. A new partial
+episode starts with zero cumulative totals, so source liquidation price,
+quantity, settlement price, and PnL remain exclusively in their immutable
+facts. Backstop never creates ordinal `1`.
+
+Zero encodings are canonical and hash-relevant. Fill and settlement transition
+effects use buy/sell zero quantities at the maximum scale used for the
+candidate arithmetic; backstop effects use the source backstop-quantity scale.
+New partial episodes use buy/sell zero totals at the exact result-position
+scale. Exact-flat `PositionQuantity` also retains the transition maximum scale.
+All non-trade funding zero deltas and new funding totals use scale `0`.
+All zero notionals use the canonical `ExactQuoteNotional` string `0`.
+
+Freeze deterministic mutation order:
+
+```text
+primary immutable fact
+liquidation market-flow current                 # fill only
+liquidation process current                     # start/fill/backstop only
+for each affected account in envelope order:
+  unresolved-cause fact                         # backstop only
+  episode effects ordinal 0 then ordinal 1
+  old episode record then new episode record
+  position-quantity current
+  position-episode current
+```
+
+Settlement is `settlement fact -> account transition bundle`; start is
+`start fact -> process current`. Before return, validate every proposed
+quantity/episode pair and reject duplicate keys across the complete vector.
+
+Freeze exact reason codes:
+
+```text
+liquidation_state.unsupported_event
+liquidation_state.identity_mismatch
+liquidation_state.start_fact_prior_invalid
+liquidation_state.start_fact_identity_collision
+liquidation_state.fill_fact_prior_invalid
+liquidation_state.fill_fact_identity_collision
+liquidation_state.backstop_fact_prior_invalid
+liquidation_state.backstop_fact_identity_collision
+liquidation_state.settlement_fact_prior_invalid
+liquidation_state.settlement_fact_identity_collision
+liquidation_state.process_prior_invalid
+liquidation_state.process_missing
+liquidation_state.process_identity_collision
+liquidation_state.process_account_mismatch
+liquidation_state.process_provenance_regression
+liquidation_state.process_transition_invalid
+liquidation_state.flow_prior_invalid
+liquidation_state.quantity_current_invalid
+liquidation_state.episode_current_invalid
+liquidation_state.episode_reference_invalid
+liquidation_state.current_pair_mismatch
+liquidation_state.fill_overrun
+liquidation_state.quantity_arithmetic
+liquidation_state.flow_arithmetic
+liquidation_state.unresolved_prior_invalid
+liquidation_state.unresolved_identity_collision
+liquidation_state.episode_effect_prior_invalid
+liquidation_state.episode_effect_identity_collision
+liquidation_state.episode_prior_invalid
+liquidation_state.episode_identity_collision
+liquidation_state.proposed_pair_invalid
+liquidation_state.duplicate_mutation_key
+```
+
+Freeze total error precedence:
+
+```text
+unsupported/schema
+envelope identity
+primary immutable prior decode/key binding, then collision
+process decode, existence, account, provenance, then transition
+flow decode/key binding
+affected accounts in envelope order:
+  quantity-current decode/key binding
+  episode-current decode/key binding
+  episode reference decode/key binding
+  current-pair validation
+quantity arithmetic, then flow arithmetic, then proposed-pair validation
+secondary identities in mutation/account order:
+  unresolved fact
+  ordinal-0 episode effect
+  ordinal-1 episode effect
+  new episode
+  at each key: decode/key binding before valid identity collision
+duplicate mutation keys
+```
+
+For repeated starts, process validation intentionally precedes start-fact
+collision so a retained process always yields `process_identity_collision`.
+For fill, backstop, and settlement, primary fact collision precedes provenance
+or position-state checks. Identical fact bytes still collide; only ledger-level
+whole-block `AlreadyApplied` is idempotent.
+
+Same-block later fills and backstops observe earlier candidate state and must
+advance the complete event-position tuple. A late failure rolls back the
+entire event and therefore the block. Fresh replay, repeated replay, and
+checkpoint-resumed replay must produce byte-identical state and hashes.
+Checkpoint restore requires the exact reducer-set version; no version
+substitution or fallback is permitted.
 
 - [ ] Test ID collision, missing start, wrong account, per-market multiple
   fills, fill overrun, repeated fill, invalid account/process transitions,
