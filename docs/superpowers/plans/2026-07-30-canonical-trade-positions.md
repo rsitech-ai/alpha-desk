@@ -132,18 +132,18 @@ multiplication, rescale, addition, and subtraction rechecks the scale and
 coefficient bounds. The type supports exact upward rescaling only and exposes
 no canonical division.
 
-- [ ] Write red tests for positive/negative/zero position quantities,
+- [x] Write red tests for positive/negative/zero position quantities,
   scale-38 boundaries, exact price-times-quantity products, sign behavior,
   scale-sum bounds, 511/512/513-bit coefficients, pre-parse byte/digit limits,
   operation-result overflow, exact upward normalization, canonical zero/sign/
   scale and String/Serde forms, malformed/noncanonical input, and deterministic
   ordering.
-- [ ] Run focused red tests and retain the missing-type signal.
-- [ ] Implement the smallest types with no `f32`/`f64`, unbounded allocation,
+- [x] Run focused red tests and retain the missing-type signal.
+- [x] Implement the smallest types with no `f32`/`f64`, unbounded allocation,
   rounding, or lossy conversion.
-- [ ] Run domain tests, strict all-target/all-feature Clippy, formatting, and
+- [x] Run domain tests, strict all-target/all-feature Clippy, formatting, and
   diff checks.
-- [ ] Commit with `feat(domain): add exact position accounting values`.
+- [x] Commit with `feat(domain): add exact position accounting values`.
 
 ---
 
@@ -786,6 +786,11 @@ fixed.
 
 ## Decision log
 
+- 2026-07-30: Task 1 completed at `4b44962` plus exact-API remediation
+  `7bc7a41`. The final surface has signed exact-only `PositionQuantity`,
+  bounded canonical `ExactQuoteNotional`, no public arbitrary-`BigInt`
+  admission, and checked upward-only normalization. Parent and independent
+  review passed 53 domain tests, strict Clippy, formatting, and diff checks.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
