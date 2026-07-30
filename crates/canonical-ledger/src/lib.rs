@@ -6,6 +6,7 @@ mod error;
 mod ledger;
 mod market;
 mod order;
+mod position;
 mod reducer;
 mod state;
 mod trade;
@@ -32,6 +33,11 @@ pub use market::{
 pub use order::{
     CanonicalOrderReducerV1, OrderCurrentRecordV1, OrderFactRecordV1, OrderLifecycleV1,
     OrderStateError, OrderTransitionRecordV1, OrderTransitionStatusV1,
+};
+pub use position::{
+    CanonicalPositionReducerV1, PositionAnchorTransitionV1, PositionEffectFactRecordV1,
+    PositionQuantityCurrentRecordV1, PositionStateError, PositionUnresolvedCauseFactRecordV1,
+    PositionUnresolvedCauseV1,
 };
 pub use reducer::{ApplyContext, EventReducer};
 pub use state::{
