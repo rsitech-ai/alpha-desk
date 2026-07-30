@@ -5,7 +5,7 @@ use domain_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::StateKey;
+use crate::{ReducerError, StateKey, StateMutation, StateView};
 
 use super::{
     AccountStateError,
@@ -628,4 +628,228 @@ const fn valid_quantity_totals(left: Quantity, right: Quantity) -> bool {
 
 const fn valid_quote_totals(left: QuoteAmount, right: QuoteAmount) -> bool {
     left.raw() >= 0 && right.raw() >= 0 && left.scale() == right.scale()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FlowSide {
+    Credit,
+    Debit,
+}
+
+pub(super) fn quantity_flow_mutation(
+    state: &StateView<'_>,
+    account_id: Address,
+    scope: AccountQuantityFlowScopeV1,
+    amount: Quantity,
+    side: FlowSide,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key = AccountQuantityFlowCurrentRecordV1::state_key(&account_id, &scope)
+        .map_err(super::codec_reducer_error)?;
+    let zero = amount
+        .checked_sub(amount)
+        .map_err(super::flow_reducer_error)?;
+    let (credits, debits) = match state.get(&key) {
+        Some(bytes) => {
+            let current = AccountQuantityFlowCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            normalize_quantity(current.credits, current.debits, amount, side)?
+        }
+        None => match side {
+            FlowSide::Credit => (amount, zero),
+            FlowSide::Debit => (zero, amount),
+        },
+    };
+    let record = AccountQuantityFlowCurrentRecordV1 {
+        account_id,
+        scope,
+        credits,
+        debits,
+        last_event_id: event_id.clone(),
+        last_block_height: block_height,
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
+}
+
+pub(super) fn quote_flow_mutation(
+    state: &StateView<'_>,
+    account_id: Address,
+    scope: AccountQuoteFlowScopeV1,
+    amount: QuoteAmount,
+    side: FlowSide,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key = AccountQuoteFlowCurrentRecordV1::state_key(&account_id, &scope)
+        .map_err(super::codec_reducer_error)?;
+    let zero = amount
+        .checked_sub(amount)
+        .map_err(super::flow_reducer_error)?;
+    let (credits, debits) = match state.get(&key) {
+        Some(bytes) => {
+            let current = AccountQuoteFlowCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            normalize_quote(current.credits, current.debits, amount, side)?
+        }
+        None => match side {
+            FlowSide::Credit => (amount, zero),
+            FlowSide::Debit => (zero, amount),
+        },
+    };
+    let record = AccountQuoteFlowCurrentRecordV1 {
+        account_id,
+        scope,
+        credits,
+        debits,
+        last_event_id: event_id.clone(),
+        last_block_height: block_height,
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
+}
+
+pub(super) fn vault_principal_mutation(
+    state: &StateView<'_>,
+    vault_id: &VaultId,
+    amount: QuoteAmount,
+    side: FlowSide,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key = VaultPrincipalFlowCurrentRecordV1::state_key(vault_id)
+        .map_err(super::codec_reducer_error)?;
+    let zero = amount
+        .checked_sub(amount)
+        .map_err(super::flow_reducer_error)?;
+    let (deposits, withdrawals) = match state.get(&key) {
+        Some(bytes) => {
+            let current = VaultPrincipalFlowCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            let (deposits, withdrawals) =
+                normalize_quote(current.deposits, current.withdrawals, amount, side)?;
+            (deposits, withdrawals)
+        }
+        None => match side {
+            FlowSide::Credit => (amount, zero),
+            FlowSide::Debit => (zero, amount),
+        },
+    };
+    let record = VaultPrincipalFlowCurrentRecordV1 {
+        vault_id: vault_id.clone(),
+        deposits,
+        withdrawals,
+        last_event_id: event_id.clone(),
+        last_block_height: block_height,
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
+}
+
+pub(super) fn vault_share_mutation(
+    state: &StateView<'_>,
+    vault_id: &VaultId,
+    amount: Quantity,
+    side: FlowSide,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key =
+        VaultShareFlowCurrentRecordV1::state_key(vault_id).map_err(super::codec_reducer_error)?;
+    let zero = amount
+        .checked_sub(amount)
+        .map_err(super::flow_reducer_error)?;
+    let (issued, redeemed) = match state.get(&key) {
+        Some(bytes) => {
+            let current = VaultShareFlowCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            normalize_quantity(current.shares_issued, current.shares_redeemed, amount, side)?
+        }
+        None => match side {
+            FlowSide::Credit => (amount, zero),
+            FlowSide::Debit => (zero, amount),
+        },
+    };
+    let record = VaultShareFlowCurrentRecordV1 {
+        vault_id: vault_id.clone(),
+        shares_issued: issued,
+        shares_redeemed: redeemed,
+        last_event_id: event_id.clone(),
+        last_block_height: block_height,
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
+}
+
+fn normalize_quantity(
+    credits: Quantity,
+    debits: Quantity,
+    amount: Quantity,
+    side: FlowSide,
+) -> Result<(Quantity, Quantity), ReducerError> {
+    let scale = credits.scale().max(debits.scale()).max(amount.scale());
+    let credits = credits
+        .rescale(scale, domain_types::RoundingMode::TowardZero)
+        .map_err(super::flow_reducer_error)?;
+    let debits = debits
+        .rescale(scale, domain_types::RoundingMode::TowardZero)
+        .map_err(super::flow_reducer_error)?;
+    let amount = amount
+        .rescale(scale, domain_types::RoundingMode::TowardZero)
+        .map_err(super::flow_reducer_error)?;
+    match side {
+        FlowSide::Credit => Ok((
+            credits
+                .checked_add(amount)
+                .map_err(super::flow_reducer_error)?,
+            debits,
+        )),
+        FlowSide::Debit => Ok((
+            credits,
+            debits
+                .checked_add(amount)
+                .map_err(super::flow_reducer_error)?,
+        )),
+    }
+}
+
+fn normalize_quote(
+    credits: QuoteAmount,
+    debits: QuoteAmount,
+    amount: QuoteAmount,
+    side: FlowSide,
+) -> Result<(QuoteAmount, QuoteAmount), ReducerError> {
+    let scale = credits.scale().max(debits.scale()).max(amount.scale());
+    let credits = credits
+        .rescale(scale, domain_types::RoundingMode::TowardZero)
+        .map_err(super::flow_reducer_error)?;
+    let debits = debits
+        .rescale(scale, domain_types::RoundingMode::TowardZero)
+        .map_err(super::flow_reducer_error)?;
+    let amount = amount
+        .rescale(scale, domain_types::RoundingMode::TowardZero)
+        .map_err(super::flow_reducer_error)?;
+    match side {
+        FlowSide::Credit => Ok((
+            credits
+                .checked_add(amount)
+                .map_err(super::flow_reducer_error)?,
+            debits,
+        )),
+        FlowSide::Debit => Ok((
+            credits,
+            debits
+                .checked_add(amount)
+                .map_err(super::flow_reducer_error)?,
+        )),
+    }
 }

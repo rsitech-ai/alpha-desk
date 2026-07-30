@@ -5,7 +5,7 @@ use domain_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::StateKey;
+use crate::{ReducerError, StateKey, StateMutation, StateView};
 
 use super::{
     AccountStateError,
@@ -409,4 +409,150 @@ const fn validate_heights(first: BlockHeight, last: BlockHeight) -> Result<(), A
     } else {
         Err(AccountStateError::InvalidRecord)
     }
+}
+
+pub(super) fn account_mode_mutation(
+    state: &StateView<'_>,
+    account_id: Address,
+    previous: AccountAbstractionModeV1,
+    new: AccountAbstractionModeV1,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key =
+        AccountModeCurrentRecordV1::state_key(&account_id).map_err(super::codec_reducer_error)?;
+    let record = match state.get(&key) {
+        Some(bytes) => {
+            let current = AccountModeCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            if current.current != previous {
+                return Err(super::reducer_error(
+                    "account_state.previous_account_mode_mismatch",
+                    "account mode predecessor does not match current state",
+                ));
+            }
+            AccountModeCurrentRecordV1 {
+                account_id,
+                initial_previous: current.initial_previous,
+                current: new,
+                first_event_id: current.first_event_id,
+                last_event_id: event_id.clone(),
+                first_block_height: current.first_block_height,
+                last_block_height: block_height,
+            }
+        }
+        None => AccountModeCurrentRecordV1 {
+            account_id,
+            initial_previous: previous,
+            current: new,
+            first_event_id: event_id.clone(),
+            last_event_id: event_id.clone(),
+            first_block_height: block_height,
+            last_block_height: block_height,
+        },
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn margin_mode_mutation(
+    state: &StateView<'_>,
+    account_id: Address,
+    market_id: &MarketId,
+    previous: MarginModeV1,
+    new: MarginModeV1,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key = MarginModeCurrentRecordV1::state_key(&account_id, market_id)
+        .map_err(super::codec_reducer_error)?;
+    let record = match state.get(&key) {
+        Some(bytes) => {
+            let current = MarginModeCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            if current.current != previous {
+                return Err(super::reducer_error(
+                    "account_state.previous_margin_mode_mismatch",
+                    "margin mode predecessor does not match current state",
+                ));
+            }
+            MarginModeCurrentRecordV1 {
+                account_id,
+                market_id: market_id.clone(),
+                initial_previous: current.initial_previous,
+                current: new,
+                first_event_id: current.first_event_id,
+                last_event_id: event_id.clone(),
+                first_block_height: current.first_block_height,
+                last_block_height: block_height,
+            }
+        }
+        None => MarginModeCurrentRecordV1 {
+            account_id,
+            market_id: market_id.clone(),
+            initial_previous: previous,
+            current: new,
+            first_event_id: event_id.clone(),
+            last_event_id: event_id.clone(),
+            first_block_height: block_height,
+            last_block_height: block_height,
+        },
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn leverage_mutation(
+    state: &StateView<'_>,
+    account_id: Address,
+    market_id: &MarketId,
+    previous: Leverage,
+    new: Leverage,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key = LeverageCurrentRecordV1::state_key(&account_id, market_id)
+        .map_err(super::codec_reducer_error)?;
+    let record = match state.get(&key) {
+        Some(bytes) => {
+            let current = LeverageCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            if current.current != previous {
+                return Err(super::reducer_error(
+                    "account_state.previous_leverage_mismatch",
+                    "leverage predecessor does not match current state",
+                ));
+            }
+            LeverageCurrentRecordV1 {
+                account_id,
+                market_id: market_id.clone(),
+                initial_previous: current.initial_previous,
+                current: new,
+                first_event_id: current.first_event_id,
+                last_event_id: event_id.clone(),
+                first_block_height: current.first_block_height,
+                last_block_height: block_height,
+            }
+        }
+        None => LeverageCurrentRecordV1 {
+            account_id,
+            market_id: market_id.clone(),
+            initial_previous: previous,
+            current: new,
+            first_event_id: event_id.clone(),
+            last_event_id: event_id.clone(),
+            first_block_height: block_height,
+            last_block_height: block_height,
+        },
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
 }

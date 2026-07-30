@@ -1,7 +1,7 @@
 use domain_types::{Address, BlockHeight, EventId, VaultId};
 use serde::{Deserialize, Serialize};
 
-use crate::StateKey;
+use crate::{ReducerError, StateKey, StateMutation, StateView};
 
 use super::{
     AccountStateError,
@@ -240,4 +240,95 @@ struct AccountVaultWire {
     last_event_id: String,
     first_block_height: u64,
     last_block_height: u64,
+}
+
+pub(super) fn subaccount_relation_mutation(
+    state: &StateView<'_>,
+    master_account_id: Address,
+    from_account_id: Address,
+    to_account_id: Address,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let subaccount_id = if master_account_id == from_account_id {
+        to_account_id
+    } else if master_account_id == to_account_id {
+        from_account_id
+    } else {
+        return Err(super::reducer_error(
+            "account_state.subaccount_scope_ambiguous",
+            "subaccount master must be exactly one transfer endpoint",
+        ));
+    };
+    let key = SubaccountMasterCurrentRecordV1::state_key(&subaccount_id)
+        .map_err(super::codec_reducer_error)?;
+    let record = match state.get(&key) {
+        Some(bytes) => {
+            let current = SubaccountMasterCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            if current.master_account_id != master_account_id {
+                return Err(super::reducer_error(
+                    "account_state.master_conflict",
+                    "subaccount is already bound to another master",
+                ));
+            }
+            SubaccountMasterCurrentRecordV1 {
+                subaccount_id,
+                master_account_id,
+                first_event_id: current.first_event_id,
+                last_event_id: event_id.clone(),
+                first_block_height: current.first_block_height,
+                last_block_height: block_height,
+            }
+        }
+        None => SubaccountMasterCurrentRecordV1 {
+            subaccount_id,
+            master_account_id,
+            first_event_id: event_id.clone(),
+            last_event_id: event_id.clone(),
+            first_block_height: block_height,
+            last_block_height: block_height,
+        },
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
+}
+
+pub(super) fn vault_relation_mutation(
+    state: &StateView<'_>,
+    account_id: Address,
+    vault_id: &VaultId,
+    event_id: &EventId,
+    block_height: BlockHeight,
+) -> Result<StateMutation, ReducerError> {
+    let key = AccountVaultRelationCurrentRecordV1::state_key(&account_id, vault_id)
+        .map_err(super::codec_reducer_error)?;
+    let record = match state.get(&key) {
+        Some(bytes) => {
+            let current = AccountVaultRelationCurrentRecordV1::decode_at(&key, bytes)
+                .map_err(super::current_record_reducer_error)?;
+            AccountVaultRelationCurrentRecordV1 {
+                account_id,
+                vault_id: vault_id.clone(),
+                first_event_id: current.first_event_id,
+                last_event_id: event_id.clone(),
+                first_block_height: current.first_block_height,
+                last_block_height: block_height,
+            }
+        }
+        None => AccountVaultRelationCurrentRecordV1 {
+            account_id,
+            vault_id: vault_id.clone(),
+            first_event_id: event_id.clone(),
+            last_event_id: event_id.clone(),
+            first_block_height: block_height,
+            last_block_height: block_height,
+        },
+    };
+    Ok(StateMutation::put(
+        key,
+        record.encode().map_err(super::codec_reducer_error)?,
+    ))
 }
