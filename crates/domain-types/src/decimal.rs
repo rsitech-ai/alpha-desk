@@ -10,6 +10,10 @@ use std::{
 use thiserror::Error;
 
 pub const MAX_DECIMAL_SCALE: u8 = 38;
+pub const MAX_NOTIONAL_SCALE: u8 = 76;
+pub const MAX_NOTIONAL_COEFFICIENT_BITS: u64 = 512;
+pub const MAX_NOTIONAL_DECIMAL_DIGITS: usize = 155;
+pub const MAX_NOTIONAL_WIRE_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnalyticFloat {
@@ -455,6 +459,7 @@ macro_rules! decimal_newtype {
 
 decimal_newtype!(Price);
 decimal_newtype!(Quantity);
+decimal_newtype!(PositionQuantity);
 decimal_newtype!(QuoteAmount);
 decimal_newtype!(BaseAmount);
 decimal_newtype!(UsdAmount);
@@ -463,6 +468,237 @@ decimal_newtype!(FeeRate);
 decimal_newtype!(Leverage);
 decimal_newtype!(MarginRatio);
 decimal_newtype!(BasisPoints);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExactQuoteNotional {
+    coefficient: BigInt,
+    scale: u8,
+}
+
+impl ExactQuoteNotional {
+    pub fn from_coefficient(coefficient: BigInt, scale: u8) -> Result<Self, ValueError> {
+        validate_notional_scale(scale)?;
+        let (coefficient, scale) = canonicalize_notional(coefficient, scale);
+        validate_notional_coefficient(&coefficient)?;
+        Ok(Self { coefficient, scale })
+    }
+
+    pub fn checked_product(price: Price, quantity: Quantity) -> Result<Self, ValueError> {
+        let coefficient = BigInt::from(price.raw()) * BigInt::from(quantity.raw());
+        let scale = price
+            .scale()
+            .checked_add(quantity.scale())
+            .ok_or(ValueError::Overflow)?;
+        Self::from_coefficient(coefficient, scale)
+    }
+
+    pub const fn scale(&self) -> u8 {
+        self.scale
+    }
+
+    pub const fn coefficient(&self) -> &BigInt {
+        &self.coefficient
+    }
+
+    pub fn checked_add(&self, rhs: &Self) -> Result<Self, ValueError> {
+        let target_scale = self.scale.max(rhs.scale);
+        let left = self.coefficient_at_scale(target_scale);
+        let right = rhs.coefficient_at_scale(target_scale);
+        Self::from_coefficient(left + right, target_scale)
+    }
+
+    pub fn checked_sub(&self, rhs: &Self) -> Result<Self, ValueError> {
+        let target_scale = self.scale.max(rhs.scale);
+        let left = self.coefficient_at_scale(target_scale);
+        let right = rhs.coefficient_at_scale(target_scale);
+        Self::from_coefficient(left - right, target_scale)
+    }
+
+    fn coefficient_at_scale(&self, target_scale: u8) -> BigInt {
+        debug_assert!(target_scale >= self.scale);
+        &self.coefficient * pow10_big(u32::from(target_scale - self.scale))
+    }
+}
+
+impl FromStr for ExactQuoteNotional {
+    type Err = ValueError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if input.len() > MAX_NOTIONAL_WIRE_BYTES {
+            return Err(ValueError::OutOfRange);
+        }
+        if input.is_empty() {
+            return Err(ValueError::Invalid);
+        }
+
+        let (negative, unsigned) = if let Some(rest) = input.strip_prefix('-') {
+            (true, rest)
+        } else if input.starts_with('+') {
+            return Err(ValueError::Invalid);
+        } else {
+            (false, input)
+        };
+        if unsigned.is_empty() {
+            return Err(ValueError::Invalid);
+        }
+
+        let mut parts = unsigned.split('.');
+        let whole = parts.next().ok_or(ValueError::Invalid)?;
+        let fraction = parts.next();
+        if parts.next().is_some()
+            || whole.is_empty()
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || whole.len() > 1 && whole.starts_with('0')
+        {
+            return Err(ValueError::Invalid);
+        }
+        let fraction = match fraction {
+            Some(value)
+                if !value.is_empty()
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+                    && !value.ends_with('0') =>
+            {
+                value
+            }
+            Some(_) => return Err(ValueError::Invalid),
+            None => "",
+        };
+        if negative && whole == "0" && fraction.is_empty() {
+            return Err(ValueError::Invalid);
+        }
+
+        let digit_count = whole
+            .len()
+            .checked_add(fraction.len())
+            .ok_or(ValueError::OutOfRange)?;
+        if digit_count > MAX_NOTIONAL_DECIMAL_DIGITS {
+            return Err(ValueError::OutOfRange);
+        }
+        let scale = u8::try_from(fraction.len()).map_err(|_| ValueError::OutOfRange)?;
+        validate_notional_scale(scale)?;
+
+        let mut digits = String::with_capacity(digit_count);
+        digits.push_str(whole);
+        digits.push_str(fraction);
+        let mut coefficient =
+            BigInt::parse_bytes(digits.as_bytes(), 10).ok_or(ValueError::Invalid)?;
+        if negative {
+            coefficient = -coefficient;
+        }
+        Self::from_coefficient(coefficient, scale)
+    }
+}
+
+impl fmt::Display for ExactQuoteNotional {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.coefficient.is_negative() {
+            formatter.write_str("-")?;
+        }
+        let digits = self.coefficient.abs().to_str_radix(10);
+        let scale = usize::from(self.scale);
+        if scale == 0 {
+            return formatter.write_str(&digits);
+        }
+        if digits.len() <= scale {
+            formatter.write_str("0.")?;
+            for _ in 0..(scale - digits.len()) {
+                formatter.write_str("0")?;
+            }
+            formatter.write_str(&digits)
+        } else {
+            let split = digits.len() - scale;
+            formatter.write_str(&digits[..split])?;
+            formatter.write_str(".")?;
+            formatter.write_str(&digits[split..])
+        }
+    }
+}
+
+impl PartialOrd for ExactQuoteNotional {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ExactQuoteNotional {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let target_scale = self.scale.max(other.scale);
+        self.coefficient_at_scale(target_scale)
+            .cmp(&other.coefficient_at_scale(target_scale))
+    }
+}
+
+impl Serialize for ExactQuoteNotional {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+struct ExactQuoteNotionalVisitor;
+
+impl serde::de::Visitor<'_> for ExactQuoteNotionalVisitor {
+    type Value = ExactQuoteNotional;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a bounded canonical exact quote notional string")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        value.parse().map_err(E::custom)
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'_ str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExactQuoteNotional {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(ExactQuoteNotionalVisitor)
+    }
+}
+
+fn validate_notional_scale(scale: u8) -> Result<(), ValueError> {
+    if scale > MAX_NOTIONAL_SCALE {
+        Err(ValueError::ScaleOutOfRange {
+            scale,
+            maximum: MAX_NOTIONAL_SCALE,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_notional_coefficient(coefficient: &BigInt) -> Result<(), ValueError> {
+    if coefficient.bits() > MAX_NOTIONAL_COEFFICIENT_BITS {
+        Err(ValueError::OutOfRange)
+    } else {
+        Ok(())
+    }
+}
+
+fn canonicalize_notional(mut coefficient: BigInt, mut scale: u8) -> (BigInt, u8) {
+    if coefficient.is_zero() {
+        return (BigInt::ZERO, 0);
+    }
+    while scale > 0 && (&coefficient % 10_u8).is_zero() {
+        coefficient /= 10_u8;
+        scale -= 1;
+    }
+    (coefficient, scale)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]

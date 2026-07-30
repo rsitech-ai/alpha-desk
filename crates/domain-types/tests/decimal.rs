@@ -1,6 +1,6 @@
 use domain_types::{
-    AnalyticFloat, Decimal, MAX_DECIMAL_SCALE, Price, ProbabilityPpm, Quantity, RoundingMode,
-    ValueError,
+    AnalyticFloat, Decimal, MAX_DECIMAL_SCALE, PositionQuantity, Price, ProbabilityPpm, Quantity,
+    RoundingMode, ValueError,
 };
 use proptest::prelude::*;
 use std::{collections::HashSet, str::FromStr};
@@ -17,6 +17,30 @@ fn price_parses_at_metadata_scale_and_formats_without_float() {
 fn parsing_rejects_precision_beyond_metadata_scale() {
     let error = Quantity::parse_at_scale("1.0000001", 6).unwrap_err();
     assert_eq!(error, ValueError::ExcessPrecision { allowed: 6 });
+}
+
+#[test]
+fn position_quantity_is_explicitly_signed_and_preserves_its_scale() {
+    for (input, raw) in [("12.50", 1_250), ("0.00", 0), ("-12.50", -1_250)] {
+        let quantity = PositionQuantity::parse_at_scale(input, 2).unwrap();
+        assert_eq!(quantity.raw(), raw);
+        assert_eq!(quantity.scale(), 2);
+        assert_eq!(quantity.to_string(), input);
+    }
+}
+
+#[test]
+fn position_quantity_accepts_scale_38_and_rejects_scale_39() {
+    let boundary = PositionQuantity::from_raw(i128::MIN, MAX_DECIMAL_SCALE).unwrap();
+    assert_eq!(boundary.raw(), i128::MIN);
+    assert_eq!(boundary.scale(), MAX_DECIMAL_SCALE);
+    assert_eq!(
+        PositionQuantity::from_raw(1, MAX_DECIMAL_SCALE + 1),
+        Err(ValueError::ScaleOutOfRange {
+            scale: MAX_DECIMAL_SCALE + 1,
+            maximum: MAX_DECIMAL_SCALE,
+        })
+    );
 }
 
 #[test]
