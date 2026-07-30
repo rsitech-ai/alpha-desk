@@ -847,7 +847,7 @@ Return `None` for partial, open, or interrupted episodes.
 - [x] Document exact analytical-only metric availability and the missing fee
   execution identity.
 - [x] Run ledger/replay tests and strict gates.
-- [ ] Commit with `feat(state): add exact analytical position episodes`.
+- [x] Commit with `feat(state): add exact analytical position episodes`.
 
 ---
 
