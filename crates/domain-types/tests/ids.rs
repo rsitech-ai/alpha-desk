@@ -1,4 +1,4 @@
-use domain_types::{Address, BlockHeight, ChainId, LiquidationId, ValueError};
+use domain_types::{Address, BlockHeight, ChainId, LiquidationId, TwapId, ValueError};
 
 #[test]
 fn ids_reject_empty_and_whitespace_padded_values() {
@@ -79,4 +79,17 @@ fn liquidation_ids_are_strict_canonical_domain_ids() {
         );
     }
     assert!(serde_json::from_str::<LiquidationId>("\" liquidation-42\"").is_err());
+}
+
+#[test]
+fn twap_ids_preserve_the_documented_unsigned_numeric_identity() {
+    let id = TwapId::new(12_212_201_265);
+    assert_eq!(id.get(), 12_212_201_265);
+    assert_eq!(id.to_string(), "12212201265");
+    assert_eq!(
+        serde_json::from_str::<TwapId>(&serde_json::to_string(&id).unwrap()).unwrap(),
+        id
+    );
+    assert!(serde_json::from_str::<TwapId>("\"12212201265\"").is_err());
+    assert!(serde_json::from_str::<TwapId>("-1").is_err());
 }

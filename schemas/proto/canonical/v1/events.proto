@@ -129,6 +129,21 @@ message TwapCompleted {
   string average_price = 3;
 }
 
+enum TradeParticipantRoleV1 {
+  TRADE_PARTICIPANT_ROLE_V1_UNSPECIFIED = 0;
+  TRADE_PARTICIPANT_ROLE_V1_BUYER = 1;
+  TRADE_PARTICIPANT_ROLE_V1_SELLER = 2;
+}
+
+message TradeParticipantV1 {
+  TradeParticipantRoleV1 role = 1;
+  string account_id = 2;
+  string start_position = 3;
+  string order_id = 4;
+  optional uint64 twap_id = 5;
+  string client_order_id = 6;
+}
+
 message TradeMatched {
   string trade_id = 1;
   string market_id = 2;
@@ -137,6 +152,7 @@ message TradeMatched {
   hl.common.v1.DecimalValue price = 5;
   hl.common.v1.DecimalValue quantity = 6;
   uint64 deterministic_seed = 7;
+  repeated TradeParticipantV1 participants = 8;
 }
 
 // Account and ledger payloads.

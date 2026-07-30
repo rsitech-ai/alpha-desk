@@ -34,6 +34,7 @@ mod generated {
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/alpha-desk-v1.pb"));
 pub const MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES: usize = 16 * 1024;
+pub const MAX_CANONICAL_TRADE_PAYLOAD_BYTES: usize = 16 * 1024;
 
 const GENERATED_RUST_ARTIFACTS: &[(&str, &[u8])] = &[
     (
@@ -58,6 +59,8 @@ const SCHEMA_MATERIAL_HEADER: &[u8] = b"alpha-desk-schema-material-v1\n";
 const SCHEMA_MATERIAL_LINE_BYTES: usize = 60;
 const CANONICAL_ACCOUNT_PAYLOAD_SIZE_REASON: &str =
     "canonical account payload exceeds the 16384-byte limit";
+const CANONICAL_TRADE_PAYLOAD_SIZE_REASON: &str =
+    "canonical trade payload exceeds the 16384-byte limit";
 const MAX_SCHEMA_FILES: usize = 4_096;
 const MAX_SCHEMA_MATERIAL_BYTES: usize = 64 * 1024 * 1024;
 
@@ -555,6 +558,17 @@ pub struct WireTradeMatched {
     pub price: String,
     pub quantity: String,
     pub deterministic_seed: u64,
+    pub participants: Option<[WireTradeParticipantV1; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireTradeParticipantV1 {
+    pub role: String,
+    pub account_id: String,
+    pub start_position: String,
+    pub order_id: String,
+    pub twap_id: Option<u64>,
+    pub client_order_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2084,9 +2098,10 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
                 market_id: None,
                 maker_order_id: None,
                 taker_order_id: None,
-                price: "0".to_owned(),
-                quantity: "0".to_owned(),
+                price: "1".to_owned(),
+                quantity: "1".to_owned(),
                 deterministic_seed: 0,
+                participants: None,
             });
         }
         "DepositCredited" => {
@@ -2356,12 +2371,20 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
 }
 
 pub fn encode_trade_matched(value: &WireTradeMatched) -> Result<Vec<u8>, PayloadCodecError> {
-    if value.price.is_empty() || value.quantity.is_empty() {
-        return Err(PayloadCodecError::Invalid {
-            kind: "TradeMatched".to_owned(),
-            reason: "price and quantity are required".to_owned(),
-        });
-    }
+    require_positive_wire_decimal("TradeMatched", "price", &value.price)?;
+    require_positive_wire_decimal("TradeMatched", "quantity", &value.quantity)?;
+    let participants = value
+        .participants
+        .clone()
+        .map(validate_trade_participants)
+        .transpose()?
+        .map(|participants| {
+            participants
+                .into_iter()
+                .map(encode_trade_participant)
+                .collect()
+        })
+        .unwrap_or_default();
     let message = generated::hl::canonical::v1::TradeMatched {
         trade_id: encode_optional_identity("trade_id", &value.trade_id)?,
         market_id: encode_optional_identity("market_id", &value.market_id)?,
@@ -2374,11 +2397,13 @@ pub fn encode_trade_matched(value: &WireTradeMatched) -> Result<Vec<u8>, Payload
             value: value.quantity.clone(),
         }),
         deterministic_seed: value.deterministic_seed,
+        participants,
     };
-    Ok(wrap_payload("TradeMatched", message.encode_to_vec()))
+    bounded_trade_payload("TradeMatched", message.encode_to_vec())
 }
 
 pub fn decode_trade_matched(bytes: &[u8]) -> Result<WireTradeMatched, PayloadCodecError> {
+    validate_trade_payload_size("TradeMatched", bytes)?;
     let body = unwrap_payload("TradeMatched", bytes)?;
     let message =
         generated::hl::canonical::v1::TradeMatched::decode(body.as_slice()).map_err(|source| {
@@ -2395,6 +2420,29 @@ pub fn decode_trade_matched(bytes: &[u8]) -> Result<WireTradeMatched, PayloadCod
         kind: "TradeMatched".to_owned(),
         reason: "missing quantity".to_owned(),
     })?;
+    require_positive_wire_decimal("TradeMatched", "price", &price.value)?;
+    require_positive_wire_decimal("TradeMatched", "quantity", &quantity.value)?;
+    let participants: Option<[WireTradeParticipantV1; 2]> = match message.participants.len() {
+        0 => None,
+        2 => {
+            let participants = message
+                .participants
+                .into_iter()
+                .map(decode_trade_participant)
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .expect("length checked before conversion");
+            Some(validate_trade_participants(participants)?)
+        }
+        actual => {
+            return Err(PayloadCodecError::Invalid {
+                kind: "TradeMatched".to_owned(),
+                reason: format!(
+                    "participants must contain zero or exactly two entries, got {actual}"
+                ),
+            });
+        }
+    };
     Ok(WireTradeMatched {
         trade_id: decode_optional_identity("trade_id", message.trade_id)?,
         market_id: decode_optional_identity("market_id", message.market_id)?,
@@ -2403,6 +2451,99 @@ pub fn decode_trade_matched(bytes: &[u8]) -> Result<WireTradeMatched, PayloadCod
         price: price.value,
         quantity: quantity.value,
         deterministic_seed: message.deterministic_seed,
+        participants,
+    })
+}
+
+fn validate_trade_participants(
+    mut participants: [WireTradeParticipantV1; 2],
+) -> Result<[WireTradeParticipantV1; 2], PayloadCodecError> {
+    for participant in &mut participants {
+        participant.account_id = required_api_address(
+            "TradeMatched",
+            "participants.account_id",
+            std::mem::take(&mut participant.account_id),
+        )?;
+        participant.start_position = required_payload_field(
+            "TradeMatched",
+            "participants.start_position",
+            std::mem::take(&mut participant.start_position),
+        )?;
+        parse_wire_decimal(
+            "TradeMatched",
+            "participants.start_position",
+            &participant.start_position,
+        )?;
+        participant.order_id = required_payload_field(
+            "TradeMatched",
+            "participants.order_id",
+            std::mem::take(&mut participant.order_id),
+        )?;
+        participant.client_order_id = participant
+            .client_order_id
+            .take()
+            .map(|value| {
+                required_bounded_text("TradeMatched", "participants.client_order_id", value, 256)
+            })
+            .transpose()?;
+    }
+    if participants[0].role != "buyer" || participants[1].role != "seller" {
+        return Err(PayloadCodecError::Invalid {
+            kind: "TradeMatched".to_owned(),
+            reason: "participants must be ordered buyer then seller".to_owned(),
+        });
+    }
+    require_distinct_accounts(
+        "TradeMatched",
+        "participants[0].account_id",
+        &participants[0].account_id,
+        "participants[1].account_id",
+        &participants[1].account_id,
+    )?;
+    Ok(participants)
+}
+
+fn encode_trade_participant(
+    value: WireTradeParticipantV1,
+) -> generated::hl::canonical::v1::TradeParticipantV1 {
+    let role = match value.role.as_str() {
+        "buyer" => generated::hl::canonical::v1::TradeParticipantRoleV1::Buyer as i32,
+        "seller" => generated::hl::canonical::v1::TradeParticipantRoleV1::Seller as i32,
+        _ => unreachable!("roles are validated before encoding"),
+    };
+    generated::hl::canonical::v1::TradeParticipantV1 {
+        role,
+        account_id: value.account_id,
+        start_position: value.start_position,
+        order_id: value.order_id,
+        twap_id: value.twap_id,
+        client_order_id: value.client_order_id.unwrap_or_default(),
+    }
+}
+
+fn decode_trade_participant(
+    value: generated::hl::canonical::v1::TradeParticipantV1,
+) -> Result<WireTradeParticipantV1, PayloadCodecError> {
+    let role = match generated::hl::canonical::v1::TradeParticipantRoleV1::try_from(value.role) {
+        Ok(generated::hl::canonical::v1::TradeParticipantRoleV1::Buyer) => "buyer",
+        Ok(generated::hl::canonical::v1::TradeParticipantRoleV1::Seller) => "seller",
+        _ => {
+            return Err(PayloadCodecError::Invalid {
+                kind: "TradeMatched".to_owned(),
+                reason: "participant role must be buyer or seller".to_owned(),
+            });
+        }
+    };
+    Ok(WireTradeParticipantV1 {
+        role: role.to_owned(),
+        account_id: value.account_id,
+        start_position: value.start_position,
+        order_id: value.order_id,
+        twap_id: value.twap_id,
+        client_order_id: decode_optional_identity(
+            "participants.client_order_id",
+            value.client_order_id,
+        )?,
     })
 }
 
@@ -3369,11 +3510,27 @@ fn bounded_account_payload(kind: &str, message: Vec<u8>) -> Result<Vec<u8>, Payl
     Ok(payload)
 }
 
+fn bounded_trade_payload(kind: &str, message: Vec<u8>) -> Result<Vec<u8>, PayloadCodecError> {
+    let payload = wrap_payload(kind, message);
+    validate_trade_payload_size(kind, &payload)?;
+    Ok(payload)
+}
+
 fn validate_account_payload_size(kind: &str, bytes: &[u8]) -> Result<(), PayloadCodecError> {
     if bytes.len() > MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES {
         return Err(PayloadCodecError::Invalid {
             kind: kind.to_owned(),
             reason: CANONICAL_ACCOUNT_PAYLOAD_SIZE_REASON.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_trade_payload_size(kind: &str, bytes: &[u8]) -> Result<(), PayloadCodecError> {
+    if bytes.len() > MAX_CANONICAL_TRADE_PAYLOAD_BYTES {
+        return Err(PayloadCodecError::Invalid {
+            kind: kind.to_owned(),
+            reason: CANONICAL_TRADE_PAYLOAD_SIZE_REASON.to_owned(),
         });
     }
     Ok(())

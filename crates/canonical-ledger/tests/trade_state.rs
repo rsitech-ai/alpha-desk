@@ -82,7 +82,6 @@ fn trade_contract_failures_roll_back_the_complete_block() {
         invalid_trade(101, InvalidTrade::MismatchedMarket),
         invalid_trade(101, InvalidTrade::OneParticipant),
         invalid_trade(101, InvalidTrade::DuplicateParticipant),
-        invalid_trade(101, InvalidTrade::ZeroQuantity),
     ];
 
     for invalid in cases {
@@ -262,7 +261,6 @@ enum InvalidTrade {
     MismatchedMarket,
     OneParticipant,
     DuplicateParticipant,
-    ZeroQuantity,
 }
 
 fn invalid_trade(height: u64, invalid: InvalidTrade) -> CanonicalEventEnvelope {
@@ -285,11 +283,7 @@ fn invalid_trade(height: u64, invalid: InvalidTrade) -> CanonicalEventEnvelope {
             InvalidTrade::DuplicateParticipant => vec![participant, participant],
             _ => vec![participant, Address::from_bytes([0x44; 20])],
         },
-        if invalid == InvalidTrade::ZeroQuantity {
-            Quantity::parse_at_scale("0", 8).unwrap()
-        } else {
-            Quantity::parse_at_scale("0.01", 8).unwrap()
-        },
+        Quantity::parse_at_scale("0.01", 8).unwrap(),
         "1.0.0",
     )
 }
@@ -313,6 +307,7 @@ fn build_trade(
         price: Price::parse_at_scale("65000", 6).unwrap(),
         quantity,
         deterministic_seed: 0,
+        participants: None,
     });
     let payload_hash = *blake3::hash(&payload.encode_to_vec().unwrap()).as_bytes();
     CanonicalEventEnvelope::from_input(CanonicalEventInput {

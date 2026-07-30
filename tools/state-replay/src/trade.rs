@@ -350,6 +350,7 @@ fn trade_block(
         price: Price::parse_at_scale("65000", 6)?,
         quantity: Quantity::parse_at_scale("0.01", 8)?,
         deterministic_seed: height,
+        participants: None,
     });
     let payload_hash = *blake3::hash(&payload.encode_to_vec()?).as_bytes();
     let event = CanonicalEventEnvelope::from_input(CanonicalEventInput {
