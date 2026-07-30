@@ -399,7 +399,7 @@ on them.
   cargo +1.97.1 test -p canonical-ledger --test account_cashflow --locked --offline
   ```
 
-- [ ] **Step 3: Implement bounded records**
+- [x] **Step 3: Implement bounded records**
 
   Freeze reducer version
   `hyperliquid-alpha-desk-canonical-account@1.0.0`. Use two flow record
@@ -822,6 +822,14 @@ on them.
   spec-compliance and code-quality GO. Worker, reviewer, and parent each
   reproduced the focused and 152-test package gates; strict Clippy, formatting,
   size preflight, and exact-range diff checks passed.
+- 2026-07-30: Task 4 Slice A completed at `cdebbf0`. Ten bounded, key-bound
+  account record families now preserve immutable facts, quantity and quote
+  flows, vault-side observed flows, direct relations, and mode/leverage
+  predecessors without exposing balances or holdings. The focused 12-test
+  suite, full 62-test ledger suite, strict Clippy, formatting, and diff checks
+  passed for the worker, parent, and independent reviewer. The independent
+  exact-range review returned GO with no findings. Reducer transitions,
+  prerequisites, collisions, and block-atomic behavior remain Slice B.
 
 ## Rollback / Recovery
 
