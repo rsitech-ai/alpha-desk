@@ -880,12 +880,30 @@ position-settlement-fact.v1
   key: frame(event_id) + frame(account) + frame(market)
 ```
 
+Textual liquidation, event, and market identities use their exact UTF-8 bytes;
+account identities use the raw 20 address bytes. Freeze the six record schemas:
+
+```text
+hyperliquid-alpha-desk/liquidation-current/v1
+hyperliquid-alpha-desk/liquidation-start-fact/v1
+hyperliquid-alpha-desk/liquidation-fill-fact/v1
+hyperliquid-alpha-desk/liquidation-market-flow-current/v1
+hyperliquid-alpha-desk/backstop-liquidation-fact/v1
+hyperliquid-alpha-desk/position-settlement-fact/v1
+```
+
+Freeze the reducer/rule version as
+`hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0`.
+`CanonicalLiquidationReducerV1::VERSION` supplies that exact value. Task 6A
+adds the typed records and version marker; Task 6B adds `EventReducer`
+behavior.
+
 `LiquidationCurrentRecordV1` binds the started account, margin observation,
-first/last events, and an observed process status with exact lowercase wire
-variants `started` and `backstop_observed`. No V1 payload proves completion,
-so there is no `completed`, `terminal`, or final-fill status. Market quantity
-aggregates are always
-separate per liquidation, account, and market; never sum across markets.
+start/backstop/last-observation provenance, and an observed process status with
+exact lowercase wire variants `started` and `backstop_observed`. No V1 payload
+proves completion, so there is no `completed`, `terminal`, or final-fill
+status. Market quantity aggregates are always separate per liquidation,
+account, and market; never sum across markets.
 Backstop facts retain both accounts and the explicitly missing price/basis.
 Settlement facts have no liquidation ID and therefore no process status.
 
@@ -894,10 +912,199 @@ pub enum LiquidationObservedStatusV1 {
     Started,
     BackstopObserved,
 }
+
+pub enum LiquidationSourceValueResolutionV1 {
+    UnavailableFromSource,
+}
 ```
 
 The exact wire variants are `started` and `backstop_observed`. Neither means
-that the liquidation is complete or terminal.
+that the liquidation is complete or terminal. The only V1 source-value
+resolution wire variant is `unavailable_from_source`.
+
+Freeze the records as source-observation facts, not inferred accounting:
+
+```rust
+pub struct LiquidationCurrentRecordV1 {
+    liquidation_id: LiquidationId,
+    account_id: Address,
+    start_margin_value: UsdAmount,
+    start_maintenance_requirement: UsdAmount,
+    observed_status: LiquidationObservedStatusV1,
+    start_event_id: EventId,
+    start_block_height: BlockHeight,
+    start_transaction_index: u32,
+    start_canonical_event_index: u32,
+    first_backstop_event_id: Option<EventId>,
+    first_backstop_block_height: Option<BlockHeight>,
+    first_backstop_transaction_index: Option<u32>,
+    first_backstop_canonical_event_index: Option<u32>,
+    last_observation_event_id: EventId,
+    last_observation_block_height: BlockHeight,
+    last_observation_transaction_index: u32,
+    last_observation_canonical_event_index: u32,
+    rule_version: String,
+}
+
+pub struct LiquidationStartFactRecordV1 {
+    liquidation_id: LiquidationId,
+    event_id: EventId,
+    account_id: Address,
+    margin_value: UsdAmount,
+    maintenance_requirement: UsdAmount,
+    block_height: BlockHeight,
+    transaction_index: u32,
+    canonical_event_index: u32,
+    payload_blake3: [u8; 32],
+    rule_version: String,
+}
+
+pub struct LiquidationFillFactRecordV1 {
+    liquidation_id: LiquidationId,
+    event_id: EventId,
+    account_id: Address,
+    market_id: MarketId,
+    price: Price,
+    quantity: Quantity,
+    block_height: BlockHeight,
+    transaction_index: u32,
+    canonical_event_index: u32,
+    payload_blake3: [u8; 32],
+    rule_version: String,
+}
+
+pub struct LiquidationMarketFlowCurrentRecordV1 {
+    liquidation_id: LiquidationId,
+    account_id: Address,
+    market_id: MarketId,
+    observed_filled_quantity: Quantity,
+    first_fill_event_id: EventId,
+    first_fill_block_height: BlockHeight,
+    first_fill_transaction_index: u32,
+    first_fill_canonical_event_index: u32,
+    last_fill_event_id: EventId,
+    last_fill_block_height: BlockHeight,
+    last_fill_transaction_index: u32,
+    last_fill_canonical_event_index: u32,
+    rule_version: String,
+}
+
+pub struct BackstopLiquidationFactRecordV1 {
+    liquidation_id: LiquidationId,
+    event_id: EventId,
+    account_id: Address,
+    backstop_account_id: Address,
+    market_id: MarketId,
+    quantity: Quantity,
+    transfer_price_resolution: LiquidationSourceValueResolutionV1,
+    entry_price_resolution: LiquidationSourceValueResolutionV1,
+    block_height: BlockHeight,
+    transaction_index: u32,
+    canonical_event_index: u32,
+    payload_blake3: [u8; 32],
+    rule_version: String,
+}
+
+pub struct PositionSettlementFactRecordV1 {
+    event_id: EventId,
+    account_id: Address,
+    market_id: MarketId,
+    settlement_price: Price,
+    settled_quantity: Quantity,
+    realized_pnl: QuoteAmount,
+    block_height: BlockHeight,
+    transaction_index: u32,
+    canonical_event_index: u32,
+    payload_blake3: [u8; 32],
+    rule_version: String,
+}
+```
+
+The start/current margin values are nonnegative, share one scale, and preserve
+`margin_value < maintenance_requirement`. Fact decimals retain source scale;
+there is no scale relation across price, quantity, settlement price, or PnL.
+Fill price and fill quantity are strictly positive. Per-market
+`observed_filled_quantity` is the unsigned exact sum of source fill quantities,
+not a signed position delta or remaining quantity. Task 6B additions align
+existing and incoming quantities upward to their maximum scale, checked, with
+no downscale or rounding. Backstop accounts differ and quantity is strictly
+positive. Both backstop resolution fields must be
+`UnavailableFromSource`; the record exposes no known transfer price or entry
+basis. Settlement price is nonnegative, settled quantity is strictly positive,
+and realized PnL remains signed.
+
+Define event position as the lexicographically ordered tuple
+`(block_height, transaction_index, canonical_event_index)`. Current and
+aggregate first/last provenance must bind tuple to event identity: equal event
+IDs require equal tuples, while distinct event IDs require strict tuple order.
+Distinct events may share one block but never the complete tuple. `Started`
+requires all four first-backstop fields to be `None`. `BackstopObserved`
+requires all four to be `Some`, a distinct first-backstop event, and:
+
+```text
+start_position < first_backstop_position <= last_observation_position
+```
+
+Equality between first-backstop and last-observation positions is valid only
+when their event IDs are equal; otherwise their order is strict. The same
+identity/tuple rule applies to first-fill and last-fill provenance.
+
+Every retained fill updates current `last_observation_*` without changing
+status. The first retained backstop sets `first_backstop_*`; later backstops
+preserve the first provenance and update only `last_observation_*`.
+`LiquidationMarketFlowCurrentRecordV1` similarly preserves first-fill
+provenance and advances last-fill provenance. All records require the exact
+frozen rule version.
+
+Every immutable fact copies `CanonicalEventEnvelope::payload_hash()` exactly.
+The field-ordered JSON wire name is `payload_blake3`, encoded as exactly 64
+lowercase hexadecimal characters. Decoders reject wrong length, uppercase, or
+non-hex values; Task 6B constructs and validates the envelope-to-fact binding.
+Current and aggregate records have no single payload hash.
+
+Immutable fact validity is standalone: its codec does not require that the
+current/start sibling already exists. Reducer-level sibling and envelope
+checks are Task 6B and remain block atomic. Prior immutable facts are decoded
+and key-bound first: malformed/noncanonical/key-mismatched bytes are
+`prior_invalid`; any valid existing fact at the same key, including identical
+bytes, is `identity_collision`. Whole-block duplicate delivery idempotence is
+a separate ledger contract. No record exposes `complete`, terminality, side, a
+known transfer price, a known entry/cost basis, or a
+settlement-to-liquidation link.
+
+V1 treats the source `LiquidationId` as a globally unique process identity.
+The current key therefore remains `frame(liquidation_id)` exactly as frozen;
+reuse for another started account is an identity collision, never a second
+process. This is enforced fail-closed and does not depend on present source
+qualification. Once a current exists, every later `LiquidationStarted` for
+that ID is `process_identity_collision`, including the same account and valid
+or byte-identical content; only whole-block ledger redelivery is idempotent,
+and no later start fact/current mutation commits. A fill/backstop before a
+retained start and a mismatched liquidated account are Task 6B transition
+errors. Because
+`BackstopObserved` is explicitly nonterminal, later same-account fills and
+strictly later repeated backstop observations are accepted; exact event-key
+reuse collides, and provenance regression fails. The immutable fact shapes
+retain enough identity to diagnose failures without weakening the current key.
+
+Freeze exact envelope bindings for Task 6B:
+
+```text
+LiquidationStarted   accounts [account]            markets []
+LiquidationFill      accounts [account]            markets [market]
+BackstopLiquidation  accounts [account, backstop]  markets [market]
+PositionSettled      accounts [account]            markets [market]
+```
+
+The backstop account order is literal. `PositionSettled` remains independent:
+it requires no liquidation start/current and never mutates liquidation process
+status.
+
+Keys use unsigned 64-bit big-endian length framing, checked/preallocated to at
+most 64 KiB. Values are canonical, unknown/duplicate-field-denying JSON of at
+most 16 KiB. Constructors validate private fields; `decode_at` recomputes the
+exact key. The later production `StateImage` retains its separate 4 KiB key
+limit.
 
 - [ ] Write red codec/key tests for every record, process status, account
   binding, per-market separation, duplicates, canonical JSON, key mismatch,
