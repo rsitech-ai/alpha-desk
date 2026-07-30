@@ -24,6 +24,14 @@ fn trade_e2e_proves_exact_state_repeat_resume_and_atomic_rejection() {
     );
     assert_eq!(report["evidence_class"], "synthetic_canonical_trade");
     assert_eq!(
+        report["archive_producer_identity"],
+        "state-replay-trade-e2e-v2"
+    );
+    assert_eq!(
+        report["fixture_parser_version"],
+        "state-replay-trade-fixture-v2"
+    );
+    assert_eq!(
         report["state_semantics"],
         "canonical_trade_facts_and_exact_participant_anchors"
     );

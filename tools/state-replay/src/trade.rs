@@ -1,5 +1,8 @@
 use super::*;
 
+const TRADE_ARCHIVE_PRODUCER_IDENTITY: &str = "state-replay-trade-e2e-v2";
+const TRADE_FIXTURE_PARSER_VERSION: &str = "state-replay-trade-fixture-v2";
+
 pub fn run_trade_e2e(config: &TradeRunConfig) -> Result<TradeEvidence, FixtureRunError> {
     validate_replay_counts(
         config.block_count,
@@ -13,7 +16,7 @@ pub fn run_trade_e2e(config: &TradeRunConfig) -> Result<TradeEvidence, FixtureRu
     let archive = LocalParquetArchive::open(
         &archive_root,
         ArchiveConfig::deterministic_fixture(
-            "state-replay-trade-e2e-v1",
+            TRADE_ARCHIVE_PRODUCER_IDENTITY,
             KnownTime::from_unix_micros(FIXTURE_EPOCH_MICROS)?,
         )?,
     )?;
@@ -280,6 +283,8 @@ pub fn run_trade_e2e(config: &TradeRunConfig) -> Result<TradeEvidence, FixtureRu
     let report = TradeReport {
         schema_version: TRADE_REPORT_SCHEMA,
         evidence_class: TRADE_EVIDENCE_CLASS,
+        archive_producer_identity: TRADE_ARCHIVE_PRODUCER_IDENTITY,
+        fixture_parser_version: TRADE_FIXTURE_PARSER_VERSION,
         state_semantics: "canonical_trade_facts_and_exact_participant_anchors",
         source_qualification: "synthetic_unassessed",
         reducer_set_version: CanonicalTradeReducerSetV2::VERSION,
@@ -410,7 +415,7 @@ fn trade_block(
         observed_at: KnownTime::from_unix_micros(time.unix_micros())?,
         ingested_at: KnownTime::from_unix_micros(time.unix_micros())?,
         canonicalized_at: KnownTime::from_unix_micros(time.unix_micros())?,
-        parser_version: "state-replay-trade-fixture-v1".to_owned(),
+        parser_version: TRADE_FIXTURE_PARSER_VERSION.to_owned(),
         payload,
     })?;
     Ok(BlockEnvelope::try_new(
@@ -674,6 +679,8 @@ fn prove_component_checkpoint_store_rejection(
 struct TradeReport<'a> {
     schema_version: &'static str,
     evidence_class: &'static str,
+    archive_producer_identity: &'static str,
+    fixture_parser_version: &'static str,
     state_semantics: &'static str,
     source_qualification: &'static str,
     reducer_set_version: &'static str,

@@ -531,6 +531,16 @@ impl TradeParticipantRecordV1 {
     }
 
     #[must_use]
+    pub const fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    #[must_use]
+    pub const fn trade_id(&self) -> &TradeId {
+        &self.trade_id
+    }
+
+    #[must_use]
     pub const fn ordinal(&self) -> u8 {
         self.ordinal
     }
@@ -543,6 +553,11 @@ impl TradeParticipantRecordV1 {
     #[must_use]
     pub const fn quantity(&self) -> Quantity {
         self.quantity
+    }
+
+    #[must_use]
+    pub const fn block_height(&self) -> BlockHeight {
+        self.block_height
     }
 }
 
@@ -620,8 +635,18 @@ impl TradeReconciliationRecordV1 {
     }
 
     #[must_use]
+    pub const fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    #[must_use]
     pub const fn trade_id(&self) -> &TradeId {
         &self.trade_id
+    }
+
+    #[must_use]
+    pub const fn market_id(&self) -> &MarketId {
+        &self.market_id
     }
 
     #[must_use]
@@ -922,6 +947,16 @@ impl TradeParticipantRecordV2 {
     }
 
     #[must_use]
+    pub const fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    #[must_use]
+    pub const fn trade_id(&self) -> &TradeId {
+        &self.trade_id
+    }
+
+    #[must_use]
     pub const fn ordinal(&self) -> u8 {
         self.ordinal
     }
@@ -1059,8 +1094,18 @@ impl TradeReconciliationRecordV2 {
     }
 
     #[must_use]
+    pub const fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    #[must_use]
     pub const fn trade_id(&self) -> &TradeId {
         &self.trade_id
+    }
+
+    #[must_use]
+    pub const fn market_id(&self) -> &MarketId {
+        &self.market_id
     }
 
     #[must_use]
