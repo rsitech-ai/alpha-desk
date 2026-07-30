@@ -418,31 +418,31 @@ participant-bearing trade sets it to `Some(event_id)`. Task 4 never creates or
 mutates analytical episodes; Task 5B consumes the same trade/pre-event state
 and owns the corresponding partial-or-complete episode transition.
 
-- [ ] Write red tests for first nonzero anchor, buyer/seller symmetry, long and
+- [x] Write red tests for first nonzero anchor, buyer/seller symmetry, long and
   short add/reduce/flat/reversal, mixed scales, overflow, missing participants,
   reordered identities, unresolved metadata, duplicate effect, start-position
   mismatch, seeded unresolved-state re-anchor, all four
   known-quantity/first-anchor combinations, corrupt current state, mixed
   legacy/enriched test-dispatcher application, and late block rollback.
-- [ ] Require exact current market metadata. Normalize price to the active
+- [x] Require exact current market metadata. Normalize price to the active
   price scale and fill/start/result quantities to the active quantity scale
   only by exact upward rescaling; then require price tick alignment and fill,
   both starts, and both results to be lot-aligned. Perform exact notional
   multiplication only after this normalization. The notional is
   validation-only in Task 4; `trade.v2` owns the source price and Task 5B owns
   analytical notional persistence.
-- [ ] Ensure order-fill events are unsupported by this reducer and cannot
+- [x] Ensure order-fill events are unsupported by this reducer and cannot
   double count.
-- [ ] Add strict key-bound 16 KiB codecs and 64 KiB preallocation bounds;
+- [x] Add strict key-bound 16 KiB codecs and 64 KiB preallocation bounds;
   test the ledger's stricter 4 KiB mutation-key ceiling separately.
-- [ ] Use a test-only dispatcher that evaluates market,
+- [x] Use a test-only dispatcher that evaluates market,
   `CanonicalTradeReducerSetV2`, and `CanonicalPositionReducerV1` against the
   same pre-event state, skips position reduction for legacy trades, and
   rejects cross-child key collisions. Production mixed archive/checkpoint
   replay remains Task 7/8 under `CanonicalStateReducerV1::VERSION =
   "hyperliquid-alpha-desk-canonical-state@1.0.0"`.
-- [ ] Run ledger/replay tests and strict gates.
-- [ ] Commit with `feat(state): reconstruct anchored position quantity`.
+- [x] Run ledger/replay tests and strict gates.
+- [x] Commit with `feat(state): reconstruct anchored position quantity`.
 
 ---
 
@@ -901,6 +901,16 @@ fixed.
   flag false. Parent and independent review passed full ledger/replay suites,
   eight literal persisted-record goldens, the V2 codec boundary matrix,
   strict Clippy, formatting, and diff checks.
+- 2026-07-30: Task 4 contract was corrected at `e555ee0`, implemented at
+  `e9b2195`, and completed with deterministic-compatibility remediation
+  `9a45701`. Exact market-gated source anchors now reconstruct signed
+  buyer/seller position quantity without assuming flat opening state, retain
+  first/continued/reanchored transitions, and fail closed on scale,
+  alignment, arithmetic, prerequisite, collision, or current-state errors.
+  Parent and independent review passed 21 focused position tests, full
+  ledger/replay suites, literal wire/key vectors, inclusive codec/key
+  boundaries, strict Clippy, formatting, and diff checks. Qualification
+  remains synthetic and the production composite/source join remains open.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
