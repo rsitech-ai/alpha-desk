@@ -1523,6 +1523,357 @@ fn load_episode_pair(
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct LoadedNonTradePair {
+    first_anchor_event_id: Option<EventId>,
+    state: LoadedNonTradePairState,
+}
+
+#[derive(Debug, Clone)]
+enum LoadedNonTradePairState {
+    Absent,
+    NoOpenEpisode,
+    Interrupted,
+    Resolved {
+        episode: Box<PositionEpisodeRecordV1>,
+        known_quantity: PositionQuantity,
+    },
+}
+
+impl LoadedNonTradePair {
+    pub(super) fn known_quantity(&self) -> Option<PositionQuantity> {
+        match &self.state {
+            LoadedNonTradePairState::Resolved { known_quantity, .. } => Some(*known_quantity),
+            LoadedNonTradePairState::NoOpenEpisode => {
+                Some(PositionQuantity::from_raw(0, 0).expect("canonical zero"))
+            }
+            LoadedNonTradePairState::Absent | LoadedNonTradePairState::Interrupted => None,
+        }
+    }
+
+    pub(super) fn is_known_zero(&self) -> bool {
+        matches!(self.state, LoadedNonTradePairState::NoOpenEpisode)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum NonTradeQuantityResult {
+    Exact(PositionQuantity),
+    Ambiguous,
+}
+
+pub(super) fn load_nontrade_pair(
+    state: &StateView<'_>,
+    account_id: &Address,
+    market_id: &MarketId,
+) -> Result<LoadedNonTradePair, ReducerError> {
+    let quantity_key = PositionQuantityCurrentRecordV1::state_key(account_id, market_id)
+        .map_err(|_| liquidation_quantity_current_invalid())?;
+    let episode_key = PositionEpisodeCurrentRecordV1::state_key(account_id, market_id)
+        .map_err(|_| liquidation_episode_current_invalid())?;
+    let quantity = state
+        .get(&quantity_key)
+        .map(|bytes| {
+            PositionQuantityCurrentRecordV1::decode_at(&quantity_key, bytes)
+                .map_err(|_| liquidation_quantity_current_invalid())
+        })
+        .transpose()?;
+    let current = state
+        .get(&episode_key)
+        .map(|bytes| {
+            PositionEpisodeCurrentRecordV1::decode_at(&episode_key, bytes)
+                .map_err(|_| liquidation_episode_current_invalid())
+        })
+        .transpose()?;
+    match (quantity, current) {
+        (None, None) => Ok(LoadedNonTradePair {
+            first_anchor_event_id: None,
+            state: LoadedNonTradePairState::Absent,
+        }),
+        (Some(quantity), Some(current)) => {
+            let first_anchor_event_id = quantity.first_anchor_event_id().cloned();
+            let pair = match (
+                quantity.known_quantity(),
+                current.attribution_resolution(),
+                current.episode_id(),
+            ) {
+                (Some(value), EpisodeAttributionResolutionV1::NoOpenEpisode, None)
+                    if value.raw() == 0 =>
+                {
+                    LoadedNonTradePairState::NoOpenEpisode
+                }
+                (None, EpisodeAttributionResolutionV1::Interrupted, None) => {
+                    LoadedNonTradePairState::Interrupted
+                }
+                (Some(value), EpisodeAttributionResolutionV1::Resolved, Some(target))
+                    if value.raw() != 0 =>
+                {
+                    let target_key = PositionEpisodeRecordV1::state_key(target)
+                        .map_err(|_| liquidation_episode_reference_invalid())?;
+                    let bytes = state
+                        .get(&target_key)
+                        .ok_or_else(liquidation_episode_reference_invalid)?;
+                    let episode = PositionEpisodeRecordV1::decode_at(&target_key, bytes)
+                        .map_err(|_| liquidation_episode_reference_invalid())?;
+                    if episode.account_id != *account_id
+                        || episode.market_id != *market_id
+                        || episode.status != EpisodeStatusV1::Open
+                    {
+                        return Err(liquidation_episode_reference_invalid());
+                    }
+                    LoadedNonTradePairState::Resolved {
+                        episode: Box::new(episode),
+                        known_quantity: value,
+                    }
+                }
+                _ => return Err(liquidation_current_pair_mismatch()),
+            };
+            Ok(LoadedNonTradePair {
+                first_anchor_event_id,
+                state: pair,
+            })
+        }
+        _ => Err(liquidation_current_pair_mismatch()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stage_nontrade_transition(
+    event: &CanonicalEventEnvelope,
+    account_id: Address,
+    market_id: &MarketId,
+    loaded: LoadedNonTradePair,
+    result: NonTradeQuantityResult,
+    cause: EpisodeCloseCauseV1,
+    zero_quantity_scale: u8,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    let zero_quantity = Quantity::from_raw(0, zero_quantity_scale)
+        .map_err(|_| liquidation_quantity_arithmetic())?;
+    let zero_notional =
+        ExactQuoteNotional::from_str("0").map_err(|_| liquidation_quantity_arithmetic())?;
+    let zero_funding =
+        QuoteAmount::from_raw(0, 0).map_err(|_| liquidation_quantity_arithmetic())?;
+
+    let known_quantity = match result {
+        NonTradeQuantityResult::Exact(value) => Some(value),
+        NonTradeQuantityResult::Ambiguous => None,
+    };
+    let quantity = PositionQuantityCurrentRecordV1::try_new(
+        account_id,
+        market_id.clone(),
+        known_quantity,
+        loaded.first_anchor_event_id.clone(),
+        event.event_id().clone(),
+        event.block_height(),
+    )
+    .map_err(|_| liquidation_proposed_pair_invalid())?;
+    let quantity_key = PositionQuantityCurrentRecordV1::state_key(&account_id, market_id)
+        .map_err(|_| liquidation_proposed_pair_invalid())?;
+
+    let mut effects = Vec::new();
+    let mut episodes = Vec::new();
+    let mut proposed_open = None;
+    if let LoadedNonTradePairState::Resolved { episode, .. } = loaded.state {
+        let mut interrupted = *episode;
+        interrupted.close_event_id = Some(event.event_id().clone());
+        interrupted.close_cause = Some(cause);
+        interrupted.status = EpisodeStatusV1::Interrupted;
+        interrupted.last_event_id = event.event_id().clone();
+        interrupted.last_block_height = event.block_height();
+        interrupted
+            .validate()
+            .map_err(|_| liquidation_proposed_pair_invalid())?;
+        let effect = PositionEpisodeEffectFactRecordV1::try_new(
+            event.event_id().clone(),
+            account_id,
+            market_id.clone(),
+            0,
+            interrupted.episode_id.clone(),
+            EpisodeEffectKindV1::Interrupted,
+            zero_quantity,
+            zero_notional.clone(),
+            zero_quantity,
+            zero_notional.clone(),
+            zero_funding,
+            zero_funding,
+            Some(cause),
+        )
+        .map_err(|_| liquidation_proposed_pair_invalid())?;
+        effects.push(effect);
+        episodes.push(interrupted);
+    } else if matches!(result, NonTradeQuantityResult::Exact(_)) {
+        return Err(liquidation_current_pair_mismatch());
+    }
+
+    if let NonTradeQuantityResult::Exact(value) = result
+        && value.raw() != 0
+    {
+        let episode_id = derive_position_episode_id(&account_id, market_id, event.event_id(), 1)
+            .map_err(|_| liquidation_proposed_pair_invalid())?;
+        let opened = PositionEpisodeRecordV1::try_new(
+            episode_id.clone(),
+            account_id,
+            market_id.clone(),
+            event.event_id().clone(),
+            1,
+            value,
+            None,
+            None,
+            EpisodeCompletenessV1::PartialFromFirstObservation,
+            zero_quantity,
+            zero_notional.clone(),
+            zero_quantity,
+            zero_notional.clone(),
+            zero_funding,
+            zero_funding,
+            EpisodeStatusV1::Open,
+            event.event_id().clone(),
+            event.block_height(),
+        )
+        .map_err(|_| liquidation_proposed_pair_invalid())?;
+        let effect = PositionEpisodeEffectFactRecordV1::try_new(
+            event.event_id().clone(),
+            account_id,
+            market_id.clone(),
+            1,
+            episode_id.clone(),
+            EpisodeEffectKindV1::Opened,
+            zero_quantity,
+            zero_notional.clone(),
+            zero_quantity,
+            zero_notional,
+            zero_funding,
+            zero_funding,
+            None,
+        )
+        .map_err(|_| liquidation_proposed_pair_invalid())?;
+        effects.push(effect);
+        episodes.push(opened);
+        proposed_open = Some(episode_id);
+    }
+
+    let resolution = match result {
+        NonTradeQuantityResult::Exact(value) if value.raw() == 0 => {
+            EpisodeAttributionResolutionV1::NoOpenEpisode
+        }
+        NonTradeQuantityResult::Exact(_) => EpisodeAttributionResolutionV1::Resolved,
+        NonTradeQuantityResult::Ambiguous => EpisodeAttributionResolutionV1::Interrupted,
+    };
+    let current = PositionEpisodeCurrentRecordV1::try_new(
+        account_id,
+        market_id.clone(),
+        proposed_open,
+        resolution,
+        event.event_id().clone(),
+        event.block_height(),
+    )
+    .map_err(|_| liquidation_proposed_pair_invalid())?;
+    let current_key = PositionEpisodeCurrentRecordV1::state_key(&account_id, market_id)
+        .map_err(|_| liquidation_proposed_pair_invalid())?;
+    validate_proposed_pair(known_quantity, &current, episodes.iter())
+        .map_err(|_| liquidation_proposed_pair_invalid())?;
+
+    let mut mutations = Vec::new();
+    for effect in effects {
+        let key = PositionEpisodeEffectFactRecordV1::state_key(
+            effect.event_id(),
+            &account_id,
+            market_id,
+            effect.leg_ordinal(),
+        )
+        .map_err(|_| liquidation_episode_effect_prior_invalid())?;
+        mutations.push(StateMutation::put(
+            key,
+            effect
+                .encode()
+                .map_err(|_| liquidation_episode_effect_prior_invalid())?,
+        ));
+    }
+    for episode in episodes {
+        let key = PositionEpisodeRecordV1::state_key(episode.episode_id())
+            .map_err(|_| liquidation_episode_prior_invalid())?;
+        mutations.push(StateMutation::put(
+            key,
+            episode
+                .encode()
+                .map_err(|_| liquidation_episode_prior_invalid())?,
+        ));
+    }
+    mutations.push(StateMutation::put(
+        quantity_key,
+        quantity
+            .encode()
+            .map_err(|_| liquidation_proposed_pair_invalid())?,
+    ));
+    mutations.push(StateMutation::put(
+        current_key,
+        current
+            .encode()
+            .map_err(|_| liquidation_proposed_pair_invalid())?,
+    ));
+    Ok(mutations)
+}
+
+fn liquidation_quantity_current_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.quantity_current_invalid",
+        "position quantity current is invalid",
+    )
+}
+
+fn liquidation_episode_current_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.episode_current_invalid",
+        "position episode current is invalid",
+    )
+}
+
+fn liquidation_episode_reference_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.episode_reference_invalid",
+        "position episode reference is invalid",
+    )
+}
+
+fn liquidation_current_pair_mismatch() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.current_pair_mismatch",
+        "position quantity and episode currents do not form a valid pair",
+    )
+}
+
+fn liquidation_quantity_arithmetic() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.quantity_arithmetic",
+        "non-trade position quantity arithmetic failed",
+    )
+}
+
+fn liquidation_episode_effect_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.episode_effect_prior_invalid",
+        "prior position episode effect is invalid",
+    )
+}
+
+fn liquidation_episode_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.episode_prior_invalid",
+        "prior position episode is invalid",
+    )
+}
+
+fn liquidation_proposed_pair_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.proposed_pair_invalid",
+        "proposed position quantity and episode pair is invalid",
+    )
+}
+
+fn liquidation_error(reason_code: &'static str, message: &'static str) -> ReducerError {
+    ReducerError::from_static(reason_code, message)
+}
+
 fn validate_proposed_pair<'a>(
     known_quantity: Option<PositionQuantity>,
     current: &PositionEpisodeCurrentRecordV1,

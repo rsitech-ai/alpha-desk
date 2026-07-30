@@ -1,13 +1,25 @@
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
+use canonical_events::{
+    BackstopLiquidation, CanonicalEventEnvelope, EventKind, EventPayload, LiquidationFill,
+    LiquidationStarted, PositionSettled,
+};
 use domain_types::{
-    Address, BlockHeight, EventId, LiquidationId, MarketId, Price, Quantity, QuoteAmount, UsdAmount,
+    Address, BlockHeight, EventId, LiquidationId, MarketId, PositionQuantity, Price, Quantity,
+    QuoteAmount, RoundingMode, UsdAmount,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::StateKey;
+use crate::{ApplyContext, EventReducer, ReducerError, StateKey, StateMutation, StateView};
 
 use super::codec::{PositionStateError, decode_wire, encode_wire, require_record_bytes, state_key};
+use super::episodes::{
+    EpisodeCloseCauseV1, LoadedNonTradePair, NonTradeQuantityResult,
+    PositionEpisodeEffectFactRecordV1, PositionEpisodeRecordV1, load_nontrade_pair,
+    stage_nontrade_transition,
+};
+use super::quantity::PositionUnresolvedCauseFactRecordV1;
 
 const CURRENT_NAMESPACE: &str = "liquidation-current.v1";
 const CURRENT_SCHEMA: &str = "hyperliquid-alpha-desk/liquidation-current/v1";
@@ -27,6 +39,839 @@ pub struct CanonicalLiquidationReducerV1;
 
 impl CanonicalLiquidationReducerV1 {
     pub const VERSION: &'static str = "hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0";
+}
+
+impl EventReducer for CanonicalLiquidationReducerV1 {
+    fn reducer_set_version(&self) -> &str {
+        Self::VERSION
+    }
+
+    fn supports(&self, event: &CanonicalEventEnvelope) -> bool {
+        event.schema_version() == "1.0.0"
+            && matches!(
+                event.event_kind(),
+                EventKind::LiquidationStarted
+                    | EventKind::LiquidationFill
+                    | EventKind::BackstopLiquidation
+                    | EventKind::PositionSettled
+            )
+    }
+
+    fn reduce(
+        &self,
+        state: &StateView<'_>,
+        event: &CanonicalEventEnvelope,
+        _context: &ApplyContext<'_>,
+    ) -> Result<Vec<StateMutation>, ReducerError> {
+        if !self.supports(event) {
+            return Err(liquidation_error(
+                "liquidation_state.unsupported_event",
+                "liquidation reducer received an unsupported event",
+            ));
+        }
+        match event.payload() {
+            EventPayload::LiquidationStarted(payload) => reduce_start(state, event, payload),
+            EventPayload::LiquidationFill(payload) => reduce_fill(state, event, payload),
+            EventPayload::BackstopLiquidation(payload) => reduce_backstop(state, event, payload),
+            EventPayload::PositionSettled(payload) => reduce_settlement(state, event, payload),
+            _ => Err(liquidation_error(
+                "liquidation_state.unsupported_event",
+                "liquidation reducer received an unsupported payload",
+            )),
+        }
+    }
+}
+
+fn exact_identity(
+    event: &CanonicalEventEnvelope,
+    kind: EventKind,
+    markets: &[MarketId],
+    accounts: &[Address],
+) -> Result<(), ReducerError> {
+    if event.event_kind() == kind
+        && event.market_ids() == markets
+        && event.account_addresses() == accounts
+    {
+        Ok(())
+    } else {
+        Err(liquidation_error(
+            "liquidation_state.identity_mismatch",
+            "liquidation envelope identity does not match its payload",
+        ))
+    }
+}
+
+fn reduce_start(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+    payload: &LiquidationStarted,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    exact_identity(
+        event,
+        EventKind::LiquidationStarted,
+        &[],
+        &[payload.account_id],
+    )?;
+
+    let current_key =
+        LiquidationCurrentRecordV1::state_key(&payload.liquidation_id).map_err(|_| {
+            liquidation_error(
+                "liquidation_state.process_prior_invalid",
+                "invalid process key",
+            )
+        })?;
+    if let Some(bytes) = state.get(&current_key) {
+        LiquidationCurrentRecordV1::decode_at(&current_key, bytes).map_err(|_| {
+            liquidation_error(
+                "liquidation_state.process_prior_invalid",
+                "existing liquidation process is invalid",
+            )
+        })?;
+        return Err(liquidation_error(
+            "liquidation_state.process_identity_collision",
+            "liquidation process identity already exists",
+        ));
+    }
+
+    let fact = LiquidationStartFactRecordV1::try_new(
+        payload.liquidation_id.clone(),
+        event.event_id().clone(),
+        payload.account_id,
+        payload.margin_value,
+        payload.maintenance_requirement,
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+        event.payload_hash(),
+    )
+    .map_err(|_| {
+        liquidation_error(
+            "liquidation_state.identity_mismatch",
+            "liquidation start payload is invalid",
+        )
+    })?;
+    let fact_key = LiquidationStartFactRecordV1::state_key(fact.liquidation_id(), fact.event_id())
+        .map_err(|_| {
+            liquidation_error(
+                "liquidation_state.start_fact_prior_invalid",
+                "invalid liquidation start fact key",
+            )
+        })?;
+    if let Some(bytes) = state.get(&fact_key) {
+        LiquidationStartFactRecordV1::decode_at(&fact_key, bytes).map_err(|_| {
+            liquidation_error(
+                "liquidation_state.start_fact_prior_invalid",
+                "existing liquidation start fact is invalid",
+            )
+        })?;
+        return Err(liquidation_error(
+            "liquidation_state.start_fact_identity_collision",
+            "liquidation start fact identity already exists",
+        ));
+    }
+
+    let current = LiquidationCurrentRecordV1::try_new(
+        payload.liquidation_id.clone(),
+        payload.account_id,
+        payload.margin_value,
+        payload.maintenance_requirement,
+        LiquidationObservedStatusV1::Started,
+        event.event_id().clone(),
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+        None,
+        event.event_id().clone(),
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+    )
+    .map_err(|_| {
+        liquidation_error(
+            "liquidation_state.process_transition_invalid",
+            "liquidation start process transition is invalid",
+        )
+    })?;
+
+    Ok(vec![
+        StateMutation::put(
+            fact_key,
+            fact.encode().map_err(|_| {
+                liquidation_error(
+                    "liquidation_state.start_fact_prior_invalid",
+                    "could not encode liquidation start fact",
+                )
+            })?,
+        ),
+        StateMutation::put(
+            current_key,
+            current.encode().map_err(|_| {
+                liquidation_error(
+                    "liquidation_state.process_transition_invalid",
+                    "could not encode liquidation process",
+                )
+            })?,
+        ),
+    ])
+}
+
+fn reduce_fill(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+    payload: &LiquidationFill,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    exact_identity(
+        event,
+        EventKind::LiquidationFill,
+        std::slice::from_ref(&payload.market_id),
+        &[payload.account_id],
+    )?;
+    let fact = LiquidationFillFactRecordV1::try_new(
+        payload.liquidation_id.clone(),
+        event.event_id().clone(),
+        payload.account_id,
+        payload.market_id.clone(),
+        payload.price,
+        payload.quantity,
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+        event.payload_hash(),
+    )
+    .map_err(|_| identity_mismatch())?;
+    let fact_key = LiquidationFillFactRecordV1::state_key(fact.liquidation_id(), fact.event_id())
+        .map_err(|_| fill_fact_prior_invalid())?;
+    reject_fill_fact(state, &fact_key)?;
+
+    let process = load_process(state, &payload.liquidation_id)?;
+    validate_process_observation(&process, payload.account_id, event)?;
+    let process_mutation = updated_process_mutation(&process, event, false)?;
+
+    let flow_key = LiquidationMarketFlowCurrentRecordV1::state_key(
+        &payload.liquidation_id,
+        &payload.account_id,
+        &payload.market_id,
+    )
+    .map_err(|_| flow_prior_invalid())?;
+    let prior_flow = state
+        .get(&flow_key)
+        .map(|bytes| {
+            LiquidationMarketFlowCurrentRecordV1::decode_at(&flow_key, bytes)
+                .map_err(|_| flow_prior_invalid())
+        })
+        .transpose()?;
+    if let Some(flow) = prior_flow.as_ref() {
+        validate_flow_observation(flow, &process, event)?;
+    }
+    let loaded = load_nontrade_pair(state, &payload.account_id, &payload.market_id)?;
+    let result = fill_result(&loaded, payload.quantity)?;
+    let flow = updated_flow(prior_flow.as_ref(), payload, event)?;
+    let mut account_mutations = stage_nontrade_transition(
+        event,
+        payload.account_id,
+        &payload.market_id,
+        loaded,
+        result,
+        EpisodeCloseCauseV1::LiquidationFill,
+        payload.quantity.scale().max(match result {
+            NonTradeQuantityResult::Exact(value) => value.scale(),
+            NonTradeQuantityResult::Ambiguous => payload.quantity.scale(),
+        }),
+    )?;
+    validate_episode_secondary_collisions(state, event, &account_mutations)?;
+
+    let mut mutations = vec![
+        StateMutation::put(
+            fact_key,
+            fact.encode().map_err(|_| fill_fact_prior_invalid())?,
+        ),
+        StateMutation::put(flow_key, flow.encode().map_err(|_| flow_prior_invalid())?),
+        process_mutation,
+    ];
+    mutations.append(&mut account_mutations);
+    ensure_unique_liquidation_keys(&mutations)?;
+    Ok(mutations)
+}
+
+fn reduce_backstop(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+    payload: &BackstopLiquidation,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    exact_identity(
+        event,
+        EventKind::BackstopLiquidation,
+        std::slice::from_ref(&payload.market_id),
+        &[payload.account_id, payload.backstop_account_id],
+    )?;
+    let fact = BackstopLiquidationFactRecordV1::try_new(
+        payload.liquidation_id.clone(),
+        event.event_id().clone(),
+        payload.account_id,
+        payload.backstop_account_id,
+        payload.market_id.clone(),
+        payload.quantity,
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+        event.payload_hash(),
+    )
+    .map_err(|_| identity_mismatch())?;
+    let fact_key =
+        BackstopLiquidationFactRecordV1::state_key(fact.liquidation_id(), fact.event_id())
+            .map_err(|_| backstop_fact_prior_invalid())?;
+    reject_backstop_fact(state, &fact_key)?;
+    let process = load_process(state, &payload.liquidation_id)?;
+    validate_process_observation(&process, payload.account_id, event)?;
+    let process_mutation = updated_process_mutation(&process, event, true)?;
+
+    let accounts = [payload.account_id, payload.backstop_account_id];
+    let loaded = [
+        load_nontrade_pair(state, &accounts[0], &payload.market_id)?,
+        load_nontrade_pair(state, &accounts[1], &payload.market_id)?,
+    ];
+    let mut staged_bundles = Vec::new();
+    for (account, pair) in accounts.into_iter().zip(loaded) {
+        staged_bundles.push(stage_nontrade_transition(
+            event,
+            account,
+            &payload.market_id,
+            pair,
+            NonTradeQuantityResult::Ambiguous,
+            EpisodeCloseCauseV1::BackstopInterrupted,
+            payload.quantity.scale(),
+        )?);
+    }
+
+    let mut bundles = Vec::new();
+    for (account, staged) in accounts.into_iter().zip(staged_bundles) {
+        let cause = PositionUnresolvedCauseFactRecordV1::backstop_liquidation(
+            account,
+            payload.market_id.clone(),
+            event.event_id().clone(),
+            payload.liquidation_id.clone(),
+        );
+        let cause_key = PositionUnresolvedCauseFactRecordV1::state_key(
+            &account,
+            &payload.market_id,
+            event.event_id(),
+            &payload.liquidation_id,
+        )
+        .map_err(|_| unresolved_prior_invalid())?;
+        if let Some(bytes) = state.get(&cause_key) {
+            PositionUnresolvedCauseFactRecordV1::decode_at(&cause_key, bytes)
+                .map_err(|_| unresolved_prior_invalid())?;
+            return Err(liquidation_error(
+                "liquidation_state.unresolved_identity_collision",
+                "position unresolved cause identity already exists",
+            ));
+        }
+        validate_episode_secondary_collisions(state, event, &staged)?;
+        let mut bundle = vec![StateMutation::put(
+            cause_key,
+            cause.encode().map_err(|_| unresolved_prior_invalid())?,
+        )];
+        bundle.extend(staged);
+        bundles.push(bundle);
+    }
+
+    let mut mutations = vec![
+        StateMutation::put(
+            fact_key,
+            fact.encode().map_err(|_| backstop_fact_prior_invalid())?,
+        ),
+        process_mutation,
+    ];
+    for mut bundle in bundles {
+        mutations.append(&mut bundle);
+    }
+    ensure_unique_liquidation_keys(&mutations)?;
+    Ok(mutations)
+}
+
+fn reduce_settlement(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+    payload: &PositionSettled,
+) -> Result<Vec<StateMutation>, ReducerError> {
+    exact_identity(
+        event,
+        EventKind::PositionSettled,
+        std::slice::from_ref(&payload.market_id),
+        &[payload.account_id],
+    )?;
+    let fact = PositionSettlementFactRecordV1::try_new(
+        event.event_id().clone(),
+        payload.account_id,
+        payload.market_id.clone(),
+        payload.settlement_price,
+        payload.settled_quantity,
+        payload.realized_pnl,
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+        event.payload_hash(),
+    )
+    .map_err(|_| identity_mismatch())?;
+    let fact_key = PositionSettlementFactRecordV1::state_key(
+        fact.event_id(),
+        &payload.account_id,
+        &payload.market_id,
+    )
+    .map_err(|_| settlement_fact_prior_invalid())?;
+    reject_settlement_fact(state, &fact_key)?;
+    let loaded = load_nontrade_pair(state, &payload.account_id, &payload.market_id)?;
+    let result = settlement_result(&loaded, payload.settled_quantity)?;
+    let zero_scale = payload.settled_quantity.scale().max(match result {
+        NonTradeQuantityResult::Exact(value) => value.scale(),
+        NonTradeQuantityResult::Ambiguous => payload.settled_quantity.scale(),
+    });
+    let mut account_mutations = stage_nontrade_transition(
+        event,
+        payload.account_id,
+        &payload.market_id,
+        loaded,
+        result,
+        EpisodeCloseCauseV1::Settlement,
+        zero_scale,
+    )?;
+    validate_episode_secondary_collisions(state, event, &account_mutations)?;
+    let mut mutations = vec![StateMutation::put(
+        fact_key,
+        fact.encode().map_err(|_| settlement_fact_prior_invalid())?,
+    )];
+    mutations.append(&mut account_mutations);
+    ensure_unique_liquidation_keys(&mutations)?;
+    Ok(mutations)
+}
+
+fn fill_result(
+    loaded: &LoadedNonTradePair,
+    quantity: Quantity,
+) -> Result<NonTradeQuantityResult, ReducerError> {
+    if loaded.is_known_zero() {
+        return Err(liquidation_error(
+            "liquidation_state.fill_overrun",
+            "liquidation fill overruns a known position",
+        ));
+    }
+    match loaded.known_quantity() {
+        Some(position) if position.raw() != 0 => toward_zero_result(position, quantity, true),
+        _ => Ok(NonTradeQuantityResult::Ambiguous),
+    }
+}
+
+fn settlement_result(
+    loaded: &LoadedNonTradePair,
+    quantity: Quantity,
+) -> Result<NonTradeQuantityResult, ReducerError> {
+    match loaded.known_quantity() {
+        Some(position) if position.raw() != 0 => toward_zero_result(position, quantity, false),
+        _ => Ok(NonTradeQuantityResult::Ambiguous),
+    }
+}
+
+fn toward_zero_result(
+    position: PositionQuantity,
+    quantity: Quantity,
+    reject_overrun: bool,
+) -> Result<NonTradeQuantityResult, ReducerError> {
+    let scale = position.scale().max(quantity.scale());
+    let position = position
+        .checked_rescale_up(scale)
+        .map_err(|_| quantity_arithmetic())?;
+    let quantity = quantity
+        .rescale(scale, RoundingMode::TowardZero)
+        .map_err(|_| quantity_arithmetic())?;
+    let unsigned =
+        PositionQuantity::from_raw(quantity.raw(), scale).map_err(|_| quantity_arithmetic())?;
+    let candidate = if position.raw() > 0 {
+        position.checked_sub(unsigned)
+    } else {
+        position.checked_add(unsigned)
+    }
+    .map_err(|_| quantity_arithmetic())?;
+    let overrun =
+        (position.raw() > 0 && candidate.raw() < 0) || (position.raw() < 0 && candidate.raw() > 0);
+    if overrun {
+        if reject_overrun {
+            Err(liquidation_error(
+                "liquidation_state.fill_overrun",
+                "liquidation fill overruns a known position",
+            ))
+        } else {
+            Ok(NonTradeQuantityResult::Ambiguous)
+        }
+    } else {
+        Ok(NonTradeQuantityResult::Exact(candidate))
+    }
+}
+
+fn load_process(
+    state: &StateView<'_>,
+    liquidation_id: &LiquidationId,
+) -> Result<LiquidationCurrentRecordV1, ReducerError> {
+    let key = LiquidationCurrentRecordV1::state_key(liquidation_id)
+        .map_err(|_| process_prior_invalid())?;
+    let bytes = state.get(&key).ok_or_else(|| {
+        liquidation_error(
+            "liquidation_state.process_missing",
+            "liquidation process is missing",
+        )
+    })?;
+    LiquidationCurrentRecordV1::decode_at(&key, bytes).map_err(|_| process_prior_invalid())
+}
+
+fn validate_process_observation(
+    process: &LiquidationCurrentRecordV1,
+    account_id: Address,
+    event: &CanonicalEventEnvelope,
+) -> Result<(), ReducerError> {
+    if process.account_id() != account_id {
+        return Err(liquidation_error(
+            "liquidation_state.process_account_mismatch",
+            "liquidation process account does not match event",
+        ));
+    }
+    let incoming = EventPosition::new(
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+    );
+    let prior = EventPosition::new(
+        process.last_observation_block_height(),
+        process.last_observation_transaction_index(),
+        process.last_observation_canonical_event_index(),
+    );
+    if event.event_id() == process.last_observation_event_id() || incoming <= prior {
+        return Err(liquidation_error(
+            "liquidation_state.process_provenance_regression",
+            "liquidation process provenance did not advance",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_flow_observation(
+    flow: &LiquidationMarketFlowCurrentRecordV1,
+    process: &LiquidationCurrentRecordV1,
+    event: &CanonicalEventEnvelope,
+) -> Result<(), ReducerError> {
+    let flow_position = EventPosition::new(
+        flow.last_fill_block_height(),
+        flow.last_fill_transaction_index(),
+        flow.last_fill_canonical_event_index(),
+    );
+    let process_position = EventPosition::new(
+        process.last_observation_block_height(),
+        process.last_observation_transaction_index(),
+        process.last_observation_canonical_event_index(),
+    );
+    let coherent_with_process = if flow.last_fill_event_id() == process.last_observation_event_id()
+    {
+        flow_position == process_position
+    } else {
+        flow_position < process_position
+    };
+    let incoming_position = EventPosition::new(
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+    );
+    if !coherent_with_process
+        || event.event_id() == flow.last_fill_event_id()
+        || incoming_position <= flow_position
+    {
+        return Err(flow_prior_invalid());
+    }
+    Ok(())
+}
+
+fn updated_process_mutation(
+    process: &LiquidationCurrentRecordV1,
+    event: &CanonicalEventEnvelope,
+    backstop: bool,
+) -> Result<StateMutation, ReducerError> {
+    let first_backstop = if backstop && process.first_backstop_event_id().is_none() {
+        Some((
+            event.event_id().clone(),
+            event.block_height(),
+            event.transaction_index(),
+            event.canonical_event_index(),
+        ))
+    } else {
+        process.first_backstop_event_id().cloned().map(|event_id| {
+            (
+                event_id,
+                process
+                    .first_backstop_block_height()
+                    .expect("validated backstop position"),
+                process
+                    .first_backstop_transaction_index()
+                    .expect("validated backstop position"),
+                process
+                    .first_backstop_canonical_event_index()
+                    .expect("validated backstop position"),
+            )
+        })
+    };
+    let status = if backstop {
+        LiquidationObservedStatusV1::BackstopObserved
+    } else {
+        process.observed_status()
+    };
+    let updated = LiquidationCurrentRecordV1::try_new(
+        process.liquidation_id().clone(),
+        process.account_id(),
+        process.start_margin_value(),
+        process.start_maintenance_requirement(),
+        status,
+        process.start_event_id().clone(),
+        process.start_block_height(),
+        process.start_transaction_index(),
+        process.start_canonical_event_index(),
+        first_backstop,
+        event.event_id().clone(),
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+    )
+    .map_err(|_| {
+        liquidation_error(
+            "liquidation_state.process_transition_invalid",
+            "liquidation process transition is invalid",
+        )
+    })?;
+    let key = LiquidationCurrentRecordV1::state_key(updated.liquidation_id())
+        .map_err(|_| process_prior_invalid())?;
+    Ok(StateMutation::put(
+        key,
+        updated.encode().map_err(|_| process_prior_invalid())?,
+    ))
+}
+
+fn updated_flow(
+    prior: Option<&LiquidationMarketFlowCurrentRecordV1>,
+    payload: &LiquidationFill,
+    event: &CanonicalEventEnvelope,
+) -> Result<LiquidationMarketFlowCurrentRecordV1, ReducerError> {
+    let (quantity, first_event, first_height, first_transaction, first_index) = match prior {
+        Some(prior) => {
+            let scale = prior
+                .observed_filled_quantity()
+                .scale()
+                .max(payload.quantity.scale());
+            let left = prior
+                .observed_filled_quantity()
+                .rescale(scale, RoundingMode::TowardZero)
+                .map_err(|_| flow_arithmetic())?;
+            let right = payload
+                .quantity
+                .rescale(scale, RoundingMode::TowardZero)
+                .map_err(|_| flow_arithmetic())?;
+            (
+                left.checked_add(right).map_err(|_| flow_arithmetic())?,
+                prior.first_fill_event_id().clone(),
+                prior.first_fill_block_height(),
+                prior.first_fill_transaction_index(),
+                prior.first_fill_canonical_event_index(),
+            )
+        }
+        None => (
+            payload.quantity,
+            event.event_id().clone(),
+            event.block_height(),
+            event.transaction_index(),
+            event.canonical_event_index(),
+        ),
+    };
+    LiquidationMarketFlowCurrentRecordV1::try_new(
+        payload.liquidation_id.clone(),
+        payload.account_id,
+        payload.market_id.clone(),
+        quantity,
+        first_event,
+        first_height,
+        first_transaction,
+        first_index,
+        event.event_id().clone(),
+        event.block_height(),
+        event.transaction_index(),
+        event.canonical_event_index(),
+    )
+    .map_err(|_| flow_arithmetic())
+}
+
+fn reject_fill_fact(state: &StateView<'_>, key: &StateKey) -> Result<(), ReducerError> {
+    if let Some(bytes) = state.get(key) {
+        LiquidationFillFactRecordV1::decode_at(key, bytes)
+            .map_err(|_| fill_fact_prior_invalid())?;
+        return Err(liquidation_error(
+            "liquidation_state.fill_fact_identity_collision",
+            "liquidation fill fact identity already exists",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_backstop_fact(state: &StateView<'_>, key: &StateKey) -> Result<(), ReducerError> {
+    if let Some(bytes) = state.get(key) {
+        BackstopLiquidationFactRecordV1::decode_at(key, bytes)
+            .map_err(|_| backstop_fact_prior_invalid())?;
+        return Err(liquidation_error(
+            "liquidation_state.backstop_fact_identity_collision",
+            "backstop fact identity already exists",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_settlement_fact(state: &StateView<'_>, key: &StateKey) -> Result<(), ReducerError> {
+    if let Some(bytes) = state.get(key) {
+        PositionSettlementFactRecordV1::decode_at(key, bytes)
+            .map_err(|_| settlement_fact_prior_invalid())?;
+        return Err(liquidation_error(
+            "liquidation_state.settlement_fact_identity_collision",
+            "position settlement fact identity already exists",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_episode_secondary_collisions(
+    state: &StateView<'_>,
+    event: &CanonicalEventEnvelope,
+    mutations: &[StateMutation],
+) -> Result<(), ReducerError> {
+    for mutation in mutations {
+        let key = mutation.key();
+        if key.namespace() == "position-episode-effect-fact.v1" {
+            let Some(existing) = state.get(key) else {
+                continue;
+            };
+            PositionEpisodeEffectFactRecordV1::decode_at(key, existing)
+                .map_err(|_| episode_effect_prior_invalid())?;
+            return Err(liquidation_error(
+                "liquidation_state.episode_effect_identity_collision",
+                "position episode effect identity already exists",
+            ));
+        }
+        if key.namespace() != "position-episode.v1" {
+            continue;
+        }
+        let Some(proposed_bytes) = mutation.value() else {
+            continue;
+        };
+        let proposed = PositionEpisodeRecordV1::decode_at(key, proposed_bytes)
+            .map_err(|_| episode_prior_invalid())?;
+        if proposed.opening_anchor_event_id() != event.event_id()
+            || proposed.opening_leg_ordinal() != 1
+        {
+            continue;
+        }
+        let Some(existing) = state.get(key) else {
+            continue;
+        };
+        PositionEpisodeRecordV1::decode_at(key, existing).map_err(|_| episode_prior_invalid())?;
+        return Err(liquidation_error(
+            "liquidation_state.episode_identity_collision",
+            "position episode identity already exists",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_unique_liquidation_keys(mutations: &[StateMutation]) -> Result<(), ReducerError> {
+    let mut keys = BTreeSet::new();
+    if mutations.iter().all(|mutation| keys.insert(mutation.key())) {
+        Ok(())
+    } else {
+        Err(liquidation_error(
+            "liquidation_state.duplicate_mutation_key",
+            "liquidation reducer emitted duplicate mutation keys",
+        ))
+    }
+}
+
+fn identity_mismatch() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.identity_mismatch",
+        "liquidation payload is invalid",
+    )
+}
+
+fn fill_fact_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.fill_fact_prior_invalid",
+        "prior liquidation fill fact is invalid",
+    )
+}
+
+fn backstop_fact_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.backstop_fact_prior_invalid",
+        "prior backstop fact is invalid",
+    )
+}
+
+fn settlement_fact_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.settlement_fact_prior_invalid",
+        "prior settlement fact is invalid",
+    )
+}
+
+fn process_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.process_prior_invalid",
+        "prior liquidation process is invalid",
+    )
+}
+
+fn flow_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.flow_prior_invalid",
+        "prior liquidation flow is invalid",
+    )
+}
+
+fn quantity_arithmetic() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.quantity_arithmetic",
+        "liquidation position arithmetic failed",
+    )
+}
+
+fn flow_arithmetic() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.flow_arithmetic",
+        "liquidation flow arithmetic failed",
+    )
+}
+
+fn unresolved_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.unresolved_prior_invalid",
+        "prior unresolved cause fact is invalid",
+    )
+}
+
+fn episode_effect_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.episode_effect_prior_invalid",
+        "prior position episode effect is invalid",
+    )
+}
+
+fn episode_prior_invalid() -> ReducerError {
+    liquidation_error(
+        "liquidation_state.episode_prior_invalid",
+        "prior position episode is invalid",
+    )
+}
+
+fn liquidation_error(reason_code: &'static str, message: &'static str) -> ReducerError {
+    ReducerError::from_static(reason_code, message)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1730,6 +2575,20 @@ mod tests {
                 [0; 32],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn duplicate_mutation_keys_are_rejected_by_the_complete_vector_guard() {
+        let key = StateKey::try_new("liquidation-test.v1", vec![1]).unwrap();
+        let mutations = vec![
+            StateMutation::put(key.clone(), vec![1]),
+            StateMutation::put(key, vec![2]),
+        ];
+        let error = ensure_unique_liquidation_keys(&mutations).unwrap_err();
+        assert_eq!(
+            error.reason_code(),
+            "liquidation_state.duplicate_mutation_key"
         );
     }
 }
