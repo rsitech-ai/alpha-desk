@@ -605,9 +605,11 @@ The current-record codec enforces only the structural rule:
 `StateView`-aware reference validator. A resolved pointer is valid only when
 the target key exists, `PositionEpisodeRecordV1::decode_at` succeeds, account
 and market match, and the target status is `Open`. Non-resolved pointers must
-not supply a target. Task 5B calls this validator on every load and before
-block acceptance; a current pointer never references a closed or interrupted
-episode.
+not supply a target. Task 5B calls this validator for every existing loaded
+resolved pointer and validates every proposed episode/current pair in memory
+before emitting it. Task 7A revalidates touched final pairs through bounded
+`BlockDeltaView` before block acceptance. A current pointer never references a
+closed or interrupted episode.
 
 Fields remain private. Public APIs are limited to deterministic ID derivation,
 `state_key`, `decode`, `decode_at`, the state-aware reference validator, and
@@ -640,43 +642,210 @@ are not an idempotent overwrite.
 
 **Files:**
 - Modify: `crates/canonical-ledger/src/position/episodes.rs`
+- Modify: `crates/canonical-ledger/src/position/quantity.rs`
 - Create: `crates/canonical-ledger/tests/position_episodes.rs`
 - Modify: `crates/canonical-ledger/src/position/mod.rs`
+- Modify: `crates/canonical-ledger/src/lib.rs`
+- Create: `crates/replay-engine/tests/position_episodes.rs`
 - Modify: `docs/contracts/deterministic-state-v1.md`
 
-An exact episode begins only from a source-proven flat start position. A first
-nonzero anchor creates a partial observed episode. Flat closes the episode.
+Add a distinct `CanonicalPositionEpisodeReducerV1` with:
+
+```text
+VERSION = hyperliquid-alpha-desk-canonical-position-episode@1.0.0
+```
+
+It supports only exact-schema enriched `TradeMatched`, `FundingPaid`, and
+`FundingReceived`. Participant-free trades, `OrderFilled`, all fee events,
+liquidation, backstop, and settlement remain unsupported until their named
+reducers. Same-event V1/V2 trade facts and account-flow facts are sibling
+outputs, never prerequisites.
+
+Extract one crate-private validated-trade helper from Task 4 and use it from
+both `CanonicalPositionReducerV1` and the episode reducer. Against the same
+pre-event `StateView`, it loads exact market metadata, applies upward-only
+price/fill/start normalization, enforces price tick and quantity lot alignment,
+computes buyer/seller results with checked signed arithmetic, and validates the
+full exact notional. Neither reducer may copy this arithmetic or read the
+other's same-event mutations. The helper returns typed internal failures so
+Task 4 preserves every existing reason code and byte-for-byte behavior while
+the episode reducer maps its own frozen reason codes. Existing Task 4 focused
+tests are mandatory refactor regressions.
+
+The test dispatcher evaluates market events first. For other events it
+evaluates, in fixed order, trade-set, account, quantity, and episode children
+against the same pre-event state; concatenates their mutations in that order;
+rejects cross-child duplicate keys; and runs child validation in fixed order.
+Later events in the block see all candidate mutations from prior events.
+
+For every touched account-market, freeze the pre-event consistency matrix:
+
+```text
+quantity current absent       <=> episode current absent
+known quantity == zero        <=> NoOpenEpisode
+known quantity != zero        <=> Resolved + matching key-bound Open episode
+known quantity == None        <=> Interrupted
+```
+
+Any other pair, corrupt/key-mismatched record, orphan current, or resolved
+closed/interrupted episode is `position_episode.current_pair_mismatch`.
+Known quantities must normalize exactly to the source start position.
+Unknown quantity may re-anchor from the next enriched trade's source start.
+First observation is the both-absent case.
+
+Task 5B preserves this invariant by induction: validate every loaded pair and
+every proposed episode/current pair in memory before returning mutations. Do
+not add an O(total-state) `validate_block` scan. Task 7A's bounded delta view
+will validate both touched namespaces in both directions. The production
+composite refuses all pre-episode component checkpoints and requires replay
+under its new reducer-set version, so no implicit migration can introduce
+orphan state.
+
+For each normalized participant, buyer activity always increments buy
+quantity/notional and seller activity always increments sell
+quantity/notional. This remains true for entry, reduction, close, and both
+reversal pieces. The transition table is:
+
+```text
+start == 0:
+  open CompleteFromFlat leg 0 with the full fill delta
+
+first observation or re-anchor with start != 0:
+  create PartialFromFirstObservation leg 0 anchored at source start
+
+start and result have the same nonzero sign:
+  apply the full fill to the new/existing Open episode
+
+result == 0:
+  apply the full fill and close leg 0 with TradeFlat
+
+start and result have opposite nonzero signs:
+  close old/partial leg 0 with TradeReversal using only closed_quantity
+  open CompleteFromFlat residual leg 1 from opening_position == 0
+```
+
 For reversal:
 
 ```text
-closed_quantity   = min(abs(start_position), fill_quantity)
+closed_quantity   = min(checked_magnitude(start_position), fill_quantity)
 residual_quantity = fill_quantity - closed_quantity
 ```
 
-The old/partial episode receives only the closing quantity and its notional at
-the trade price. If residual is positive, leg ordinal `1` opens a new,
-`CompleteFromFlat` opposite episode at the same price. This rule also applies
-when the first retained trade reverses a nonzero source start position, so the
-same event creates a partial closed leg `0` and a complete residual leg `1`
-without key collision. Entry/exit VWAP remains the exact
-`notional / quantity` pair; no canonical decimal division occurs.
+Never call unchecked `abs` on signed raw values. Branch by role/sign and use
+checked negation for a buyer closing a short. The old/partial episode receives
+only `closed_quantity` and `price * closed_quantity`; the new episode receives
+only residual quantity and notional. Require checked quantity and notional
+split conservation against the full fill. A first-observation reversal creates
+a partial episode opened and closed by the same event at ordinal `0`, plus the
+complete residual ordinal `1`.
+
+Existing episode identity/opening fields remain immutable. Upward-align
+cumulative buy/sell quantity scales before checked addition. Use
+`ExactQuoteNotional::checked_product` for each attributed portion and
+`checked_add` for cumulative notionals. Entry/exit VWAP remains the exact
+`(notional, quantity)` pair; no canonical decimal division occurs.
+
+Mutation order is exactly
+`buyer(effect leg 0, effect leg 1, episode leg 0, episode leg 1, current)`
+followed by the same sequence for seller, omitting nonexistent legs.
+Decode/key-bind any existing immutable effect before rejecting
+`position_episode.effect_identity_collision`.
+Decode/key-bind a pre-existing newly derived episode before rejecting
+`position_episode.episode_identity_collision`. Identical bytes are not an
+idempotent overwrite. Only the validated existing Open episode may be
+overwritten. Reject reducer-local duplicate mutation keys before returning;
+stage both participants fully so a late seller failure returns no mutations.
+
+Funding independently validates exact ordered envelope account/market
+identity, positive payload amount, exact current market metadata, and the
+prestate matrix. Suppression is byte-empty:
+
+```text
+both currents absent                 -> no episode mutations
+known zero + NoOpenEpisode           -> no episode mutations
+unknown quantity + Interrupted       -> no episode mutations
+known nonzero + Resolved Open target -> attribute funding
+```
+
+Resolved attribution upward-aligns existing paid, received, and incoming
+`QuoteAmount` values to their maximum scale, checked-adds exactly the named
+paid or received side, emits ordinal-`0` `Updated` effect with zero trade
+deltas and the one funding delta, updates episode provenance, and refreshes
+the resolved current pointer. Any corrupt or inconsistent resolved state is an
+error, never suppression. The account reducer retains its independent funding
+flow/fact in the same event. `FeeCharged` stays out of episodes because V1 has
+no execution identity; time proximity is forbidden.
+
+Freeze these reducer reason codes and precedence after unsupported/identity
+checks, then prerequisites, loaded-state validity, arithmetic, collisions, and
+duplicate mutations:
+
+```text
+position_episode.unsupported_event
+position_episode.identity_mismatch
+position_episode.market_prerequisite_missing
+position_episode.market_prerequisite_invalid
+position_episode.market_prerequisite_unresolved
+position_episode.quantity_current_invalid
+position_episode.episode_current_invalid
+position_episode.episode_reference_invalid
+position_episode.current_pair_mismatch
+position_episode.start_position_mismatch
+position_episode.quantity_arithmetic
+position_episode.notional_arithmetic
+position_episode.funding_arithmetic
+position_episode.effect_prior_invalid
+position_episode.effect_identity_collision
+position_episode.episode_prior_invalid
+position_episode.episode_identity_collision
+position_episode.duplicate_mutation_key
+```
+
+An existing effect or newly derived episode key is decoded first. Decode,
+canonicality, or key-binding failure returns the corresponding
+`*_prior_invalid`; only a valid existing immutable record returns
+`*_identity_collision`. A current record codec failure returns its named
+`*_current_invalid`; a missing/corrupt/key-mismatched/non-open resolved target
+returns `episode_reference_invalid`; structurally valid cross-family pair
+disagreement returns `current_pair_mismatch`.
 
 For a `CompleteFromFlat` episode closed only by trades,
 `observed_signed_trade_notional_delta = sell_notional - buy_notional`.
 This is an analytical trade-only metric, not protocol/source `closedPnl`, and
 excludes fees and funding. It is unavailable when liquidation, settlement,
-backstop, or another non-trade cause changes quantity.
+backstop, or another non-trade cause changes quantity. Expose:
 
-- [ ] Test flat-open-close, partial observation, add/reduce, full close,
-  first-observation reversal, same-event two-episode identity, reversal split,
-  non-terminating VWAP, wide overflow, duplicate effect, current-pointer
-  consistency, closed-episode immutability, and immutable effect collision
-  rejection after decoding an existing key-bound effect.
-- [ ] Attribute funding only while an exact/partial open episode pointer is
-  resolved. Suppress attribution when the pointer is interrupted/unresolved;
-  retain the Task 4 account-market flow either way.
-- [ ] Keep `FeeCharged` out of episodes; document the missing execution
-  identity rather than assigning by time proximity.
+```rust
+pub fn observed_signed_trade_notional_delta(
+    &self,
+) -> Result<Option<ExactQuoteNotional>, PositionStateError>
+```
+
+Return `Some(sell - buy)` only for `CompleteFromFlat` episodes whose status is
+`Closed` and cause is `TradeFlat` or `TradeReversal`; use checked subtraction.
+Return `None` for partial, open, or interrupted episodes.
+
+- [ ] Test buyer/seller flat-open/add/reduce/flat/reversal; first partial
+  same-side/reduce/flat/reversal; unresolved re-anchor from flat/nonzero;
+  both reversal ordinals/IDs; split quantity/notional conservation;
+  non-terminating VWAP pairs; mixed-scale increases; tick/lot/downscale,
+  checked-magnitude, signed quantity, exact notional, cumulative quantity, and
+  cumulative notional overflow.
+- [ ] Test every invalid quantity/episode prestate pair, corrupt/key-mismatched
+  records, closed immutability, state-aware reference validation, start
+  mismatch, effect/new-episode collision after decoding corrupt,
+  key-mismatched, and identical prior bytes, and reducer-local/cross-child
+  duplicate keys.
+- [ ] Test paid/received funding attribution, upward scale alignment, all three
+  byte-empty suppression states, stale flat/nonzero mismatch, exact market and
+  ordered identity failures, and proof that account funding flow remains a
+  sibling while fees are unsupported.
+- [ ] Test same-event prestate behavior, later same-block visibility, buyer
+  success plus seller failure rollback, late child failure rollback, mixed
+  legacy/enriched ownership, checkpoint refusal, and repeated/resumed replay
+  byte identity under the test reducer set.
+- [ ] Document exact analytical-only metric availability and the missing fee
+  execution identity.
 - [ ] Run ledger/replay tests and strict gates.
 - [ ] Commit with `feat(state): add exact analytical position episodes`.
 
@@ -839,6 +1008,12 @@ before reserving the entry vector. Enforce the existing mutation-byte ceiling
 independently because repeated writes are intentionally collapsed in the
 normalized view. Every child reducer receives the same normalized view.
 
+The episode child uses this bounded delta to validate both touched
+`position-quantity-current.v1` and `position-episode-current.v1` namespaces in
+both directions. It rejects orphan touched records and rechecks the
+known-nonzero/resolved, known-zero/no-open, and unknown/interrupted matrix
+against the final candidate state without scanning untouched global state.
+
 - [ ] Write red tests for deterministic order, put/update/delete, repeated
   writes, block-start/final values, write-count overflow, byte/entry limits,
   default compatibility, late delta-invariant failure, and full rollback.
@@ -857,7 +1032,8 @@ normalized view. Every child reducer receives the same normalized view.
 `CanonicalStateReducerV1` dispatches in fixed order:
 
 ```text
-market -> order -> trade-v1-fact -> trade-v2-fact -> account-flow -> position
+market -> order -> trade-v1-fact -> trade-v2-fact -> account-flow
+  -> position-quantity -> position-episode -> position-liquidation
 ```
 
 All components see the same pre-event state; later events see all prior
@@ -870,7 +1046,9 @@ whose reducer-set version differs. Composite block validation passes the same
 `BlockDeltaView` to every child in fixed component order.
 The frozen component set includes both `CanonicalTradeReducerV1 @1.0.0` and
 `CanonicalTradeReducerV2 @2.0.0`; removing either is a reducer-set version
-change.
+change. Position quantity, analytical episode, and liquidation/settlement are
+three separately versioned children; none may be collapsed into or silently
+substituted for another.
 
 - [ ] Test same-event pre-state visibility, cross-component collision, current
   overwrite across separate events, immutable collision, late reducer failure,
@@ -1019,6 +1197,14 @@ fixed.
   formatting, and diff checks. Independent review returned GO after literal
   key, cross-family negative, independent 513-bit, wrong-key, and fixed
   episode-key remediation. Transition logic remains Task 5B.
+- 2026-07-30: Task 5B entered design HOLD before RED. Two independent
+  preflights found the original text did not freeze reducer ownership,
+  same-prestate composition, quantity/episode pairing, shared normalized
+  trade arithmetic, reversal deltas, funding suppression, collision ordering,
+  bounded final validation, replay compatibility, or reason codes. The
+  corrected contract now defines a separate episode reducer, a shared Task 4
+  validation kernel, exact transition/funding tables, inductive validation
+  until Task 7A's bounded delta audit, and explicit composite children.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
