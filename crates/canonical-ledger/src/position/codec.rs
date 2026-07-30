@@ -1,5 +1,7 @@
 use serde::{Serialize, de::DeserializeOwned};
 
+use domain_types::{Address, MarketId};
+
 use crate::StateKey;
 
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
@@ -63,6 +65,58 @@ pub(super) fn state_key(
         encoded.extend_from_slice(identity);
     }
     StateKey::try_new(namespace, encoded).map_err(|_| PositionStateError::InvalidKey)
+}
+
+pub(super) fn decode_account_market_key(
+    key: &StateKey,
+) -> Result<(Address, MarketId), PositionStateError> {
+    let encoded = key.key();
+    let mut offset = 0_usize;
+    let account = decode_key_frame(encoded, &mut offset)?;
+    if account.len() != 20 {
+        return Err(PositionStateError::InvalidKey);
+    }
+    let account = Address::from_bytes(
+        account
+            .try_into()
+            .map_err(|_| PositionStateError::InvalidKey)?,
+    );
+    let market = decode_key_frame(encoded, &mut offset)?;
+    if offset != encoded.len() {
+        return Err(PositionStateError::InvalidKey);
+    }
+    let market = std::str::from_utf8(market).map_err(|_| PositionStateError::InvalidKey)?;
+    let market = MarketId::new(market.to_owned()).map_err(|_| PositionStateError::InvalidKey)?;
+    Ok((account, market))
+}
+
+fn decode_key_frame<'a>(
+    encoded: &'a [u8],
+    offset: &mut usize,
+) -> Result<&'a [u8], PositionStateError> {
+    let length_end = offset
+        .checked_add(KEY_FRAME_BYTES)
+        .ok_or(PositionStateError::InvalidKey)?;
+    let length_bytes = encoded
+        .get(*offset..length_end)
+        .ok_or(PositionStateError::InvalidKey)?;
+    let length = u64::from_be_bytes(
+        length_bytes
+            .try_into()
+            .map_err(|_| PositionStateError::InvalidKey)?,
+    );
+    let length = usize::try_from(length).map_err(|_| PositionStateError::InvalidKey)?;
+    if length == 0 {
+        return Err(PositionStateError::InvalidKey);
+    }
+    let frame_end = length_end
+        .checked_add(length)
+        .ok_or(PositionStateError::InvalidKey)?;
+    let frame = encoded
+        .get(length_end..frame_end)
+        .ok_or(PositionStateError::InvalidKey)?;
+    *offset = frame_end;
+    Ok(frame)
 }
 
 pub(super) fn encode_wire<T: Serialize>(wire: &T) -> Result<Vec<u8>, PositionStateError> {

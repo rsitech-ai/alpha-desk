@@ -5,8 +5,9 @@ use canonical_events::{
     EventPayload, SourceEvidence, TradeMatched,
 };
 use canonical_ledger::{
-    ApplyContext, ApplyOutcome, CanonicalLedger, EventReducer, LedgerLimits, PrepareOutcome,
-    ReducerError, StateKey, StateMutation, StateView,
+    ApplyContext, ApplyOutcome, CanonicalLedger, EventReducer, LedgerLimits,
+    MAX_BLOCK_DELTA_ENTRIES, MAX_BLOCK_DELTA_REFERENCED_BYTES, PrepareOutcome, ReducerError,
+    StateKey, StateMutation, StateView,
 };
 use domain_types::{
     Address, BlockHeight, ChainId, KnownTime, MarketId, Price, ProtocolTime, Quantity, SourceId,
@@ -91,6 +92,39 @@ impl EventReducer for RejectingReducer {
     }
 }
 
+#[derive(Debug, Clone)]
+struct LegacyValidationCounter {
+    calls: Rc<Cell<u32>>,
+}
+
+impl EventReducer for LegacyValidationCounter {
+    fn reducer_set_version(&self) -> &str {
+        "legacy-validation-counter@1.0.0"
+    }
+
+    fn supports(&self, _event: &CanonicalEventEnvelope) -> bool {
+        false
+    }
+
+    fn reduce(
+        &self,
+        _state: &StateView<'_>,
+        _event: &CanonicalEventEnvelope,
+        _context: &ApplyContext<'_>,
+    ) -> Result<Vec<StateMutation>, ReducerError> {
+        unreachable!("empty block has no events")
+    }
+
+    fn validate_block(
+        &self,
+        _state: &StateView<'_>,
+        _context: &ApplyContext<'_>,
+    ) -> Result<(), ReducerError> {
+        self.calls.set(self.calls.get() + 1);
+        Ok(())
+    }
+}
+
 #[test]
 fn empty_committed_blocks_advance_contiguously_with_identical_state_hashes() {
     let mut left = ledger(10, RejectingReducer);
@@ -119,6 +153,21 @@ fn empty_committed_blocks_advance_contiguously_with_identical_state_hashes() {
             139, 12, 12, 231, 124, 63, 15, 110, 45, 205, 191, 95, 209,
         ]
     );
+}
+
+#[test]
+fn empty_block_calls_legacy_validation_exactly_once_through_the_delta_default() {
+    let calls = Rc::new(Cell::new(0));
+    let mut ledger = ledger(
+        15,
+        LegacyValidationCounter {
+            calls: Rc::clone(&calls),
+        },
+    );
+
+    ledger.apply_block(&empty_block("mainnet", 15, 15)).unwrap();
+
+    assert_eq!(calls.get(), 1);
 }
 
 #[test]
@@ -288,14 +337,67 @@ impl EventReducer for OrderingReducer {
 
 #[test]
 fn mutation_limits_fail_closed_before_the_candidate_state_is_committed() {
-    let limits = LedgerLimits::try_new(8, 0, 64, 64, 256).expect_err("zero mutation limit");
-    assert_eq!(limits.reason_code(), "ledger.invalid_limits");
+    let valid = [8, 2, 64, 64, 1_024, 16, 512];
+    for index in 0..valid.len() {
+        let mut invalid = valid;
+        invalid[index] = 0;
+        let error = LedgerLimits::try_new(
+            invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6],
+        )
+        .expect_err("all seven limits must be nonzero");
+        assert_eq!(error.reason_code(), "ledger.invalid_limits");
+    }
+    let too_many_events = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+    assert!(matches!(
+        LedgerLimits::try_new(too_many_events, 1, 64, 64, 1_024, 1, 512),
+        Err(canonical_ledger::LedgerError::InvalidLimits)
+    ));
+    assert!(matches!(
+        LedgerLimits::try_new(
+            usize::try_from(u32::MAX).unwrap(),
+            usize::MAX,
+            64,
+            64,
+            usize::MAX,
+            1,
+            512
+        ),
+        Err(canonical_ledger::LedgerError::InvalidLimits)
+    ));
+    assert!(LedgerLimits::try_new(2, 3, 64, 64, 1_024, 7, 512).is_err());
+    assert!(LedgerLimits::try_new(8, 2, 64, 64, 1_024, 16, 1_025).is_err());
+    assert!(LedgerLimits::try_new(8, 2, 1_025, 64, 1_024, 16, 512).is_err());
+    assert!(LedgerLimits::try_new(8, 2, 64, 1_025, 1_024, 16, 512).is_err());
+
+    let production = LedgerLimits::production();
+    assert_eq!(
+        production.max_block_delta_entries(),
+        MAX_BLOCK_DELTA_ENTRIES
+    );
+    assert_eq!(
+        production.max_block_delta_referenced_bytes(),
+        MAX_BLOCK_DELTA_REFERENCED_BYTES
+    );
+    let custom_above_defaults = LedgerLimits::try_new(
+        MAX_BLOCK_DELTA_ENTRIES + 1,
+        2,
+        64,
+        64,
+        MAX_BLOCK_DELTA_REFERENCED_BYTES + 1,
+        MAX_BLOCK_DELTA_ENTRIES + 1,
+        MAX_BLOCK_DELTA_REFERENCED_BYTES + 1,
+    )
+    .expect("production defaults are not global hard caps");
+    assert_eq!(
+        custom_above_defaults.max_block_delta_entries(),
+        MAX_BLOCK_DELTA_ENTRIES + 1
+    );
 
     let mut ledger = CanonicalLedger::try_new(
         ChainId::new("mainnet").expect("chain"),
         BlockHeight::new(60),
         TradeReducer::accepting(),
-        LedgerLimits::try_new(8, 1, 8, 8, 16).expect("limits"),
+        LedgerLimits::try_new(8, 1, 8, 8, 16, 8, 16).expect("limits"),
     )
     .expect("ledger");
     let before = ledger.state_hash();

@@ -156,6 +156,14 @@ all cross-family mismatches fail closed. A known quantity must equal the next
 source start after exact upward normalization. An absent or interrupted pair
 may re-anchor from that source start.
 
+At block acceptance, the episode reducer revalidates only account-market pairs
+touched through the bounded normalized delta. Quantity-current triggers are
+decoded before episode-current triggers, then touched episode records are
+decoded block-start before block-final. Unique pairs are validated in
+quantity-current key order. This catches create/delete and cross-child
+orphaning without an unbounded scan of unrelated state; historical
+unreferenced episodes may remain after both current records are deleted.
+
 An episode opened from observed flat state is
 `complete_from_flat`. A first observation or unresolved re-anchor at nonzero
 position is `partial_from_first_observation`, preserving the explicit opening
@@ -421,8 +429,9 @@ The ledger:
    disposition, and next height;
 2. clones the current pure state into an isolated candidate;
 3. applies events in canonical block order;
-4. enforces per-event and per-block mutation bounds;
-5. runs block-wide reducer invariants;
+4. enforces per-event, raw block-mutation, and normalized block-delta bounds;
+5. calls `validate_block_delta` exactly once with the final candidate and the
+   sorted bounded delta, including an empty view for an empty block;
 6. hashes the complete candidate state; and
 7. returns an opaque prepared transition without changing visible state; and
 8. swaps that candidate into the visible ledger only after an explicit commit.
@@ -477,17 +486,30 @@ State keys contain:
 One event cannot emit multiple mutations for the same key. A delete of a
 missing key is invalid instead of silently becoming a no-op.
 
+The normalized block delta contains one read-only entry per touched key in
+`StateKey` order. Each entry exposes the immutable block-start value, final
+candidate value, and checked write count. Repeated writes collapse into that
+one entry; byte-identical puts still count; and create-then-delete remains
+visible as an absent start and absent final value. Referenced-byte accounting
+counts each unique encoded key once plus its present start and final values.
+Limits are enforced after every successful write, so a transient oversized
+candidate fails even if a later write would have reduced its final size.
+
 Production defaults currently bound:
 
 - events per block: `100000`;
 - mutations per event: `4096`;
 - encoded key bytes: `4096`;
 - value bytes: `16777216`; and
-- aggregate block delta bytes: `268435456`.
+- aggregate raw block mutation bytes: `268435456`;
+- normalized block-delta entries: `1000000`; and
+- normalized block-delta referenced bytes: `268435456`.
 
-These are safety ceilings, not measured performance qualifications. Deployment
-profiles may tighten them but cannot set zero or make an individual key/value
-limit larger than the block delta limit.
+These are production defaults, not global hard caps or measured performance
+qualifications. Custom profiles may be larger when all seven values are
+nonzero, events fit `u32`, normalized entries do not exceed the checked
+events-times-mutations product, key/value limits do not exceed the raw block
+limit, and normalized referenced bytes do not exceed that raw limit.
 
 ## Canonical state bytes
 
