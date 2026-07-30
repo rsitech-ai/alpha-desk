@@ -481,41 +481,95 @@ pub enum EpisodeAttributionResolutionV1 {
     Interrupted,
 }
 
+pub enum EpisodeEffectKindV1 {
+    Opened,
+    Updated,
+    Closed,
+    Interrupted,
+}
+
 pub struct PositionEpisodeRecordV1 {
-    pub episode_id: PositionEpisodeId,
-    pub account_id: Address,
-    pub market_id: MarketId,
-    pub opening_anchor_event_id: EventId,
-    pub opening_leg_ordinal: u8,
-    pub close_event_id: Option<EventId>,
-    pub close_cause: Option<EpisodeCloseCauseV1>,
-    pub completeness: EpisodeCompletenessV1,
-    pub buy_quantity: Quantity,
-    pub buy_notional: ExactQuoteNotional,
-    pub sell_quantity: Quantity,
-    pub sell_notional: ExactQuoteNotional,
-    pub funding_paid: QuoteAmount,
-    pub funding_received: QuoteAmount,
-    pub status: EpisodeStatusV1,
+    episode_id: PositionEpisodeId,
+    account_id: Address,
+    market_id: MarketId,
+    opening_anchor_event_id: EventId,
+    opening_leg_ordinal: u8,
+    opening_position: PositionQuantity,
+    close_event_id: Option<EventId>,
+    close_cause: Option<EpisodeCloseCauseV1>,
+    completeness: EpisodeCompletenessV1,
+    buy_quantity: Quantity,
+    buy_notional: ExactQuoteNotional,
+    sell_quantity: Quantity,
+    sell_notional: ExactQuoteNotional,
+    funding_paid: QuoteAmount,
+    funding_received: QuoteAmount,
+    status: EpisodeStatusV1,
+    last_event_id: EventId,
+    last_block_height: BlockHeight,
 }
 
 pub struct PositionEpisodeCurrentRecordV1 {
-    pub account_id: Address,
-    pub market_id: MarketId,
-    pub episode_id: Option<PositionEpisodeId>,
-    pub attribution_resolution: EpisodeAttributionResolutionV1,
-    pub last_event_id: EventId,
+    account_id: Address,
+    market_id: MarketId,
+    episode_id: Option<PositionEpisodeId>,
+    attribution_resolution: EpisodeAttributionResolutionV1,
+    last_event_id: EventId,
+    last_block_height: BlockHeight,
+}
+
+pub struct PositionEpisodeEffectFactRecordV1 {
+    event_id: EventId,
+    account_id: Address,
+    market_id: MarketId,
+    leg_ordinal: u8,
+    episode_id: PositionEpisodeId,
+    effect_kind: EpisodeEffectKindV1,
+    buy_quantity_delta: Quantity,
+    buy_notional_delta: ExactQuoteNotional,
+    sell_quantity_delta: Quantity,
+    sell_notional_delta: ExactQuoteNotional,
+    funding_paid_delta: QuoteAmount,
+    funding_received_delta: QuoteAmount,
+    close_cause: Option<EpisodeCloseCauseV1>,
+    rule_version: String,
 }
 ```
 
-Derive `PositionEpisodeId` deterministically from account, market, opening
-anchor event, and leg ordinal. Keys are:
+Derive `PositionEpisodeId` with BLAKE3 derive-key context
+`hyperliquid-alpha-desk/position-episode-id/v1`. Hash, in order, the raw
+20-byte account, market UTF-8, and opening-event UTF-8, each framed as an
+unsigned u64 big-endian length followed by the bytes, then hash the raw u8
+opening leg ordinal. The ordinal is exactly `0` or `1`. Reject derivation when
+the framed source identity exceeds the established 64 KiB bound. Encode the
+result as `pos_ep_` followed by exactly 64 lowercase hexadecimal characters.
+Episode decode recomputes this identity and rejects a mismatch. Freeze at
+least one literal derived-ID vector plus independent perturbations of every
+input.
+
+The namespace/schema pairs are:
+
+```text
+position-episode.v1
+  hyperliquid-alpha-desk/position-episode/v1
+position-episode-current.v1
+  hyperliquid-alpha-desk/position-episode-current/v1
+position-episode-effect-fact.v1
+  hyperliquid-alpha-desk/position-episode-effect-fact/v1
+```
+
+Keys are:
 
 ```text
 position-episode.v1                  frame(episode_id)
 position-episode-current.v1          frame(account) + frame(market)
 position-episode-effect-fact.v1      frame(event_id) + frame(account) + frame(market) + frame(leg_ordinal)
 ```
+
+Key frames use the established unsigned u64 big-endian length plus bytes.
+The ordinal key component is therefore `frame([ordinal])`, including the
+eight-byte length `1` followed by the single ordinal byte. Opening ordinals and
+later effect ordinals are independent fields even when they happen to match.
 
 Leg ordinal is bounded to `0..=1`: `0` is the first or only episode effect for
 an account-market event, and `1` is the second residual/reseed effect when the
@@ -526,19 +580,56 @@ lowercase wire variants are
 `complete_from_flat` / `partial_from_first_observation`,
 `trade_flat` / `trade_reversal` / `liquidation_fill` / `settlement` /
 `backstop_interrupted`, `open` / `closed` / `interrupted`, and
-`no_open_episode` / `resolved` / `interrupted`.
+`no_open_episode` / `resolved` / `interrupted`, and
+`opened` / `updated` / `closed` / `interrupted`.
 
 An open episode has neither close field. Closed and interrupted episodes have
-both close fields. `Resolved` requires `Some(episode_id)` referencing an open
-episode; `NoOpenEpisode` and `Interrupted` require `episode_id = None`. A
-current pointer never references a closed or interrupted episode. Strict
-key-bound codecs use the established 16 KiB value and 64 KiB preallocation
-rules.
+both close fields. `Closed` accepts only `TradeFlat` or `TradeReversal`.
+`Interrupted` accepts only `LiquidationFill`, `Settlement`, or
+`BackstopInterrupted`. Opening and closing event IDs may be equal for a
+first-observation reversal. `CompleteFromFlat` requires a zero
+`opening_position`; `PartialFromFirstObservation` requires a nonzero
+`opening_position`.
 
-- [ ] Write red codec/key tests for deterministic IDs, both leg ordinals,
-  current pointers, completeness, close event/cause pairing, closed/current
-  inconsistency, exact-notional bounds, collision, key mismatch, canonical
-  JSON, same-event two-effect key separation, 16 KiB values, and 64 KiB keys.
+All cumulative and effect-delta buy/sell quantities, exact notionals, and
+funding paid/received values are nonnegative. For each buy or sell pair,
+quantity is zero if and only if its notional is zero. An episode effect is a
+delta, not a state snapshot. `Opened` and `Updated` have no close cause;
+`Closed` and `Interrupted` follow the same close-cause matrix as the episode
+record. Every effect carries rule version
+`hyperliquid-alpha-desk-canonical-position-episode@1.0.0`.
+
+The current-record codec enforces only the structural rule:
+`Resolved` requires `Some(episode_id)`, while `NoOpenEpisode` and
+`Interrupted` require `None`. Task 5A also exposes a read-only,
+`StateView`-aware reference validator. A resolved pointer is valid only when
+the target key exists, `PositionEpisodeRecordV1::decode_at` succeeds, account
+and market match, and the target status is `Open`. Non-resolved pointers must
+not supply a target. Task 5B calls this validator on every load and before
+block acceptance; a current pointer never references a closed or interrupted
+episode.
+
+Fields remain private. Public APIs are limited to deterministic ID derivation,
+`state_key`, `decode`, `decode_at`, the state-aware reference validator, and
+read-only accessors. Validated construction and encoding remain
+`pub(super)`. Strict key-bound codecs use the established 16 KiB value and
+64 KiB preallocation rules. The production ledger's separate 4 KiB mutation
+key ceiling remains independently enforced.
+
+Task 5A freezes the immutable effect identity and codec. Task 5B owns stateful
+insertion and must decode any existing effect at the target key before
+rejecting it as `position_episode.effect_identity_collision`; identical bytes
+are not an idempotent overwrite.
+
+- [ ] Write red codec/key tests for the literal deterministic ID, every ID
+  input perturbation, both opening/effect ordinals, all literal
+  schema/enum/record/key vectors, current pointers, completeness and opening
+  position, derived-ID mismatch, the complete status/close-cause matrix,
+  nonnegative totals/deltas, quantity/notional pairing, exact-notional
+  256-byte/155-digit/512-bit/scale-76 bounds, key mismatch, canonical JSON,
+  same-event two-effect key separation, state-aware missing/corrupt/
+  key-mismatched/wrong-identity/non-open pointer targets, exact 16 KiB values,
+  exact 64 KiB keys and each +1 rejection.
 - [ ] Implement records/codecs only; no transition logic.
 - [ ] Run focused/full ledger tests and strict gates.
 - [ ] Commit with `feat(state): add position episode records`.
@@ -579,7 +670,8 @@ backstop, or another non-trade cause changes quantity.
 - [ ] Test flat-open-close, partial observation, add/reduce, full close,
   first-observation reversal, same-event two-episode identity, reversal split,
   non-terminating VWAP, wide overflow, duplicate effect, current-pointer
-  consistency, and closed-episode immutability.
+  consistency, closed-episode immutability, and immutable effect collision
+  rejection after decoding an existing key-bound effect.
 - [ ] Attribute funding only while an exact/partial open episode pointer is
   resolved. Suppress attribution when the pointer is interrupted/unresolved;
   retain the Task 4 account-market flow either way.
@@ -911,6 +1003,13 @@ fixed.
   ledger/replay suites, literal wire/key vectors, inclusive codec/key
   boundaries, strict Clippy, formatting, and diff checks. Qualification
   remains synthetic and the production composite/source join remains open.
+- 2026-07-30: Task 5A entered design HOLD before tests because the original
+  text named an immutable episode-effect namespace without a record and left
+  deterministic episode-ID bytes unspecified. The corrected contract freezes
+  a delta effect fact, BLAKE3 identity derivation, private record surfaces,
+  opening-position and mutation provenance, status/cause matrices, exact
+  numeric invariants, and structural versus state-aware current-pointer
+  validation. Independent re-review returned GO before implementation.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
