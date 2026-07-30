@@ -8,9 +8,14 @@ use domain_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{ApplyContext, EventReducer, ReducerError, StateKey, StateMutation, StateView};
+use crate::{
+    ApplyContext, BlockDeltaView, EventReducer, ReducerError, StateKey, StateMutation, StateView,
+};
 
-use super::codec::{PositionStateError, decode_wire, encode_wire, require_record_bytes, state_key};
+use super::codec::{
+    PositionStateError, decode_account_market_key, decode_wire, encode_wire, require_record_bytes,
+    state_key,
+};
 use super::quantity::{
     NormalizedTradeLeg, PositionQuantityCurrentRecordV1, TradeValidationError, ValidatedTrade,
     ValidatedTradeLeg, finish_prepared_enriched_trade, normalize_prerequisite_trade_leg,
@@ -19,6 +24,7 @@ use super::quantity::{
 
 const EPISODE_NAMESPACE: &str = "position-episode.v1";
 const EPISODE_SCHEMA: &str = "hyperliquid-alpha-desk/position-episode/v1";
+const QUANTITY_CURRENT_NAMESPACE: &str = "position-quantity-current.v1";
 const CURRENT_NAMESPACE: &str = "position-episode-current.v1";
 const CURRENT_SCHEMA: &str = "hyperliquid-alpha-desk/position-episode-current/v1";
 const EFFECT_NAMESPACE: &str = "position-episode-effect-fact.v1";
@@ -88,6 +94,15 @@ impl EventReducer for CanonicalPositionEpisodeReducerV1 {
                 "position episode reducer received an unsupported event",
             )),
         }
+    }
+
+    fn validate_block_delta(
+        &self,
+        final_state: &StateView<'_>,
+        delta: &BlockDeltaView<'_>,
+        _context: &ApplyContext<'_>,
+    ) -> Result<(), ReducerError> {
+        validate_episode_block_delta(final_state, delta)
     }
 }
 
@@ -1517,6 +1532,138 @@ fn load_episode_pair(
                     known_quantity: value,
                 })
             }
+            _ => Err(current_pair_mismatch()),
+        },
+        _ => Err(current_pair_mismatch()),
+    }
+}
+
+fn validate_episode_block_delta(
+    final_state: &StateView<'_>,
+    delta: &BlockDeltaView<'_>,
+) -> Result<(), ReducerError> {
+    let mut touched = std::collections::BTreeMap::new();
+
+    for entry in delta {
+        if entry.key().namespace() != QUANTITY_CURRENT_NAMESPACE {
+            continue;
+        }
+        let (account, market) =
+            decode_account_market_key(entry.key()).map_err(|_| quantity_current_invalid())?;
+        for value in [entry.block_start_value(), entry.block_final_value()]
+            .into_iter()
+            .flatten()
+        {
+            PositionQuantityCurrentRecordV1::decode_at(entry.key(), value)
+                .map_err(|_| quantity_current_invalid())?;
+        }
+        insert_touched_pair(&mut touched, account, market)?;
+    }
+
+    for entry in delta {
+        if entry.key().namespace() != CURRENT_NAMESPACE {
+            continue;
+        }
+        let (account, market) =
+            decode_account_market_key(entry.key()).map_err(|_| episode_current_invalid())?;
+        for value in [entry.block_start_value(), entry.block_final_value()]
+            .into_iter()
+            .flatten()
+        {
+            PositionEpisodeCurrentRecordV1::decode_at(entry.key(), value)
+                .map_err(|_| episode_current_invalid())?;
+        }
+        insert_touched_pair(&mut touched, account, market)?;
+    }
+
+    for entry in delta {
+        if entry.key().namespace() != EPISODE_NAMESPACE {
+            continue;
+        }
+        let mut identified = false;
+        for value in [entry.block_start_value(), entry.block_final_value()]
+            .into_iter()
+            .flatten()
+        {
+            let episode = PositionEpisodeRecordV1::decode_at(entry.key(), value)
+                .map_err(|_| episode_prior_invalid())?;
+            insert_touched_pair(
+                &mut touched,
+                episode.account_id(),
+                episode.market_id().clone(),
+            )?;
+            identified = true;
+        }
+        if !identified {
+            return Err(episode_prior_invalid());
+        }
+    }
+
+    for (_, (account, market)) in touched {
+        validate_final_episode_pair(final_state, account, &market)?;
+    }
+    Ok(())
+}
+
+fn insert_touched_pair(
+    touched: &mut std::collections::BTreeMap<StateKey, (Address, MarketId)>,
+    account: Address,
+    market: MarketId,
+) -> Result<(), ReducerError> {
+    let quantity_key = PositionQuantityCurrentRecordV1::state_key(&account, &market)
+        .map_err(|_| quantity_current_invalid())?;
+    touched.entry(quantity_key).or_insert((account, market));
+    Ok(())
+}
+
+fn validate_final_episode_pair(
+    final_state: &StateView<'_>,
+    account: Address,
+    market: &MarketId,
+) -> Result<(), ReducerError> {
+    let quantity_key = PositionQuantityCurrentRecordV1::state_key(&account, market)
+        .map_err(|_| quantity_current_invalid())?;
+    let current_key = PositionEpisodeCurrentRecordV1::state_key(&account, market)
+        .map_err(|_| episode_current_invalid())?;
+    let quantity = final_state
+        .get(&quantity_key)
+        .map(|bytes| {
+            PositionQuantityCurrentRecordV1::decode_at(&quantity_key, bytes)
+                .map_err(|_| quantity_current_invalid())
+        })
+        .transpose()?;
+    let current = final_state
+        .get(&current_key)
+        .map(|bytes| {
+            PositionEpisodeCurrentRecordV1::decode_at(&current_key, bytes)
+                .map_err(|_| episode_current_invalid())
+        })
+        .transpose()?;
+
+    if let Some(current) = current.as_ref() {
+        current
+            .validate_reference(final_state)
+            .map_err(|_| episode_reference_invalid())?;
+    }
+
+    match (quantity, current) {
+        (None, None) => Ok(()),
+        (Some(quantity), Some(current)) => match (
+            quantity.known_quantity(),
+            current.attribution_resolution(),
+            current.episode_id(),
+        ) {
+            (Some(value), EpisodeAttributionResolutionV1::NoOpenEpisode, None)
+                if value.raw() == 0 =>
+            {
+                Ok(())
+            }
+            (Some(value), EpisodeAttributionResolutionV1::Resolved, Some(_))
+                if value.raw() != 0 =>
+            {
+                Ok(())
+            }
+            (None, EpisodeAttributionResolutionV1::Interrupted, None) => Ok(()),
             _ => Err(current_pair_mismatch()),
         },
         _ => Err(current_pair_mismatch()),

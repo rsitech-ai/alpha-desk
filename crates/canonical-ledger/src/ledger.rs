@@ -4,10 +4,14 @@ use canonical_events::{BlockEnvelope, ConfirmationClass};
 use domain_types::{BlockHeight, ChainId};
 
 use crate::{
-    AppliedMutation, ApplyContext, EventReducer, LedgerError, StateImage, StateKey, StateMutation,
+    AppliedMutation, ApplyContext, BlockDeltaEntry, BlockDeltaView, EventReducer, LedgerError,
+    StateImage, StateKey, StateMutation,
     error::valid_reducer_version,
     state::{StateWatermark, view_entries},
 };
+
+pub const MAX_BLOCK_DELTA_ENTRIES: usize = 1_000_000;
+pub const MAX_BLOCK_DELTA_REFERENCED_BYTES: usize = 256 * 1_024 * 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LedgerLimits {
@@ -16,6 +20,8 @@ pub struct LedgerLimits {
     max_key_bytes: usize,
     max_value_bytes: usize,
     max_block_delta_bytes: usize,
+    max_block_delta_entries: usize,
+    max_block_delta_referenced_bytes: usize,
 }
 
 impl LedgerLimits {
@@ -25,6 +31,8 @@ impl LedgerLimits {
         max_key_bytes: usize,
         max_value_bytes: usize,
         max_block_delta_bytes: usize,
+        max_block_delta_entries: usize,
+        max_block_delta_referenced_bytes: usize,
     ) -> Result<Self, LedgerError> {
         if [
             max_events_per_block,
@@ -32,10 +40,17 @@ impl LedgerLimits {
             max_key_bytes,
             max_value_bytes,
             max_block_delta_bytes,
+            max_block_delta_entries,
+            max_block_delta_referenced_bytes,
         ]
         .contains(&0)
             || max_key_bytes > max_block_delta_bytes
             || max_value_bytes > max_block_delta_bytes
+            || u32::try_from(max_events_per_block).is_err()
+            || max_events_per_block
+                .checked_mul(max_mutations_per_event)
+                .is_none_or(|maximum_entries| max_block_delta_entries > maximum_entries)
+            || max_block_delta_referenced_bytes > max_block_delta_bytes
         {
             return Err(LedgerError::InvalidLimits);
         }
@@ -45,6 +60,8 @@ impl LedgerLimits {
             max_key_bytes,
             max_value_bytes,
             max_block_delta_bytes,
+            max_block_delta_entries,
+            max_block_delta_referenced_bytes,
         })
     }
 
@@ -56,7 +73,19 @@ impl LedgerLimits {
             max_key_bytes: 4 * 1_024,
             max_value_bytes: 16 * 1_024 * 1_024,
             max_block_delta_bytes: 256 * 1_024 * 1_024,
+            max_block_delta_entries: MAX_BLOCK_DELTA_ENTRIES,
+            max_block_delta_referenced_bytes: MAX_BLOCK_DELTA_REFERENCED_BYTES,
         }
+    }
+
+    #[must_use]
+    pub const fn max_block_delta_entries(self) -> usize {
+        self.max_block_delta_entries
+    }
+
+    #[must_use]
+    pub const fn max_block_delta_referenced_bytes(self) -> usize {
+        self.max_block_delta_referenced_bytes
     }
 }
 
@@ -291,7 +320,8 @@ impl<R: EventReducer> CanonicalLedger<R> {
         let before_state_hash = self.state_hash;
         let mut candidate = self.state.candidate_entries();
         let mut applied_mutations = Vec::new();
-        let mut block_delta_bytes = 0_usize;
+        let mut raw_block_delta_bytes = 0_usize;
+        let mut block_delta = BlockDeltaTracker::new(self.state.entries(), self.limits);
         let context = ApplyContext::new(
             block.chain_id(),
             block.block_height(),
@@ -310,12 +340,19 @@ impl<R: EventReducer> CanonicalLedger<R> {
                 .reducer
                 .reduce(&view_entries(&candidate), event, &context)
                 .map_err(|source| LedgerError::ReducerFailed { source })?;
-            self.validate_mutations(&mutations, &mut block_delta_bytes)?;
-            apply_mutations(&mut candidate, mutations, &mut applied_mutations)?;
+            self.validate_mutations(&mutations, &mut raw_block_delta_bytes)?;
+            apply_mutations(
+                &mut candidate,
+                mutations,
+                &mut applied_mutations,
+                &mut block_delta,
+            )?;
         }
 
+        let block_delta_entries = block_delta.entries(&candidate);
+        let block_delta_view = BlockDeltaView::new(&block_delta_entries);
         self.reducer
-            .validate_block(&view_entries(&candidate), &context)
+            .validate_block_delta(&view_entries(&candidate), &block_delta_view, &context)
             .map_err(|source| LedgerError::ReducerFailed { source })?;
 
         let watermark = StateWatermark {
@@ -434,20 +471,139 @@ fn apply_mutations(
     candidate: &mut BTreeMap<StateKey, Vec<u8>>,
     mutations: Vec<StateMutation>,
     applied: &mut Vec<AppliedMutation>,
+    block_delta: &mut BlockDeltaTracker<'_>,
 ) -> Result<(), LedgerError> {
     for mutation in mutations {
         match mutation {
             StateMutation::Put { key, value } => {
                 let previous = candidate.insert(key.clone(), value.clone());
+                block_delta.record_write(&key, Some(&value))?;
                 applied.push(AppliedMutation::new(key, previous, Some(value)));
             }
             StateMutation::Delete { key } => {
                 let previous = candidate.remove(&key).ok_or(LedgerError::InvalidMutation {
                     reason: "cannot delete a missing state key",
                 })?;
+                block_delta.record_write(&key, None)?;
                 applied.push(AppliedMutation::new(key, Some(previous), None));
             }
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrackedBlockDelta {
+    write_count: u32,
+    final_value_bytes: usize,
+}
+
+#[derive(Debug)]
+struct BlockDeltaTracker<'a> {
+    block_start: &'a BTreeMap<StateKey, Vec<u8>>,
+    entries: BTreeMap<StateKey, TrackedBlockDelta>,
+    referenced_bytes: usize,
+    limits: LedgerLimits,
+}
+
+impl<'a> BlockDeltaTracker<'a> {
+    fn new(block_start: &'a BTreeMap<StateKey, Vec<u8>>, limits: LedgerLimits) -> Self {
+        Self {
+            block_start,
+            entries: BTreeMap::new(),
+            referenced_bytes: 0,
+            limits,
+        }
+    }
+
+    fn record_write(
+        &mut self,
+        key: &StateKey,
+        final_value: Option<&[u8]>,
+    ) -> Result<(), LedgerError> {
+        let final_value_bytes = final_value.map_or(0, <[u8]>::len);
+        if let Some(tracked) = self.entries.get_mut(key) {
+            let write_count = tracked
+                .write_count
+                .checked_add(1)
+                .ok_or(LedgerError::MutationLimitExceeded)?;
+            let referenced_bytes = self
+                .referenced_bytes
+                .checked_sub(tracked.final_value_bytes)
+                .and_then(|bytes| bytes.checked_add(final_value_bytes))
+                .ok_or(LedgerError::MutationLimitExceeded)?;
+            if referenced_bytes > self.limits.max_block_delta_referenced_bytes {
+                return Err(LedgerError::MutationLimitExceeded);
+            }
+            tracked.write_count = write_count;
+            tracked.final_value_bytes = final_value_bytes;
+            self.referenced_bytes = referenced_bytes;
+            return Ok(());
+        }
+
+        if self.entries.len() >= self.limits.max_block_delta_entries {
+            return Err(LedgerError::MutationLimitExceeded);
+        }
+        let referenced_bytes = self
+            .referenced_bytes
+            .checked_add(key.encoded_len()?)
+            .and_then(|bytes| bytes.checked_add(self.block_start.get(key).map_or(0, Vec::len)))
+            .and_then(|bytes| bytes.checked_add(final_value_bytes))
+            .ok_or(LedgerError::MutationLimitExceeded)?;
+        if referenced_bytes > self.limits.max_block_delta_referenced_bytes {
+            return Err(LedgerError::MutationLimitExceeded);
+        }
+        self.entries.insert(
+            key.clone(),
+            TrackedBlockDelta {
+                write_count: 1,
+                final_value_bytes,
+            },
+        );
+        self.referenced_bytes = referenced_bytes;
+        Ok(())
+    }
+
+    fn entries<'view>(
+        &'view self,
+        block_final: &'view BTreeMap<StateKey, Vec<u8>>,
+    ) -> Vec<BlockDeltaEntry<'view>> {
+        let mut entries = Vec::with_capacity(self.entries.len());
+        entries.extend(self.entries.iter().map(|(key, tracked)| {
+            BlockDeltaEntry::new(
+                key,
+                self.block_start.get(key).map(Vec::as_slice),
+                block_final.get(key).map(Vec::as_slice),
+                tracked.write_count,
+            )
+        }));
+        entries
+    }
+
+    #[cfg(test)]
+    fn set_write_count_for_test(&mut self, key: &StateKey, write_count: u32) {
+        self.entries
+            .get_mut(key)
+            .expect("test seam requires an existing tracked key")
+            .write_count = write_count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_delta_write_count_overflow_fails_closed() {
+        let block_start = BTreeMap::new();
+        let key = StateKey::try_new("test.delta", b"overflow".to_vec()).unwrap();
+        let mut tracker = BlockDeltaTracker::new(&block_start, LedgerLimits::production());
+        tracker.record_write(&key, None).unwrap();
+        tracker.set_write_count_for_test(&key, u32::MAX);
+
+        assert_eq!(
+            tracker.record_write(&key, None),
+            Err(LedgerError::MutationLimitExceeded)
+        );
+    }
 }

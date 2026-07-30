@@ -22,8 +22,8 @@ pub use account::{
 pub use checkpoint::{CheckpointArtifact, CheckpointCompatibility};
 pub use error::{CheckpointError, LedgerError, ReducerError, StateImageError, StateKeyError};
 pub use ledger::{
-    ApplyOutcome, CanonicalLedger, LedgerLimits, PrepareOutcome, PreparedBlock, StateCheckpoint,
-    StateDelta,
+    ApplyOutcome, CanonicalLedger, LedgerLimits, MAX_BLOCK_DELTA_ENTRIES,
+    MAX_BLOCK_DELTA_REFERENCED_BYTES, PrepareOutcome, PreparedBlock, StateCheckpoint, StateDelta,
 };
 pub use market::{
     AssetContextCurrentRecordV1, CanonicalMarketReducerV1, DexCurrentRecordV1,
@@ -45,7 +45,7 @@ pub use position::{
     PositionSettlementFactRecordV1, PositionStateError, PositionUnresolvedCauseFactRecordV1,
     PositionUnresolvedCauseV1, derive_position_episode_id,
 };
-pub use reducer::{ApplyContext, EventReducer};
+pub use reducer::{ApplyContext, BlockDeltaEntry, BlockDeltaView, EventReducer};
 pub use state::{
     AppliedMutation, StateImage, StateImageLimits, StateKey, StateMutation, StateView,
 };
