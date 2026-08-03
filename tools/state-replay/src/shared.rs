@@ -4,10 +4,11 @@ pub(super) fn validate_replay_counts(
     block_count: u64,
     checkpoint_after: u64,
     iterations: u64,
+    extra_full_passes: u64,
     rejection_blocks: u64,
 ) -> Result<(), FixtureRunError> {
     let passes = iterations
-        .checked_add(1)
+        .checked_add(extra_full_passes)
         .ok_or(FixtureRunError::InvalidConfig)?;
     let total_blocks = block_count
         .checked_mul(passes)

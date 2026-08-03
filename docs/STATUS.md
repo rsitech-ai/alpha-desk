@@ -161,6 +161,12 @@ No validated secret exposure was found by the 2026-07-28 local audit, but normal
 
 ## Latest local evidence
 
+- `just state-replay-position-e2e 30 12 4` — retained private synthetic
+  position report proves exact opening-checkpoint state, reversal/funding/
+  liquidation/backstop/settlement/re-anchor semantics, full/segmented replay
+  equality, semantic-mutation denial, and three atomic rejection boundaries.
+  Deployed/live source and every production qualification remain false.
+
 - `just state-replay-account-e2e 30 12 4` — retained private synthetic account
   report proves repeat/resume equivalence, exact account-flow/relation/mode
   namespace cardinalities, typed prerequisite denial, and atomic late-invalid

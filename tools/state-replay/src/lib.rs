@@ -5,6 +5,7 @@ mod archive;
 mod fixture;
 mod market;
 mod order;
+mod position;
 mod shared;
 mod trade;
 
@@ -46,6 +47,7 @@ pub use archive::run_archive_e2e;
 pub use fixture::run_fixture_e2e;
 pub use market::{MarketEvidence, MarketRunConfig, run_market_e2e};
 pub use order::{OrderEvidence, OrderRunConfig, run_order_e2e};
+pub use position::{PositionEvidence, PositionRunConfig, run_position_e2e};
 pub use trade::run_trade_e2e;
 
 const REPORT_SCHEMA: &str = "hyperliquid-alpha-desk/state-replay-e2e-report/v1";
@@ -201,6 +203,8 @@ pub enum FixtureRunError {
     Json(#[from] serde_json::Error),
     #[error("fixture replay invariant failed: {0}")]
     Invariant(&'static str),
+    #[error("canonical position evidence differs from the frozen semantic oracle")]
+    PositionSemanticMismatch,
 }
 
 pub type StateReplayError = FixtureRunError;
@@ -227,6 +231,7 @@ impl FixtureRunError {
             Self::MarketState(_) => "state_replay.market_state",
             Self::Json(_) => "state_replay.json",
             Self::Invariant(_) => "state_replay.invariant",
+            Self::PositionSemanticMismatch => "state_replay.position_semantic_mismatch",
         }
     }
 }

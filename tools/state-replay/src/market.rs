@@ -76,6 +76,7 @@ pub fn run_market_e2e(config: &MarketRunConfig) -> Result<MarketEvidence, Fixtur
         config.block_count,
         config.checkpoint_after,
         config.iterations,
+        1,
         3,
     )?;
     let output_root = create_private_output_root(&config.output_root)?;

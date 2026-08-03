@@ -242,6 +242,7 @@ fn validate_config(config: &FixtureRunConfig) -> Result<(), FixtureRunError> {
         config.checkpoint_after,
         config.iterations,
         1,
+        1,
     )
 }
 

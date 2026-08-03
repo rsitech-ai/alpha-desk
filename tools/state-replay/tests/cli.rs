@@ -9,7 +9,7 @@ fn cli_emits_stable_exit_codes_and_runs_the_fixture_evidence_path() {
     assert!(missing.stdout.is_empty());
     assert_eq!(
         String::from_utf8(missing.stderr).expect("UTF-8"),
-        "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay trade-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay order-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay market-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay account-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay archive-e2e --archive PATH --output PATH --chain ID --start-height N --end-height N --checkpoint-height N --iterations N\n"
+        "usage: state-replay fixture-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay trade-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay order-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay market-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay account-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay position-e2e --output PATH --blocks N --checkpoint-after N --iterations N\n       state-replay archive-e2e --archive PATH --output PATH --chain ID --start-height N --end-height N --checkpoint-height N --iterations N\n"
     );
 
     let temporary = tempfile::tempdir().expect("temporary root");
@@ -56,6 +56,36 @@ fn cli_emits_stable_exit_codes_and_runs_the_fixture_evidence_path() {
         String::from_utf8(repeated.stderr).expect("UTF-8"),
         "ERROR state_replay.output_exists\n"
     );
+}
+
+#[test]
+fn cli_runs_the_canonical_position_evidence_path_without_overclaiming() {
+    let binary = env!("CARGO_BIN_EXE_state-replay");
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let output = temporary.path().join("position-evidence");
+
+    let success = Command::new(binary)
+        .args([
+            "position-e2e",
+            "--output",
+            output.to_str().expect("UTF-8 output"),
+            "--blocks",
+            "8",
+            "--checkpoint-after",
+            "1",
+            "--iterations",
+            "2",
+        ])
+        .output()
+        .expect("successful invocation");
+
+    assert_eq!(success.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(success.stdout).expect("UTF-8"),
+        "PASS evidence_class=synthetic_canonical_position state_semantics=exact_trade_anchored_quantity_and_analytical_episode_flows synthetic_position_contract_proven=true source_qualification=synthetic_unassessed stage_1_qualified=false stage_2_qualified=false deployed_source_qualified=false live_source_qualified=false authoritative_opening_position_qualified=false authoritative_opening_balance_qualified=false venue_position_reconciliation_qualified=false protocol_entry_price_parity_qualified=false source_closed_pnl_completeness_qualified=false execution_fee_attribution_qualified=false twap_position_completeness_qualified=false backstop_cost_basis_qualified=false standard_margin_qualified=false unified_margin_qualified=false portfolio_margin_qualified=false liquidation_price_qualified=false book_state_qualified=false signal_state_qualified=false execution_qualified=false live_product_qualified=false\n"
+    );
+    assert!(success.stderr.is_empty());
+    assert!(output.join("report.json").is_file());
 }
 
 #[test]

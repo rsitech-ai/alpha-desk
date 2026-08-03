@@ -59,7 +59,13 @@ pub fn run_account_e2e(config: &AccountRunConfig) -> Result<AccountEvidence, Fix
     if config.iterations < 2 {
         return Err(FixtureRunError::InvalidConfig);
     }
-    validate_replay_counts(config.blocks, config.checkpoint_after, config.iterations, 4)?;
+    validate_replay_counts(
+        config.blocks,
+        config.checkpoint_after,
+        config.iterations,
+        1,
+        4,
+    )?;
     let output = create_private_output_root(&config.output)?;
     let archive = LocalParquetArchive::open(
         output.join("archive"),
@@ -921,66 +927,68 @@ fn market_prerequisite_block(
     height: u64,
     chain: &ChainId,
 ) -> Result<BlockEnvelope, FixtureRunError> {
+    block(height, chain, market_prerequisite_events(height)?)
+}
+
+pub(super) fn market_prerequisite_events(
+    height: u64,
+) -> Result<Vec<CanonicalEventEnvelope>, FixtureRunError> {
     let btc = AssetId::new("BTC")?;
     let usdc = AssetId::new("USDC")?;
     let market = market()?;
-    block(
-        height,
-        chain,
-        vec![
-            event(
-                height,
-                0,
-                EventPayload::DexCreated(DexCreated {
-                    dex_id: DexId::new("state-replay")?,
-                    name: "State replay".to_owned(),
-                    operator_account_id: OPERATOR,
-                }),
-                vec![],
-                vec![OPERATOR],
-                "1.0.0",
-            )?,
-            event(
-                height,
-                1,
-                EventPayload::AssetContextUpdated(AssetContextUpdated {
-                    asset_id: btc.clone(),
-                    context_version: "btc-v1".to_owned(),
-                    context_hash: [1; 32],
-                }),
-                vec![],
-                vec![],
-                "1.0.0",
-            )?,
-            event(
-                height,
-                2,
-                EventPayload::AssetContextUpdated(AssetContextUpdated {
-                    asset_id: usdc.clone(),
-                    context_version: "usdc-v1".to_owned(),
-                    context_hash: [2; 32],
-                }),
-                vec![],
-                vec![],
-                "1.0.0",
-            )?,
-            event(
-                height,
-                3,
-                EventPayload::MarketCreated(MarketCreated {
-                    market_id: market.clone(),
-                    dex_id: DexId::new("state-replay")?,
-                    base_asset_id: btc,
-                    quote_asset_id: usdc,
-                    tick_size: Price::parse_at_scale("0.1", 6)?,
-                    lot_size: Quantity::parse_at_scale("0.001", 8)?,
-                }),
-                vec![market],
-                vec![],
-                "1.0.0",
-            )?,
-        ],
-    )
+    Ok(vec![
+        event(
+            height,
+            0,
+            EventPayload::DexCreated(DexCreated {
+                dex_id: DexId::new("state-replay")?,
+                name: "State replay".to_owned(),
+                operator_account_id: OPERATOR,
+            }),
+            vec![],
+            vec![OPERATOR],
+            "1.0.0",
+        )?,
+        event(
+            height,
+            1,
+            EventPayload::AssetContextUpdated(AssetContextUpdated {
+                asset_id: btc.clone(),
+                context_version: "btc-v1".to_owned(),
+                context_hash: [1; 32],
+            }),
+            vec![],
+            vec![],
+            "1.0.0",
+        )?,
+        event(
+            height,
+            2,
+            EventPayload::AssetContextUpdated(AssetContextUpdated {
+                asset_id: usdc.clone(),
+                context_version: "usdc-v1".to_owned(),
+                context_hash: [2; 32],
+            }),
+            vec![],
+            vec![],
+            "1.0.0",
+        )?,
+        event(
+            height,
+            3,
+            EventPayload::MarketCreated(MarketCreated {
+                market_id: market.clone(),
+                dex_id: DexId::new("state-replay")?,
+                base_asset_id: btc,
+                quote_asset_id: usdc,
+                tick_size: Price::parse_at_scale("0.1", 6)?,
+                lot_size: Quantity::parse_at_scale("0.001", 8)?,
+            }),
+            vec![market],
+            vec![],
+            "1.0.0",
+        )?,
+    ])
 }
 
 fn account_flow_block(
@@ -1390,7 +1398,7 @@ fn event(
     })?)
 }
 
-fn block(
+pub(super) fn block(
     height: u64,
     chain: &ChainId,
     events: Vec<CanonicalEventEnvelope>,
@@ -1422,7 +1430,7 @@ fn rejection_archive(
     )?)
 }
 
-fn composite_reducer() -> Result<CanonicalStateReducerV1, FixtureRunError> {
+pub(super) fn composite_reducer() -> Result<CanonicalStateReducerV1, FixtureRunError> {
     CanonicalStateReducerV1::try_new().map_err(|_| {
         FixtureRunError::Invariant("canonical composite reducer configuration is invalid")
     })
