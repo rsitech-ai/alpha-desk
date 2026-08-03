@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, num::NonZeroU64, path::PathBuf};
 
 use canonical_events::BlockEnvelope;
 use domain_types::{BlockHeight, BlockRange, ChainId, KnownTime, ManifestId, SourceId};
@@ -293,12 +293,68 @@ impl RawObservationReceipt {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorPolicy {
+    ContiguousNativeOffset,
+    MonotonicByteOffset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LocalRecordSequence(NonZeroU64);
+
+impl LocalRecordSequence {
+    pub fn try_new(value: u64) -> Result<Self, ArchiveError> {
+        NonZeroU64::new(value)
+            .map(Self)
+            .ok_or(ArchiveError::InvalidInput("local record sequence is zero"))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub fn checked_next(self) -> Result<Self, ArchiveError> {
+        self.checked_advance_by(1)
+    }
+
+    pub fn checked_advance_by(self, count: u64) -> Result<Self, ArchiveError> {
+        self.get()
+            .checked_add(count)
+            .and_then(NonZeroU64::new)
+            .map(Self)
+            .ok_or(ArchiveError::InvalidInput(
+                "local record sequence overflows",
+            ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SequencedSourceObservation<'a> {
+    observation: &'a SourceObservation,
+    local_sequence: LocalRecordSequence,
+}
+
+impl<'a> SequencedSourceObservation<'a> {
+    #[must_use]
+    pub const fn observation(&self) -> &'a SourceObservation {
+        self.observation
+    }
+
+    #[must_use]
+    pub const fn local_sequence(&self) -> LocalRecordSequence {
+        self.local_sequence
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RawObservationBatch {
     chain_id: ChainId,
     observations: Vec<SourceObservation>,
     spool_manifest_blake3: [u8; 32],
     spool_segment_blake3: [u8; 32],
+    cursor_policy: CursorPolicy,
+    first_local_sequence: Option<LocalRecordSequence>,
 }
 
 impl RawObservationBatch {
@@ -340,12 +396,107 @@ impl RawObservationBatch {
             observations,
             spool_manifest_blake3,
             spool_segment_blake3,
+            cursor_policy: CursorPolicy::ContiguousNativeOffset,
+            first_local_sequence: None,
+        })
+    }
+
+    pub fn try_new_byte_offsets(
+        chain_id: ChainId,
+        observations: Vec<SourceObservation>,
+        spool_manifest_blake3: [u8; 32],
+        spool_segment_blake3: [u8; 32],
+        first_local_sequence: LocalRecordSequence,
+    ) -> Result<Self, ArchiveError> {
+        let first = observations
+            .first()
+            .ok_or(ArchiveError::InvalidInput("raw observation batch is empty"))?;
+        if matches!(
+            first.observation_class(),
+            hl_protocol::ObservationClass::CommittedBlock
+                | hl_protocol::ObservationClass::HistoricalBlock
+        ) {
+            return Err(ArchiveError::InvalidInput(
+                "byte-offset cursor policy is incompatible with block-height observation class",
+            ));
+        }
+        let mut previous_offset = first.cursor().offset();
+        for observation in observations.iter().skip(1) {
+            if observation.source_id() != first.source_id()
+                || observation.source_version() != first.source_version()
+                || observation.observation_class() != first.observation_class()
+                || observation.parser_schema_version() != first.parser_schema_version()
+            {
+                return Err(ArchiveError::InvalidInput(
+                    "raw observation batch metadata is inconsistent",
+                ));
+            }
+            if observation.cursor().epoch() != first.cursor().epoch() {
+                return Err(ArchiveError::InvalidInput(
+                    "raw observation batch cursor epochs are inconsistent",
+                ));
+            }
+            match observation.cursor().offset().cmp(&previous_offset) {
+                std::cmp::Ordering::Less => {
+                    return Err(ArchiveError::InvalidInput(
+                        "raw observation byte offsets regress",
+                    ));
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(ArchiveError::InvalidInput(
+                        "raw observation byte offsets are duplicated",
+                    ));
+                }
+                std::cmp::Ordering::Greater => {
+                    previous_offset = observation.cursor().offset();
+                }
+            }
+        }
+        validate_local_sequence_span(first_local_sequence, observations.len())?;
+        Ok(Self {
+            chain_id,
+            observations,
+            spool_manifest_blake3,
+            spool_segment_blake3,
+            cursor_policy: CursorPolicy::MonotonicByteOffset,
+            first_local_sequence: Some(first_local_sequence),
         })
     }
 
     #[must_use]
     pub fn observations(&self) -> &[SourceObservation] {
         &self.observations
+    }
+
+    #[must_use]
+    pub const fn cursor_policy(&self) -> CursorPolicy {
+        self.cursor_policy
+    }
+
+    #[must_use]
+    pub const fn first_local_sequence(&self) -> Option<LocalRecordSequence> {
+        self.first_local_sequence
+    }
+
+    pub fn sequenced_observations(
+        &self,
+    ) -> Option<impl ExactSizeIterator<Item = Result<SequencedSourceObservation<'_>, ArchiveError>>>
+    {
+        self.first_local_sequence.map(|first_local_sequence| {
+            self.observations
+                .iter()
+                .enumerate()
+                .map(move |(index, observation)| {
+                    let advance_by = u64::try_from(index).map_err(|_| {
+                        ArchiveError::InvalidInput("local record sequence overflows")
+                    })?;
+                    let local_sequence = first_local_sequence.checked_advance_by(advance_by)?;
+                    Ok(SequencedSourceObservation {
+                        observation,
+                        local_sequence,
+                    })
+                })
+        })
     }
 
     #[must_use]
@@ -362,6 +513,18 @@ impl RawObservationBatch {
     pub const fn spool_segment_blake3(&self) -> [u8; 32] {
         self.spool_segment_blake3
     }
+}
+
+fn validate_local_sequence_span(
+    first: LocalRecordSequence,
+    count: usize,
+) -> Result<(), ArchiveError> {
+    let last_index = count
+        .checked_sub(1)
+        .ok_or(ArchiveError::InvalidInput("raw observation batch is empty"))?;
+    let advance_by = u64::try_from(last_index)
+        .map_err(|_| ArchiveError::InvalidInput("local record sequence overflows"))?;
+    first.checked_advance_by(advance_by).map(|_| ())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
