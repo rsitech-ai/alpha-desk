@@ -86,38 +86,30 @@ fn account_e2e_proves_exact_synthetic_account_flows_relations_modes_and_boundari
     assert_eq!(report["account_mode_current_count"], 1);
     assert_eq!(report["margin_mode_current_count"], 1);
     assert_eq!(report["leverage_current_count"], 1);
-    assert_eq!(report["debit_credit_symmetry_proven"], true);
+    assert!(report.get("debit_credit_symmetry_proven").is_none());
     assert_atomic_rejection(
         &report["missing_asset_prerequisite"],
         "ledger.reducer_failed",
+        Some("account_state.asset_prerequisite_missing"),
     );
     assert_atomic_rejection(
         &report["missing_market_prerequisite"],
         "ledger.reducer_failed",
+        Some("account_state.market_prerequisite_missing"),
     );
     assert_atomic_rejection(
         &report["cross_component_late_invalid"],
         "ledger.reducer_failed",
+        Some("trade_state.trade_id_collision"),
     );
-    assert_atomic_rejection(&report["unsupported_schema"], "ledger.unsupported_event");
+    assert_atomic_rejection(
+        &report["unsupported_schema"],
+        "ledger.unsupported_event",
+        None,
+    );
     assert!(output.join("archive").is_dir());
     assert!(output.join("checkpoints").is_dir());
-    assert_eq!(
-        fs::metadata(&evidence.report_path)
-            .expect("report metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    assert_eq!(
-        fs::metadata(output.canonicalize().expect("canonical output"))
-            .expect("output metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o700
-    );
+    assert_private_tree(&output);
 }
 
 #[test]
@@ -144,11 +136,88 @@ fn account_e2e_refuses_invalid_or_existing_output() {
     })
     .expect_err("existing output");
     assert_eq!(error.reason_code(), "state_replay.output_exists");
+
+    let traversal = temporary.path().join("safe").join("..").join("escape");
+    let error = run_account_e2e(&AccountRunConfig {
+        output: traversal,
+        blocks: 3,
+        checkpoint_after: 1,
+        iterations: 2,
+    })
+    .expect_err("traversal must fail");
+    assert_eq!(error.reason_code(), "state_replay.unsafe_output");
+
+    let file = temporary.path().join("file-parent");
+    fs::write(&file, b"not a directory").expect("file parent");
+    let error = run_account_e2e(&AccountRunConfig {
+        output: file.join("evidence"),
+        blocks: 3,
+        checkpoint_after: 1,
+        iterations: 2,
+    })
+    .expect_err("non-directory parent must fail");
+    assert_eq!(error.reason_code(), "state_replay.unsafe_output");
+
+    let target = temporary.path().join("target");
+    fs::create_dir(&target).expect("target");
+    let link = temporary.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    let error = run_account_e2e(&AccountRunConfig {
+        output: link.join("evidence"),
+        blocks: 3,
+        checkpoint_after: 1,
+        iterations: 2,
+    })
+    .expect_err("symlink parent must fail");
+    assert_eq!(error.reason_code(), "state_replay.unsafe_output");
 }
 
-fn assert_atomic_rejection(report: &Value, source_reason_code: &str) {
+fn assert_atomic_rejection(
+    report: &Value,
+    source_reason_code: &str,
+    reducer_reason_code: Option<&str>,
+) {
     assert_eq!(report["reason_code"], "replay.block_quarantined");
     assert_eq!(report["source_reason_code"], source_reason_code);
+    match reducer_reason_code {
+        Some(reason) => assert_eq!(report["reducer_reason_code"], reason),
+        None => assert!(report["reducer_reason_code"].is_null()),
+    }
     assert_eq!(report["applied_block_count"], 0);
     assert_eq!(report["state_hash_before"], report["state_hash_after"]);
+}
+
+fn assert_private_tree(root: &std::path::Path) {
+    for entry in walk(root) {
+        let metadata = fs::symlink_metadata(&entry).expect("metadata");
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "symlink: {}",
+            entry.display()
+        );
+        let expected = if metadata.is_dir() { 0o700 } else { 0o600 };
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            expected,
+            "{}",
+            entry.display()
+        );
+    }
+}
+
+fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut entries = vec![root.to_path_buf()];
+    let mut index = 0;
+    while index < entries.len() {
+        if fs::symlink_metadata(&entries[index])
+            .expect("metadata")
+            .is_dir()
+        {
+            for child in fs::read_dir(&entries[index]).expect("directory") {
+                entries.push(child.expect("entry").path());
+            }
+        }
+        index += 1;
+    }
+    entries
 }

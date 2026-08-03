@@ -66,10 +66,40 @@ pub(super) fn resolve_output_path(path: &Path) -> Result<PathBuf, FixtureRunErro
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    let parent_metadata =
+        fs::symlink_metadata(parent).map_err(|_| FixtureRunError::UnsafeOutput)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(FixtureRunError::UnsafeOutput);
+    }
     let canonical_parent = parent
         .canonicalize()
         .map_err(|_| FixtureRunError::UnsafeOutput)?;
     Ok(canonical_parent.join(name))
+}
+
+pub(super) fn harden_private_tree(root: &Path) -> Result<(), FixtureRunError> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|_| FixtureRunError::Io("reading evidence permissions"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(FixtureRunError::UnsafeOutput);
+    }
+    fs::set_permissions(
+        root,
+        fs::Permissions::from_mode(if metadata.is_dir() { 0o700 } else { 0o600 }),
+    )
+    .map_err(|_| FixtureRunError::Io("setting evidence permissions"))?;
+    if metadata.is_dir() {
+        for child in
+            fs::read_dir(root).map_err(|_| FixtureRunError::Io("reading evidence directory"))?
+        {
+            harden_private_tree(
+                &child
+                    .map_err(|_| FixtureRunError::Io("reading evidence entry"))?
+                    .path(),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn replay_request(
