@@ -70,7 +70,7 @@ fn cli_runs_the_canonical_position_evidence_path_without_overclaiming() {
             "--output",
             output.to_str().expect("UTF-8 output"),
             "--blocks",
-            "8",
+            "9",
             "--checkpoint-after",
             "1",
             "--iterations",
