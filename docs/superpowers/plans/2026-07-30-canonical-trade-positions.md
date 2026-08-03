@@ -1910,11 +1910,11 @@ runtime-dependent.
 - [x] Run the focused RED suite and retain the missing-command/module signal.
 - [x] Implement the smallest separate position runner; do not copy archive,
   checkpoint, output, or work-boundary logic that can be safely shared.
-- [ ] Run the full state-replay package, ledger/replay packages, strict
+- [x] Run the full state-replay package, ledger/replay packages, strict
   all-target/all-feature Clippy, formatting, `just generated`, `just deny`, a
   retained quick run, `just oss-audit`, serialized
   `RUST_TEST_THREADS=1 just verify`, and `git diff --check`.
-- [ ] Independently review the exact implementation range and remediate every
+- [x] Independently review the exact implementation range and remediate every
   blocking finding before recording Task 8 complete.
 
 ## Production source/commit-join gate
@@ -2081,6 +2081,22 @@ fixed.
   This is repo-ready synthetic contract evidence only; broad repository gates,
   independent implementation review, and the production source/commit join
   remain open.
+- 2026-08-03: Task 8 completed across `4cbccea..2336d0c` after three
+  implementation-review remediation rounds. The final independent review
+  returned GO after the literal fixture oracle, eight distinct suffix blocks,
+  complete episode-effect validation, checkpoint-current/effect decoding,
+  and global fail-closed settlement-PnL exclusivity were proven. Retained quick
+  evidence is
+  `target/evidence/state-replay-position/20260803T100342Z-13667/report.json`.
+  Parent verification passed `just generated` at commit `2336d0c` with
+  descriptor SHA-256
+  `55b2e6a13fe5d52e9b9aaf69639557dd1c564134286b52d68a66cb0f19174b9d`,
+  `just deny`, `just oss-audit` (`PASS files=522`), the focused canonical-ledger
+  and replay-engine suites, and a durable serialized
+  `RUST_TEST_THREADS=1 just verify` run with exit status `0`, including the
+  Swift package test. This closes only repo-ready synthetic position replay;
+  deployed-source qualification remains blocked on the production
+  source/commit-join gate below.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
