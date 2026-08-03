@@ -6,6 +6,8 @@ use state_replay::{AccountRunConfig, run_account_e2e};
 #[test]
 fn account_e2e_proves_exact_synthetic_account_flows_relations_modes_and_boundaries() {
     let temporary = tempfile::tempdir().expect("temporary root");
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
+        .expect("private temporary parent");
     let output = temporary.path().join("account-evidence");
     let evidence = run_account_e2e(&AccountRunConfig {
         output: output.clone(),
@@ -115,6 +117,8 @@ fn account_e2e_proves_exact_synthetic_account_flows_relations_modes_and_boundari
 #[test]
 fn account_e2e_refuses_invalid_or_existing_output() {
     let temporary = tempfile::tempdir().expect("temporary root");
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
+        .expect("private temporary parent");
     let invalid = temporary.path().join("invalid");
     let error = run_account_e2e(&AccountRunConfig {
         output: invalid.clone(),
@@ -169,6 +173,19 @@ fn account_e2e_refuses_invalid_or_existing_output() {
         iterations: 2,
     })
     .expect_err("symlink parent must fail");
+    assert_eq!(error.reason_code(), "state_replay.unsafe_output");
+
+    let public_parent = temporary.path().join("public-parent");
+    fs::create_dir(&public_parent).expect("public parent");
+    fs::set_permissions(&public_parent, fs::Permissions::from_mode(0o777))
+        .expect("make parent group/world writable");
+    let error = run_account_e2e(&AccountRunConfig {
+        output: public_parent.join("evidence"),
+        blocks: 3,
+        checkpoint_after: 1,
+        iterations: 2,
+    })
+    .expect_err("unsafe parent permissions must fail");
     assert_eq!(error.reason_code(), "state_replay.unsafe_output");
 }
 

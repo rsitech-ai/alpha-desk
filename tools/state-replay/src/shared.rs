@@ -71,6 +71,9 @@ pub(super) fn resolve_output_path(path: &Path) -> Result<PathBuf, FixtureRunErro
     if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
         return Err(FixtureRunError::UnsafeOutput);
     }
+    if parent_metadata.permissions().mode() & 0o022 != 0 {
+        return Err(FixtureRunError::UnsafeOutput);
+    }
     let canonical_parent = parent
         .canonicalize()
         .map_err(|_| FixtureRunError::UnsafeOutput)?;
