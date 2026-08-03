@@ -680,9 +680,7 @@ fn validate_settlement_pnl_exclusivity(
     settlement_key: &StateKey,
 ) -> Result<(), FixtureRunError> {
     let mut settlement_claim_seen = false;
-    for (key, bytes) in entries.iter().filter(|(key, _)| {
-        key.namespace().starts_with("position-") || key.namespace().starts_with("account-")
-    }) {
+    for (key, bytes) in entries {
         let value: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|_| FixtureRunError::PositionSemanticMismatch)?;
         let Some(raw_pnl) = value.get("realized_pnl") else {
@@ -1202,6 +1200,23 @@ mod tests {
                 .expect("settlement key");
         let foreign_key =
             StateKey::try_new("account-fact.v1", b"foreign".to_vec()).expect("foreign key");
+        let entries = BTreeMap::from([
+            (
+                settlement_key.clone(),
+                br#"{"realized_pnl":"-2.5"}"#.to_vec(),
+            ),
+            (foreign_key, br#"{"realized_pnl":"1"}"#.to_vec()),
+        ]);
+
+        assert!(validate_settlement_pnl_exclusivity(&entries, &settlement_key).is_err());
+    }
+
+    #[test]
+    fn settlement_exclusivity_rejects_realized_pnl_outside_position_and_account_namespaces() {
+        let settlement_key =
+            StateKey::try_new("position-settlement-fact.v1", b"settlement".to_vec())
+                .expect("settlement key");
+        let foreign_key = StateKey::try_new("trade.v2", b"foreign".to_vec()).expect("foreign key");
         let entries = BTreeMap::from([
             (
                 settlement_key.clone(),
