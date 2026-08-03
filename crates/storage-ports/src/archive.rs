@@ -168,6 +168,8 @@ pub struct RawObservationReceipt {
     cursor_epoch: String,
     start_offset: u64,
     end_offset: u64,
+    cursor_policy: CursorPolicy,
+    local_sequence_range: Option<LocalRecordSequenceRange>,
     spool_manifest_blake3: [u8; 32],
     spool_segment_blake3: [u8; 32],
     rolling_content_sha256: [u8; 32],
@@ -212,6 +214,8 @@ impl RawObservationReceipt {
             cursor_epoch,
             start_offset,
             end_offset,
+            cursor_policy: CursorPolicy::ContiguousNativeOffset,
+            local_sequence_range: None,
             spool_manifest_blake3,
             spool_segment_blake3,
             rolling_content_sha256,
@@ -220,6 +224,45 @@ impl RawObservationReceipt {
             schema_fingerprint,
             durable_at,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_byte_offsets(
+        receipt_id: impl Into<String>,
+        manifest_id: ManifestId,
+        chain_id: ChainId,
+        source_id: SourceId,
+        cursor_epoch: impl Into<String>,
+        start_offset: u64,
+        end_offset: u64,
+        local_sequence_range: LocalRecordSequenceRange,
+        spool_manifest_blake3: [u8; 32],
+        spool_segment_blake3: [u8; 32],
+        rolling_content_sha256: [u8; 32],
+        object_sha256: [u8; 32],
+        manifest_sha256: [u8; 32],
+        schema_fingerprint: [u8; 32],
+        durable_at: KnownTime,
+    ) -> Result<Self, ArchiveError> {
+        let mut receipt = Self::try_new(
+            receipt_id,
+            manifest_id,
+            chain_id,
+            source_id,
+            cursor_epoch,
+            start_offset,
+            end_offset,
+            spool_manifest_blake3,
+            spool_segment_blake3,
+            rolling_content_sha256,
+            object_sha256,
+            manifest_sha256,
+            schema_fingerprint,
+            durable_at,
+        )?;
+        receipt.cursor_policy = CursorPolicy::MonotonicByteOffset;
+        receipt.local_sequence_range = Some(local_sequence_range);
+        Ok(receipt)
     }
 
     #[must_use]
@@ -255,6 +298,16 @@ impl RawObservationReceipt {
     #[must_use]
     pub const fn end_offset(&self) -> u64 {
         self.end_offset
+    }
+
+    #[must_use]
+    pub const fn cursor_policy(&self) -> CursorPolicy {
+        self.cursor_policy
+    }
+
+    #[must_use]
+    pub const fn local_sequence_range(&self) -> Option<LocalRecordSequenceRange> {
+        self.local_sequence_range
     }
 
     #[must_use]
@@ -329,6 +382,49 @@ impl LocalRecordSequence {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalRecordSequenceRange {
+    start: LocalRecordSequence,
+    end: LocalRecordSequence,
+}
+
+impl LocalRecordSequenceRange {
+    pub fn try_new(
+        start: LocalRecordSequence,
+        end: LocalRecordSequence,
+    ) -> Result<Self, ArchiveError> {
+        if start > end {
+            return Err(ArchiveError::InvalidInput("local record sequence range"));
+        }
+        Ok(Self { start, end })
+    }
+
+    #[must_use]
+    pub const fn start(self) -> LocalRecordSequence {
+        self.start
+    }
+
+    #[must_use]
+    pub const fn end(self) -> LocalRecordSequence {
+        self.end
+    }
+
+    #[must_use]
+    pub const fn len(self) -> u64 {
+        self.end.get() - self.start.get() + 1
+    }
+
+    #[must_use]
+    pub const fn contains(self, sequence: LocalRecordSequence) -> bool {
+        sequence.get() >= self.start.get() && sequence.get() <= self.end.get()
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        false
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SequencedSourceObservation<'a> {
     observation: &'a SourceObservation,
@@ -348,6 +444,42 @@ impl<'a> SequencedSourceObservation<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct OwnedSequencedSourceObservation {
+    observation: SourceObservation,
+    local_sequence: LocalRecordSequence,
+}
+
+impl OwnedSequencedSourceObservation {
+    #[must_use]
+    pub const fn new(observation: SourceObservation, local_sequence: LocalRecordSequence) -> Self {
+        Self {
+            observation,
+            local_sequence,
+        }
+    }
+
+    #[must_use]
+    pub const fn observation(&self) -> &SourceObservation {
+        &self.observation
+    }
+
+    #[must_use]
+    pub const fn local_sequence(&self) -> LocalRecordSequence {
+        self.local_sequence
+    }
+
+    #[must_use]
+    pub fn into_observation(self) -> SourceObservation {
+        self.observation
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (LocalRecordSequence, SourceObservation) {
+        (self.local_sequence, self.observation)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RawObservationBatch {
     chain_id: ChainId,
     observations: Vec<SourceObservation>,
@@ -355,6 +487,7 @@ pub struct RawObservationBatch {
     spool_segment_blake3: [u8; 32],
     cursor_policy: CursorPolicy,
     first_local_sequence: Option<LocalRecordSequence>,
+    last_local_sequence: Option<LocalRecordSequence>,
 }
 
 impl RawObservationBatch {
@@ -398,6 +531,7 @@ impl RawObservationBatch {
             spool_segment_blake3,
             cursor_policy: CursorPolicy::ContiguousNativeOffset,
             first_local_sequence: None,
+            last_local_sequence: None,
         })
     }
 
@@ -454,7 +588,8 @@ impl RawObservationBatch {
                 }
             }
         }
-        validate_local_sequence_span(first_local_sequence, observations.len())?;
+        let last_local_sequence =
+            validate_local_sequence_span(first_local_sequence, observations.len())?;
         Ok(Self {
             chain_id,
             observations,
@@ -462,6 +597,7 @@ impl RawObservationBatch {
             spool_segment_blake3,
             cursor_policy: CursorPolicy::MonotonicByteOffset,
             first_local_sequence: Some(first_local_sequence),
+            last_local_sequence: Some(last_local_sequence),
         })
     }
 
@@ -478,6 +614,18 @@ impl RawObservationBatch {
     #[must_use]
     pub const fn first_local_sequence(&self) -> Option<LocalRecordSequence> {
         self.first_local_sequence
+    }
+
+    #[must_use]
+    pub const fn last_local_sequence(&self) -> Option<LocalRecordSequence> {
+        self.last_local_sequence
+    }
+
+    #[must_use]
+    pub fn local_sequence_range(&self) -> Option<LocalRecordSequenceRange> {
+        self.first_local_sequence
+            .zip(self.last_local_sequence)
+            .map(|(start, end)| LocalRecordSequenceRange { start, end })
     }
 
     pub fn sequenced_observations(
@@ -520,13 +668,13 @@ impl RawObservationBatch {
 fn validate_local_sequence_span(
     first: LocalRecordSequence,
     count: usize,
-) -> Result<(), ArchiveError> {
+) -> Result<LocalRecordSequence, ArchiveError> {
     let last_index = count
         .checked_sub(1)
         .ok_or(ArchiveError::InvalidInput("raw observation batch is empty"))?;
     let advance_by = u64::try_from(last_index)
         .map_err(|_| ArchiveError::InvalidInput("local record sequence overflows"))?;
-    first.checked_advance_by(advance_by).map(|_| ())
+    first.checked_advance_by(advance_by)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,6 +727,8 @@ pub struct RawArchiveObject {
     chain_id: ChainId,
     source_id: SourceId,
     cursor_range: RawObservationRange,
+    cursor_policy: CursorPolicy,
+    local_sequence_range: Option<LocalRecordSequenceRange>,
 }
 
 impl RawArchiveObject {
@@ -606,7 +756,39 @@ impl RawArchiveObject {
             chain_id,
             source_id,
             cursor_range,
+            cursor_policy: CursorPolicy::ContiguousNativeOffset,
+            local_sequence_range: None,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_byte_offsets(
+        relative_path: PathBuf,
+        sha256: [u8; 32],
+        size_bytes: u64,
+        row_count: u64,
+        chain_id: ChainId,
+        source_id: SourceId,
+        cursor_range: RawObservationRange,
+        local_sequence_range: LocalRecordSequenceRange,
+    ) -> Result<Self, ArchiveError> {
+        if row_count != local_sequence_range.len() {
+            return Err(ArchiveError::InvalidInput(
+                "raw archive object local sequence span",
+            ));
+        }
+        let mut object = Self::try_new(
+            relative_path,
+            sha256,
+            size_bytes,
+            row_count,
+            chain_id,
+            source_id,
+            cursor_range,
+        )?;
+        object.cursor_policy = CursorPolicy::MonotonicByteOffset;
+        object.local_sequence_range = Some(local_sequence_range);
+        Ok(object)
     }
 
     #[must_use]
@@ -642,6 +824,16 @@ impl RawArchiveObject {
     #[must_use]
     pub const fn cursor_range(&self) -> &RawObservationRange {
         &self.cursor_range
+    }
+
+    #[must_use]
+    pub const fn cursor_policy(&self) -> CursorPolicy {
+        self.cursor_policy
+    }
+
+    #[must_use]
+    pub const fn local_sequence_range(&self) -> Option<LocalRecordSequenceRange> {
+        self.local_sequence_range
     }
 }
 
@@ -711,6 +903,16 @@ impl VerifiedRawManifest {
     #[must_use]
     pub const fn object(&self) -> &RawArchiveObject {
         &self.object
+    }
+
+    #[must_use]
+    pub const fn cursor_policy(&self) -> CursorPolicy {
+        self.object.cursor_policy()
+    }
+
+    #[must_use]
+    pub const fn local_sequence_range(&self) -> Option<LocalRecordSequenceRange> {
+        self.object.local_sequence_range()
     }
 }
 
@@ -964,6 +1166,8 @@ impl ArchiveError {
 pub type BlockIterator = Box<dyn Iterator<Item = Result<BlockEnvelope, ArchiveError>> + Send>;
 pub type RawObservationIterator =
     Box<dyn Iterator<Item = Result<SourceObservation, ArchiveError>> + Send>;
+pub type SequencedRawObservationIterator =
+    Box<dyn Iterator<Item = Result<OwnedSequencedSourceObservation, ArchiveError>> + Send>;
 
 pub trait CanonicalArchive: Send + Sync {
     fn append_block(&self, block: &BlockEnvelope) -> Result<ArchiveReceipt, ArchiveError>;
