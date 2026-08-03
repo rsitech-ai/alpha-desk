@@ -10,8 +10,12 @@ use canonical_events::{
     WithdrawalDebited,
 };
 use canonical_ledger::{
-    CanonicalLedger, CanonicalStateReducerV1, CheckpointArtifact, CheckpointCompatibility,
-    LedgerLimits, StateImageLimits,
+    AccountFactRecordV1, AccountModeCurrentRecordV1, AccountQuantityFlowCurrentRecordV1,
+    AccountQuoteFlowCurrentRecordV1, AccountVaultRelationCurrentRecordV1, CanonicalLedger,
+    CanonicalStateReducerV1, CheckpointArtifact, CheckpointCompatibility, LedgerLimits,
+    LeverageCurrentRecordV1, MarginModeCurrentRecordV1, StateImageLimits,
+    SubaccountMasterCurrentRecordV1, VaultPrincipalFlowCurrentRecordV1,
+    VaultShareFlowCurrentRecordV1,
 };
 use canonical_state_store::LocalCheckpointStore;
 use domain_types::{
@@ -25,8 +29,8 @@ use storage_ports::{CanonicalArchive, StateCheckpointStore};
 
 use super::{
     CHAIN, FIXTURE_EPOCH_MICROS, FixtureRunError, NeverCancel, REPORT_FILE, RejectionReport,
-    START_HEIGHT, create_private_output_root, fixture_time, publish_report, rejection_report,
-    replay_request, source_hashes, validate_replay_counts,
+    START_HEIGHT, create_private_output_root, fixture_time, harden_private_tree, publish_report,
+    rejection_report, replay_request, source_hashes, validate_replay_counts,
 };
 
 const ACCOUNT_REPORT_SCHEMA: &str = "hyperliquid-alpha-desk/state-replay-account-e2e-report/v1";
@@ -208,6 +212,7 @@ pub fn run_account_e2e(config: &AccountRunConfig) -> Result<AccountEvidence, Fix
             "account namespace counts diverged",
         ));
     }
+    validate_account_records(&resumed)?;
 
     let rejection_height = end_height + 1;
     let missing_asset_archive = rejection_archive(&output, "missing-asset")?;
@@ -293,7 +298,6 @@ pub fn run_account_e2e(config: &AccountRunConfig) -> Result<AccountEvidence, Fix
         account_mode_current_count: counts.account_mode_current_count,
         margin_mode_current_count: counts.margin_mode_current_count,
         leverage_current_count: counts.leverage_current_count,
-        debit_credit_symmetry_proven: true,
         missing_asset_prerequisite: missing_asset,
         missing_market_prerequisite: missing_market,
         cross_component_late_invalid: cross_component,
@@ -301,6 +305,7 @@ pub fn run_account_e2e(config: &AccountRunConfig) -> Result<AccountEvidence, Fix
     };
     let report_path = output.join(REPORT_FILE);
     publish_report(&report_path, &report)?;
+    harden_private_tree(&output)?;
     Ok(AccountEvidence { report_path })
 }
 
@@ -352,7 +357,13 @@ fn rejection(
             "account rejection was not atomic",
         ));
     }
-    rejection_report(height, &error, None, before, after)
+    rejection_report(
+        height,
+        &error,
+        error.reducer_reason_code().map(str::to_owned),
+        before,
+        after,
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -407,6 +418,46 @@ fn namespace_counts(ledger: &CanonicalLedger<CanonicalStateReducerV1>) -> Accoun
         margin_mode_current_count: count("account-margin-mode-current.v1"),
         leverage_current_count: count("account-leverage-current.v1"),
     }
+}
+
+fn validate_account_records(
+    ledger: &CanonicalLedger<CanonicalStateReducerV1>,
+) -> Result<(), FixtureRunError> {
+    for (key, bytes) in ledger.state_image().entries() {
+        let valid = match key.namespace() {
+            "account-fact.v1" => AccountFactRecordV1::decode_at(key, bytes).is_ok(),
+            "account-quantity-flow-current.v1" => {
+                AccountQuantityFlowCurrentRecordV1::decode_at(key, bytes).is_ok()
+            }
+            "account-quote-flow-current.v1" => {
+                AccountQuoteFlowCurrentRecordV1::decode_at(key, bytes).is_ok()
+            }
+            "vault-principal-flow-current.v1" => {
+                VaultPrincipalFlowCurrentRecordV1::decode_at(key, bytes).is_ok()
+            }
+            "vault-share-flow-current.v1" => {
+                VaultShareFlowCurrentRecordV1::decode_at(key, bytes).is_ok()
+            }
+            "account-subaccount-master.v1" => {
+                SubaccountMasterCurrentRecordV1::decode_at(key, bytes).is_ok()
+            }
+            "account-vault-relation.v1" => {
+                AccountVaultRelationCurrentRecordV1::decode_at(key, bytes).is_ok()
+            }
+            "account-mode-current.v1" => AccountModeCurrentRecordV1::decode_at(key, bytes).is_ok(),
+            "account-margin-mode-current.v1" => {
+                MarginModeCurrentRecordV1::decode_at(key, bytes).is_ok()
+            }
+            "account-leverage-current.v1" => LeverageCurrentRecordV1::decode_at(key, bytes).is_ok(),
+            _ => true,
+        };
+        if !valid {
+            return Err(FixtureRunError::Invariant(
+                "account evidence record is not key-bound",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn market_prerequisite_block(
@@ -967,7 +1018,6 @@ struct AccountReport<'a> {
     account_mode_current_count: usize,
     margin_mode_current_count: usize,
     leverage_current_count: usize,
-    debit_credit_symmetry_proven: bool,
     missing_asset_prerequisite: RejectionReport,
     missing_market_prerequisite: RejectionReport,
     cross_component_late_invalid: RejectionReport,

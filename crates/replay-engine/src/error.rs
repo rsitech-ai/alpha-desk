@@ -81,6 +81,7 @@ pub enum ReplayError {
     BlockQuarantined {
         height: BlockHeight,
         source_reason_code: &'static str,
+        reducer_reason_code: Option<String>,
         progress: ReplayProgress,
     },
 }
@@ -124,6 +125,17 @@ impl ReplayError {
             | Self::BlockQuarantined {
                 source_reason_code, ..
             } => Some(*source_reason_code),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn reducer_reason_code(&self) -> Option<&str> {
+        match self {
+            Self::BlockQuarantined {
+                reducer_reason_code,
+                ..
+            } => reducer_reason_code.as_deref(),
             _ => None,
         }
     }

@@ -110,6 +110,7 @@ where
                         return Err(ReplayError::BlockQuarantined {
                             height: block.block_height(),
                             source_reason_code: error.reason_code(),
+                            reducer_reason_code: error.reducer_reason_code().map(str::to_owned),
                             progress: self.progress(applied, last_height),
                         });
                     }
