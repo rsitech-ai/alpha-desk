@@ -37,6 +37,10 @@ chain=<encoded-chain>/dataset=raw_source_observations/source=<encoded-source>/
   CURRENT
 ```
 
+Sources whose native cursor is a sparse byte offset use the physically
+isolated [raw archive V2](raw-archive-v2.md). V1 remains the dense
+native-offset contract and does not accept V2 fields.
+
 Content-addressed block-bundle and raw-batch manifests live under
 `_manifests/blocks/` and `_manifests/raw/`. Components use a canonical
 percent encoding. Readers reject non-canonical encodings, absolute paths,

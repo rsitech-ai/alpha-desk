@@ -5,6 +5,8 @@ mod fs;
 mod inspection;
 mod manifest;
 mod raw;
+mod raw_policy;
+mod raw_v2;
 mod reader;
 mod schema;
 mod writer;
@@ -24,8 +26,9 @@ use storage_ports::{
 
 pub use inspection::{ArchiveDataset, ArchiveInspection, InspectedObject};
 use storage_ports::{
-    RawObservationArchive, RawObservationBatch, RawObservationIterator, RawObservationRange,
-    RawObservationReceipt, VerifiedRawManifest,
+    LocalRecordSequenceRange, RawObservationArchive, RawObservationBatch, RawObservationIterator,
+    RawObservationRange, RawObservationReceipt, SequencedRawObservationIterator,
+    VerifiedRawManifest,
 };
 
 const DEFAULT_MAX_READ_BLOCKS: u64 = 100_000;
@@ -210,6 +213,15 @@ impl RawObservationArchive for LocalParquetArchive {
         range: RawObservationRange,
     ) -> Result<RawObservationIterator, ArchiveError> {
         raw::read_observations(self, chain, source, range)
+    }
+
+    fn read_observations_by_sequence(
+        &self,
+        chain: &domain_types::ChainId,
+        source: &domain_types::SourceId,
+        range: LocalRecordSequenceRange,
+    ) -> Result<SequencedRawObservationIterator, ArchiveError> {
+        raw_v2::read_observations_by_sequence(self, chain, source, range)
     }
 
     fn verify_raw_manifest(

@@ -29,7 +29,7 @@ use parquet::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use storage_ports::{
-    ArchiveError, RawArchiveObject, RawObservationBatch, RawObservationIterator,
+    ArchiveError, CursorPolicy, RawArchiveObject, RawObservationBatch, RawObservationIterator,
     RawObservationRange, RawObservationReceipt, VerifiedRawManifest,
 };
 
@@ -136,6 +136,9 @@ pub fn append_batch(
     batch: &RawObservationBatch,
     durable_at: KnownTime,
 ) -> Result<RawObservationReceipt, ArchiveError> {
+    if batch.cursor_policy() == CursorPolicy::MonotonicByteOffset {
+        return super::raw_v2::append_batch(archive, batch, durable_at);
+    }
     let first = batch
         .observations()
         .first()
@@ -143,8 +146,16 @@ pub fn append_batch(
     let descriptor = batch_descriptor(batch)?;
     let source = first.source_id();
     let chain = batch.chain_id();
-    let dataset = dataset_relative(chain, source);
-    let _process_lock = fs::open_writer_lock(archive.root(), &dataset.join(".writer.lock"))?;
+    let _process_lock = fs::open_writer_lock(
+        archive.root(),
+        &super::raw_policy::writer_lock_relative(chain, source),
+    )?;
+    super::raw_policy::ensure_append_policy(
+        archive.root(),
+        chain,
+        source,
+        super::raw_policy::RawPolicy::LegacyContiguous,
+    )?;
     let current = load_current_catalog(archive, chain, source)?;
 
     if let Some(existing) = current
@@ -217,6 +228,14 @@ pub fn read_observations(
     source: &SourceId,
     range: RawObservationRange,
 ) -> Result<RawObservationIterator, ArchiveError> {
+    if !super::raw_policy::ensure_read_policy(
+        archive.root(),
+        chain,
+        source,
+        super::raw_policy::RawPolicy::LegacyContiguous,
+    )? {
+        return Err(ArchiveError::RangeUnavailable);
+    }
     let count = range
         .end_offset()
         .checked_sub(range.start_offset())
@@ -298,6 +317,9 @@ pub fn verify_raw_manifest(
 ) -> Result<VerifiedRawManifest, ArchiveError> {
     let hash = manifest::hash_from_manifest_id(manifest_id)?;
     let relative = global_manifest_relative(hash);
+    if !archive.root().join(&relative).exists() {
+        return super::raw_v2::verify_raw_manifest(archive, manifest_id);
+    }
     let loaded = load_batch_at(archive.root(), &relative)?;
     if loaded.hash != hash || loaded.relative != relative {
         return Err(ArchiveError::ManifestVerification(
@@ -488,7 +510,7 @@ fn write_object(
     })
 }
 
-fn raw_record_batch(batch: &RawObservationBatch) -> Result<RecordBatch, ArchiveError> {
+pub(super) fn raw_record_batch(batch: &RawObservationBatch) -> Result<RecordBatch, ArchiveError> {
     let observations = batch.observations();
     let chain_ids = StringArray::from_iter_values(std::iter::repeat_n(
         batch.chain_id().as_str(),
@@ -1334,7 +1356,10 @@ fn decode_raw_batch(
     Ok(())
 }
 
-fn column<T: Array + 'static>(batch: &RecordBatch, index: usize) -> Result<&T, ArchiveError> {
+pub(super) fn column<T: Array + 'static>(
+    batch: &RecordBatch,
+    index: usize,
+) -> Result<&T, ArchiveError> {
     batch
         .column(index)
         .as_any()
@@ -1342,14 +1367,14 @@ fn column<T: Array + 'static>(batch: &RecordBatch, index: usize) -> Result<&T, A
         .ok_or(ArchiveError::SchemaMismatch)
 }
 
-fn observation_class_name(value: ObservationClass) -> Result<String, ArchiveError> {
+pub(super) fn observation_class_name(value: ObservationClass) -> Result<String, ArchiveError> {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .ok_or_else(|| ArchiveError::Codec("serializing observation class".into()))
 }
 
-fn parse_observation_class(value: &str) -> Result<ObservationClass, ArchiveError> {
+pub(super) fn parse_observation_class(value: &str) -> Result<ObservationClass, ArchiveError> {
     serde_json::from_value(serde_json::Value::String(value.to_owned()))
         .map_err(|_| ArchiveError::ManifestVerification("raw observation class is not supported"))
 }
@@ -1443,7 +1468,7 @@ fn receipt(
     )
 }
 
-fn hash_file(file: &mut File) -> Result<([u8; 32], u64), ArchiveError> {
+pub(super) fn hash_file(file: &mut File) -> Result<([u8; 32], u64), ArchiveError> {
     file.seek(SeekFrom::Start(0))
         .map_err(|_| ArchiveError::Io("seeking raw Parquet object"))?;
     let mut hasher = Sha256::new();
@@ -1467,7 +1492,7 @@ fn hash_file(file: &mut File) -> Result<([u8; 32], u64), ArchiveError> {
     Ok((hasher.finalize().into(), length))
 }
 
-fn path_string(path: &Path) -> Result<String, ArchiveError> {
+pub(super) fn path_string(path: &Path) -> Result<String, ArchiveError> {
     path.to_str()
         .map(ToOwned::to_owned)
         .ok_or(ArchiveError::UnsafePath)
