@@ -1218,6 +1218,13 @@ pub trait RawObservationArchive: Send + Sync {
         &self,
         manifest: &ManifestId,
     ) -> Result<VerifiedRawManifest, ArchiveError>;
+
+    fn contains_raw_cursor_epoch(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        cursor_epoch: &str,
+    ) -> Result<bool, ArchiveError>;
 }
 
 fn validate_identity(value: &str, label: &'static str) -> Result<(), ArchiveError> {

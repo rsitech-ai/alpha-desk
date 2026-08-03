@@ -1,5 +1,8 @@
 # Capture Status V3
 
+> Frozen compatibility contract. Current runtimes publish V4; see
+> [`capture-status-v4.md`](capture-status-v4.md).
+
 `hl.capture.status.v3` is the atomic, machine-readable operator snapshot written
 by `hl-capture run` and returned by `hl-capture status --json`. It contains no
 source payloads, filesystem paths, connection strings, credentials, or private

@@ -18,6 +18,8 @@ readonly status_path="${evidence_root}/capture-status.json"
 readonly archive_path="${evidence_root}/archive"
 readonly source_root="${evidence_root}/node-source"
 readonly source_leaf="${source_root}/1721000000/20260728"
+readonly auxiliary_source_path="${evidence_root}/node-fills.ndjson"
+readonly auxiliary_fixture_path="${repository_root}/fixtures/source/node-v1/fill.json"
 readonly service_stdout="${evidence_root}/service.stdout"
 readonly service_stderr="${evidence_root}/service.stderr"
 readonly report_path="${evidence_root}/report.json"
@@ -115,6 +117,11 @@ mkdir -p \
   "$archive_path" \
   "$source_leaf" \
   "$independent_source_leaf"
+: >"$auxiliary_source_path"
+[[ -f "$auxiliary_fixture_path" && ! -L "$auxiliary_fixture_path" ]] || {
+  printf '%s\n' 'capture-e2e:error auxiliary fixture must be a regular non-symlink file' >&2
+  exit 1
+}
 "${repository_root}/tools/dev/ensure-nats-dev-credentials.sh" >/dev/null
 set -a
 # shellcheck disable=SC1091
@@ -265,6 +272,15 @@ class = "committed-block"
 queue_capacity = 4096
 max_payload_bytes = 8388608
 adapter = { kind = "node-block-directory", path = "${source_root}", stream_name = "synthetic-fixture", start_height = ${first_height}, poll_interval_millis = 25, replica_cmds_style = "actions-and-responses" }
+
+[[sources]]
+id = "synthetic-node-fills"
+source_version = "synthetic-node-v1"
+trust = "locally-verified-committed"
+class = "auxiliary-ledger"
+queue_capacity = 128
+max_payload_bytes = 1048576
+adapter = { kind = "node-line", path = "${auxiliary_source_path}", stream_name = "synthetic-node-fills", stream = "fills", poll_interval_millis = 25 }
 EOF
 if [[ "$failover_mode" == '1' ]]; then
   cat >>"$config_path" <<EOF
@@ -307,6 +323,7 @@ write_source_block_at() {
 
 write_source_block() {
   write_source_block_at "$source_leaf" "$1"
+  jq -c . "$auxiliary_fixture_path" >>"$auxiliary_source_path"
 }
 
 write_independent_block() {
@@ -355,6 +372,7 @@ readiness_attempts="$(((readiness_timeout_seconds + 120) * 4))"
 
 wait_for_durable_height() {
   local expected_height="$1"
+  local expected_auxiliary_records="${2:-$((expected_height - first_height + 1))}"
   local attempt
   for attempt in $(seq 1 "$readiness_attempts"); do
     if ! kill -0 "$capture_pid" >/dev/null 2>&1; then
@@ -367,6 +385,7 @@ wait_for_durable_height() {
     if [[ -f "$status_path" ]] \
       && jq -e \
         --argjson expected "$expected_height" \
+        --argjson expected_auxiliary "$expected_auxiliary_records" \
         '.ready == true
           and (
             (
@@ -401,6 +420,17 @@ wait_for_durable_height() {
           and .pending_blocks == 0
           and .capture_backlog_records == 0
           and (.oldest_pending_capture_height // null) == null
+          and (.auxiliary_sources | length) == 1
+          and .auxiliary_sources[0].source_id == "synthetic-node-fills"
+          and .auxiliary_sources[0].health == "healthy"
+          and .auxiliary_sources[0].qualification == "unqualified"
+          and .auxiliary_sources[0].local_sequence == $expected_auxiliary
+          and .auxiliary_sources[0].spool_records == $expected_auxiliary
+          and .auxiliary_sources[0].unarchived_records == 0
+          and .auxiliary_sources[0].unread_bytes == 0
+          and .auxiliary_sources[0].partial_line == false
+          and (.auxiliary_sources[0].quarantine_reason // null) == null
+          and (.auxiliary_sources[0].last_error_reason // null) == null
           and .disk_free_basis_points >= 1000' \
         "$status_path" >/dev/null 2>&1; then
       return
@@ -435,6 +465,39 @@ wait_for_spool_records() {
   exit 1
 }
 
+wait_for_auxiliary_records() {
+  local expected_records="$1"
+  local attempt
+  for attempt in $(seq 1 "$readiness_attempts"); do
+    if ! kill -0 "$capture_pid" >/dev/null 2>&1; then
+      wait "$capture_pid" || true
+      capture_pid=''
+      printf '%s\n' 'capture-e2e:error capture process exited before archiving auxiliary records' >&2
+      exit 1
+    fi
+    sample_process
+    if [[ -f "$status_path" ]] \
+      && jq -e \
+        --argjson expected "$expected_records" \
+        '(.auxiliary_sources | length) == 1
+          and .auxiliary_sources[0].source_id == "synthetic-node-fills"
+          and .auxiliary_sources[0].health == "healthy"
+          and .auxiliary_sources[0].local_sequence == $expected
+          and .auxiliary_sources[0].spool_records == $expected
+          and .auxiliary_sources[0].unarchived_records == 0
+          and .auxiliary_sources[0].unread_bytes == 0
+          and .auxiliary_sources[0].partial_line == false
+          and (.auxiliary_sources[0].quarantine_reason // null) == null
+          and (.auxiliary_sources[0].last_error_reason // null) == null' \
+        "$status_path" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.25
+  done
+  printf '%s\n' 'capture-e2e:error auxiliary archive progress timeout' >&2
+  exit 1
+}
+
 wait_for_degraded_status() {
   local evidence_name="$1"
   local attempt
@@ -454,6 +517,7 @@ wait_for_degraded_status() {
 
 stop_capture() {
   local expected_height="$1"
+  local expected_auxiliary_records="${2:-$((expected_height - first_height + 1))}"
   kill -TERM "$capture_pid"
   if ! wait "$capture_pid"; then
     capture_pid=''
@@ -463,7 +527,15 @@ stop_capture() {
   capture_pid=''
   jq -e \
     --argjson expected "$expected_height" \
-    '.ready == false and .health == "yellow" and .durable_height == $expected and .pending_blocks == 0' \
+    --argjson expected_auxiliary "$expected_auxiliary_records" \
+    '.ready == false
+      and .health == "yellow"
+      and .durable_height == $expected
+      and .pending_blocks == 0
+      and (.auxiliary_sources | length) == 1
+      and .auxiliary_sources[0].health == "healthy"
+      and .auxiliary_sources[0].local_sequence == $expected_auxiliary
+      and .auxiliary_sources[0].unarchived_records == 0' \
     "$status_path" >/dev/null
 }
 
@@ -477,7 +549,7 @@ if [[ "$failover_mode" == '1' ]]; then
     height="$((height + 1))"
   done
   start_capture
-  wait_for_durable_height "$last_height"
+  wait_for_durable_height "$last_height" "$((block_count - 1))"
   jq -e \
     --argjson failover_height "$((first_height + 1))" \
     '.active_committed_source == "independent-committed"
@@ -486,7 +558,7 @@ if [[ "$failover_mode" == '1' ]]; then
       and .health == "yellow"
       and .ready == true' \
     "$status_path" >/dev/null
-  stop_capture "$last_height"
+  stop_capture "$last_height" "$((block_count - 1))"
   restart_count=1
 
   write_source_block "$((first_height + 1))"
@@ -512,6 +584,7 @@ elif [[ "$outage_mode" == 'nats-postgres' ]]; then
   write_source_block "$((first_height + 1))"
   write_source_block "$((first_height + 2))"
   wait_for_spool_records 3
+  wait_for_auxiliary_records 3
   nats_outage_spool_records=3
   wait_for_degraded_status 'status-nats-outage.json'
   docker unpause "$nats_container" >/dev/null
@@ -524,6 +597,7 @@ elif [[ "$outage_mode" == 'nats-postgres' ]]; then
     outage_height="$((outage_height + 1))"
   done
   wait_for_spool_records "$block_count"
+  wait_for_auxiliary_records "$block_count"
   postgres_outage_spool_records="$block_count"
   wait_for_degraded_status 'status-postgres-outage.json'
   docker unpause "$postgres_container" >/dev/null
@@ -559,6 +633,7 @@ while (( $(date -u '+%s') - process_started_at_epoch < minimum_runtime_seconds )
   fi
   jq -e \
     --argjson expected "$last_height" \
+    --argjson expected_auxiliary "$block_count" \
     '.ready == true
       and (
         (
@@ -593,6 +668,17 @@ while (( $(date -u '+%s') - process_started_at_epoch < minimum_runtime_seconds )
       and .pending_blocks == 0
       and .capture_backlog_records == 0
       and (.oldest_pending_capture_height // null) == null
+      and (.auxiliary_sources | length) == 1
+      and .auxiliary_sources[0].source_id == "synthetic-node-fills"
+      and .auxiliary_sources[0].health == "healthy"
+      and .auxiliary_sources[0].qualification == "unqualified"
+      and .auxiliary_sources[0].local_sequence == $expected_auxiliary
+      and .auxiliary_sources[0].spool_records == $expected_auxiliary
+      and .auxiliary_sources[0].unarchived_records == 0
+      and .auxiliary_sources[0].unread_bytes == 0
+      and .auxiliary_sources[0].partial_line == false
+      and (.auxiliary_sources[0].quarantine_reason // null) == null
+      and (.auxiliary_sources[0].last_error_reason // null) == null
       and .disk_free_basis_points >= 1000' \
     "$status_path" >/dev/null
   sample_process
@@ -606,11 +692,11 @@ archive_summary="$("${repository_root}/target/debug/archive-inspect" verify "$ar
   printf '%s\n' 'capture-e2e:error archive block count mismatch' >&2
   exit 1
 }
-expected_raw_sources=1
-expected_raw_observations="$block_count"
+expected_raw_sources=2
+expected_raw_observations="$((block_count * 2))"
 if [[ "$failover_mode" == '1' ]]; then
-  expected_raw_sources=2
-  expected_raw_observations="$((block_count * 2))"
+  expected_raw_sources=3
+  expected_raw_observations="$((block_count * 3))"
 fi
 [[ "$archive_summary" == *"raw_sources=${expected_raw_sources}"* &&
   "$archive_summary" == *"raw_observations=${expected_raw_observations}"* ]] || {
@@ -632,6 +718,12 @@ if [[ "$failover_mode" == '1' ]]; then
     exit 1
   }
 fi
+auxiliary_spool_summary="$("${repository_root}/target/debug/spool-inspect" \
+  verify "${evidence_root}/spool/synthetic-node-fills")"
+[[ "$auxiliary_spool_summary" == *"records=0"* ]] || {
+  printf '%s\n' 'capture-e2e:error auxiliary hot spool was not pruned after verified archive checkpoint' >&2
+  exit 1
+}
 archived_blocks="$(docker exec "$postgres_container" \
   psql -U alpha -d alpha -Atqc \
   "SELECT count(*) FROM capture_archived_blocks WHERE chain_id = '${chain_id}' AND state = 'acknowledged'")"
@@ -655,6 +747,8 @@ durable_height="$(docker exec "$postgres_container" \
 }
 
 capture_status_schema_version="$(jq -r '.schema_version' "$status_path")"
+auxiliary_local_sequence="$(jq -r '.auxiliary_sources[0].local_sequence' "$status_path")"
+auxiliary_spool_records="$(jq -r '.auxiliary_sources[0].spool_records' "$status_path")"
 active_committed_source="$(jq -r '.active_committed_source' "$status_path")"
 failover_height="$(jq -r '.failover_height // 0' "$status_path")"
 final_capture_backlog_records="$(jq -r '.capture_backlog_records' "$status_path")"
@@ -680,7 +774,7 @@ archive_bytes="$(( $(du -sk "$archive_path" | awk '{print $1}') * 1024 ))"
 service_stdout_bytes="$(wc -c <"$service_stdout" | tr -d '[:space:]')"
 service_stderr_bytes="$(wc -c <"$service_stderr" | tr -d '[:space:]')"
 jq -n \
-  --arg schema_version 'hl.capture.e2e.v2' \
+  --arg schema_version 'hl.capture.e2e.v3' \
   --arg capture_status_schema_version "$capture_status_schema_version" \
   --arg run_id "$run_id" \
   --arg chain_id "$chain_id" \
@@ -692,6 +786,8 @@ jq -n \
   --argjson last_height "$last_height" \
   --argjson block_count "$block_count" \
   --argjson raw_observation_count "$expected_raw_observations" \
+  --argjson auxiliary_local_sequence "$auxiliary_local_sequence" \
+  --argjson auxiliary_spool_records "$auxiliary_spool_records" \
   --argjson acknowledged_publications "$acknowledged_publications" \
   --argjson restart_count "$restart_count" \
   --argjson nats_outage_spool_records "$nats_outage_spool_records" \
@@ -709,6 +805,7 @@ jq -n \
   --arg archive_summary "$archive_summary" \
   --arg spool_summary "$spool_summary" \
   --arg independent_spool_summary "$independent_spool_summary" \
+  --arg auxiliary_spool_summary "$auxiliary_spool_summary" \
   --arg binary_sha256 "$binary_sha256" \
   --arg postgres_version "$postgres_version" \
   --arg nats_version "$nats_version" \
@@ -732,6 +829,8 @@ jq -n \
     last_height: $last_height,
     block_count: $block_count,
     raw_observation_count: $raw_observation_count,
+    auxiliary_local_sequence: $auxiliary_local_sequence,
+    auxiliary_spool_records: $auxiliary_spool_records,
     acknowledged_publications: $acknowledged_publications,
     restart_count: $restart_count,
     nats_outage_spool_records: $nats_outage_spool_records,
@@ -751,6 +850,7 @@ jq -n \
     independent_spool_summary: (
       if $independent_spool_summary == "" then null else $independent_spool_summary end
     ),
+    auxiliary_spool_summary: $auxiliary_spool_summary,
     binary_sha256: $binary_sha256,
     postgres_version: $postgres_version,
     nats_version: $nats_version,

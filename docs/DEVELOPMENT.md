@@ -175,20 +175,23 @@ cargo +1.97.1 run -p hl-capture --locked --offline -- \
   status --config <retained-capture-config> --json
 ```
 
-The V3 status contract separates downstream publication plans from the active
+The V4 status contract separates downstream publication plans from the active
 source's fsynced
 source backlog, reports the oldest pending capture height, and exposes the
-lowest spool/archive filesystem free percentage in basis points. See
-[`contracts/capture-status-v3.md`](contracts/capture-status-v3.md).
+lowest spool/archive filesystem free percentage in basis points. It also
+reports bounded Node V1 auxiliary-source byte lag, archive depth, partial-line,
+qualification, quarantine, and durable cursor state. See
+[`contracts/capture-status-v4.md`](contracts/capture-status-v4.md).
 
 The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
-drip-feeds deterministic, empty transaction-block records through the real
-node-directory adapter and `hl-capture run`, verifies raw spool durability,
-archives byte-identical raw observations plus committed blocks, performs one
-clean process restart against the same spool/archive/journal state, verifies
-PostgreSQL and JetStream acknowledgements, and proves a final bounded SIGTERM
-shutdown:
+drip-feeds deterministic empty transaction-block records and auxiliary fill
+records through the real node-directory and NodeLine adapters in
+`hl-capture run`, verifies raw spool/checkpoint durability, archives
+byte-identical raw observations plus committed blocks, performs one clean
+process restart against the same spool/archive/journal state, verifies V4
+auxiliary cursor recovery plus PostgreSQL and JetStream acknowledgements, and
+proves a final bounded SIGTERM shutdown:
 
 ```sh
 just capture-e2e
@@ -201,14 +204,20 @@ Each run retains an atomic report and non-secret diagnostic artifacts under
 `target/evidence/capture-e2e/<run-id>/`. The report records the binary hash,
 dependency versions, block/publication counts, restart count, runtime,
 resource high-water marks, spool/archive summaries, log byte counts, status
-schema, outage backlog samples, final capture backlog, final disk-free basis
-points, and shutdown result. The test removes only its disposable containers,
-network, and temporary secret directory.
+schema, auxiliary cumulative sequence and pruned hot-spool summary, outage
+backlog samples, final capture backlog, final disk-free basis points, and
+shutdown result. The test removes only its disposable containers, network, and
+temporary secret directory. Treat each source spool's
+`auxiliary-archive-checkpoint-v1.json` as recovery authority and preserve it
+with the complete spool and archive; see
+[`runbooks/capture-restart.md`](runbooks/capture-restart.md).
 
 `capture-outage-e2e` uses five records and pauses its test-owned NATS and
 PostgreSQL containers in turn. It requires the spool to grow during each
-outage, captures the degraded atomic status, restores the dependency, and
-requires a positive visible capture backlog during both outages and exact
+outage, independently requires the auxiliary NodeLine source to remain healthy
+and archive every corresponding fill with zero unarchived records, captures
+the degraded atomic status, restores the dependency, and requires a positive
+visible committed capture backlog during both outages and exact
 raw/spool/block/publication parity with zero final backlog at the contiguous
 cursor. The test never stops or modifies host PostgreSQL, shared NATS, or
 unrelated containers. `runtime.postgres_operation_timeout_millis`
@@ -218,9 +227,10 @@ coupled to the JetStream publication timeout.
 `capture-failover-e2e` uses two synthetic node directories. It withholds the
 second primary height while making a later primary height visible, supplies a
 complete independent range, verifies the exact create-once failover record and
-yellow-ready Status V3 state, performs a clean restart, repairs the primary,
+yellow-ready Status V4 state, performs a clean restart, repairs the primary,
 and proves the runtime still drains from the independent source. It requires
-two five-record spools, ten raw observations, five canonical blocks and
+two five-record committed spools, one archive-checkpointed auxiliary stream,
+fifteen raw observations, five canonical blocks and
 publications, zero final active backlog, and no automatic failback.
 
 This is a synthetic node-format runtime-mechanics lane. Its report deliberately

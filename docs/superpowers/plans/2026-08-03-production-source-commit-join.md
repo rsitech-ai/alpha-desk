@@ -632,6 +632,48 @@
 - 2026-08-03: Next after the reviewed M2 commit: begin M3 by activating the
   configured `NodeLine` acquisition path with spool-and-archive-before-ACK,
   bounded backpressure, observable health, restart, and clean-shutdown tests.
+- 2026-08-03: M3 acquisition is now active for every configured NodeLine
+  source. Complete records are fsynced to byte-policy spools, sealed and
+  verified in V2 raw archive batches before ordered ACK; parser/schema
+  failures use an exact-byte `quarantine-v1:<reason>` disposition. Group
+  commit uses an absolute first-record deadline, one bounded child per source,
+  cancellation-safe shutdown, deterministic retry, and source-specific
+  terminal latching.
+- 2026-08-03: Added an archive-backed auxiliary checkpoint that binds the
+  source contract, exact spool segment/manifest hashes, complete first/last
+  local-sequence span and row count, every raw manifest ID, archive path
+  lineage, durable native cursor, receive time, and quarantine history. Startup
+  verifies the referenced raw manifests and exact contiguous coverage before
+  trusting the baseline or pruning hot spool files. Temp-only/corrupt
+  checkpoint, crash-before-archive, idle restart, and same-path archive
+  wipe/recreate regressions fail closed.
+- 2026-08-03: Capture status V4 now distinguishes durable
+  `quarantine_reason` from current `last_error_reason`, exposes durable and
+  active tail epochs separately, validates atomic durable fields and exact
+  cumulative/unarchived sequence arithmetic, and rejects malformed status JSON.
+  Duplicate adapter output fails closed rather than receiving a second ACK.
+- 2026-08-03: Fresh M3A local gates passed: all `hl-capture` targets and
+  integration tests, strict Clippy with warnings denied, formatting, and
+  `git diff --check`. Independent code and post-GO docs/E2E reviews both
+  returned GO. This is a `repo-ready` slice, not runtime-proven or
+  production-ready.
+- 2026-08-03: Runtime regressions now cover epoch rotation while older records
+  are pending at a controlled archive boundary, atomic durable-versus-tail
+  epochs, configured pending-capacity arithmetic, partial suffix visibility
+  and exact completion, peer-cancellation error latching, idle retry recovery,
+  and verified-catalog rejection of A-to-B-to-pruned-A epoch recurrence.
+  Oversized-line terminal status now fails closed at the real supervisor with
+  no cursor, sequence, spool, or archive advance. The complete affected
+  storage/archive/capture test matrix and strict Clippy/format/diff gates are
+  green, and independent code review is GO after documenting the checkpoint
+  recovery authority. The existing E2E/soak harness now drives NodeLine fills,
+  asserts V4 cursor recovery across a real process restart, and distinguishes
+  cumulative auxiliary records from the pruned hot spool. Its execution is
+  currently blocked by a full host data volume and unavailable Docker daemon.
+  Whole-spec production also remains blocked on idempotent 128-512 MB raw
+  Parquet compaction; current
+  group commits intentionally produce small immutable raw objects so ACK can
+  remain archive-backed.
 
 ## Rollback / Recovery
 

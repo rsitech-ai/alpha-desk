@@ -6,11 +6,14 @@ use domain_types::SourceId;
 use hl_protocol::{CursorTransition, ObservationClass, SourceCursor, SourceObservation};
 use storage_ports::{CursorPolicy, LocalRecordSequence};
 
+use super::inspection::{
+    SpoolInspectionBaseline, inspect_spool_with_baseline, recover_spool_tail_with_baseline,
+};
 use super::manifest::load_close_receipt;
 use super::record::validate_record;
 use super::{
     AppendReceipt, CloseReceipt, DurabilityPolicy, SegmentHeader, SegmentHeaderV1, SpoolError,
-    SpoolRead, SpoolReader, SpoolWriter, inspect_spool, io_error, recover_spool_tail,
+    SpoolRead, SpoolReader, SpoolWriter, io_error,
 };
 
 const POLICY_SCHEMA_PREFIX: &str = "hl-spool-policy-v1:";
@@ -26,6 +29,54 @@ pub struct SourceSpoolConfig {
     segment_target_bytes: u64,
     rotation_interval: Duration,
     cursor_policy: CursorPolicy,
+    baseline: Option<SourceSpoolBaseline>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSpoolBaseline {
+    segment_sequence: u64,
+    manifest_hash: [u8; 32],
+    last_cursor: SourceCursor,
+    last_local_sequence: Option<LocalRecordSequence>,
+}
+
+impl SourceSpoolBaseline {
+    pub fn try_new(
+        segment_sequence: u64,
+        manifest_hash: [u8; 32],
+        last_cursor: SourceCursor,
+        last_local_sequence: Option<LocalRecordSequence>,
+    ) -> Result<Self, SpoolError> {
+        if segment_sequence == 0 || manifest_hash == [0; 32] {
+            return Err(SpoolError::InvalidManifest);
+        }
+        Ok(Self {
+            segment_sequence,
+            manifest_hash,
+            last_cursor,
+            last_local_sequence,
+        })
+    }
+
+    #[must_use]
+    pub const fn segment_sequence(&self) -> u64 {
+        self.segment_sequence
+    }
+
+    #[must_use]
+    pub const fn manifest_hash(&self) -> [u8; 32] {
+        self.manifest_hash
+    }
+
+    #[must_use]
+    pub const fn last_cursor(&self) -> &SourceCursor {
+        &self.last_cursor
+    }
+
+    #[must_use]
+    pub const fn last_local_sequence(&self) -> Option<LocalRecordSequence> {
+        self.last_local_sequence
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,7 +171,18 @@ impl SourceSpoolConfig {
             segment_target_bytes: rotation.segment_target_bytes,
             rotation_interval: rotation.rotation_interval,
             cursor_policy,
+            baseline: None,
         })
+    }
+
+    pub fn with_baseline(mut self, baseline: SourceSpoolBaseline) -> Result<Self, SpoolError> {
+        if (self.cursor_policy == CursorPolicy::MonotonicByteOffset)
+            != baseline.last_local_sequence.is_some()
+        {
+            return Err(SpoolError::InvalidManifest);
+        }
+        self.baseline = Some(baseline);
+        Ok(self)
     }
 }
 
@@ -209,17 +271,38 @@ impl SourceSpool {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(SpoolError::UnsafeSpoolEntry);
         }
-        recover_spool_tail(&config.directory)?;
-        let inspection = inspect_spool(&config.directory)?;
+        let inspection_baseline =
+            config
+                .baseline
+                .as_ref()
+                .map(|baseline| SpoolInspectionBaseline {
+                    segment_sequence: baseline.segment_sequence,
+                    manifest_hash: baseline.manifest_hash,
+                    cursor_policy: config.cursor_policy,
+                    local_sequence: baseline.last_local_sequence,
+                });
+        recover_spool_tail_with_baseline(&config.directory, inspection_baseline)?;
+        let inspection = inspect_spool_with_baseline(&config.directory, inspection_baseline)?;
         let closed_segments = inspection
             .segment_paths()
             .iter()
             .filter(|path| Some(path.as_path()) != inspection.open_segment_path())
             .map(load_close_receipt)
             .collect::<Result<Vec<_>, _>>()?;
-        let mut last_durable_cursor: Option<SourceCursor> = None;
-        let mut last_record_identity = None;
-        let mut last_local_sequence = None;
+        let mut last_durable_cursor = config
+            .baseline
+            .as_ref()
+            .map(|baseline| baseline.last_cursor.clone());
+        let mut last_record_identity =
+            last_durable_cursor
+                .as_ref()
+                .map(|cursor| LastRecordIdentity {
+                    cursor: cursor.clone(),
+                });
+        let mut last_local_sequence = config
+            .baseline
+            .as_ref()
+            .and_then(|baseline| baseline.last_local_sequence);
         let mut retained_segments = Vec::new();
         for path in inspection.segment_paths() {
             let closed_manifest = closed_segments
@@ -535,6 +618,23 @@ impl SourceSpool {
     #[must_use]
     pub const fn source_id(&self) -> &SourceId {
         &self.config.source_id
+    }
+
+    pub fn forget_archived_segment(&mut self, segment: &CloseReceipt) -> Result<(), SpoolError> {
+        let index = self
+            .closed_segments
+            .iter()
+            .position(|candidate| candidate == segment)
+            .ok_or(SpoolError::ManifestContentMismatch)?;
+        if self.active_segment_path() == segment.segment_path() {
+            return Err(SpoolError::SegmentClosed);
+        }
+        self.closed_segments.remove(index);
+        self.segment_paths
+            .retain(|path| path != segment.segment_path());
+        self.retained_segments
+            .retain(|retained| retained.path != segment.segment_path());
+        Ok(())
     }
 
     pub fn seal_active(

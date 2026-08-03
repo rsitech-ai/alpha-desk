@@ -44,6 +44,9 @@ impl CaptureConfig {
 
     fn validate(&self) -> Result<(), ConfigError> {
         validate_identity(&self.parser_version).map_err(|_| ConfigError::InvalidParserVersion)?;
+        if self.parser_version.starts_with("quarantine-v1:") {
+            return Err(ConfigError::InvalidParserVersion);
+        }
         self.runtime.validate()?;
         self.spool.validate()?;
         if self.sources.is_empty() {
@@ -377,7 +380,7 @@ pub struct SourceConfig {
 impl SourceConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         SourceId::new(self.id.clone()).map_err(|_| ConfigError::InvalidSourceId)?;
-        if self.id.len() > MAX_IDENTITY_BYTES || self.id.chars().any(char::is_control) {
+        if !is_safe_source_path_component(&self.id) {
             return Err(ConfigError::InvalidSourceId);
         }
         validate_identity(&self.source_version).map_err(|_| ConfigError::InvalidSourceVersion)?;
@@ -442,6 +445,18 @@ impl SourceConfig {
     pub fn credential_path(&self) -> Option<&Path> {
         self.credential_path.as_deref()
     }
+}
+
+fn is_safe_source_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_IDENTITY_BYTES
+        && value != "."
+        && value != ".."
+        && value.bytes().enumerate().all(|(index, byte)| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => true,
+            b'-' | b'_' | b'.' => index > 0,
+            _ => false,
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

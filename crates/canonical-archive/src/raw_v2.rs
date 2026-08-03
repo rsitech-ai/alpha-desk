@@ -341,6 +341,32 @@ pub(super) fn read_observations_by_sequence(
     Ok(Box::new(replayed.into_iter().map(Ok)))
 }
 
+pub(super) fn contains_cursor_epoch(
+    archive: &LocalParquetArchive,
+    chain: &ChainId,
+    source: &SourceId,
+    cursor_epoch: &str,
+) -> Result<bool, ArchiveError> {
+    SourceCursor::new(cursor_epoch.to_owned(), 0)
+        .map_err(|_| ArchiveError::InvalidInput("raw cursor epoch"))?;
+    if !super::raw_policy::ensure_read_policy(
+        archive.root(),
+        chain,
+        source,
+        super::raw_policy::RawPolicy::MonotonicByteV2,
+    )? {
+        return Ok(false);
+    }
+    let Some(catalog) = load_current_catalog(archive, chain, source)? else {
+        return Ok(false);
+    };
+    Ok(catalog
+        .value
+        .batches
+        .iter()
+        .any(|reference| reference.cursor_epoch == cursor_epoch))
+}
+
 pub(crate) fn inspect_source(
     archive: &LocalParquetArchive,
     chain: &ChainId,

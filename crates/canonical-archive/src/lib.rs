@@ -230,6 +230,15 @@ impl RawObservationArchive for LocalParquetArchive {
     ) -> Result<VerifiedRawManifest, ArchiveError> {
         raw::verify_raw_manifest(self, manifest)
     }
+
+    fn contains_raw_cursor_epoch(
+        &self,
+        chain: &domain_types::ChainId,
+        source: &domain_types::SourceId,
+        cursor_epoch: &str,
+    ) -> Result<bool, ArchiveError> {
+        raw_v2::contains_cursor_epoch(self, chain, source, cursor_epoch)
+    }
 }
 
 impl CanonicalArchiveMaintenance for LocalParquetArchive {

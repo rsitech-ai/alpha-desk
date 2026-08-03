@@ -395,6 +395,45 @@ fn parser_source_and_spool_identity_are_canonical() {
 }
 
 #[test]
+fn parser_identity_cannot_impersonate_the_reserved_quarantine_disposition() {
+    let source = replace_once(
+        &valid_config(),
+        "parser_version = \"parser-v1\"",
+        "parser_version = \"quarantine-v1:source.schema_drift\"",
+    );
+    let error = CaptureConfig::from_toml(&source).expect_err("reserved namespace must fail");
+    assert_eq!(error.reason_code(), "capture_config.invalid_parser_version");
+}
+
+#[test]
+fn source_ids_are_single_ascii_spool_path_components() {
+    for invalid in [
+        "/tmp/escaped",
+        "../escaped",
+        "nested/source",
+        "nested\\source",
+        ".",
+        "..",
+        "%2e%2e",
+        "node%2fsource",
+        "nøde-source",
+        ".hidden",
+    ] {
+        let source = replace_once(
+            &valid_config(),
+            "id = \"primary-node\"",
+            &format!("id = {invalid:?}"),
+        );
+        let error = CaptureConfig::from_toml(&source).expect_err("unsafe source ID must fail");
+        assert_eq!(
+            error.reason_code(),
+            "capture_config.invalid_source_id",
+            "unexpected result for {invalid:?}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_source_ids_and_unknown_classes_fail() {
     let duplicate = valid_config().replace("id = \"public-market\"", "id = \"primary-node\"");
     let error = CaptureConfig::from_toml(&duplicate).expect_err("duplicate source");
