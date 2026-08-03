@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use hl_protocol::{CursorTransition, SourceCursor, SourceObservation};
+use storage_ports::{CursorPolicy, LocalRecordSequence};
 
 use super::header::SegmentHeader;
-use super::manifest::{CloseReceipt, ClosedSegmentManifestV1, ManifestFields, publish_manifest};
+use super::manifest::{
+    CloseReceipt, ClosedSegmentManifest, ClosedSegmentManifestV1, ClosedSegmentManifestV2,
+    ManifestFields, publish_manifest,
+};
 use super::reader::scan_records;
 use super::record::encode_record;
 use super::recovery::{RecoveryReport, recover_open_segment};
@@ -249,9 +253,38 @@ impl SpoolWriter {
     }
 
     pub fn close(
+        self,
+        closed_at_micros: i64,
+        previous_manifest_blake3: Option<[u8; 32]>,
+    ) -> Result<CloseReceipt, SpoolError> {
+        if self.header.cursor_policy() != CursorPolicy::ContiguousNativeOffset {
+            return Err(SpoolError::CursorPolicyMismatch);
+        }
+        self.close_with_manifest(closed_at_micros, previous_manifest_blake3, None)
+    }
+
+    pub fn close_with_local_sequence_span(
+        self,
+        closed_at_micros: i64,
+        previous_manifest_blake3: Option<[u8; 32]>,
+        first_local_sequence: LocalRecordSequence,
+        last_local_sequence: LocalRecordSequence,
+    ) -> Result<CloseReceipt, SpoolError> {
+        if self.header.cursor_policy() != CursorPolicy::MonotonicByteOffset {
+            return Err(SpoolError::CursorPolicyMismatch);
+        }
+        self.close_with_manifest(
+            closed_at_micros,
+            previous_manifest_blake3,
+            Some((first_local_sequence, last_local_sequence)),
+        )
+    }
+
+    fn close_with_manifest(
         mut self,
         closed_at_micros: i64,
         previous_manifest_blake3: Option<[u8; 32]>,
+        local_sequence_span: Option<(LocalRecordSequence, LocalRecordSequence)>,
     ) -> Result<CloseReceipt, SpoolError> {
         validate_timestamp(closed_at_micros)?;
         if self.record_count == 0 {
@@ -273,7 +306,7 @@ impl SpoolWriter {
             .and_then(std::ffi::OsStr::to_str)
             .ok_or(SpoolError::InvalidManifest)?
             .to_owned();
-        let manifest = ClosedSegmentManifestV1::new(ManifestFields {
+        let fields = ManifestFields {
             segment_sequence: self.header.segment_sequence(),
             segment_file,
             source_id: self.header.source_id().as_str().to_owned(),
@@ -287,7 +320,13 @@ impl SpoolWriter {
             segment_blake3,
             previous_manifest_blake3,
             closed_at_micros,
-        })?;
+        };
+        let manifest = match local_sequence_span {
+            None => ClosedSegmentManifest::V1(ClosedSegmentManifestV1::new(fields)?),
+            Some((first, last)) => {
+                ClosedSegmentManifest::V2(ClosedSegmentManifestV2::new(fields, first, last)?)
+            }
+        };
         let receipt = publish_manifest(&self.segment_path, manifest)?;
         self.closed = true;
         Ok(receipt)

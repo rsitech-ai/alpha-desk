@@ -2,7 +2,7 @@ use bytes::Bytes;
 use domain_types::SourceId;
 use hl_capture::spool::{
     DurabilityPolicy, SegmentHeaderV1, SourceSpool, SourceSpoolAppendDisposition,
-    SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy, SpoolWriter,
+    SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy, SpoolWriter, inspect_spool,
 };
 use hl_protocol::{
     ObservationClass, ParseWarning, ReceiveTimestamps, SourceCursor, SourceObservation,
@@ -162,6 +162,150 @@ fn byte_offsets_receive_physical_local_sequences_and_resume_after_restart() {
 }
 
 #[test]
+fn byte_offset_closed_manifest_binds_policy_and_local_sequence_span() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+
+    for (offset, durable_at) in [(17, 101), (49, 102), (121, 103)] {
+        spool.append(&byte_observation(offset), durable_at).unwrap();
+    }
+
+    let closed = spool.seal_active(104).unwrap().unwrap();
+    assert_eq!(
+        hex::encode(closed.manifest_hash()),
+        "062121f89955077deef42a50152b21057457c17a9cc260a0a3e3084a896d3b30"
+    );
+    assert_eq!(closed.manifest().schema_version(), "hl-spool-manifest-v2");
+    assert_eq!(
+        closed.manifest().cursor_policy(),
+        Some(CursorPolicy::MonotonicByteOffset)
+    );
+    assert_eq!(closed.manifest().first_local_sequence().unwrap().get(), 1);
+    assert_eq!(closed.manifest().last_local_sequence().unwrap().get(), 3);
+
+    let encoded: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(closed.manifest_path()).unwrap()).unwrap();
+    assert_eq!(encoded["schema_version"], "hl-spool-manifest-v2");
+    assert_eq!(encoded["cursor_policy"], "monotonic-byte-offset");
+    assert_eq!(encoded["first_local_sequence"], 1);
+    assert_eq!(encoded["last_local_sequence"], 3);
+
+    drop(spool);
+    let reopened = SourceSpool::open(byte_config(&root), 200).unwrap();
+    let verified = &reopened.closed_segments()[0];
+    assert_eq!(verified.manifest_hash(), closed.manifest_hash());
+    assert_eq!(verified.manifest().first_local_sequence().unwrap().get(), 1);
+    assert_eq!(verified.manifest().last_local_sequence().unwrap().get(), 3);
+    assert_eq!(reopened.last_local_sequence().unwrap().get(), 3);
+}
+
+#[test]
+fn byte_offset_closed_manifest_rejects_a_tampered_sequence_span() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool.append(&byte_observation(17), 101).unwrap();
+    spool.append(&byte_observation(49), 102).unwrap();
+    let closed = spool.seal_active(103).unwrap().unwrap();
+
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(closed.manifest_path()).unwrap()).unwrap();
+    value["last_local_sequence"] = serde_json::json!(3);
+    let mut tampered = serde_json::to_vec_pretty(&value).unwrap();
+    tampered.push(b'\n');
+    std::fs::write(closed.manifest_path(), tampered).unwrap();
+
+    assert!(matches!(
+        hl_capture::spool::CloseReceipt::load(closed.segment_path()),
+        Err(SpoolError::InvalidManifest)
+    ));
+}
+
+#[test]
+fn pre_m2d_byte_segment_with_a_v1_manifest_migrates_to_v2_without_renumbering() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool.append(&byte_observation(17), 101).unwrap();
+    let legacy = spool.seal_active(102).unwrap().unwrap();
+    let legacy_path = legacy.manifest_path().to_owned();
+    drop(spool);
+
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.insert(
+        "schema_version".to_owned(),
+        serde_json::json!("hl-spool-manifest-v1"),
+    );
+    object.remove("cursor_policy");
+    object.remove("first_local_sequence");
+    object.remove("last_local_sequence");
+    let mut encoded = serde_json::to_vec_pretty(&value).unwrap();
+    encoded.push(b'\n');
+    std::fs::write(&legacy_path, &encoded).unwrap();
+
+    let inspection = inspect_spool(root.path().join("primary-node")).unwrap();
+    assert_eq!(inspection.records(), 1);
+    let legacy_hash = *blake3::hash(&encoded).as_bytes();
+    let mut reopened = SourceSpool::open(byte_config(&root), 200).unwrap();
+    assert_eq!(reopened.last_local_sequence().unwrap().get(), 1);
+    assert_eq!(
+        reopened.closed_segments()[0].manifest().cursor_policy(),
+        None
+    );
+    reopened.append(&byte_observation(49), 201).unwrap();
+    let migrated = reopened.shutdown(202).unwrap().unwrap();
+    assert_eq!(
+        migrated.manifest().cursor_policy(),
+        Some(CursorPolicy::MonotonicByteOffset)
+    );
+    assert_eq!(migrated.manifest().first_local_sequence().unwrap().get(), 2);
+    assert_eq!(migrated.manifest().last_local_sequence().unwrap().get(), 2);
+    assert_eq!(
+        migrated.manifest().previous_manifest_blake3(),
+        Some(legacy_hash)
+    );
+    let migrated_inspection = inspect_spool(root.path().join("primary-node")).unwrap();
+    assert_eq!(migrated_inspection.closed_segments(), 2);
+    assert_eq!(migrated_inspection.records(), 2);
+}
+
+#[test]
+fn inspection_rejects_gap_and_overlap_between_v2_sequence_spans() {
+    for shifted_sequence in [1_u64, 3] {
+        let root = TempDir::new().unwrap();
+        let rotation = SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            rotation,
+            CursorPolicy::MonotonicByteOffset,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config, 100).unwrap();
+        spool.append(&byte_observation(17), 101).unwrap();
+        spool.append(&byte_observation(49), 102).unwrap();
+        let second = spool.shutdown(103).unwrap().unwrap();
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(second.manifest_path()).unwrap()).unwrap();
+        value["first_local_sequence"] = serde_json::json!(shifted_sequence);
+        value["last_local_sequence"] = serde_json::json!(shifted_sequence);
+        let mut encoded = serde_json::to_vec_pretty(&value).unwrap();
+        encoded.push(b'\n');
+        std::fs::write(second.manifest_path(), encoded).unwrap();
+
+        assert!(matches!(
+            inspect_spool(root.path().join("primary-node")),
+            Err(SpoolError::ManifestChainBroken)
+        ));
+    }
+}
+
+#[test]
 fn byte_offset_duplicate_is_idempotent_but_conflicting_content_fails_closed() {
     let root = TempDir::new().unwrap();
     let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
@@ -291,7 +435,19 @@ fn byte_offset_epoch_change_rotates_before_append_and_keeps_sequence() {
         .unwrap();
 
     assert_eq!(second.local_sequence().get(), 2);
-    assert!(second.closed_segment().is_some());
+    let first_close = second.closed_segment().expect("epoch rotation");
+    assert_eq!(
+        first_close.manifest().cursor_policy(),
+        Some(CursorPolicy::MonotonicByteOffset)
+    );
+    assert_eq!(
+        first_close.manifest().first_local_sequence().unwrap().get(),
+        1
+    );
+    assert_eq!(
+        first_close.manifest().last_local_sequence().unwrap().get(),
+        1
+    );
     assert_eq!(spool.verified_segment_paths().len(), 2);
     let first_records = SpoolReader::open(&spool.verified_segment_paths()[0])
         .unwrap()

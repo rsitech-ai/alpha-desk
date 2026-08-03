@@ -11,7 +11,10 @@ use std::io;
 
 pub use header::{SegmentHeader, SegmentHeaderV1};
 pub use inspection::{SpoolInspection, inspect_spool, recover_spool_tail};
-pub use manifest::{CloseReceipt, ClosedSegmentManifestV1, MANIFEST_SCHEMA_V1};
+pub use manifest::{
+    CloseReceipt, ClosedSegmentManifest, ClosedSegmentManifestV1, ClosedSegmentManifestV2,
+    MANIFEST_SCHEMA_V1, MANIFEST_SCHEMA_V2,
+};
 pub use reader::{
     SpoolRead, SpoolReader, SpoolRecordStream, SpoolRecordSummary, validate_segment_bytes,
 };

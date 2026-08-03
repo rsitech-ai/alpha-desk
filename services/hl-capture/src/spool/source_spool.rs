@@ -211,11 +211,21 @@ impl SourceSpool {
         }
         recover_spool_tail(&config.directory)?;
         let inspection = inspect_spool(&config.directory)?;
+        let closed_segments = inspection
+            .segment_paths()
+            .iter()
+            .filter(|path| Some(path.as_path()) != inspection.open_segment_path())
+            .map(load_close_receipt)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut last_durable_cursor: Option<SourceCursor> = None;
         let mut last_record_identity = None;
         let mut last_local_sequence = None;
         let mut retained_segments = Vec::new();
         for path in inspection.segment_paths() {
+            let closed_manifest = closed_segments
+                .iter()
+                .find(|receipt| receipt.segment_path() == path)
+                .map(CloseReceipt::manifest);
             let reader = SpoolReader::open(path)?;
             validate_header(reader.header(), &config)?;
             let mut records = reader.stream()?;
@@ -246,7 +256,23 @@ impl SourceSpool {
                                 first_in_segment,
                             )?;
                         }
-                        let local_sequence = next_local_sequence(last_local_sequence)?;
+                        let local_sequence = if first_in_segment
+                            && config.cursor_policy == CursorPolicy::MonotonicByteOffset
+                        {
+                            match closed_manifest.and_then(|value| value.first_local_sequence()) {
+                                Some(first) => {
+                                    if last_local_sequence.is_some()
+                                        && next_local_sequence(last_local_sequence)? != first
+                                    {
+                                        return Err(SpoolError::ManifestChainBroken);
+                                    }
+                                    first
+                                }
+                                None => next_local_sequence(last_local_sequence)?,
+                            }
+                        } else {
+                            next_local_sequence(last_local_sequence)?
+                        };
                         if config.cursor_policy == CursorPolicy::MonotonicByteOffset {
                             match &mut retained_segment {
                                 Some(index) => {
@@ -284,6 +310,12 @@ impl SourceSpool {
             if let Some(index) = retained_segment {
                 retained_segments.push(index);
             }
+            if let Some(expected_last) =
+                closed_manifest.and_then(|value| value.last_local_sequence())
+                && last_local_sequence != Some(expected_last)
+            {
+                return Err(SpoolError::ManifestContentMismatch);
+            }
         }
 
         let (writer, active_path) = if let Some(path) = inspection.open_segment_path() {
@@ -310,11 +342,6 @@ impl SourceSpool {
             (writer, active)
         };
         let mut segment_paths = inspection.segment_paths().to_vec();
-        let closed_segments = segment_paths
-            .iter()
-            .filter(|path| Some(path.as_path()) != inspection.open_segment_path())
-            .map(load_close_receipt)
-            .collect::<Result<Vec<_>, _>>()?;
         if segment_paths.last() != Some(&active_path) {
             segment_paths.push(active_path);
         }
@@ -531,7 +558,7 @@ impl SourceSpool {
         if writer.record_count() == 0 {
             return Ok(None);
         }
-        writer.close(closed_at_micros, self.chain_tip).map(Some)
+        self.close_writer(writer, closed_at_micros).map(Some)
     }
 
     fn rotation_due(&self, durable_at_micros: i64) -> Result<bool, SpoolError> {
@@ -558,7 +585,7 @@ impl SourceSpool {
             .segment_sequence()
             .checked_add(1)
             .ok_or(SpoolError::SizeOverflow)?;
-        let closed = writer.close(closed_at_micros, self.chain_tip)?;
+        let closed = self.close_writer(writer, closed_at_micros)?;
         self.chain_tip = Some(closed.manifest_hash());
         let header = SegmentHeader::new_with_cursor_policy(
             self.config.source_id.clone(),
@@ -574,6 +601,36 @@ impl SourceSpool {
         self.writer = Some(writer);
         self.closed_segments.push(closed.clone());
         Ok(closed)
+    }
+
+    fn close_writer(
+        &self,
+        writer: SpoolWriter,
+        closed_at_micros: i64,
+    ) -> Result<CloseReceipt, SpoolError> {
+        match self.config.cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => writer.close(closed_at_micros, self.chain_tip),
+            CursorPolicy::MonotonicByteOffset => {
+                let first = self
+                    .retained_segments
+                    .iter()
+                    .find(|index| index.path == writer.segment_path())
+                    .map(|index| index.first_local_sequence)
+                    .ok_or(SpoolError::ManifestContentMismatch)?;
+                let last = first
+                    .checked_advance_by(
+                        writer
+                            .record_count()
+                            .checked_sub(1)
+                            .ok_or(SpoolError::EmptySegment)?,
+                    )
+                    .map_err(|_| SpoolError::SizeOverflow)?;
+                if self.last_local_sequence != Some(last) {
+                    return Err(SpoolError::ManifestContentMismatch);
+                }
+                writer.close_with_local_sequence_span(closed_at_micros, self.chain_tip, first, last)
+            }
+        }
     }
 
     fn find_retained(

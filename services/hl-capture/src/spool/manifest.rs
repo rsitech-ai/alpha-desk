@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 
 use hl_protocol::SourceCursor;
 use serde::{Deserialize, Serialize};
+use storage_ports::{CursorPolicy, LocalRecordSequence};
 
 use super::{SpoolError, io_error};
 
 pub const MANIFEST_SCHEMA_V1: &str = "hl-spool-manifest-v1";
+pub const MANIFEST_SCHEMA_V2: &str = "hl-spool-manifest-v2";
+const BYTE_OFFSET_POLICY: &str = "monotonic-byte-offset";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,14 +142,6 @@ impl ClosedSegmentManifestV1 {
         Ok(manifest)
     }
 
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, SpoolError> {
-        self.validate()?;
-        let mut encoded =
-            serde_json::to_vec_pretty(self).map_err(|_| SpoolError::InvalidManifest)?;
-        encoded.push(b'\n');
-        Ok(encoded)
-    }
-
     pub(crate) fn validate(&self) -> Result<(), SpoolError> {
         if self.schema_version != MANIFEST_SCHEMA_V1
             || self.record_count == 0
@@ -162,6 +157,278 @@ impl ClosedSegmentManifestV1 {
             return Err(SpoolError::InvalidManifest);
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosedSegmentManifestV2 {
+    schema_version: String,
+    cursor_policy: String,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+    segment_sequence: u64,
+    segment_file: String,
+    source_id: String,
+    source_version: String,
+    spool_schema_version: String,
+    #[serde(with = "hex_32")]
+    producer_build_hash: [u8; 32],
+    file_size_bytes: u64,
+    record_count: u64,
+    min_cursor: SourceCursor,
+    max_cursor: SourceCursor,
+    #[serde(with = "hex_32")]
+    segment_blake3: [u8; 32],
+    #[serde(with = "option_hex_32")]
+    previous_manifest_blake3: Option<[u8; 32]>,
+    closed_at_micros: i64,
+}
+
+impl ClosedSegmentManifestV2 {
+    pub(crate) fn new(
+        fields: ManifestFields,
+        first_local_sequence: LocalRecordSequence,
+        last_local_sequence: LocalRecordSequence,
+    ) -> Result<Self, SpoolError> {
+        let manifest = Self {
+            schema_version: MANIFEST_SCHEMA_V2.to_owned(),
+            cursor_policy: BYTE_OFFSET_POLICY.to_owned(),
+            first_local_sequence: first_local_sequence.get(),
+            last_local_sequence: last_local_sequence.get(),
+            segment_sequence: fields.segment_sequence,
+            segment_file: fields.segment_file,
+            source_id: fields.source_id,
+            source_version: fields.source_version,
+            spool_schema_version: fields.spool_schema_version,
+            producer_build_hash: fields.producer_build_hash,
+            file_size_bytes: fields.file_size_bytes,
+            record_count: fields.record_count,
+            min_cursor: fields.min_cursor,
+            max_cursor: fields.max_cursor,
+            segment_blake3: fields.segment_blake3,
+            previous_manifest_blake3: fields.previous_manifest_blake3,
+            closed_at_micros: fields.closed_at_micros,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn validate(&self) -> Result<(), SpoolError> {
+        let first = LocalRecordSequence::try_new(self.first_local_sequence)
+            .map_err(|_| SpoolError::InvalidManifest)?;
+        LocalRecordSequence::try_new(self.last_local_sequence)
+            .map_err(|_| SpoolError::InvalidManifest)?;
+        let expected_last = first
+            .checked_advance_by(
+                self.record_count
+                    .checked_sub(1)
+                    .ok_or(SpoolError::InvalidManifest)?,
+            )
+            .map_err(|_| SpoolError::InvalidManifest)?;
+        if self.schema_version != MANIFEST_SCHEMA_V2
+            || self.cursor_policy != BYTE_OFFSET_POLICY
+            || expected_last.get() != self.last_local_sequence
+            || self.file_size_bytes == 0
+            || self.segment_file.is_empty()
+            || self.source_id.is_empty()
+            || self.source_version.is_empty()
+            || self.spool_schema_version.is_empty()
+            || self.closed_at_micros < 0
+            || self.min_cursor.epoch() != self.max_cursor.epoch()
+            || self.min_cursor.offset() > self.max_cursor.offset()
+        {
+            return Err(SpoolError::InvalidManifest);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClosedSegmentManifest {
+    V1(ClosedSegmentManifestV1),
+    V2(ClosedSegmentManifestV2),
+}
+
+impl ClosedSegmentManifest {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, SpoolError> {
+        let encoded = fs::read(path.as_ref())
+            .map_err(|source| io_error("reading a closed-segment manifest", source))?;
+        Self::decode(&encoded)
+    }
+
+    fn decode(encoded: &[u8]) -> Result<Self, SpoolError> {
+        #[derive(Deserialize)]
+        struct SchemaProbe {
+            schema_version: String,
+        }
+        let probe: SchemaProbe =
+            serde_json::from_slice(encoded).map_err(|_| SpoolError::InvalidManifest)?;
+        let manifest = match probe.schema_version.as_str() {
+            MANIFEST_SCHEMA_V1 => {
+                Self::V1(serde_json::from_slice(encoded).map_err(|_| SpoolError::InvalidManifest)?)
+            }
+            MANIFEST_SCHEMA_V2 => {
+                Self::V2(serde_json::from_slice(encoded).map_err(|_| SpoolError::InvalidManifest)?)
+            }
+            _ => return Err(SpoolError::InvalidManifest),
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, SpoolError> {
+        self.validate()?;
+        let mut encoded = match self {
+            Self::V1(value) => serde_json::to_vec_pretty(value),
+            Self::V2(value) => serde_json::to_vec_pretty(value),
+        }
+        .map_err(|_| SpoolError::InvalidManifest)?;
+        encoded.push(b'\n');
+        Ok(encoded)
+    }
+
+    fn validate(&self) -> Result<(), SpoolError> {
+        match self {
+            Self::V1(value) => value.validate(),
+            Self::V2(value) => value.validate(),
+        }
+    }
+
+    #[must_use]
+    pub fn schema_version(&self) -> &str {
+        match self {
+            Self::V1(value) => value.schema_version(),
+            Self::V2(value) => &value.schema_version,
+        }
+    }
+
+    #[must_use]
+    pub const fn cursor_policy(&self) -> Option<CursorPolicy> {
+        match self {
+            Self::V1(_) => None,
+            Self::V2(_) => Some(CursorPolicy::MonotonicByteOffset),
+        }
+    }
+
+    #[must_use]
+    pub fn first_local_sequence(&self) -> Option<LocalRecordSequence> {
+        match self {
+            Self::V1(_) => None,
+            Self::V2(value) => LocalRecordSequence::try_new(value.first_local_sequence).ok(),
+        }
+    }
+
+    #[must_use]
+    pub fn last_local_sequence(&self) -> Option<LocalRecordSequence> {
+        match self {
+            Self::V1(_) => None,
+            Self::V2(value) => LocalRecordSequence::try_new(value.last_local_sequence).ok(),
+        }
+    }
+
+    #[must_use]
+    pub const fn segment_sequence(&self) -> u64 {
+        match self {
+            Self::V1(value) => value.segment_sequence,
+            Self::V2(value) => value.segment_sequence,
+        }
+    }
+
+    #[must_use]
+    pub fn segment_file(&self) -> &str {
+        match self {
+            Self::V1(value) => &value.segment_file,
+            Self::V2(value) => &value.segment_file,
+        }
+    }
+
+    #[must_use]
+    pub fn source_id(&self) -> &str {
+        match self {
+            Self::V1(value) => &value.source_id,
+            Self::V2(value) => &value.source_id,
+        }
+    }
+
+    #[must_use]
+    pub fn source_version(&self) -> &str {
+        match self {
+            Self::V1(value) => &value.source_version,
+            Self::V2(value) => &value.source_version,
+        }
+    }
+
+    #[must_use]
+    pub fn spool_schema_version(&self) -> &str {
+        match self {
+            Self::V1(value) => &value.spool_schema_version,
+            Self::V2(value) => &value.spool_schema_version,
+        }
+    }
+
+    #[must_use]
+    pub const fn producer_build_hash(&self) -> [u8; 32] {
+        match self {
+            Self::V1(value) => value.producer_build_hash,
+            Self::V2(value) => value.producer_build_hash,
+        }
+    }
+
+    #[must_use]
+    pub const fn file_size_bytes(&self) -> u64 {
+        match self {
+            Self::V1(value) => value.file_size_bytes,
+            Self::V2(value) => value.file_size_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn record_count(&self) -> u64 {
+        match self {
+            Self::V1(value) => value.record_count,
+            Self::V2(value) => value.record_count,
+        }
+    }
+
+    #[must_use]
+    pub const fn min_cursor(&self) -> &SourceCursor {
+        match self {
+            Self::V1(value) => &value.min_cursor,
+            Self::V2(value) => &value.min_cursor,
+        }
+    }
+
+    #[must_use]
+    pub const fn max_cursor(&self) -> &SourceCursor {
+        match self {
+            Self::V1(value) => &value.max_cursor,
+            Self::V2(value) => &value.max_cursor,
+        }
+    }
+
+    #[must_use]
+    pub const fn segment_blake3(&self) -> [u8; 32] {
+        match self {
+            Self::V1(value) => value.segment_blake3,
+            Self::V2(value) => value.segment_blake3,
+        }
+    }
+
+    #[must_use]
+    pub const fn previous_manifest_blake3(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::V1(value) => value.previous_manifest_blake3,
+            Self::V2(value) => value.previous_manifest_blake3,
+        }
+    }
+
+    #[must_use]
+    pub const fn closed_at_micros(&self) -> i64 {
+        match self {
+            Self::V1(value) => value.closed_at_micros,
+            Self::V2(value) => value.closed_at_micros,
+        }
     }
 }
 
@@ -184,7 +451,7 @@ pub(crate) struct ManifestFields {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseReceipt {
-    manifest: ClosedSegmentManifestV1,
+    manifest: ClosedSegmentManifest,
     segment_path: PathBuf,
     manifest_path: PathBuf,
     manifest_hash: [u8; 32],
@@ -196,7 +463,7 @@ impl CloseReceipt {
     }
 
     #[must_use]
-    pub const fn manifest(&self) -> &ClosedSegmentManifestV1 {
+    pub const fn manifest(&self) -> &ClosedSegmentManifest {
         &self.manifest
     }
 
@@ -226,7 +493,7 @@ impl CloseReceipt {
 
 pub(crate) fn publish_manifest(
     segment_path: &Path,
-    manifest: ClosedSegmentManifestV1,
+    manifest: ClosedSegmentManifest,
 ) -> Result<CloseReceipt, SpoolError> {
     let manifest_path = manifest_path_for(segment_path);
     let mut temporary_path = manifest_path.as_os_str().to_owned();
@@ -286,9 +553,7 @@ pub(crate) fn load_close_receipt(
     let manifest_path = manifest_path_for(segment_path);
     let encoded = fs::read(&manifest_path)
         .map_err(|source| io_error("reading a closed-segment manifest", source))?;
-    let manifest: ClosedSegmentManifestV1 =
-        serde_json::from_slice(&encoded).map_err(|_| SpoolError::InvalidManifest)?;
-    manifest.validate()?;
+    let manifest = ClosedSegmentManifest::decode(&encoded)?;
     if segment_path.file_name().and_then(std::ffi::OsStr::to_str) != Some(manifest.segment_file()) {
         return Err(SpoolError::ManifestContentMismatch);
     }
