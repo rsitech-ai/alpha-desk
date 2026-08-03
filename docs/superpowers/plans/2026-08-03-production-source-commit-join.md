@@ -271,6 +271,16 @@
 - Expected result: both source halves are durably captured and observable, but
   no canonical trade is emitted before the join milestones.
 
+### M3B. Bound raw archive packing and compaction
+
+- Goal: remove the small-object, full-catalog-rewrite, and inode-growth blocker
+  without weakening archive-before-ACK receipts or checkpoint recovery.
+- Plan: execute
+  [`2026-08-03-raw-archive-packing-compaction.md`](2026-08-03-raw-archive-packing-compaction.md).
+- Completion boundary: V3 format and migration are repo-ready only after exact
+  replay/recovery/growth gates; production storage remains HOLD until retained
+  24-hour compaction, scrub, analytical-read, and restore evidence passes.
+
 ### M4. Capture the byte-first operator corpus gate
 
 - Goal: obtain the immutable same-build evidence needed to design the committed
