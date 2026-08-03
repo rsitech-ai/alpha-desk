@@ -226,6 +226,46 @@ impl ReplayCancellation for NeverCancel {
     }
 }
 
+pub(super) fn open_deterministic_archive(
+    path: &Path,
+    archive_id: &str,
+) -> Result<LocalParquetArchive, FixtureRunError> {
+    Ok(LocalParquetArchive::open(
+        path,
+        ArchiveConfig::deterministic_fixture(
+            archive_id,
+            KnownTime::from_unix_micros(FIXTURE_EPOCH_MICROS)?,
+        )?,
+    )?)
+}
+
+pub(super) fn append_fixture_blocks(
+    archive: &LocalParquetArchive,
+    blocks: &[BlockEnvelope],
+) -> Result<Vec<domain_types::ManifestId>, FixtureRunError> {
+    blocks
+        .iter()
+        .map(|block| Ok(archive.append_block(block)?.manifest_id().clone()))
+        .collect()
+}
+
+pub(super) fn canonical_events_schema_fingerprint(
+    archive: &LocalParquetArchive,
+    manifests: &[domain_types::ManifestId],
+) -> Result<[u8; 32], FixtureRunError> {
+    Ok(*archive
+        .verify_manifest(
+            manifests
+                .first()
+                .ok_or(FixtureRunError::Invariant("missing fixture manifest"))?,
+        )?
+        .schema_fingerprints()
+        .get("canonical_events")
+        .ok_or(FixtureRunError::Invariant(
+            "missing canonical schema fingerprint",
+        ))?)
+}
+
 pub(super) fn empty_ledger_at(
     chain: ChainId,
     first_height: BlockHeight,

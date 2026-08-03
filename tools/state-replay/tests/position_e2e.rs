@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use state_replay::{PositionRunConfig, run_position_e2e};
 
 const FALSE_QUALIFICATIONS: &[&str] = &[
@@ -32,7 +32,7 @@ fn position_e2e_proves_only_the_frozen_synthetic_position_contract() {
     let output = temporary.path().join("position-evidence");
     let evidence = run_position_e2e(&PositionRunConfig {
         output: output.clone(),
-        blocks: 8,
+        blocks: 9,
         checkpoint_after: 1,
         iterations: 2,
     })
@@ -86,6 +86,7 @@ fn position_e2e_proves_only_the_frozen_synthetic_position_contract() {
         "checkpoint_id",
         "replay_elapsed_micros",
         "namespace_counts",
+        "fixture_oracle",
         "duplicate_trade_identity",
         "start_position_mismatch",
         "unsupported_schema",
@@ -121,7 +122,7 @@ fn position_e2e_proves_only_the_frozen_synthetic_position_contract() {
     for field in FALSE_QUALIFICATIONS {
         assert_eq!(report[*field], false, "{field}");
     }
-    assert_eq!(report["block_count"], 8);
+    assert_eq!(report["block_count"], 9);
     assert_eq!(report["checkpoint_after"], 1);
     assert_eq!(report["iterations_completed"], 2);
     assert_eq!(
@@ -140,7 +141,7 @@ fn position_e2e_proves_only_the_frozen_synthetic_position_contract() {
     let segmented = report["segmented_resume_receipt_hashes"]
         .as_array()
         .expect("segmented receipts");
-    assert_eq!(segmented.len(), 7);
+    assert_eq!(segmented.len(), 8);
     assert!(segmented.iter().all(Value::is_string));
     assert!(
         segmented
@@ -185,6 +186,7 @@ fn position_e2e_proves_only_the_frozen_synthetic_position_contract() {
             .map(|(name, count)| (name.to_owned(), count))
             .collect()
     );
+    assert_eq!(report["fixture_oracle"], literal_fixture_oracle());
     assert_atomic_rejection(
         &report["duplicate_trade_identity"],
         "ledger.reducer_failed",
@@ -211,11 +213,11 @@ fn position_e2e_refuses_incomplete_suffix_and_existing_or_unsafe_output() {
     let incomplete = temporary.path().join("incomplete");
     let error = run_position_e2e(&PositionRunConfig {
         output: incomplete.clone(),
-        blocks: 7,
+        blocks: 8,
         checkpoint_after: 1,
         iterations: 2,
     })
-    .expect_err("seven suffix blocks are mandatory");
+    .expect_err("eight suffix blocks are mandatory");
     assert_eq!(error.reason_code(), "state_replay.invalid_config");
     assert!(!incomplete.exists());
 
@@ -223,7 +225,7 @@ fn position_e2e_refuses_incomplete_suffix_and_existing_or_unsafe_output() {
     fs::create_dir(&existing).expect("existing output");
     let error = run_position_e2e(&PositionRunConfig {
         output: existing,
-        blocks: 8,
+        blocks: 9,
         checkpoint_after: 1,
         iterations: 2,
     })
@@ -236,12 +238,77 @@ fn position_e2e_refuses_incomplete_suffix_and_existing_or_unsafe_output() {
         .expect("public permissions");
     let error = run_position_e2e(&PositionRunConfig {
         output: public_parent.join("evidence"),
-        blocks: 8,
+        blocks: 9,
         checkpoint_after: 1,
         iterations: 2,
     })
     .expect_err("unsafe parent");
     assert_eq!(error.reason_code(), "state_replay.unsafe_output");
+}
+
+fn literal_fixture_oracle() -> Value {
+    json!({
+        "order_ids": {
+            "opening_buyer": "position-open-buyer-order",
+            "opening_seller": "position-open-seller-order",
+            "reversal_buyer": "position-reversal-buyer-order",
+            "reversal_seller": "position-reversal-seller-order",
+            "recovery_buyer": "position-recovery-buyer-order",
+            "recovery_seller": "position-recovery-seller-order"
+        },
+        "transaction_ids": {
+            "opening_trade": "state-replay-position-open",
+            "reversal_trade": "state-replay-position-reversal",
+            "first_funding": "state-replay-position-first-funding",
+            "liquidation_start": "state-replay-position-liquidation-start",
+            "liquidation_fill": "state-replay-position-liquidation-fill",
+            "backstop": "state-replay-position-backstop",
+            "interrupted_funding": "state-replay-position-interrupted-funding",
+            "settlement": "state-replay-position-settlement",
+            "recovery_trade": "state-replay-position-recovery",
+            "recovered_funding": "state-replay-position-recovered-funding"
+        },
+        "event_ids": {
+            "opening_trade": "evt_0f54a9acbbdb126364303e7e93878130c42499955e67eb6cb640dc1643600a25",
+            "reversal_trade": "evt_b8bc3c3f9ed9d85213efcb035eb745e49ce36bffc73a7789384426094aa511c5",
+            "first_funding": "evt_c5d3fd8c057ee3c47c9010ce0f015c6391720925d84d0fc072c78a598164d238",
+            "liquidation_start": "evt_a34e728e41e50caf47597029b2f039d8b5620b385ca020b7bae6c3bf19ccfd27",
+            "liquidation_fill": "evt_ffc9f124e05781b31ed9ae7539e1436425f2f8a485ae640b6c4210907937e925",
+            "backstop": "evt_36175305dbf66d7b0f68aa9ac983505aae70ae622054696705f624fcdde9fc14",
+            "interrupted_funding": "evt_e61efc65a6c475598a13a275757b866b9a98ac39b71ae3ef58314e766842ac29",
+            "settlement": "evt_8bcbf171818f1bb585b40d3ee1d356c6091d8cd23c797c013dd25fe8af9e5cd7",
+            "recovery_trade": "evt_85d37b63e9690e3e78b6db8ccea250fef5e2ab3d4ae09b946d655a7bb5a4b59e",
+            "recovered_funding": "evt_f0b7248da826eb6663d7fbf7873b1cec720e4b2393e8ae8bd98da7f6873c8219"
+        },
+        "episode_ids": {
+            "opening_buyer": "pos_ep_2a8da82f97ac3c5f0382810be9a0bcf72968f884f430d5168d541ccea818666f",
+            "opening_seller": "pos_ep_ecdd714df2737000b14bdc6b764dfb66bd5b5fc5c3b5b13fbc812e927e740acd",
+            "reversal_buyer": "pos_ep_98bfaaf042280cdc79f91323388bc93d1f70ae86daee8da3aee656e9013d1a64",
+            "reversal_seller": "pos_ep_36fad52e94c45dfc37a692d1fd935c049596273bda936d8adcdb95f48fe21e18",
+            "liquidation_remainder": "pos_ep_887ca9925bd8847c9062b33f9953391cac58cdb5da7fee25d9b92d7bb7cee2a4",
+            "recovery_buyer": "pos_ep_ed420bee0f852ff46725fcda495d1ee47b996e08a4561bf4f83e8c57a5e009af",
+            "recovery_seller": "pos_ep_a265c5b07a93f39c1e454bec14da83a21bd07fb2fd36df9261e8320a2c11a4ce"
+        },
+        "state_keys": {
+            "buyer_quantity_current": {"namespace": "position-quantity-current.v1", "key_hex": "000000000000001411111111111111111111111111111111111111110000000000000008706572703a425443"},
+            "seller_quantity_current": {"namespace": "position-quantity-current.v1", "key_hex": "000000000000001422222222222222222222222222222222222222220000000000000008706572703a425443"},
+            "recovery_buyer_effect": {"namespace": "position-effect-fact.v1", "key_hex": "00000000000000157472642d706f736974696f6e2d7265636f7665727900000000000000056275796572"},
+            "recovery_seller_effect": {"namespace": "position-effect-fact.v1", "key_hex": "00000000000000157472642d706f736974696f6e2d7265636f76657279000000000000000673656c6c6572"},
+            "buyer_unresolved_cause": {"namespace": "position-unresolved-cause-fact.v1", "key_hex": "000000000000001411111111111111111111111111111111111111110000000000000008706572703a42544300000000000000446576745f3336313735333035646266363664376230663638616139616339383335303561616537306165363232303534363936373035663632346663646465396663313400000000000000106c69712d706f736974696f6e2d653265"},
+            "seller_unresolved_cause": {"namespace": "position-unresolved-cause-fact.v1", "key_hex": "000000000000001422222222222222222222222222222222222222220000000000000008706572703a42544300000000000000446576745f3336313735333035646266363664376230663638616139616339383335303561616537306165363232303534363936373035663632346663646465396663313400000000000000106c69712d706f736974696f6e2d653265"},
+            "settlement_fact": {"namespace": "position-settlement-fact.v1", "key_hex": "00000000000000446576745f38626362663137313831386631626235383562343064336565316433353663363039316438636432336337393763303133646432356665386166396535636437000000000000001411111111111111111111111111111111111111110000000000000008706572703a425443"}
+        },
+        "notionals": {
+            "opening_buyer_buy": "200",
+            "opening_seller_sell": "200",
+            "reversal_buyer_close_buy": "220",
+            "reversal_buyer_open_buy": "110",
+            "reversal_seller_close_sell": "220",
+            "reversal_seller_open_sell": "110",
+            "recovery_buyer_buy": "23.75",
+            "recovery_seller_sell": "23.75"
+        }
+    })
 }
 
 fn private_temporary_root() -> tempfile::TempDir {

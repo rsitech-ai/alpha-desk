@@ -1781,14 +1781,14 @@ position effects, two resolved episode currents, two open episodes, and two
 episode effects with the frozen values below. A checkpoint that contains only
 prerequisites cannot qualify.
 
-The seven-block suffix must contain, in deterministic order: a trade that
+The eight-block suffix must contain, in deterministic order: a trade that
 reverses both participant positions using literal source `start_position`
 anchors; funding attached to an exact open episode; liquidation start;
-liquidation fill; backstop followed in the same block by funding whose episode
-attribution is suppressed; settlement; and an enriched trade that re-anchors
+liquidation fill; backstop; a separate following block containing funding whose
+episode attribution is suppressed; settlement; and an enriched trade that re-anchors
 both accounts from unresolved followed in the same block by funding attached
 to the recovered episode. Configuration is rejected unless
-`blocks >= checkpoint_after + 7`. Padding blocks may contain only
+`blocks >= checkpoint_after + 8`. Padding blocks may contain only
 deterministic supported account facts before the opening trade and must not
 change the required scenario cardinalities.
 

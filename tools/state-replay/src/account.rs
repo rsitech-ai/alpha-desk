@@ -1,6 +1,6 @@
 use std::{path::PathBuf, str::FromStr, time::Instant};
 
-use canonical_archive::{ArchiveConfig, LocalParquetArchive};
+use canonical_archive::LocalParquetArchive;
 use canonical_events::{
     AccountModeChanged, AssetContextUpdated, BlockEnvelope, BuilderFeeCharged,
     CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, DepositCredited, DexCreated,
@@ -29,8 +29,9 @@ use serde::Serialize;
 use storage_ports::{CanonicalArchive, StateCheckpointStore};
 
 use super::{
-    CHAIN, FIXTURE_EPOCH_MICROS, FixtureRunError, NeverCancel, REPORT_FILE, RejectionReport,
-    START_HEIGHT, create_private_output_root, fixture_time, harden_private_tree, publish_report,
+    CHAIN, FixtureRunError, NeverCancel, REPORT_FILE, RejectionReport, START_HEIGHT,
+    append_fixture_blocks, canonical_events_schema_fingerprint, create_private_output_root,
+    fixture_time, harden_private_tree, open_deterministic_archive, publish_report,
     rejection_report, replay_request, source_hashes, validate_replay_counts,
 };
 
@@ -67,18 +68,13 @@ pub fn run_account_e2e(config: &AccountRunConfig) -> Result<AccountEvidence, Fix
         4,
     )?;
     let output = create_private_output_root(&config.output)?;
-    let archive = LocalParquetArchive::open(
-        output.join("archive"),
-        ArchiveConfig::deterministic_fixture(
-            "state-replay-account-e2e-v1",
-            KnownTime::from_unix_micros(FIXTURE_EPOCH_MICROS)?,
-        )?,
-    )?;
+    let archive =
+        open_deterministic_archive(&output.join("archive"), "state-replay-account-e2e-v1")?;
     let chain = ChainId::new(CHAIN)?;
     let end_height = START_HEIGHT
         .checked_add(config.blocks - 1)
         .ok_or(FixtureRunError::InvalidConfig)?;
-    let mut manifests = Vec::new();
+    let mut blocks = Vec::new();
     for height in START_HEIGHT..=end_height {
         let block = if height == START_HEIGHT {
             market_prerequisite_block(height, &chain)?
@@ -87,19 +83,10 @@ pub fn run_account_e2e(config: &AccountRunConfig) -> Result<AccountEvidence, Fix
         } else {
             block(height, &chain, Vec::new())?
         };
-        manifests.push(archive.append_block(&block)?.manifest_id().clone());
+        blocks.push(block);
     }
-    let schema_fingerprint = *archive
-        .verify_manifest(
-            manifests
-                .first()
-                .ok_or(FixtureRunError::Invariant("missing manifest"))?,
-        )?
-        .schema_fingerprints()
-        .get("canonical_events")
-        .ok_or(FixtureRunError::Invariant(
-            "missing canonical schema fingerprint",
-        ))?;
+    let manifests = append_fixture_blocks(&archive, &blocks)?;
+    let schema_fingerprint = canonical_events_schema_fingerprint(&archive, &manifests)?;
 
     let replay_started = Instant::now();
     let mut expected_state_hash = None;
@@ -1421,13 +1408,10 @@ fn rejection_archive(
     output: &std::path::Path,
     name: &str,
 ) -> Result<LocalParquetArchive, FixtureRunError> {
-    Ok(LocalParquetArchive::open(
-        output.join(name),
-        ArchiveConfig::deterministic_fixture(
-            format!("state-replay-account-{name}-v1"),
-            KnownTime::from_unix_micros(FIXTURE_EPOCH_MICROS)?,
-        )?,
-    )?)
+    open_deterministic_archive(
+        &output.join(name),
+        &format!("state-replay-account-{name}-v1"),
+    )
 }
 
 pub(super) fn composite_reducer() -> Result<CanonicalStateReducerV1, FixtureRunError> {

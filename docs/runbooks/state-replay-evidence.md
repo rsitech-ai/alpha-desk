@@ -250,7 +250,7 @@ just state-replay-position-e2e 30 12 4
 
 The runner creates a private `0700` directory below
 `target/evidence/state-replay-position/` and hardens every retained file to
-`0600`. It refuses existing or unsafe output. Configuration must leave seven
+`0600`. It refuses existing or unsafe output. Configuration must leave eight
 suffix blocks after the opening-trade checkpoint. The report retains repeated
 full-range receipt equality, byte-identical checkpoint load, segmented suffix
 receipts, exact final state equality, decoded semantic checks, the rejected
