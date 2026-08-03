@@ -1,6 +1,12 @@
-use domain_types::{ChainId, SourceId};
+use std::path::PathBuf;
+
+use domain_types::{ChainId, KnownTime, ManifestId, SourceId};
 use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
-use storage_ports::{ArchiveError, CursorPolicy, LocalRecordSequence, RawObservationBatch};
+use storage_ports::{
+    ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
+    OwnedSequencedSourceObservation, RawArchiveObject, RawObservationBatch, RawObservationRange,
+    RawObservationReceipt,
+};
 
 fn observation(epoch: &str, offset: u64) -> SourceObservation {
     observation_with(
@@ -60,9 +66,142 @@ fn byte_offset_batches_accept_gaps_and_derive_contiguous_local_sequences() {
     assert_eq!(sequenced[0].local_sequence().get(), 41);
     assert_eq!(sequenced[1].local_sequence().get(), 42);
     assert_eq!(sequenced[2].local_sequence().get(), 43);
+    assert_eq!(batch.last_local_sequence().unwrap().get(), 43);
+    assert_eq!(batch.local_sequence_range().unwrap().len(), 3);
     assert_eq!(sequenced[0].observation().cursor().offset(), 19);
     assert_eq!(sequenced[1].observation().cursor().offset(), 20);
     assert_eq!(sequenced[2].observation().cursor().offset(), 47);
+}
+
+#[test]
+fn local_sequence_ranges_are_inclusive_checked_and_preserve_owned_observations() {
+    let range = LocalRecordSequenceRange::try_new(
+        LocalRecordSequence::try_new(41).unwrap(),
+        LocalRecordSequence::try_new(43).unwrap(),
+    )
+    .expect("ordered inclusive range");
+    assert_eq!(range.start().get(), 41);
+    assert_eq!(range.end().get(), 43);
+    assert_eq!(range.len(), 3);
+
+    let observation = observation("rotation-7", 47);
+    let sequenced = OwnedSequencedSourceObservation::new(observation.clone(), range.end());
+    assert_eq!(sequenced.local_sequence(), range.end());
+    assert_eq!(sequenced.observation().cursor(), observation.cursor());
+    assert_eq!(sequenced.observation().payload(), observation.payload());
+    let recovered = sequenced.into_observation();
+    assert_eq!(recovered.cursor(), observation.cursor());
+    assert_eq!(recovered.payload(), observation.payload());
+    let (sequence, recovered) =
+        OwnedSequencedSourceObservation::new(observation.clone(), range.start()).into_parts();
+    assert_eq!(sequence, range.start());
+    assert_eq!(recovered.payload(), observation.payload());
+
+    assert_invalid(
+        LocalRecordSequenceRange::try_new(
+            LocalRecordSequence::try_new(43).unwrap(),
+            LocalRecordSequence::try_new(41).unwrap(),
+        )
+        .expect_err("sequence range cannot regress"),
+        "local record sequence range",
+    );
+}
+
+#[test]
+fn byte_archive_evidence_exposes_policy_and_authenticated_sequence_range() {
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-trades").unwrap();
+    let legacy_object = RawArchiveObject::try_new(
+        PathBuf::from("raw/legacy.parquet"),
+        [0; 32],
+        128,
+        3,
+        chain.clone(),
+        source.clone(),
+        RawObservationRange::try_new("legacy", 1, 3).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        legacy_object.cursor_policy(),
+        CursorPolicy::ContiguousNativeOffset
+    );
+    assert!(legacy_object.local_sequence_range().is_none());
+    let legacy_receipt = RawObservationReceipt::try_new(
+        "legacy-receipt",
+        ManifestId::new("legacy-manifest").unwrap(),
+        chain.clone(),
+        source.clone(),
+        "legacy",
+        1,
+        3,
+        [1; 32],
+        [2; 32],
+        [3; 32],
+        [4; 32],
+        [5; 32],
+        [6; 32],
+        KnownTime::from_unix_micros(1_722_000_000_000_000).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        legacy_receipt.cursor_policy(),
+        CursorPolicy::ContiguousNativeOffset
+    );
+    assert!(legacy_receipt.local_sequence_range().is_none());
+
+    let cursor_range = RawObservationRange::try_new("rotation-7", 19, 47).unwrap();
+    let sequence_range = LocalRecordSequenceRange::try_new(
+        LocalRecordSequence::try_new(41).unwrap(),
+        LocalRecordSequence::try_new(43).unwrap(),
+    )
+    .unwrap();
+    let object = RawArchiveObject::try_new_byte_offsets(
+        PathBuf::from("raw/object.parquet"),
+        [1; 32],
+        128,
+        3,
+        chain.clone(),
+        source.clone(),
+        cursor_range,
+        sequence_range,
+    )
+    .expect("byte object evidence");
+    assert_eq!(object.cursor_policy(), CursorPolicy::MonotonicByteOffset);
+    assert_eq!(object.local_sequence_range(), Some(sequence_range));
+
+    let error = RawArchiveObject::try_new_byte_offsets(
+        PathBuf::from("raw/bad.parquet"),
+        [1; 32],
+        128,
+        2,
+        chain.clone(),
+        source.clone(),
+        RawObservationRange::try_new("rotation-7", 19, 47).unwrap(),
+        sequence_range,
+    )
+    .expect_err("object rows must cover the exact local sequence span");
+    assert_invalid(error, "raw archive object local sequence span");
+
+    let receipt = RawObservationReceipt::try_new_byte_offsets(
+        "receipt-41-43",
+        ManifestId::new("manifest-41-43").unwrap(),
+        chain,
+        source,
+        "rotation-7",
+        19,
+        47,
+        sequence_range,
+        [2; 32],
+        [3; 32],
+        [4; 32],
+        [5; 32],
+        [6; 32],
+        [7; 32],
+        KnownTime::from_unix_micros(1_722_000_000_000_000).unwrap(),
+    )
+    .expect("byte receipt evidence");
+    assert_eq!(receipt.cursor_policy(), CursorPolicy::MonotonicByteOffset);
+    assert_eq!(receipt.local_sequence_range(), Some(sequence_range));
 }
 
 #[test]
@@ -136,6 +275,8 @@ fn independent_legacy_batches_make_no_local_sequence_claim() {
     for batch in [&first, &second] {
         assert_eq!(batch.cursor_policy(), CursorPolicy::ContiguousNativeOffset);
         assert!(batch.first_local_sequence().is_none());
+        assert!(batch.last_local_sequence().is_none());
+        assert!(batch.local_sequence_range().is_none());
         assert!(batch.sequenced_observations().is_none());
     }
 }

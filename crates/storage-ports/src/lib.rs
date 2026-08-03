@@ -8,9 +8,10 @@ mod state_store;
 pub use archive::{
     ARCHIVE_MANIFEST_SCHEMA_V1, ArchiveError, ArchiveObject, ArchiveReceipt, BlockIterator,
     CanonicalArchive, CanonicalArchiveMaintenance, CompactionReceipt, CursorPolicy,
-    LocalRecordSequence, RawArchiveObject, RawObservationArchive, RawObservationBatch,
-    RawObservationIterator, RawObservationRange, RawObservationReceipt, SequencedSourceObservation,
-    SourceWatermark, VerifiedManifest, VerifiedRawManifest,
+    LocalRecordSequence, LocalRecordSequenceRange, OwnedSequencedSourceObservation,
+    RawArchiveObject, RawObservationArchive, RawObservationBatch, RawObservationIterator,
+    RawObservationRange, RawObservationReceipt, SequencedRawObservationIterator,
+    SequencedSourceObservation, SourceWatermark, VerifiedManifest, VerifiedRawManifest,
 };
 pub use capture_progress::{
     ArchivedBlockPlan, CaptureCursor, CaptureProgressStore, PlannedPublication, ProgressError,
