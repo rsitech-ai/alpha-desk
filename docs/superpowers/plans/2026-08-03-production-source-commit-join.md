@@ -546,7 +546,25 @@
   projection excluded the operational-time-derived raw manifest hash and added
   a two-root/different-clock regression. The actual manifest hash remains bound
   within one archive's finalization record.
-- 2026-08-03: Next: implement M1 with RED tests.
+- 2026-08-03: Committed M1 at `5fdf6d65af51a778dc5cd37393b718daab719e88`
+  (`feat(protocol): add sealed node source qualification`). The first focused
+  test run failed RED with unresolved qualification types; the final focused
+  qualification suite passed 14/14 and the full `hl-protocol` package passed
+  34 tests plus doc tests.
+- 2026-08-03: Requirements review initially held M1 for an unbound
+  time-normalization artifact and acceptance of the overriding `--write-fills`
+  flag. Quality review initially held it for conflated block-height/byte-offset
+  cursor evidence, incomplete read-only inspection/generation documentation,
+  and a vacuous registry-mutation test. All five findings were corrected and
+  both independent re-reviews returned GO.
+- 2026-08-03: M1 strict package Clippy, formatting, and `git diff --check`
+  passed. `just generated` passed against detached commit `5fdf6d6` with
+  `generated-check:ok`; `just deny` passed advisories, bans, licenses, and
+  sources; `just oss-audit` passed with 527 files. The production qualification
+  registry intentionally remains empty, so this is `repo-ready` evidence only.
+- 2026-08-03: Next: implement M2 with RED tests while preserving the legacy
+  height-contiguous raw manifest bytes and introducing an explicit byte-offset
+  cursor policy.
 
 ## Rollback / Recovery
 
