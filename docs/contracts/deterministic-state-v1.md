@@ -730,3 +730,12 @@ and one open unresolved interval, one resolved outcome, metadata-unresolved
 value suppression, and atomic invalid and unsupported rejection. Runnable
 replay evidence remains generated canonical-event evidence with source
 qualification explicitly unassessed.
+
+The retained `state-replay account-e2e` report schema is
+`hyperliquid-alpha-desk/state-replay-account-e2e-report/v1`. It proves only
+the generated exact observed account-flow, relation, and mode contract with
+`source_qualification = "synthetic_unassessed"`. Its only positive
+qualification is `synthetic_account_flow_contract_proven`; position, episode,
+liquidation, settlement, funding attribution, authoritative opening balance,
+venue reconciliation, margin models, liquidation price, book, signal,
+execution, Stage 1/2, and deployed/live source remain false.

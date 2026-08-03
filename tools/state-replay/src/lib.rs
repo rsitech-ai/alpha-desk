@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod account;
 mod archive;
 mod fixture;
 mod market;
@@ -40,6 +41,7 @@ use storage_ports::{CanonicalArchive, StateCheckpointStore, VerifiedManifest};
 
 use shared::*;
 
+pub use account::{AccountEvidence, AccountRunConfig, run_account_e2e};
 pub use archive::run_archive_e2e;
 pub use fixture::run_fixture_e2e;
 pub use market::{MarketEvidence, MarketRunConfig, run_market_e2e};
@@ -200,6 +202,8 @@ pub enum FixtureRunError {
     #[error("fixture replay invariant failed: {0}")]
     Invariant(&'static str),
 }
+
+pub type StateReplayError = FixtureRunError;
 
 impl FixtureRunError {
     #[must_use]
