@@ -435,6 +435,48 @@
   publication; full-tree work is reserved for bounded startup/scrub.
 - 2026-08-03: Next: implement M1 contract types and RED invalid-layout/golden
   tests. No archive write path changes before those tests and review.
+- 2026-08-03: In-progress M1 review returned HOLD despite green focused tests.
+  Direct `Deserialize` bypassed constructor invariants; the root accepted an
+  unrelated caller page hash; the format could represent only one leaf page;
+  packed inputs duplicated untyped evidence; capacity accounting omitted
+  material data/index/checkpoint/GC/double-space costs; and checkpoint V2,
+  exact-root lease, retention/deletion, framed journal, and complete golden
+  contracts were absent. Correct M1 in four reviewed slices before any V3 I/O:
+  (A) typed logical V2/V3 evidence plus validated bounded wire decoding,
+  (B) framed journal plus bounded leaf/internal sequence tree with exact pack
+  locators and computed hashes, (C) typed deterministic pack/hint/index
+  manifests with global byte/work bounds, and (D) honest capacity admission,
+  checkpoint V2, lease, retention/GC/deletion states, maintenance statistics,
+  and complete canonical/domain-hash mutation vectors.
+- 2026-08-03: Corrective M1 work removed direct `Deserialize` from validated
+  public types, made roots consume a computed journal commit, added a bounded
+  framed journal builder and bounded internal sequence tree, enforced
+  root-as-last-record/global-sequence-one/old-prefix invariants, renamed the
+  partial index estimate so it cannot authorize admission, derived packed V2
+  evidence from a canonical typed manifest, and added bounded adversarial leaf
+  decoding. P0 capacity, typed V3 logical commits, remaining validated wire
+  decoders/goldens, and the P1 checkpoint/lease/retention/deletion/statistics
+  surface remain open; no V3 I/O is authorized yet.
+- 2026-08-03: Narrow M1 re-review closed journal cross-builder substitution,
+  internal-node index-pack representation, exact index-pack authentication,
+  and packed V2 evidence parity. Index-pack offsets, lengths, page-domain
+  hashes, object hash, and content-addressed path now derive from one bounded
+  byte image; V2 embedded evidence matches producer time/identity/path/schema
+  validation; and the packed output schema is derived internally. Fresh local
+  evidence is 35 affected tests plus strict Clippy, format, and diff checks.
+  M1 remains HOLD on production capacity admission and typed V3 logical
+  commits, followed by the checkpoint/lease/retention/deletion/statistics and
+  complete decoder/golden contract. No V3 I/O is authorized.
+- 2026-08-03: Capacity review remained HOLD after finding composed commit
+  triggers, format-forced pack splits, journal path costs, GC journal bytes,
+  and runtime-policy linkage were undercounted. The follow-up now sums
+  record/delay/partition trigger bounds, includes embedded-manifest/input pack
+  limits, derives conservative journal cost from shared page/depth constants,
+  reserves per-eligible-file deletion-journal bytes, and exposes record/backlog
+  runtime validators. The corrected slice passes 37 affected tests and strict
+  Clippy/format/diff checks, but has not received a fresh independent GO and is
+  not wired to startup/runtime enforcement. Capacity and M1 therefore remain
+  HOLD; no V3 I/O is authorized.
 
 ## Rollback / Recovery
 
