@@ -3,7 +3,9 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use super::manifest::ClosedSegmentManifestV1;
+use storage_ports::{CursorPolicy, LocalRecordSequence};
+
+use super::manifest::ClosedSegmentManifest;
 use super::{
     RecoveryReport, SpoolError, SpoolReader, SpoolRecordSummary, io_error, recover_open_segment,
 };
@@ -157,12 +159,14 @@ fn inspect_directory_entries(
     let mut closed_sequences = BTreeSet::new();
     let mut previous_sequence: Option<u64> = None;
     let mut previous_manifest_hash = None;
+    let mut previous_cursor_policy = None;
+    let mut previous_local_sequence = None;
     let mut total_records = 0_u64;
     for (sequence, manifest_path) in &manifests {
         if previous_sequence.is_some_and(|previous| previous.checked_add(1) != Some(*sequence)) {
             return Err(SpoolError::ManifestChainBroken);
         }
-        let manifest = ClosedSegmentManifestV1::from_path(manifest_path)?;
+        let manifest = ClosedSegmentManifest::from_path(manifest_path)?;
         let expected_segment_name = format!("segment-{sequence:010}.hlsp");
         if manifest.segment_sequence() != *sequence
             || manifest.segment_file() != expected_segment_name
@@ -179,6 +183,17 @@ fn inspect_directory_entries(
         let reader = SpoolReader::open(segment_path)?;
         let summary = reader.summarize()?;
         verify_manifest_content(&manifest, &reader, &summary)?;
+        let policy = reader.header().cursor_policy();
+        if previous_cursor_policy.is_some_and(|previous| previous != policy) {
+            return Err(SpoolError::ManifestChainBroken);
+        }
+        previous_cursor_policy = Some(policy);
+        previous_local_sequence = verify_local_sequence_chain(
+            &manifest,
+            policy,
+            summary.record_count(),
+            previous_local_sequence,
+        )?;
 
         let encoded = fs::read(manifest_path)
             .map_err(|source| io_error("hashing a closed-segment manifest", source))?;
@@ -210,6 +225,26 @@ fn inspect_directory_entries(
                 .ok_or(SpoolError::UnexpectedOpenSegment)?,
         )?;
         let summary = reader.summarize()?;
+        if previous_cursor_policy
+            .is_some_and(|previous| previous != reader.header().cursor_policy())
+        {
+            return Err(SpoolError::ManifestChainBroken);
+        }
+        if reader.header().cursor_policy() == CursorPolicy::MonotonicByteOffset
+            && summary.record_count() > 0
+        {
+            let first = match previous_local_sequence {
+                Some(previous) => previous
+                    .checked_next()
+                    .map_err(|_| SpoolError::SizeOverflow)?,
+                None => LocalRecordSequence::try_new(1).map_err(|_| SpoolError::SizeOverflow)?,
+            };
+            previous_local_sequence = Some(
+                first
+                    .checked_advance_by(summary.record_count() - 1)
+                    .map_err(|_| SpoolError::SizeOverflow)?,
+            );
+        }
         total_records = total_records
             .checked_add(summary.record_count())
             .ok_or(SpoolError::SizeOverflow)?;
@@ -230,7 +265,7 @@ fn inspect_directory_entries(
 }
 
 pub(crate) fn verify_manifest_bytes(
-    manifest: &ClosedSegmentManifestV1,
+    manifest: &ClosedSegmentManifest,
     segment_path: &Path,
 ) -> Result<(), SpoolError> {
     let metadata = fs::metadata(segment_path)
@@ -245,7 +280,7 @@ pub(crate) fn verify_manifest_bytes(
 }
 
 pub(crate) fn verify_manifest_content(
-    manifest: &ClosedSegmentManifestV1,
+    manifest: &ClosedSegmentManifest,
     reader: &SpoolReader,
     summary: &SpoolRecordSummary,
 ) -> Result<(), SpoolError> {
@@ -254,6 +289,9 @@ pub(crate) fn verify_manifest_content(
         || reader.header().source_version() != manifest.source_version()
         || reader.header().schema_version() != manifest.spool_schema_version()
         || reader.header().producer_build_hash() != manifest.producer_build_hash()
+        || manifest
+            .cursor_policy()
+            .is_some_and(|policy| reader.header().cursor_policy() != policy)
     {
         return Err(SpoolError::ManifestContentMismatch);
     }
@@ -263,7 +301,65 @@ pub(crate) fn verify_manifest_content(
     {
         return Err(SpoolError::ManifestContentMismatch);
     }
+    match (
+        manifest.first_local_sequence(),
+        manifest.last_local_sequence(),
+    ) {
+        (None, None) => {}
+        (Some(first), Some(last)) => {
+            let expected_last = first
+                .checked_advance_by(
+                    summary
+                        .record_count()
+                        .checked_sub(1)
+                        .ok_or(SpoolError::ManifestContentMismatch)?,
+                )
+                .map_err(|_| SpoolError::ManifestContentMismatch)?;
+            if expected_last != last {
+                return Err(SpoolError::ManifestContentMismatch);
+            }
+        }
+        _ => return Err(SpoolError::ManifestContentMismatch),
+    }
     Ok(())
+}
+
+fn verify_local_sequence_chain(
+    manifest: &ClosedSegmentManifest,
+    policy: CursorPolicy,
+    record_count: u64,
+    previous: Option<LocalRecordSequence>,
+) -> Result<Option<LocalRecordSequence>, SpoolError> {
+    if policy == CursorPolicy::ContiguousNativeOffset {
+        if manifest.first_local_sequence().is_some() || manifest.last_local_sequence().is_some() {
+            return Err(SpoolError::ManifestContentMismatch);
+        }
+        return Ok(None);
+    }
+    let expected_first = match previous {
+        Some(previous) => previous
+            .checked_next()
+            .map_err(|_| SpoolError::SizeOverflow)?,
+        None => LocalRecordSequence::try_new(1).map_err(|_| SpoolError::SizeOverflow)?,
+    };
+    if let Some(declared_first) = manifest.first_local_sequence()
+        && declared_first != expected_first
+    {
+        return Err(SpoolError::ManifestChainBroken);
+    }
+    let expected_last = expected_first
+        .checked_advance_by(
+            record_count
+                .checked_sub(1)
+                .ok_or(SpoolError::ManifestContentMismatch)?,
+        )
+        .map_err(|_| SpoolError::SizeOverflow)?;
+    if let Some(declared_last) = manifest.last_local_sequence()
+        && declared_last != expected_last
+    {
+        return Err(SpoolError::ManifestChainBroken);
+    }
+    Ok(Some(expected_last))
 }
 
 fn hash_file(path: &Path) -> Result<[u8; 32], SpoolError> {
