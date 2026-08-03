@@ -1720,25 +1720,25 @@ Watermark-only and test-dispatcher versions are not historical component
 checkpoints and are excluded from this named regression table, although the
 ledger's exact-version comparison rejects them generically too.
 
-- [ ] Test the exact ordered manifest and non-bypassable constructor; every
+- [x] Test the exact ordered manifest and non-bypassable constructor; every
   ownership/fanout row; direct V1/V2 trade children without nested-set
   duplication; unsupported trigger/TWAP and non-`1.0.0` boundaries; all-owner
   same-prestate behavior; same-child/cross-child collision precedence over a
   later child error; separate-event current rewrites and delta write counts;
   immutable collision, late reducer failure, and full rollback.
-- [ ] Test identical delta/context/view object forwarding to all eight children
+- [x] Test identical delta/context/view object forwarding to all eight children
   in fixed order, first-child validation failure precedence, direct
   `validate_block` compatibility, late episode delta-invariant rollback,
   component version mismatch, and every pre-composite/component V1 checkpoint
   refusal.
-- [ ] Prove one trade plus associated order lifecycle events applies each
+- [x] Prove one trade plus associated order lifecycle events applies each
   participant to signed position state exactly once: one buyer `+quantity`,
   one seller `-quantity`, and exactly two position-effect facts. Associated
   order lifecycle events produce zero position writes. Assert intentional V1
   and V2 trade representation/participant record counts separately. Mixed
   legacy participant-free and enriched trades keep V1 facts while only
   enriched trades produce positions.
-- [ ] Commit with `feat(state): compose canonical account state`.
+- [x] Commit with `feat(state): compose canonical account state`.
 
 ---
 
@@ -1917,6 +1917,20 @@ fixed.
   state. Parent and two independent reviews passed 14 focused delta tests,
   full canonical-ledger and replay-engine suites, the full workspace suite,
   strict all-feature Clippy, formatting, and diff checks.
+- 2026-08-03: Task 7B completed at `b5e0599`. The sealed production composite
+  now validates an exact eight-child manifest, dispatches the exhaustive V1
+  ownership table against one shared pre-event state, rejects unsupported or
+  duplicate mutation surfaces with frozen precedence, and fans block and
+  bounded-delta validation through every child in manifest order. Integration
+  proof covers account-only, funding, order, legacy/enriched trade, position,
+  episode, liquidation, backstop, and settlement paths; repeated current-key
+  writes retain normalized counts; both late immutable collisions and real
+  episode-delta failures roll back the full block. Parent gates passed 209
+  canonical-ledger tests including compile-fail API boundaries, replay-engine
+  checks, strict all-target/all-feature Clippy, formatting, and diff checks.
+  Independent final review returned GO for this bounded slice; production
+  replay evidence and deployed-source qualification remain Task 8 and the
+  source/commit-join gate.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.

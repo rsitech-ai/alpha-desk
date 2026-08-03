@@ -660,6 +660,11 @@ on them.
 > liquidation-, and settlement-specific scenarios are then added by
 > replacement-plan Task 8. Use the replacement plan's exact accounting
 > semantics; the superseded Task 5 expectations below are not authoritative.
+>
+> **Unblocked (2026-08-03):** Replacement-plan Task 7B completed at `b5e0599`
+> and received independent implementation-review GO. This retained replay
+> evidence task is now the active next gate; deployed-source qualification
+> remains separately blocked on the production source/commit join.
 
 **Files:**
 - Create: `tools/state-replay/src/account.rs`
