@@ -9,7 +9,7 @@ mod writer;
 
 use std::io;
 
-pub use header::SegmentHeaderV1;
+pub use header::{SegmentHeader, SegmentHeaderV1};
 pub use inspection::{SpoolInspection, inspect_spool, recover_spool_tail};
 pub use manifest::{CloseReceipt, ClosedSegmentManifestV1, MANIFEST_SCHEMA_V1};
 pub use reader::{
@@ -17,7 +17,10 @@ pub use reader::{
 };
 pub use record::SpoolRecord;
 pub use recovery::{RecoveryReport, recover_open_segment};
-pub use source_spool::{SourceSpool, SourceSpoolAppend, SourceSpoolConfig, SpoolRotationPolicy};
+pub use source_spool::{
+    SourceSpool, SourceSpoolAppend, SourceSpoolAppendDisposition, SourceSpoolConfig,
+    SpoolRotationPolicy,
+};
 pub use writer::{AppendReceipt, DurabilityPolicy, SpoolWriter};
 
 pub(crate) const MAX_IDENTITY_BYTES: usize = 256;
@@ -47,6 +50,10 @@ pub enum SpoolError {
     UnsupportedWarnings,
     #[error("spool observation cursor regressed")]
     CursorRegression,
+    #[error("spool observation conflicts with the retained cursor content")]
+    CursorConflict,
+    #[error("spool observation class is incompatible with the configured cursor policy")]
+    CursorPolicyMismatch,
     #[error("spool durability policy is invalid")]
     InvalidDurabilityPolicy,
     #[error("spool durability timestamp is invalid")]
@@ -97,6 +104,8 @@ impl SpoolError {
             Self::SourceMismatch => "spool.source_mismatch",
             Self::UnsupportedWarnings => "spool.unsupported_warnings",
             Self::CursorRegression => "spool.cursor_regression",
+            Self::CursorConflict => "spool.cursor_conflict",
+            Self::CursorPolicyMismatch => "spool.cursor_policy_mismatch",
             Self::InvalidDurabilityPolicy => "spool.invalid_durability_policy",
             Self::InvalidTimestamp => "spool.invalid_timestamp",
             Self::EmptySegment => "spool.empty_segment",

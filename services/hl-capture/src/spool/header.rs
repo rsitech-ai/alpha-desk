@@ -2,23 +2,34 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use domain_types::SourceId;
+use storage_ports::CursorPolicy;
 
 use super::{MAX_HEADER_BYTES, MAX_IDENTITY_BYTES, SpoolError, io_error};
 
-const MAGIC: [u8; 8] = *b"HLSPV001";
-const FIXED_HEADER_BYTES: usize = 8 + 4 + 2 + 2 + 2 + 8 + 8 + 32;
+const MAGIC_V1: [u8; 8] = *b"HLSPV001";
+const MAGIC_V2: [u8; 8] = *b"HLSPV002";
+const FIXED_HEADER_V1_BYTES: usize = 8 + 4 + 2 + 2 + 2 + 8 + 8 + 32;
+const FIXED_HEADER_V2_BYTES: usize = FIXED_HEADER_V1_BYTES + 1;
+const BYTE_OFFSET_POLICY: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SegmentHeaderV1 {
+/// Decoded header for both legacy `HLSPV001` segments and policy-tagged
+/// `HLSPV002` segments.
+pub struct SegmentHeader {
     source_id: SourceId,
     source_version: String,
     schema_version: String,
     segment_sequence: u64,
     created_at_micros: i64,
     producer_build_hash: [u8; 32],
+    cursor_policy: CursorPolicy,
 }
 
-impl SegmentHeaderV1 {
+/// Compatibility name for callers that construct the byte-stable V1 format.
+/// `SegmentHeaderV1::new` always emits `HLSPV001`.
+pub type SegmentHeaderV1 = SegmentHeader;
+
+impl SegmentHeader {
     pub fn new(
         source_id: SourceId,
         source_version: impl Into<String>,
@@ -26,6 +37,27 @@ impl SegmentHeaderV1 {
         segment_sequence: u64,
         created_at_micros: i64,
         producer_build_hash: [u8; 32],
+    ) -> Result<Self, SpoolError> {
+        Self::new_with_cursor_policy(
+            source_id,
+            source_version,
+            schema_version,
+            segment_sequence,
+            created_at_micros,
+            producer_build_hash,
+            CursorPolicy::ContiguousNativeOffset,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_cursor_policy(
+        source_id: SourceId,
+        source_version: impl Into<String>,
+        schema_version: impl Into<String>,
+        segment_sequence: u64,
+        created_at_micros: i64,
+        producer_build_hash: [u8; 32],
+        cursor_policy: CursorPolicy,
     ) -> Result<Self, SpoolError> {
         let source_version = source_version.into();
         let schema_version = schema_version.into();
@@ -43,6 +75,7 @@ impl SegmentHeaderV1 {
             segment_sequence,
             created_at_micros,
             producer_build_hash,
+            cursor_policy,
         })
     }
 
@@ -76,8 +109,17 @@ impl SegmentHeaderV1 {
         self.producer_build_hash
     }
 
+    #[must_use]
+    pub const fn cursor_policy(&self) -> CursorPolicy {
+        self.cursor_policy
+    }
+
     pub(crate) fn encode(&self) -> Result<Vec<u8>, SpoolError> {
-        let header_len = FIXED_HEADER_BYTES
+        let fixed_header_bytes = match self.cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => FIXED_HEADER_V1_BYTES,
+            CursorPolicy::MonotonicByteOffset => FIXED_HEADER_V2_BYTES,
+        };
+        let header_len = fixed_header_bytes
             .checked_add(self.source_id.as_str().len())
             .and_then(|length| length.checked_add(self.source_version.len()))
             .and_then(|length| length.checked_add(self.schema_version.len()))
@@ -86,7 +128,10 @@ impl SegmentHeaderV1 {
             return Err(SpoolError::InvalidHeader);
         }
         let mut encoded = Vec::with_capacity(header_len);
-        encoded.extend_from_slice(&MAGIC);
+        encoded.extend_from_slice(match self.cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => &MAGIC_V1,
+            CursorPolicy::MonotonicByteOffset => &MAGIC_V2,
+        });
         encoded.extend_from_slice(
             &u32::try_from(header_len)
                 .map_err(|_| SpoolError::SizeOverflow)?
@@ -95,6 +140,9 @@ impl SegmentHeaderV1 {
         push_text(&mut encoded, self.source_id.as_str())?;
         push_text(&mut encoded, &self.source_version)?;
         push_text(&mut encoded, &self.schema_version)?;
+        if self.cursor_policy == CursorPolicy::MonotonicByteOffset {
+            encoded.push(BYTE_OFFSET_POLICY);
+        }
         encoded.extend_from_slice(&self.segment_sequence.to_le_bytes());
         encoded.extend_from_slice(&self.created_at_micros.to_le_bytes());
         encoded.extend_from_slice(&self.producer_build_hash);
@@ -106,16 +154,14 @@ impl SegmentHeaderV1 {
             .map_err(|source| io_error("seeking to the segment header", source))?;
         let mut prefix = [0_u8; 12];
         read_exact_header(file, &mut prefix)?;
-        if prefix[..8] != MAGIC {
-            return Err(SpoolError::InvalidHeader);
-        }
+        let fixed_header_bytes = fixed_header_bytes(&prefix[..8])?;
         let header_len = usize::try_from(u32::from_le_bytes(
             prefix[8..12]
                 .try_into()
                 .map_err(|_| SpoolError::InvalidHeader)?,
         ))
         .map_err(|_| SpoolError::SizeOverflow)?;
-        if !(FIXED_HEADER_BYTES..=MAX_HEADER_BYTES).contains(&header_len) {
+        if !(fixed_header_bytes..=MAX_HEADER_BYTES).contains(&header_len) {
             return Err(SpoolError::InvalidHeader);
         }
         let mut encoded = vec![0_u8; header_len];
@@ -130,16 +176,14 @@ impl SegmentHeaderV1 {
 
     pub(crate) fn read_from_slice(input: &[u8]) -> Result<(Self, usize), SpoolError> {
         let prefix = input.get(..12).ok_or(SpoolError::IncompleteHeader)?;
-        if prefix[..8] != MAGIC {
-            return Err(SpoolError::InvalidHeader);
-        }
+        let fixed_header_bytes = fixed_header_bytes(&prefix[..8])?;
         let header_len = usize::try_from(u32::from_le_bytes(
             prefix[8..12]
                 .try_into()
                 .map_err(|_| SpoolError::InvalidHeader)?,
         ))
         .map_err(|_| SpoolError::SizeOverflow)?;
-        if !(FIXED_HEADER_BYTES..=MAX_HEADER_BYTES).contains(&header_len) {
+        if !(fixed_header_bytes..=MAX_HEADER_BYTES).contains(&header_len) {
             return Err(SpoolError::InvalidHeader);
         }
         let encoded = input
@@ -149,10 +193,20 @@ impl SegmentHeaderV1 {
     }
 
     fn decode(encoded: &[u8]) -> Result<Self, SpoolError> {
+        let cursor_policy = match encoded.get(..8) {
+            Some(magic) if magic == MAGIC_V1 => CursorPolicy::ContiguousNativeOffset,
+            Some(magic) if magic == MAGIC_V2 => CursorPolicy::MonotonicByteOffset,
+            _ => return Err(SpoolError::InvalidHeader),
+        };
         let mut cursor = 12;
         let source_id = read_text(encoded, &mut cursor)?;
         let source_version = read_text(encoded, &mut cursor)?;
         let schema_version = read_text(encoded, &mut cursor)?;
+        if cursor_policy == CursorPolicy::MonotonicByteOffset
+            && read_u8(encoded, &mut cursor)? != BYTE_OFFSET_POLICY
+        {
+            return Err(SpoolError::InvalidHeader);
+        }
         let segment_sequence = read_u64(encoded, &mut cursor)?;
         let created_at_micros = read_i64(encoded, &mut cursor)?;
         let producer_build_hash = take(encoded, &mut cursor, 32)?
@@ -162,14 +216,25 @@ impl SegmentHeaderV1 {
             return Err(SpoolError::InvalidHeader);
         }
         let source_id = SourceId::new(source_id).map_err(|_| SpoolError::InvalidHeader)?;
-        Self::new(
+        Self::new_with_cursor_policy(
             source_id,
             source_version,
             schema_version,
             segment_sequence,
             created_at_micros,
             producer_build_hash,
+            cursor_policy,
         )
+    }
+}
+
+fn fixed_header_bytes(magic: &[u8]) -> Result<usize, SpoolError> {
+    if magic == MAGIC_V1 {
+        Ok(FIXED_HEADER_V1_BYTES)
+    } else if magic == MAGIC_V2 {
+        Ok(FIXED_HEADER_V2_BYTES)
+    } else {
+        Err(SpoolError::InvalidHeader)
     }
 }
 
@@ -199,6 +264,13 @@ fn read_u16(input: &[u8], cursor: &mut usize) -> Result<u16, SpoolError> {
             .try_into()
             .map_err(|_| SpoolError::InvalidHeader)?,
     ))
+}
+
+fn read_u8(input: &[u8], cursor: &mut usize) -> Result<u8, SpoolError> {
+    take(input, cursor, 1)?
+        .first()
+        .copied()
+        .ok_or(SpoolError::InvalidHeader)
 }
 
 fn read_u64(input: &[u8], cursor: &mut usize) -> Result<u64, SpoolError> {

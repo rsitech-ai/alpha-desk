@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use super::header::SegmentHeaderV1;
+use super::header::SegmentHeader;
 use super::manifest::manifest_path_for;
 use super::reader::scan_records;
 use super::{SpoolError, io_error};
@@ -24,7 +24,7 @@ pub fn recover_open_segment(path: impl AsRef<Path>) -> Result<RecoveryReport, Sp
         .write(true)
         .open(path.as_ref())
         .map_err(|source| io_error("opening an open segment for recovery", source))?;
-    let (_, records_offset) = SegmentHeaderV1::read_from(&mut file)?;
+    let (_, records_offset) = SegmentHeader::read_from(&mut file)?;
     let initial_size = file
         .metadata()
         .map_err(|source| io_error("reading segment metadata before recovery", source))?
