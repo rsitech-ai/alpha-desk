@@ -4,14 +4,15 @@ use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use canonical_events::{
     AccountModeChanged, AssetContextUpdated, BlockEnvelope, BuilderFeeCharged,
     CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, DepositCredited, DexCreated,
-    EventPayload, FeeCharged, FundingPaid, FundingReceived, MarginModeChanged, MarketCreated,
-    OrderAccepted, PerpTransfer, ReferralReward, SourceEvidence, SpotTransfer, SubaccountTransfer,
-    TradeMatched, TradeParticipantRoleV1, TradeParticipantV1, VaultDeposit, VaultWithdrawal,
-    WithdrawalDebited,
+    EventKind, EventPayload, FeeCharged, FundingPaid, FundingReceived, MarginModeChanged,
+    MarketCreated, OrderAccepted, PerpTransfer, ReferralReward, SourceEvidence, SpotTransfer,
+    SubaccountTransfer, TradeMatched, TradeParticipantRoleV1, TradeParticipantV1, VaultDeposit,
+    VaultWithdrawal, WithdrawalDebited,
 };
 use canonical_ledger::{
     AccountFactRecordV1, AccountModeCurrentRecordV1, AccountQuantityFlowCurrentRecordV1,
-    AccountQuoteFlowCurrentRecordV1, AccountVaultRelationCurrentRecordV1, CanonicalLedger,
+    AccountQuantityFlowScopeV1, AccountQuoteFlowCurrentRecordV1, AccountQuoteFlowScopeV1,
+    AccountStateError, AccountVaultRelationCurrentRecordV1, CanonicalLedger,
     CanonicalStateReducerV1, CheckpointArtifact, CheckpointCompatibility, LedgerLimits,
     LeverageCurrentRecordV1, MarginModeCurrentRecordV1, StateImageLimits,
     SubaccountMasterCurrentRecordV1, VaultPrincipalFlowCurrentRecordV1,
@@ -423,6 +424,10 @@ fn namespace_counts(ledger: &CanonicalLedger<CanonicalStateReducerV1>) -> Accoun
 fn validate_account_records(
     ledger: &CanonicalLedger<CanonicalStateReducerV1>,
 ) -> Result<(), FixtureRunError> {
+    let usdc = AssetId::new("USDC")?;
+    let market = market()?;
+    let vault = VaultId::new("state-replay-vault")?;
+
     for (key, bytes) in ledger.state_image().entries() {
         let valid = match key.namespace() {
             "account-fact.v1" => AccountFactRecordV1::decode_at(key, bytes).is_ok(),
@@ -449,15 +454,467 @@ fn validate_account_records(
                 MarginModeCurrentRecordV1::decode_at(key, bytes).is_ok()
             }
             "account-leverage-current.v1" => LeverageCurrentRecordV1::decode_at(key, bytes).is_ok(),
-            _ => true,
+            "asset-context-current.v1"
+            | "dex-current.v1"
+            | "market-current.v1"
+            | "market-fact.v1"
+            | "market-metadata-version.v1"
+            | "market-outcome-current.v1"
+            | "order-current.v1"
+            | "order-fact.v1"
+            | "order-transition.v1"
+            | "position-episode-current.v1"
+            | "position-episode-effect-fact.v1"
+            | "position-episode.v1"
+            | "position-effect-fact.v1"
+            | "position-quantity-current.v1"
+            | "position-unresolved-cause-fact.v1"
+            | "position-settlement-fact.v1"
+            | "reconciliation.v1"
+            | "trade-participant.v1"
+            | "trade-participant.v2"
+            | "trade-reconciliation.v2"
+            | "trade.v1"
+            | "trade.v2" => true,
+            _ => false,
         };
         if !valid {
             return Err(FixtureRunError::Invariant(
-                "account evidence record is not key-bound",
+                "account evidence contains an unknown or unbound record namespace",
             ));
         }
     }
+
+    let quantity = |account, scope, credits: &str, debits: &str| -> Result<(), FixtureRunError> {
+        let key = account_key(AccountQuantityFlowCurrentRecordV1::state_key(
+            &account, &scope,
+        ))?;
+        let record = ledger
+            .state_image()
+            .entries()
+            .get(&key)
+            .and_then(|bytes| AccountQuantityFlowCurrentRecordV1::decode_at(&key, bytes).ok())
+            .ok_or(FixtureRunError::Invariant(
+                "missing expected quantity-flow account leg",
+            ))?;
+        if !quantity_leg_matches(&record, account, &scope, credits, debits)? {
+            return Err(FixtureRunError::Invariant(
+                "quantity-flow account leg differs from fixture",
+            ));
+        }
+        Ok(())
+    };
+    quantity(
+        BUYER,
+        AccountQuantityFlowScopeV1::ExternalAsset {
+            asset_id: usdc.clone(),
+        },
+        "10",
+        "2",
+    )?;
+    quantity(
+        BUYER,
+        AccountQuantityFlowScopeV1::SpotTransferAsset {
+            asset_id: usdc.clone(),
+        },
+        "0",
+        "1",
+    )?;
+    quantity(
+        SELLER,
+        AccountQuantityFlowScopeV1::SpotTransferAsset {
+            asset_id: usdc.clone(),
+        },
+        "1",
+        "0",
+    )?;
+    quantity(
+        BUYER,
+        AccountQuantityFlowScopeV1::SubaccountTransferAsset {
+            asset_id: usdc.clone(),
+        },
+        "0",
+        "1.5",
+    )?;
+    quantity(
+        SELLER,
+        AccountQuantityFlowScopeV1::SubaccountTransferAsset {
+            asset_id: usdc.clone(),
+        },
+        "1.5",
+        "0",
+    )?;
+    quantity(
+        BUYER,
+        AccountQuantityFlowScopeV1::VaultShares {
+            vault_id: vault.clone(),
+        },
+        "2",
+        "0.5",
+    )?;
+    quantity(
+        BUYER,
+        AccountQuantityFlowScopeV1::FeeAsset {
+            asset_id: usdc.clone(),
+        },
+        "0",
+        "0.1",
+    )?;
+    quantity(
+        BUYER,
+        AccountQuantityFlowScopeV1::BuilderFeeAsset {
+            asset_id: usdc.clone(),
+        },
+        "0",
+        "0.1",
+    )?;
+    quantity(
+        BUILDER,
+        AccountQuantityFlowScopeV1::BuilderFeeAsset {
+            asset_id: usdc.clone(),
+        },
+        "0.1",
+        "0",
+    )?;
+    quantity(
+        REFERRER,
+        AccountQuantityFlowScopeV1::ReferralRewardAsset {
+            asset_id: usdc.clone(),
+        },
+        "0.1",
+        "0",
+    )?;
+
+    let quote = |account, scope, credits: &str, debits: &str| -> Result<(), FixtureRunError> {
+        let key = account_key(AccountQuoteFlowCurrentRecordV1::state_key(&account, &scope))?;
+        let record = ledger
+            .state_image()
+            .entries()
+            .get(&key)
+            .and_then(|bytes| AccountQuoteFlowCurrentRecordV1::decode_at(&key, bytes).ok())
+            .ok_or(FixtureRunError::Invariant(
+                "missing expected quote-flow account leg",
+            ))?;
+        if record.account_id() != account
+            || record.scope() != &scope
+            || record.credits() != QuoteAmount::from_str(credits)?
+            || record.debits() != QuoteAmount::from_str(debits)?
+        {
+            return Err(FixtureRunError::Invariant(
+                "quote-flow account leg differs from fixture",
+            ));
+        }
+        Ok(())
+    };
+    quote(BUYER, AccountQuoteFlowScopeV1::DefaultPerpQuote, "0", "3")?;
+    quote(SELLER, AccountQuoteFlowScopeV1::DefaultPerpQuote, "3", "0")?;
+    quote(
+        BUYER,
+        AccountQuoteFlowScopeV1::VaultPrincipal {
+            vault_id: vault.clone(),
+        },
+        "1",
+        "4",
+    )?;
+    quote(
+        BUYER,
+        AccountQuoteFlowScopeV1::MarketFunding {
+            market_id: market.clone(),
+        },
+        "0.2",
+        "0.4",
+    )?;
+
+    let principal_key = account_key(VaultPrincipalFlowCurrentRecordV1::state_key(&vault))?;
+    let principal = ledger
+        .state_image()
+        .entries()
+        .get(&principal_key)
+        .and_then(|bytes| VaultPrincipalFlowCurrentRecordV1::decode_at(&principal_key, bytes).ok())
+        .ok_or(FixtureRunError::Invariant(
+            "missing expected vault principal leg",
+        ))?;
+    if principal.vault_id() != &vault
+        || principal.deposits() != QuoteAmount::from_str("4")?
+        || principal.withdrawals() != QuoteAmount::from_str("1")?
+    {
+        return Err(FixtureRunError::Invariant(
+            "vault principal leg differs from fixture",
+        ));
+    }
+    let shares_key = account_key(VaultShareFlowCurrentRecordV1::state_key(&vault))?;
+    let shares = ledger
+        .state_image()
+        .entries()
+        .get(&shares_key)
+        .and_then(|bytes| VaultShareFlowCurrentRecordV1::decode_at(&shares_key, bytes).ok())
+        .ok_or(FixtureRunError::Invariant(
+            "missing expected vault share leg",
+        ))?;
+    if shares.vault_id() != &vault
+        || shares.shares_issued() != Quantity::from_str("2")?
+        || shares.shares_redeemed() != Quantity::from_str("0.5")?
+    {
+        return Err(FixtureRunError::Invariant(
+            "vault share leg differs from fixture",
+        ));
+    }
+    let subaccount_key = account_key(SubaccountMasterCurrentRecordV1::state_key(&SELLER))?;
+    let subaccount = ledger
+        .state_image()
+        .entries()
+        .get(&subaccount_key)
+        .and_then(|bytes| SubaccountMasterCurrentRecordV1::decode_at(&subaccount_key, bytes).ok())
+        .ok_or(FixtureRunError::Invariant(
+            "missing expected subaccount relation",
+        ))?;
+    if subaccount.subaccount_id() != SELLER || subaccount.master_account_id() != BUYER {
+        return Err(FixtureRunError::Invariant(
+            "subaccount relation differs from fixture",
+        ));
+    }
+    let relation_key = account_key(AccountVaultRelationCurrentRecordV1::state_key(
+        &BUYER, &vault,
+    ))?;
+    let relation = ledger
+        .state_image()
+        .entries()
+        .get(&relation_key)
+        .and_then(|bytes| AccountVaultRelationCurrentRecordV1::decode_at(&relation_key, bytes).ok())
+        .ok_or(FixtureRunError::Invariant(
+            "missing expected vault relation",
+        ))?;
+    if relation.account_id() != BUYER || relation.vault_id() != &vault {
+        return Err(FixtureRunError::Invariant(
+            "vault relation differs from fixture",
+        ));
+    }
+    let mode_key = account_key(AccountModeCurrentRecordV1::state_key(&BUYER))?;
+    let mode = ledger
+        .state_image()
+        .entries()
+        .get(&mode_key)
+        .and_then(|bytes| AccountModeCurrentRecordV1::decode_at(&mode_key, bytes).ok())
+        .ok_or(FixtureRunError::Invariant("missing expected account mode"))?;
+    if mode.account_id() != BUYER
+        || mode.initial_previous() != AccountAbstractionModeV1::Standard
+        || mode.current() != AccountAbstractionModeV1::Unified
+    {
+        return Err(FixtureRunError::Invariant(
+            "account mode differs from fixture",
+        ));
+    }
+    let margin_key = account_key(MarginModeCurrentRecordV1::state_key(&BUYER, &market))?;
+    let margin = ledger
+        .state_image()
+        .entries()
+        .get(&margin_key)
+        .and_then(|bytes| MarginModeCurrentRecordV1::decode_at(&margin_key, bytes).ok())
+        .ok_or(FixtureRunError::Invariant("missing expected margin mode"))?;
+    if margin.account_id() != BUYER
+        || margin.market_id() != &market
+        || margin.initial_previous() != MarginModeV1::Cross
+        || margin.current() != MarginModeV1::Isolated
+    {
+        return Err(FixtureRunError::Invariant(
+            "margin mode differs from fixture",
+        ));
+    }
+    let leverage_key = account_key(LeverageCurrentRecordV1::state_key(&BUYER, &market))?;
+    let leverage = ledger
+        .state_image()
+        .entries()
+        .get(&leverage_key)
+        .and_then(|bytes| LeverageCurrentRecordV1::decode_at(&leverage_key, bytes).ok())
+        .ok_or(FixtureRunError::Invariant("missing expected leverage"))?;
+    if leverage.account_id() != BUYER
+        || leverage.market_id() != &market
+        || leverage.initial_previous() != Leverage::from_str("1")?
+        || leverage.current() != Leverage::from_str("5")?
+    {
+        return Err(FixtureRunError::Invariant("leverage differs from fixture"));
+    }
+    let mut expected_facts = vec![
+        (
+            EventKind::DepositCredited,
+            vec![BUYER],
+            vec![],
+            Some(usdc.clone()),
+            None,
+        ),
+        (
+            EventKind::WithdrawalDebited,
+            vec![BUYER],
+            vec![],
+            Some(usdc.clone()),
+            None,
+        ),
+        (
+            EventKind::SpotTransfer,
+            vec![BUYER, SELLER],
+            vec![],
+            Some(usdc.clone()),
+            None,
+        ),
+        (
+            EventKind::PerpTransfer,
+            vec![BUYER, SELLER],
+            vec![],
+            None,
+            None,
+        ),
+        (
+            EventKind::SubaccountTransfer,
+            vec![BUYER, BUYER, SELLER],
+            vec![],
+            Some(usdc.clone()),
+            None,
+        ),
+        (
+            EventKind::VaultDeposit,
+            vec![BUYER],
+            vec![],
+            None,
+            Some(vault.clone()),
+        ),
+        (
+            EventKind::VaultWithdrawal,
+            vec![BUYER],
+            vec![],
+            None,
+            Some(vault.clone()),
+        ),
+        (
+            EventKind::FeeCharged,
+            vec![BUYER],
+            vec![],
+            Some(usdc.clone()),
+            None,
+        ),
+        (
+            EventKind::BuilderFeeCharged,
+            vec![BUYER, BUILDER],
+            vec![],
+            Some(usdc.clone()),
+            None,
+        ),
+        (
+            EventKind::ReferralReward,
+            vec![BUYER, REFERRER],
+            vec![],
+            Some(usdc.clone()),
+            None,
+        ),
+        (
+            EventKind::AccountModeChanged,
+            vec![BUYER],
+            vec![],
+            None,
+            None,
+        ),
+        (
+            EventKind::MarginModeChanged,
+            vec![BUYER],
+            vec![market.clone()],
+            None,
+            None,
+        ),
+        (
+            EventKind::LeverageChanged,
+            vec![BUYER],
+            vec![market.clone()],
+            None,
+            None,
+        ),
+        (
+            EventKind::FundingPaid,
+            vec![BUYER],
+            vec![market.clone()],
+            None,
+            None,
+        ),
+        (
+            EventKind::FundingReceived,
+            vec![BUYER],
+            vec![market],
+            None,
+            None,
+        ),
+    ];
+    for (key, bytes) in ledger
+        .state_image()
+        .entries()
+        .iter()
+        .filter(|(key, _)| key.namespace() == "account-fact.v1")
+    {
+        let fact = AccountFactRecordV1::decode_at(key, bytes)
+            .map_err(|_| FixtureRunError::Invariant("account fact is not key-bound"))?;
+        let position = expected_facts.iter().position(|expected| {
+            fact.event_kind() == expected.0
+                && fact.account_ids() == expected.1.as_slice()
+                && fact.market_ids() == expected.2.as_slice()
+                && fact.asset_id() == expected.3.as_ref()
+                && fact.vault_id() == expected.4.as_ref()
+        });
+        let position = position.ok_or(FixtureRunError::Invariant(
+            "account fact identity differs from literal fixture",
+        ))?;
+        expected_facts.swap_remove(position);
+    }
+    if !expected_facts.is_empty() {
+        return Err(FixtureRunError::Invariant(
+            "expected account facts are absent",
+        ));
+    }
     Ok(())
+}
+
+fn account_key<T>(result: Result<T, AccountStateError>) -> Result<T, FixtureRunError> {
+    result.map_err(|_| FixtureRunError::Invariant("constructing expected account state key failed"))
+}
+
+fn quantity_leg_matches(
+    record: &AccountQuantityFlowCurrentRecordV1,
+    account: Address,
+    scope: &AccountQuantityFlowScopeV1,
+    credits: &str,
+    debits: &str,
+) -> Result<bool, FixtureRunError> {
+    Ok(record.account_id() == account
+        && record.scope() == scope
+        && record.credits() == Quantity::from_str(credits)?
+        && record.debits() == Quantity::from_str(debits)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literal_quantity_validator_rejects_a_key_bound_reversed_flow() {
+        let scope = AccountQuantityFlowScopeV1::SpotTransferAsset {
+            asset_id: AssetId::new("USDC").expect("fixture asset"),
+        };
+        let key =
+            AccountQuantityFlowCurrentRecordV1::state_key(&SELLER, &scope).expect("fixture key");
+        let bytes = format!(
+            concat!(
+                r#"{{"schema":"hyperliquid-alpha-desk/account-quantity-flow-current/v1","#,
+                r#""account_id":"{}","scope":"spot_transfer_asset","#,
+                r#""asset_id":"USDC","vault_id":null,"credits":"0","#,
+                r#""debits":"1","last_event_id":"fixture-reversed-flow","#,
+                r#""last_block_height":1}}"#,
+            ),
+            SELLER.to_api_string(),
+        )
+        .into_bytes();
+        let record = AccountQuantityFlowCurrentRecordV1::decode_at(&key, &bytes)
+            .expect("well-formed key-bound mutated record");
+
+        assert!(
+            !quantity_leg_matches(&record, SELLER, &scope, "1", "0").expect("literal comparison")
+        );
+    }
 }
 
 fn market_prerequisite_block(
