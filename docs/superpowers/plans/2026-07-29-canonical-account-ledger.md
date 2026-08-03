@@ -746,7 +746,7 @@ on them.
   Both commands preserve the full evidence directory and refuse existing
   output. The soak recipe remains bounded by the shared replay-work validator.
 
-- [ ] **Step 5: Run full gates and commit**
+- [x] **Step 5: Run full gates and commit**
 
   ```bash
   cargo +1.97.1 test -p state-replay --locked --offline
@@ -866,6 +866,16 @@ on them.
   diff checks. Independent review returned GO with no findings. The result is
   repo-ready observed-flow state, not balance, position, margin, or
   deployed-source proof.
+- 2026-08-03: Task 6 completed at `a36a49f` with evidence-cause remediation
+  `95308c7` and exact semantic/output remediation `c9c848e`. The committed
+  `account-e2e` baseline proves repeated generated-archive replay, checkpoint
+  resume, exact account facts/flows/relations/modes, typed prerequisite and
+  late-failure rollback, strict output admission, and recursive private
+  evidence permissions. `just deny`, `just oss-audit` (`PASS files=518`), and
+  serialized `RUST_TEST_THREADS=1 just verify` completed; the final command
+  exited `0` at `2026-08-03T08:21:30Z`. Independent fix-round re-review
+  returned GO. Qualification remains only synthetic account-flow contract
+  proof; production source and position-specific evidence remain open.
 
 ## Rollback / Recovery
 
