@@ -401,6 +401,8 @@ impl RawObservationBatch {
         })
     }
 
+    /// Validates byte-cursor shape and local ordering without claiming that the
+    /// source is qualified for runtime admission.
     pub fn try_new_byte_offsets(
         chain_id: ChainId,
         observations: Vec<SourceObservation>,
