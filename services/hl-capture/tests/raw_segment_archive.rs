@@ -4,9 +4,15 @@ use bytes::Bytes;
 use canonical_archive::{ArchiveConfig, LocalParquetArchive};
 use domain_types::{ChainId, SourceId};
 use hl_capture::spool::{DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolRotationPolicy};
-use hl_capture::{BlockingRawSegmentArchive, RawSegmentArchive, RawSegmentArchiveConfig};
+use hl_capture::{
+    BlockingRawSegmentArchive, RawSegmentArchive, RawSegmentArchiveConfig,
+    RawSegmentArchiveVerification, RawSpoolArchiveEvidence,
+};
 use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
-use storage_ports::{RawObservationArchive, RawObservationRange};
+use storage_ports::{
+    CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange, RawObservationArchive,
+    RawObservationRange,
+};
 use tempfile::TempDir;
 
 fn observation(offset: u64, wall_micros: i64) -> SourceObservation {
@@ -34,6 +40,47 @@ fn spool(root: &TempDir) -> SourceSpool {
             [0x42; 32],
             DurabilityPolicy::FsyncEveryRecord,
             SpoolRotationPolicy::try_new(u64::MAX, std::time::Duration::from_secs(3600)).unwrap(),
+        )
+        .unwrap(),
+        100,
+    )
+    .unwrap()
+}
+
+fn byte_observation(offset: u64, wall_micros: i64) -> SourceObservation {
+    byte_observation_with_schema(offset, wall_micros, "node-v1")
+}
+
+fn byte_observation_with_schema(
+    offset: u64,
+    wall_micros: i64,
+    parser_schema_version: &str,
+) -> SourceObservation {
+    SourceObservation::new(
+        SourceId::new("node-fills").unwrap(),
+        "hyperliquid-node-v1",
+        ObservationClass::AuxiliaryLedger,
+        SourceCursor::new("node-fills-epoch", offset).unwrap(),
+        ReceiveTimestamps::new(wall_micros, offset).unwrap(),
+        parser_schema_version,
+        Bytes::from(format!("fill-{offset}")),
+        Vec::new(),
+        1024,
+    )
+    .unwrap()
+}
+
+fn byte_spool(root: &TempDir) -> SourceSpool {
+    SourceSpool::open(
+        SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("spool/node-fills"),
+            SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x43; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, std::time::Duration::from_secs(3600)).unwrap(),
+            CursorPolicy::MonotonicByteOffset,
         )
         .unwrap(),
         100,
@@ -226,4 +273,171 @@ async fn same_hour_segment_is_streamed_into_bounded_record_batches() {
     assert_eq!(summary.observation_count(), 5);
     assert_eq!(summary.batch_count(), 3);
     assert_eq!(archive.inspect().unwrap().raw_observations(), 5);
+}
+
+#[tokio::test]
+async fn sparse_byte_offset_segment_archives_and_replays_by_local_sequence() {
+    let root = TempDir::new().unwrap();
+    let archive = Arc::new(
+        LocalParquetArchive::open(
+            root.path().join("archive"),
+            ArchiveConfig::deterministic_fixture(
+                "raw-segment-byte-test",
+                domain_types::KnownTime::from_unix_micros(1_000).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+    let archiver = BlockingRawSegmentArchive::new(raw_port);
+    let mut source_spool = byte_spool(&root);
+    for offset in [19, 47, 85] {
+        source_spool
+            .append(
+                &byte_observation(offset, 1_000),
+                i64::try_from(offset).unwrap(),
+            )
+            .unwrap();
+    }
+    let closed = source_spool.shutdown(200).unwrap().unwrap();
+
+    let summary = archiver
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(2),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(summary.observation_count(), 3);
+    assert_eq!(summary.batch_count(), 2);
+    let sequence_range = LocalRecordSequenceRange::try_new(
+        LocalRecordSequence::try_new(1).unwrap(),
+        LocalRecordSequence::try_new(3).unwrap(),
+    )
+    .unwrap();
+    let replayed = archive
+        .read_observations_by_sequence(
+            &ChainId::new("mainnet").unwrap(),
+            &SourceId::new("node-fills").unwrap(),
+            sequence_range,
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|item| (
+                item.local_sequence().get(),
+                item.observation().cursor().offset(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![(1, 19), (2, 47), (3, 85)]
+    );
+
+    let first_local_sequence = closed.manifest().first_local_sequence().unwrap();
+    let last_local_sequence = closed.manifest().last_local_sequence().unwrap();
+    let spool_evidence = RawSpoolArchiveEvidence::try_new(
+        closed.manifest_hash(),
+        closed.manifest().segment_blake3(),
+        first_local_sequence,
+        closed.manifest().max_cursor().clone(),
+        last_local_sequence,
+        closed.manifest().record_count(),
+    )
+    .unwrap();
+    let verification = RawSegmentArchiveVerification::new(
+        ChainId::new("mainnet").unwrap(),
+        SourceId::new("node-fills").unwrap(),
+        spool_evidence.clone(),
+        summary.manifest_ids().to_vec(),
+    );
+    archiver
+        .verify_archived_segment(&verification)
+        .await
+        .unwrap();
+    let incomplete_verification = RawSegmentArchiveVerification::new(
+        ChainId::new("mainnet").unwrap(),
+        SourceId::new("node-fills").unwrap(),
+        spool_evidence,
+        summary.manifest_ids()[1..].to_vec(),
+    );
+    let error = archiver
+        .verify_archived_segment(&incomplete_verification)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.reason_code(),
+        "capture_raw_archive.verification_mismatch"
+    );
+}
+
+#[tokio::test]
+async fn mixed_parser_dispositions_split_batches_without_breaking_local_sequence() {
+    let root = TempDir::new().unwrap();
+    let archive = Arc::new(
+        LocalParquetArchive::open(
+            root.path().join("archive"),
+            ArchiveConfig::deterministic_fixture(
+                "raw-segment-mixed-parser-test",
+                domain_types::KnownTime::from_unix_micros(1_000).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+    let archiver = BlockingRawSegmentArchive::new(raw_port);
+    let mut source_spool = byte_spool(&root);
+    for observation in [
+        byte_observation_with_schema(19, 1_000, "node-v1"),
+        byte_observation_with_schema(47, 1_001, "quarantine-v1:source.schema_drift"),
+        byte_observation_with_schema(85, 1_002, "node-v1"),
+    ] {
+        let durable_at = observation.received().wall_micros();
+        source_spool.append(&observation, durable_at).unwrap();
+    }
+    let closed = source_spool.shutdown(200).unwrap().unwrap();
+
+    let summary = archiver
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(1024),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(summary.observation_count(), 3);
+    assert_eq!(summary.batch_count(), 3);
+    let replayed = archive
+        .read_observations_by_sequence(
+            &ChainId::new("mainnet").unwrap(),
+            &SourceId::new("node-fills").unwrap(),
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(replayed.len(), 3);
+    assert_eq!(replayed[0].observation().parser_schema_version(), "node-v1");
+    assert_eq!(
+        replayed[1].observation().parser_schema_version(),
+        "quarantine-v1:source.schema_drift"
+    );
+    assert_eq!(replayed[2].observation().parser_schema_version(), "node-v1");
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|item| item.local_sequence().get())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
 }

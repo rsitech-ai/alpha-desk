@@ -75,6 +75,26 @@ fn stream_config(path: PathBuf, stream: NodeStreamKind, stream_name: &str) -> No
     .expect("valid node file config")
 }
 
+fn bounded_stream_config(
+    path: PathBuf,
+    stream: NodeStreamKind,
+    stream_name: &str,
+    max_inflight_observations: usize,
+) -> NodeFileConfig {
+    NodeFileConfig::new_bounded(
+        path,
+        stream_name,
+        stream,
+        SourceId::new("primary-node-fills").expect("source id"),
+        "hl-node-v1",
+        "node-v1",
+        1024 * 1024,
+        Duration::from_millis(5),
+        max_inflight_observations,
+    )
+    .expect("valid bounded node file config")
+}
+
 fn context(cancellation: CancellationToken, timeout: Duration) -> SourceRequestContext {
     SourceRequestContext::new(cancellation, Instant::now() + timeout)
 }
@@ -118,6 +138,12 @@ async fn partial_final_line_is_not_emitted_until_complete() {
         .await
         .expect_err("partial line must remain pending");
     assert_eq!(error, SourceError::BackpressureTimeout);
+    let partial = source.tail_state().expect("partial tail state");
+    assert!(partial.partial_line());
+    assert_eq!(
+        partial.unread_bytes(),
+        u64::try_from(split).expect("fixture length fits u64")
+    );
 
     let mut append = OpenOptions::new()
         .append(true)
@@ -132,6 +158,9 @@ async fn partial_final_line_is_not_emitted_until_complete() {
         .await
         .expect("completed second observation");
     assert_eq!(observed.payload().as_ref(), second);
+    let complete = source.tail_state().expect("completed tail state");
+    assert!(!complete.partial_line());
+    assert_eq!(complete.unread_bytes(), 0);
 }
 
 #[tokio::test]
@@ -322,6 +351,62 @@ async fn adapter_never_reads_a_second_record_before_first_is_durable() {
         .await
         .expect("second observation after durability");
     assert!(second.cursor().offset() > first.cursor().offset());
+}
+
+#[tokio::test]
+async fn bounded_adapter_allows_ordered_group_commit_without_unbounded_read_ahead() {
+    let directory = TempDir::new().expect("temp directory");
+    let path = directory.path().join("fills");
+    let payload = fixture("fill.json");
+    let mut contents = Vec::new();
+    for _ in 0..3 {
+        contents.extend_from_slice(&payload);
+        contents.push(b'\n');
+    }
+    fs::write(&path, contents).expect("three lines");
+    let cancellation = CancellationToken::new();
+    let mut source = NodeLineFileSource::open_with_clock(
+        bounded_stream_config(path, NodeStreamKind::Fills, "node-fills", 2),
+        None,
+        TestClock::new(),
+    )
+    .expect("open bounded source");
+
+    let first = source
+        .next_observation(&context(cancellation.clone(), Duration::from_secs(1)))
+        .await
+        .expect("first observation");
+    let second = source
+        .next_observation(&context(cancellation.clone(), Duration::from_secs(1)))
+        .await
+        .expect("second observation before group acknowledgement");
+    assert!(second.cursor().offset() > first.cursor().offset());
+    assert_eq!(
+        source
+            .next_observation(&context(cancellation.clone(), Duration::from_secs(1)))
+            .await
+            .expect_err("bounded in-flight window"),
+        SourceError::BackpressureTimeout
+    );
+    assert_eq!(
+        source.acknowledge_durable(second.cursor()),
+        Err(SourceError::CursorRegression),
+        "acknowledgements must remain ordered"
+    );
+    source
+        .acknowledge_durable(first.cursor())
+        .expect("first group member durable");
+    let third = source
+        .next_observation(&context(cancellation, Duration::from_secs(1)))
+        .await
+        .expect("window reopens after ordered acknowledgement");
+    assert!(third.cursor().offset() > second.cursor().offset());
+    source
+        .acknowledge_durable(second.cursor())
+        .expect("second group member durable");
+    source
+        .acknowledge_durable(third.cursor())
+        .expect("third group member durable");
 }
 
 #[tokio::test]

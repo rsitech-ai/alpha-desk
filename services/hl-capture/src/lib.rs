@@ -2,6 +2,7 @@
 
 pub mod adapters;
 mod app;
+mod auxiliary_checkpoint;
 mod backlog;
 pub mod bus;
 mod committed_pipeline;
@@ -34,6 +35,7 @@ pub use sequencer::*;
 pub use service::{ConnectedCapture, RuntimeConnectError, connect_capture};
 pub use shutdown::{AppError, OwnedTask, run_owned_tasks};
 pub use status::{
-    CaptureHealth, CaptureSourceHealth, CaptureStatus, CommittedSourceClass, StatusError,
-    StatusWriter, read_status,
+    AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
+    CaptureSourceHealth, CaptureStatus, CommittedSourceClass, StatusError, StatusWriter,
+    read_status,
 };

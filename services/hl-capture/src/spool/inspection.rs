@@ -13,6 +13,14 @@ use super::{
 type SegmentPaths = BTreeMap<u64, PathBuf>;
 type CollectedEntries = (SegmentPaths, SegmentPaths);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpoolInspectionBaseline {
+    pub segment_sequence: u64,
+    pub manifest_hash: [u8; 32],
+    pub cursor_policy: CursorPolicy,
+    pub local_sequence: Option<LocalRecordSequence>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpoolInspection {
     closed_segments: u64,
@@ -62,6 +70,13 @@ impl SpoolInspection {
 }
 
 pub fn inspect_spool(path: impl AsRef<Path>) -> Result<SpoolInspection, SpoolError> {
+    inspect_spool_with_baseline(path, None)
+}
+
+pub(crate) fn inspect_spool_with_baseline(
+    path: impl AsRef<Path>,
+    baseline: Option<SpoolInspectionBaseline>,
+) -> Result<SpoolInspection, SpoolError> {
     let path = path.as_ref();
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io_error("reading spool inspection input", source))?;
@@ -84,7 +99,7 @@ pub fn inspect_spool(path: impl AsRef<Path>) -> Result<SpoolInspection, SpoolErr
     if !metadata.is_dir() {
         return Err(SpoolError::UnsafeSpoolEntry);
     }
-    inspect_directory(path)
+    inspect_directory(path, baseline)
 }
 
 pub fn recover_spool_tail(
@@ -109,9 +124,35 @@ pub fn recover_spool_tail(
     Ok(Some(report))
 }
 
-fn inspect_directory(directory: &Path) -> Result<SpoolInspection, SpoolError> {
+pub(crate) fn recover_spool_tail_with_baseline(
+    directory: impl AsRef<Path>,
+    baseline: Option<SpoolInspectionBaseline>,
+) -> Result<Option<RecoveryReport>, SpoolError> {
+    match inspect_spool_with_baseline(directory.as_ref(), baseline) {
+        Ok(_) => return Ok(None),
+        Err(SpoolError::IncompleteTail { .. }) => {}
+        Err(error) => return Err(error),
+    }
+    let (segments, manifests) = collect_entries(directory.as_ref())?;
+    let open = segments
+        .iter()
+        .filter(|(sequence, _)| !manifests.contains_key(sequence))
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
+    let [open] = open.as_slice() else {
+        return Err(SpoolError::UnexpectedOpenSegment);
+    };
+    let report = recover_open_segment(open)?;
+    inspect_spool_with_baseline(directory.as_ref(), baseline)?;
+    Ok(Some(report))
+}
+
+fn inspect_directory(
+    directory: &Path,
+    baseline: Option<SpoolInspectionBaseline>,
+) -> Result<SpoolInspection, SpoolError> {
     let (segments, manifests) = collect_entries(directory)?;
-    inspect_directory_entries(segments, manifests)
+    inspect_directory_entries(segments, manifests, baseline)
 }
 
 fn collect_entries(directory: &Path) -> Result<CollectedEntries, SpoolError> {
@@ -155,12 +196,13 @@ fn collect_entries(directory: &Path) -> Result<CollectedEntries, SpoolError> {
 fn inspect_directory_entries(
     segments: SegmentPaths,
     manifests: SegmentPaths,
+    baseline: Option<SpoolInspectionBaseline>,
 ) -> Result<SpoolInspection, SpoolError> {
     let mut closed_sequences = BTreeSet::new();
-    let mut previous_sequence: Option<u64> = None;
-    let mut previous_manifest_hash = None;
-    let mut previous_cursor_policy = None;
-    let mut previous_local_sequence = None;
+    let mut previous_sequence = baseline.map(|value| value.segment_sequence);
+    let mut previous_manifest_hash = baseline.map(|value| value.manifest_hash);
+    let mut previous_cursor_policy = baseline.map(|value| value.cursor_policy);
+    let mut previous_local_sequence = baseline.and_then(|value| value.local_sequence);
     let mut total_records = 0_u64;
     for (sequence, manifest_path) in &manifests {
         if previous_sequence.is_some_and(|previous| previous.checked_add(1) != Some(*sequence)) {
@@ -260,7 +302,11 @@ fn inspect_directory_entries(
             .first()
             .and_then(|sequence| segments.get(sequence))
             .cloned(),
-        last_sequence: segments.keys().next_back().copied(),
+        last_sequence: segments
+            .keys()
+            .next_back()
+            .copied()
+            .or_else(|| baseline.map(|value| value.segment_sequence)),
     })
 }
 

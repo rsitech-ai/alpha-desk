@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,9 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coordinator::{CaptureCoordinator, CoordinatorError};
 use crate::{
-    AppError, CaptureHealth, CaptureSourceHealth, CaptureStatus, CommittedSourceClass,
-    FailoverDecision, FailoverReason, OwnedTask, StatusError, StatusWriter, read_status,
-    run_owned_tasks,
+    AppError, AuxiliarySourceStatus, CaptureHealth, CaptureSourceHealth, CaptureStatus,
+    CommittedSourceClass, FailoverDecision, FailoverReason, OwnedTask, StatusError, StatusWriter,
+    read_status, run_owned_tasks,
 };
 
 const MAX_RECOVERY_BLOCKS: usize = 10_000_000;
@@ -23,7 +24,7 @@ const RECOVERING_REASON: &str = "capture_runtime.recovering";
 const DISK_HEALTHY_BASIS_POINTS: u16 = 2_000;
 const LOW_DISK_REASON: &str = "capture_disk.low_space";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeHealthSnapshot {
     health: CaptureHealth,
     ready: bool,
@@ -39,6 +40,7 @@ pub(crate) struct RuntimeHealthSnapshot {
     capture_backlog_records: u64,
     oldest_pending_capture_height: Option<BlockHeight>,
     disk_free_basis_points: Option<u16>,
+    auxiliary_sources: BTreeMap<String, AuxiliarySourceStatus>,
 }
 
 #[derive(Debug)]
@@ -63,6 +65,7 @@ impl CaptureRuntimeHealth {
             capture_backlog_records: 0,
             oldest_pending_capture_height: None,
             disk_free_basis_points: None,
+            auxiliary_sources: BTreeMap::new(),
         });
         Self { sender }
     }
@@ -226,8 +229,141 @@ impl CaptureRuntimeHealth {
         });
     }
 
+    pub(crate) fn configure_auxiliary_sources(&self, source_ids: &[String]) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.auxiliary_sources = source_ids
+                .iter()
+                .map(|source_id| {
+                    (
+                        source_id.clone(),
+                        AuxiliarySourceStatus::starting(source_id.clone()),
+                    )
+                })
+                .collect();
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_auxiliary_durable(
+        &self,
+        source_id: &str,
+        cursor_epoch: &str,
+        tail_cursor_epoch: &str,
+        durable_offset: u64,
+        local_sequence: u64,
+        unread_bytes: u64,
+        partial_line: bool,
+        last_durable_wall_micros: i64,
+        quarantine_reason: Option<&str>,
+    ) {
+        self.sender.send_modify(|snapshot| {
+            if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                source.record_durable(
+                    cursor_epoch,
+                    tail_cursor_epoch,
+                    durable_offset,
+                    local_sequence,
+                    unread_bytes,
+                    partial_line,
+                    last_durable_wall_micros,
+                    quarantine_reason,
+                );
+            }
+        });
+    }
+
+    pub(crate) fn record_auxiliary_recovered(
+        &self,
+        source_id: &str,
+        durable_cursor: &hl_protocol::SourceCursor,
+        local_sequence: u64,
+        last_durable_wall_micros: i64,
+        quarantine_reason: Option<&str>,
+    ) {
+        self.sender.send_modify(|snapshot| {
+            if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                source.record_recovered(
+                    durable_cursor.epoch(),
+                    durable_cursor.offset(),
+                    local_sequence,
+                    last_durable_wall_micros,
+                    quarantine_reason,
+                );
+            }
+        });
+    }
+
+    pub(crate) fn record_auxiliary_tail(
+        &self,
+        source_id: &str,
+        cursor_epoch: &str,
+        unread_bytes: u64,
+        partial_line: bool,
+    ) {
+        self.sender.send_modify(|snapshot| {
+            if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                source.record_tail(cursor_epoch, unread_bytes, partial_line);
+            }
+        });
+    }
+
+    pub(crate) fn record_auxiliary_buffered(
+        &self,
+        source_id: &str,
+        cursor_epoch: &str,
+        spool_records: u64,
+        unarchived_records: u64,
+        unread_bytes: u64,
+        partial_line: bool,
+    ) {
+        self.sender.send_modify(|snapshot| {
+            if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                source.record_buffered(
+                    cursor_epoch,
+                    spool_records,
+                    unarchived_records,
+                    unread_bytes,
+                    partial_line,
+                );
+            }
+        });
+    }
+
+    pub(crate) fn latch_auxiliary(&self, source_id: &str, reason_code: &str) {
+        self.sender.send_modify(|snapshot| {
+            if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                source.latch(reason_code);
+            }
+        });
+    }
+
+    pub(crate) fn retry_auxiliary(&self, source_id: &str, reason_code: &str) {
+        self.sender.send_modify(|snapshot| {
+            if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                source.retrying(reason_code);
+            }
+        });
+    }
+
+    pub(crate) fn recover_auxiliary_retry(&self, source_id: &str) {
+        self.sender.send_modify(|snapshot| {
+            if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                source.retry_recovered();
+            }
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auxiliary_source_status(&self, source_id: &str) -> Option<AuxiliarySourceStatus> {
+        self.sender
+            .borrow()
+            .auxiliary_sources
+            .get(source_id)
+            .cloned()
+    }
+
     fn snapshot(&self) -> RuntimeHealthSnapshot {
-        *self.sender.borrow()
+        self.sender.borrow().clone()
     }
 }
 
@@ -450,6 +586,11 @@ impl CaptureRuntime {
             .map(|error| error.reason_code().to_owned());
         let terminal_time = now()?;
         let terminal_source_state = self.health.snapshot();
+        let terminal_auxiliary_sources = terminal_source_state
+            .auxiliary_sources
+            .values()
+            .cloned()
+            .collect();
         let terminal = match read_status(self.status_writer.path()) {
             Ok(status) => status.into_terminal(terminal_time, final_health, final_reason.clone()),
             _ => CaptureStatus::new(
@@ -466,7 +607,8 @@ impl CaptureRuntime {
                 terminal_source_state.failover_reason,
             )
             .with_last_error_reason(final_reason),
-        };
+        }
+        .with_auxiliary_sources(terminal_auxiliary_sources);
         self.status_writer.write(&terminal).map_err(status_error)?;
         result.map_err(CaptureRuntimeError::Lifecycle)
     }
@@ -486,7 +628,7 @@ impl StatusContext {
         &self,
         runtime_health: RuntimeHealthSnapshot,
     ) -> Result<(), CaptureRuntimeError> {
-        match self.status_from_progress(runtime_health).await {
+        match self.status_from_progress(runtime_health.clone()).await {
             Ok(status) => self.writer.write(&status).map_err(status_error),
             Err(CaptureRuntimeError::Progress) => self
                 .write_without_progress(RuntimeHealthSnapshot {
@@ -525,6 +667,7 @@ impl StatusContext {
         };
         let pending_blocks =
             u64::try_from(pending.len()).map_err(|_| CaptureRuntimeError::StatusOverflow)?;
+        let auxiliary_sources = runtime_health.auxiliary_sources.values().cloned().collect();
         Ok(CaptureStatus::new(
             now()?,
             &self.build_id,
@@ -547,7 +690,8 @@ impl StatusContext {
             runtime_health.disk_free_basis_points,
         )
         .with_archive_manifest_id(archive_manifest_id)
-        .with_last_error_reason(runtime_health.reason_code.map(str::to_owned)))
+        .with_last_error_reason(runtime_health.reason_code.map(str::to_owned))
+        .with_auxiliary_sources(auxiliary_sources))
     }
 
     fn write_without_progress(
@@ -555,6 +699,7 @@ impl StatusContext {
         runtime_health: RuntimeHealthSnapshot,
     ) -> Result<(), StatusError> {
         let snapshot_at = now().map_err(|_| StatusError::InvalidField)?;
+        let auxiliary_sources = runtime_health.auxiliary_sources.values().cloned().collect();
         let status = match read_status(self.writer.path()) {
             Ok(status) if status.belongs_to(&self.build_id, &self.chain_id) => status
                 .into_terminal(
@@ -582,7 +727,8 @@ impl StatusContext {
             runtime_health.capture_backlog_records,
             runtime_health.oldest_pending_capture_height,
             runtime_health.disk_free_basis_points,
-        );
+        )
+        .with_auxiliary_sources(auxiliary_sources);
         self.writer.write(&status)
     }
 }

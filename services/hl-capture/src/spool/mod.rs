@@ -21,8 +21,8 @@ pub use reader::{
 pub use record::SpoolRecord;
 pub use recovery::{RecoveryReport, recover_open_segment};
 pub use source_spool::{
-    SourceSpool, SourceSpoolAppend, SourceSpoolAppendDisposition, SourceSpoolConfig,
-    SpoolRotationPolicy,
+    SourceSpool, SourceSpoolAppend, SourceSpoolAppendDisposition, SourceSpoolBaseline,
+    SourceSpoolConfig, SpoolRotationPolicy,
 };
 pub use writer::{AppendReceipt, DurabilityPolicy, SpoolWriter};
 

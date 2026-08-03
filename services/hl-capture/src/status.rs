@@ -5,9 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use domain_types::{BlockHeight, ChainId, KnownTime};
 use serde::{Deserialize, Serialize};
 
-const STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v3";
+const STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v4";
 const MAX_STATUS_BYTES: usize = 16 * 1024;
 const MAX_STATUS_TEXT_BYTES: usize = 512;
+const MAX_AUXILIARY_SOURCES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -30,6 +31,292 @@ pub enum CaptureSourceHealth {
     Starting,
     Healthy,
     RangeUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuxiliarySourceHealth {
+    Starting,
+    Healthy,
+    Quarantined,
+    Latched,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuxiliaryQualificationState {
+    Unqualified,
+    Qualified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuxiliarySourceStatus {
+    source_id: String,
+    health: AuxiliarySourceHealth,
+    qualification: AuxiliaryQualificationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tail_cursor_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durable_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_sequence: Option<u64>,
+    spool_records: u64,
+    unarchived_records: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unread_bytes: Option<u64>,
+    partial_line: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_durable_wall_micros: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quarantine_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error_reason: Option<String>,
+}
+
+impl AuxiliarySourceStatus {
+    pub(crate) fn starting(source_id: impl Into<String>) -> Self {
+        Self {
+            source_id: source_id.into(),
+            health: AuxiliarySourceHealth::Starting,
+            qualification: AuxiliaryQualificationState::Unqualified,
+            cursor_epoch: None,
+            tail_cursor_epoch: None,
+            durable_offset: None,
+            local_sequence: None,
+            spool_records: 0,
+            unarchived_records: 0,
+            unread_bytes: None,
+            partial_line: false,
+            last_durable_wall_micros: None,
+            quarantine_reason: None,
+            last_error_reason: None,
+        }
+    }
+
+    pub(crate) fn record_recovered(
+        &mut self,
+        cursor_epoch: impl Into<String>,
+        durable_offset: u64,
+        local_sequence: u64,
+        last_durable_wall_micros: i64,
+        quarantine_reason: Option<&str>,
+    ) {
+        let quarantined = quarantine_reason.is_some();
+        self.health = if quarantined {
+            AuxiliarySourceHealth::Quarantined
+        } else {
+            AuxiliarySourceHealth::Healthy
+        };
+        self.cursor_epoch = Some(cursor_epoch.into());
+        self.durable_offset = Some(durable_offset);
+        self.local_sequence = Some(local_sequence);
+        self.spool_records = local_sequence;
+        self.unarchived_records = 0;
+        self.last_durable_wall_micros = Some(last_durable_wall_micros);
+        self.quarantine_reason = quarantine_reason.map(ToOwned::to_owned);
+        self.last_error_reason = None;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_durable(
+        &mut self,
+        cursor_epoch: impl Into<String>,
+        tail_cursor_epoch: impl Into<String>,
+        durable_offset: u64,
+        local_sequence: u64,
+        unread_bytes: u64,
+        partial_line: bool,
+        last_durable_wall_micros: i64,
+        quarantine_reason: Option<&str>,
+    ) {
+        if let Some(reason) = quarantine_reason {
+            self.quarantine_reason = Some(reason.to_owned());
+        }
+        let quarantined = self.quarantine_reason.is_some();
+        self.health = if quarantined {
+            AuxiliarySourceHealth::Quarantined
+        } else {
+            AuxiliarySourceHealth::Healthy
+        };
+        self.cursor_epoch = Some(cursor_epoch.into());
+        self.tail_cursor_epoch = Some(tail_cursor_epoch.into());
+        self.durable_offset = Some(durable_offset);
+        self.local_sequence = Some(local_sequence);
+        self.spool_records = local_sequence;
+        self.unarchived_records = 0;
+        self.unread_bytes = Some(unread_bytes);
+        self.partial_line = partial_line;
+        self.last_durable_wall_micros = Some(last_durable_wall_micros);
+        self.last_error_reason = None;
+    }
+
+    pub(crate) fn record_tail(
+        &mut self,
+        tail_cursor_epoch: impl Into<String>,
+        unread_bytes: u64,
+        partial_line: bool,
+    ) {
+        self.tail_cursor_epoch = Some(tail_cursor_epoch.into());
+        self.unread_bytes = Some(unread_bytes);
+        self.partial_line = partial_line;
+    }
+
+    pub(crate) fn record_buffered(
+        &mut self,
+        tail_cursor_epoch: impl Into<String>,
+        spool_records: u64,
+        unarchived_records: u64,
+        unread_bytes: u64,
+        partial_line: bool,
+    ) {
+        self.tail_cursor_epoch = Some(tail_cursor_epoch.into());
+        self.spool_records = spool_records;
+        self.unarchived_records = unarchived_records;
+        self.unread_bytes = Some(unread_bytes);
+        self.partial_line = partial_line;
+    }
+
+    pub(crate) fn latch(&mut self, reason_code: &str) {
+        self.health = AuxiliarySourceHealth::Latched;
+        self.last_error_reason = Some(reason_code.to_owned());
+    }
+
+    pub(crate) fn retrying(&mut self, reason_code: &str) {
+        if self.quarantine_reason.is_none() {
+            self.health = AuxiliarySourceHealth::Starting;
+        } else {
+            self.health = AuxiliarySourceHealth::Quarantined;
+        }
+        self.last_error_reason = Some(reason_code.to_owned());
+    }
+
+    pub(crate) fn retry_recovered(&mut self) {
+        if self.health == AuxiliarySourceHealth::Latched {
+            return;
+        }
+        self.health = if self.quarantine_reason.is_some() {
+            AuxiliarySourceHealth::Quarantined
+        } else if self.local_sequence.is_some() {
+            AuxiliarySourceHealth::Healthy
+        } else {
+            AuxiliarySourceHealth::Starting
+        };
+        self.last_error_reason = None;
+    }
+
+    #[must_use]
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    #[must_use]
+    pub const fn health(&self) -> AuxiliarySourceHealth {
+        self.health
+    }
+
+    #[must_use]
+    pub const fn qualification(&self) -> AuxiliaryQualificationState {
+        self.qualification
+    }
+
+    #[must_use]
+    pub fn cursor_epoch(&self) -> Option<&str> {
+        self.cursor_epoch.as_deref()
+    }
+
+    #[must_use]
+    pub fn tail_cursor_epoch(&self) -> Option<&str> {
+        self.tail_cursor_epoch.as_deref()
+    }
+
+    #[must_use]
+    pub const fn durable_offset(&self) -> Option<u64> {
+        self.durable_offset
+    }
+
+    #[must_use]
+    pub const fn local_sequence(&self) -> Option<u64> {
+        self.local_sequence
+    }
+
+    #[must_use]
+    pub const fn spool_records(&self) -> u64 {
+        self.spool_records
+    }
+
+    #[must_use]
+    pub const fn unarchived_records(&self) -> u64 {
+        self.unarchived_records
+    }
+
+    #[must_use]
+    pub const fn unread_bytes(&self) -> Option<u64> {
+        self.unread_bytes
+    }
+
+    #[must_use]
+    pub const fn partial_line(&self) -> bool {
+        self.partial_line
+    }
+
+    #[must_use]
+    pub const fn last_durable_wall_micros(&self) -> Option<i64> {
+        self.last_durable_wall_micros
+    }
+
+    #[must_use]
+    pub fn quarantine_reason(&self) -> Option<&str> {
+        self.quarantine_reason.as_deref()
+    }
+
+    #[must_use]
+    pub fn last_error_reason(&self) -> Option<&str> {
+        self.last_error_reason.as_deref()
+    }
+
+    fn validate(&self) -> Result<(), StatusError> {
+        validate_status_text(&self.source_id)?;
+        if let Some(epoch) = &self.cursor_epoch {
+            validate_status_text(epoch)?;
+        }
+        if let Some(epoch) = &self.tail_cursor_epoch {
+            validate_status_text(epoch)?;
+        }
+        if let Some(reason) = &self.last_error_reason {
+            validate_reason_code(reason)?;
+        }
+        if let Some(reason) = &self.quarantine_reason {
+            validate_reason_code(reason)?;
+        }
+        let durable_fields = [
+            self.cursor_epoch.is_some(),
+            self.durable_offset.is_some(),
+            self.local_sequence.is_some(),
+            self.last_durable_wall_micros.is_some(),
+        ];
+        let durable_sequence = self.local_sequence.unwrap_or(0);
+        if durable_fields
+            .iter()
+            .any(|present| *present != durable_fields[0])
+            || self
+                .local_sequence
+                .is_some_and(|sequence| sequence == 0 || sequence > self.spool_records)
+            || self.spool_records.checked_sub(durable_sequence) != Some(self.unarchived_records)
+            || self.last_durable_wall_micros.is_some_and(|value| value < 0)
+            || matches!(
+                self.health,
+                AuxiliarySourceHealth::Healthy | AuxiliarySourceHealth::Quarantined
+            ) && !durable_fields[0]
+            || self.health == AuxiliarySourceHealth::Quarantined && self.quarantine_reason.is_none()
+            || self.health == AuxiliarySourceHealth::Latched && self.last_error_reason.is_none()
+        {
+            return Err(StatusError::InvalidField);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +349,8 @@ pub struct CaptureStatus {
     archive_manifest_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    auxiliary_sources: Vec<AuxiliarySourceStatus>,
 }
 
 impl CaptureStatus {
@@ -91,6 +380,7 @@ impl CaptureStatus {
             disk_free_basis_points: None,
             archive_manifest_id: None,
             last_error_reason: None,
+            auxiliary_sources: Vec::new(),
         }
     }
 
@@ -155,6 +445,12 @@ impl CaptureStatus {
     }
 
     #[must_use]
+    pub fn with_auxiliary_sources(mut self, sources: Vec<AuxiliarySourceStatus>) -> Self {
+        self.auxiliary_sources = sources;
+        self
+    }
+
+    #[must_use]
     pub fn into_terminal(
         mut self,
         snapshot_at: KnownTime,
@@ -183,6 +479,17 @@ impl CaptureStatus {
         }
         if let Some(reason) = &self.last_error_reason {
             validate_reason_code(reason)?;
+        }
+        if self.auxiliary_sources.len() > MAX_AUXILIARY_SOURCES {
+            return Err(StatusError::InvalidField);
+        }
+        let mut previous = None;
+        for source in &self.auxiliary_sources {
+            source.validate()?;
+            if previous.is_some_and(|value: &str| value >= source.source_id()) {
+                return Err(StatusError::InvalidField);
+            }
+            previous = Some(source.source_id());
         }
         if self
             .disk_free_basis_points
@@ -349,7 +656,7 @@ fn validate_status_text(value: &str) -> Result<(), StatusError> {
     }
 }
 
-fn validate_reason_code(value: &str) -> Result<(), StatusError> {
+pub(crate) fn validate_reason_code(value: &str) -> Result<(), StatusError> {
     validate_status_text(value)?;
     if value.bytes().all(|byte| {
         byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_')
@@ -357,5 +664,157 @@ fn validate_reason_code(value: &str) -> Result<(), StatusError> {
         Ok(())
     } else {
         Err(StatusError::InvalidField)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use domain_types::{ChainId, KnownTime};
+    use tempfile::TempDir;
+
+    use super::{
+        AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
+        CaptureStatus, StatusError, read_status,
+    };
+
+    #[test]
+    fn auxiliary_status_exposes_durable_cursor_lag_quarantine_and_qualification() {
+        let mut auxiliary = AuxiliarySourceStatus::starting("node-misc-events");
+        auxiliary.record_durable(
+            "node-file-v1:epoch",
+            "node-file-v1:epoch",
+            47,
+            3,
+            11,
+            true,
+            1_000,
+            Some("source.schema_drift"),
+        );
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_auxiliary_sources(vec![auxiliary]);
+
+        status.validate().unwrap();
+        let value = serde_json::to_value(status).unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert_eq!(
+            value["auxiliary_sources"][0]["source_id"],
+            "node-misc-events"
+        );
+        assert_eq!(value["auxiliary_sources"][0]["health"], "quarantined");
+        assert_eq!(
+            value["auxiliary_sources"][0]["qualification"],
+            "unqualified"
+        );
+        assert_eq!(
+            value["auxiliary_sources"][0]["cursor_epoch"],
+            "node-file-v1:epoch"
+        );
+        assert_eq!(
+            value["auxiliary_sources"][0]["tail_cursor_epoch"],
+            "node-file-v1:epoch"
+        );
+        assert_eq!(value["auxiliary_sources"][0]["durable_offset"], 47);
+        assert_eq!(value["auxiliary_sources"][0]["local_sequence"], 3);
+        assert_eq!(value["auxiliary_sources"][0]["spool_records"], 3);
+        assert_eq!(value["auxiliary_sources"][0]["unarchived_records"], 0);
+        assert_eq!(value["auxiliary_sources"][0]["unread_bytes"], 11);
+        assert_eq!(value["auxiliary_sources"][0]["partial_line"], true);
+        assert_eq!(
+            value["auxiliary_sources"][0]["quarantine_reason"],
+            "source.schema_drift"
+        );
+        assert!(value["auxiliary_sources"][0]["last_error_reason"].is_null());
+    }
+
+    #[test]
+    fn auxiliary_status_rejects_unsorted_duplicate_or_inconsistent_sources() {
+        let duplicate = vec![
+            AuxiliarySourceStatus::starting("node-fills"),
+            AuxiliarySourceStatus::starting("node-fills"),
+        ];
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_auxiliary_sources(duplicate);
+        assert_eq!(status.validate(), Err(StatusError::InvalidField));
+
+        let mut missing_durable_epoch = AuxiliarySourceStatus::starting("node-fills");
+        missing_durable_epoch.tail_cursor_epoch = Some("tail-epoch".to_owned());
+        missing_durable_epoch.durable_offset = Some(47);
+        missing_durable_epoch.local_sequence = Some(1);
+        missing_durable_epoch.spool_records = 1;
+        missing_durable_epoch.last_durable_wall_micros = Some(1_000);
+        assert_eq!(
+            missing_durable_epoch.validate(),
+            Err(StatusError::InvalidField)
+        );
+
+        let mut invalid_tail_epoch = AuxiliarySourceStatus::starting("node-fills");
+        invalid_tail_epoch.tail_cursor_epoch = Some("bad\nepoch".to_owned());
+        assert_eq!(
+            invalid_tail_epoch.validate(),
+            Err(StatusError::InvalidField)
+        );
+
+        let mut inconsistent_lag = AuxiliarySourceStatus::starting("node-fills");
+        inconsistent_lag.spool_records = 2;
+        inconsistent_lag.unarchived_records = 1;
+        assert_eq!(inconsistent_lag.validate(), Err(StatusError::InvalidField));
+
+        let mut invalid = AuxiliarySourceStatus::starting("node-fills");
+        invalid.health = AuxiliarySourceHealth::Healthy;
+        invalid.qualification = AuxiliaryQualificationState::Qualified;
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_auxiliary_sources(vec![invalid]);
+        assert_eq!(status.validate(), Err(StatusError::InvalidField));
+    }
+
+    #[test]
+    fn status_reader_rejects_json_that_erases_a_quarantine_cause() {
+        let mut auxiliary = AuxiliarySourceStatus::starting("node-misc-events");
+        auxiliary.record_durable(
+            "node-file-v1:epoch",
+            "node-file-v1:epoch",
+            47,
+            1,
+            0,
+            false,
+            1_000,
+            Some("source.schema_drift"),
+        );
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_auxiliary_sources(vec![auxiliary]);
+        let mut value = serde_json::to_value(status).unwrap();
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("quarantine_reason");
+        value["auxiliary_sources"][0]["last_error_reason"] =
+            serde_json::Value::String("source.temporary_disconnect".to_owned());
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("status.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert_eq!(read_status(&path), Err(StatusError::InvalidField));
     }
 }

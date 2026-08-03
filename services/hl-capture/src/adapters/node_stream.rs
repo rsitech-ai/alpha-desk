@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -6,8 +7,8 @@ use bytes::Bytes;
 use domain_types::SourceId;
 use hl_protocol::node::v1::{NodeRecordV1, NodeStreamKind, parse_node_record};
 use hl_protocol::{
-    BlockSource, ParseWarning, ReceiveTimestamps, SourceCursor, SourceError, SourceObservation,
-    SourceRequestContext,
+    BlockSource, ObservationClass, ParseWarning, ReceiveTimestamps, SourceCursor, SourceError,
+    SourceObservation, SourceRequestContext,
 };
 
 use super::node_files::{
@@ -17,6 +18,7 @@ use super::node_files::{
 
 const MAX_IDENTITY_BYTES: usize = 256;
 const MAX_NODE_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
+const MAX_INFLIGHT_OBSERVATIONS: usize = 1_000_000;
 
 #[derive(Debug, Clone)]
 pub struct NodeFileConfig {
@@ -28,6 +30,7 @@ pub struct NodeFileConfig {
     parser_schema_version: String,
     max_payload_bytes: usize,
     poll_interval: Duration,
+    max_inflight_observations: usize,
 }
 
 impl NodeFileConfig {
@@ -42,6 +45,31 @@ impl NodeFileConfig {
         max_payload_bytes: usize,
         poll_interval: Duration,
     ) -> Result<Self, SourceError> {
+        Self::new_bounded(
+            path,
+            stream_name,
+            stream,
+            source_id,
+            source_version,
+            parser_schema_version,
+            max_payload_bytes,
+            poll_interval,
+            1,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bounded(
+        path: PathBuf,
+        stream_name: impl Into<String>,
+        stream: NodeStreamKind,
+        source_id: SourceId,
+        source_version: impl Into<String>,
+        parser_schema_version: impl Into<String>,
+        max_payload_bytes: usize,
+        poll_interval: Duration,
+        max_inflight_observations: usize,
+    ) -> Result<Self, SourceError> {
         let stream_name = stream_name.into();
         let source_version = source_version.into();
         let parser_schema_version = parser_schema_version.into();
@@ -52,6 +80,7 @@ impl NodeFileConfig {
             || !(1..=MAX_NODE_PAYLOAD_BYTES).contains(&max_payload_bytes)
             || poll_interval.is_zero()
             || Instant::now().checked_add(poll_interval).is_none()
+            || !(1..=MAX_INFLIGHT_OBSERVATIONS).contains(&max_inflight_observations)
         {
             return Err(SourceError::Configuration(
                 "invalid node file-source configuration".into(),
@@ -66,6 +95,7 @@ impl NodeFileConfig {
             parser_schema_version,
             max_payload_bytes,
             poll_interval,
+            max_inflight_observations,
         })
     }
 
@@ -119,16 +149,26 @@ impl NodeReceiveClock for SystemNodeClock {
 #[derive(Debug, Clone)]
 pub struct NodeQuarantineRecord {
     cursor: SourceCursor,
+    observation_class: ObservationClass,
+    received: ReceiveTimestamps,
     payload: Bytes,
     content_hash: blake3::Hash,
     reason_code: &'static str,
 }
 
 impl NodeQuarantineRecord {
-    pub(super) fn new(cursor: SourceCursor, payload: Bytes, reason_code: &'static str) -> Self {
+    pub(super) fn new(
+        cursor: SourceCursor,
+        observation_class: ObservationClass,
+        received: ReceiveTimestamps,
+        payload: Bytes,
+        reason_code: &'static str,
+    ) -> Self {
         let content_hash = blake3::hash(&payload);
         Self {
             cursor,
+            observation_class,
+            received,
             payload,
             content_hash,
             reason_code,
@@ -138,6 +178,16 @@ impl NodeQuarantineRecord {
     #[must_use]
     pub const fn cursor(&self) -> &SourceCursor {
         &self.cursor
+    }
+
+    #[must_use]
+    pub const fn observation_class(&self) -> ObservationClass {
+        self.observation_class
+    }
+
+    #[must_use]
+    pub const fn received(&self) -> ReceiveTimestamps {
+        self.received
     }
 
     #[must_use]
@@ -168,9 +218,18 @@ pub struct NodeLineFileSource<C = SystemNodeClock> {
     active: OpenNodeFile,
     read_offset: u64,
     durable_cursor: Option<SourceCursor>,
-    pending_emitted_cursor: Option<SourceCursor>,
+    pending_emitted_cursors: VecDeque<SourceCursor>,
     pending_quarantine: Option<PendingQuarantine>,
+    partial_line: bool,
     clock: C,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeLineTailState {
+    active_cursor_epoch: String,
+    durable_cursor: Option<SourceCursor>,
+    unread_bytes: u64,
+    partial_line: bool,
 }
 
 impl NodeLineFileSource<SystemNodeClock> {
@@ -207,18 +266,19 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
             active,
             read_offset,
             durable_cursor,
-            pending_emitted_cursor: None,
+            pending_emitted_cursors: VecDeque::new(),
             pending_quarantine: None,
+            partial_line: false,
             clock,
         })
     }
 
     pub fn acknowledge_durable(&mut self, cursor: &SourceCursor) -> Result<(), SourceError> {
-        if self.pending_emitted_cursor.as_ref() != Some(cursor) {
+        if self.pending_emitted_cursors.front() != Some(cursor) {
             return Err(SourceError::CursorRegression);
         }
         self.durable_cursor = Some(cursor.clone());
-        self.pending_emitted_cursor = None;
+        self.pending_emitted_cursors.pop_front();
         Ok(())
     }
 
@@ -245,6 +305,16 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
             .map(|pending| &pending.record)
     }
 
+    pub fn tail_state(&self) -> Result<NodeLineTailState, SourceError> {
+        let size = self.same_identity_size()?;
+        Ok(NodeLineTailState {
+            active_cursor_epoch: self.active.epoch.clone(),
+            durable_cursor: self.durable_cursor.clone(),
+            unread_bytes: size.saturating_sub(self.read_offset),
+            partial_line: self.partial_line,
+        })
+    }
+
     async fn handle_complete_line(
         &mut self,
         payload: Vec<u8>,
@@ -254,13 +324,21 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
         let cursor = SourceCursor::new(self.active.epoch.clone(), end_offset)
             .map_err(|_| SourceError::MalformedPayload("node cursor is invalid".into()))?;
         let bytes = Bytes::from(payload);
+        self.partial_line = false;
+        let received = self.clock.now()?;
         let parsed = parse_off_thread(self.config.stream, bytes.clone()).await;
         context.check()?;
         let parsed = match parsed {
             Ok(parsed) => parsed,
             Err(error @ (SourceError::MalformedPayload(_) | SourceError::SchemaDrift(_))) => {
                 self.pending_quarantine = Some(PendingQuarantine {
-                    record: NodeQuarantineRecord::new(cursor, bytes, error.reason_code()),
+                    record: NodeQuarantineRecord::new(
+                        cursor,
+                        self.config.stream.observation_class(),
+                        received,
+                        bytes,
+                        error.reason_code(),
+                    ),
                     error: error.clone(),
                 });
                 return Err(error);
@@ -272,7 +350,7 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
             self.config.source_version.clone(),
             parsed.observation_class(),
             cursor.clone(),
-            self.clock.now()?,
+            received,
             self.config.parser_schema_version.clone(),
             parsed.into_payload(),
             Vec::<ParseWarning>::new(),
@@ -280,7 +358,7 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
         )
         .map_err(|_| SourceError::MalformedPayload("node observation is invalid".into()))?;
         self.read_offset = end_offset;
-        self.pending_emitted_cursor = Some(cursor);
+        self.pending_emitted_cursors.push_back(cursor);
         Ok(observation)
     }
 
@@ -323,7 +401,7 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
                         self.config.max_payload_bytes,
                     )?;
                     self.read_offset = 0;
-                    self.pending_emitted_cursor = None;
+                    self.partial_line = false;
                     Ok(true)
                 }
                 LineRead::Complete { .. } => Ok(false),
@@ -340,6 +418,28 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
     }
 }
 
+impl NodeLineTailState {
+    #[must_use]
+    pub fn active_cursor_epoch(&self) -> &str {
+        &self.active_cursor_epoch
+    }
+
+    #[must_use]
+    pub const fn durable_cursor(&self) -> Option<&SourceCursor> {
+        self.durable_cursor.as_ref()
+    }
+
+    #[must_use]
+    pub const fn unread_bytes(&self) -> u64 {
+        self.unread_bytes
+    }
+
+    #[must_use]
+    pub const fn partial_line(&self) -> bool {
+        self.partial_line
+    }
+}
+
 #[async_trait]
 impl<C: NodeReceiveClock> BlockSource for NodeLineFileSource<C> {
     async fn next_observation(
@@ -351,7 +451,7 @@ impl<C: NodeReceiveClock> BlockSource for NodeLineFileSource<C> {
             if let Some(pending) = &self.pending_quarantine {
                 return Err(pending.error.clone());
             }
-            if self.pending_emitted_cursor.is_some() {
+            if self.pending_emitted_cursors.len() >= self.config.max_inflight_observations {
                 return Err(SourceError::BackpressureTimeout);
             }
             if self.same_identity_size()? < self.read_offset {
@@ -369,6 +469,7 @@ impl<C: NodeReceiveClock> BlockSource for NodeLineFileSource<C> {
                         .await;
                 }
                 LineRead::EndOfFile | LineRead::Partial => {
+                    self.partial_line = matches!(state, LineRead::Partial);
                     if self.rotate_if_ready(state)? {
                         continue;
                     }

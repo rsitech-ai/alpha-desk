@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-07-29
+Updated: 2026-08-03
 
 This is the evidence ledger for the current working repository. The approved design and stage plans describe the target system; unchecked plan items are not proof that work is absent, and checked items alone would not be proof that a gate passed. A stage is complete only when its required tests, evidence record, approvals, and signed tag verify.
 
@@ -17,7 +17,7 @@ This is the evidence ledger for the current working repository. The approved des
 | Stage | Current status | What exists | What is still required |
 | --- | --- | --- | --- |
 | 0 — Foundations | Local implementation checks and Compose smoke pass; gate `HOLD` | Workspace/toolchains, exact domain types, identifiers, Protobuf contracts, deterministic fixtures, telemetry/provenance, architecture checks, supply-chain policy, dependency stack, deployment scaffolding, gate tooling, concurrent child-output draining, and owned-resource cleanup proof | Replace placeholder trust identities; obtain second-builder, CI, reviewer, approval, clean evidence-commit, and signed-tag evidence |
-| 1 — Truth layer | Empty committed-block runtime and one-way failover are synthetic-source proven; stage not passed | Validated byte-preserving observations, strict primary/independent topology, crash-safe hash-chained per-source spools, exact-height create-once failover state, bounded one-record-at-a-time spool verification/replay and central canonical drain, primary and independent node-directory adapters, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive with bounded raw batches, raw-segment provenance and parity, archive-before-journal-before-JetStream-before-cursor coordination, reconnecting PostgreSQL/JetStream sessions, absolute and percentage disk gates, V3 active-source/failover/backlog/capacity status, bounded staggered reconnect backoff, owned runtime lifecycle, restart and no-failback E2E, PostgreSQL/NATS outage-recovery E2E, and bounded synthetic soak evidence | Qualified action-bearing committed mapping and operator corpus, separately operated independent-source qualification, recovery/operator/public/historical transports, overlap reconciliation and explicit failback procedure, real historical upcasts, crash-failpoint matrix, loopback health/metrics, multi-hour soak, production TLS/identity/replicated JetStream qualification, and signed gate |
+| 1 — Truth layer | M3A auxiliary acquisition is repo-ready; empty committed-block runtime and one-way failover are synthetic-source proven; stage not passed | Validated byte-preserving observations, strict primary/independent topology, crash-safe hash-chained per-source spools, exact-height create-once failover state, bounded spool verification/replay and central canonical drain, primary and independent node-directory adapters, active bounded NodeLine adapters, archive-before-ACK auxiliary checkpoints and verified hot-spool pruning, V4 auxiliary health/cursor/quarantine status, empty committed-block mapping, exhaustive source-trust admission, deterministic canonical identity, bounded sequencer, canonical/raw Parquet archive with bounded raw batches, archive-before-journal-before-JetStream-before-cursor coordination, reconnecting PostgreSQL/JetStream sessions, disk gates, owned runtime lifecycle, committed-source restart/failover/outage E2E, and bounded synthetic soak evidence | Run the updated process-level NodeLine restart/soak harness; implement idempotent 128–512 MiB raw Parquet packing/compaction with object/catalog/inode limits; capture and approve the same-build private operator corpus; qualify action-bearing committed mapping and independent operation; add crash/restore/scrub, multi-hour/24-hour soak, production transport/identity, and signed gate evidence |
 | 2 — State reconstruction | Block-atomic, local checkpoint, serial replay, exact canonical trade facts, and exact canonical order lifecycle implemented; stage not passed | Pure synchronous reducer contract, default-deny kind/schema ownership, contiguous committed watermark, deterministic canonical state bytes and hash, duplicate idempotence, whole-block rollback, bounded mutations, immutable state deltas, exact state-image restore, content-derived canonical checkpoint manifests bound to archive/schema/reducer identity, descriptor-relative private manifest-last local checkpoint publication/load, immutable-manifest serial replay with preflight, deterministic receipts, exact trade facts with ordinal participant legs and stored quantity-symmetry reconciliation, exact default-deny order lifecycle with hash-linked transitions, bounded synthetic trade/order replay and checkpoint evidence, and focused adversarial tests | Qualified complete action-bearing account/position/balance/fee/funding/transfer reducers, RocksDB atomic batch/checkpoints, production replay service runtime, correction handling, external account/book reconciliation, deployed-source rebuild evidence, and signed gate |
 | 3 — Wallet/entity intelligence | Scaffold-only | Workspace crate boundaries | Wallet metrics, entity graph, attribution, confidence, and signed gate |
 | 4 — Market intelligence/signals | Scaffold-only | Workspace crate boundaries | Feature families, signal lifecycle, health gating, evaluation, and signed gate |
@@ -61,20 +61,25 @@ bounded batches, and capture configuration rejects segment targets above
 512 MiB. Local acquisition and canonical drain are independent owned tasks:
 PostgreSQL or NATS failure degrades readiness without stopping fsynced source
 capture, and the drain reconnects from durable PostgreSQL progress.
-The atomic V3 status distinguishes active-source fsynced capture backlog from
+The atomic V4 status distinguishes active-source fsynced capture backlog from
 downstream publication plans, reports source class and bounded source health,
 records the immutable failover height/reason without source paths or operator
 identity, reports the oldest pending capture height and lowest spool/archive
 free-space percentage, warns below 20% free, and rejects new writes below 10%
-or the configured absolute reserve. Independent operation can be yellow-ready
-but can never become green.
+or the configured absolute reserve. It also exposes each configured NodeLine
+source's durable and active epochs, byte lag, partial-line state, cumulative
+fsynced count, unarchived count, quarantine cause, current failure, and
+qualification state. Independent operation can be yellow-ready but can never
+become green.
 
 `hl-capture fixture-replay` retains a deterministic coordinator-only lane. The
 self-contained production-entrypoint E2E uses `hl-capture run`, restarts it once
-against the same spool, archive, journal, and stream, and requires exact
-spool/raw/block/publication parity. The soak wrapper retains bounded JSON
-evidence. Both lanes are explicitly synthetic and do not qualify deployed-node
-source semantics.
+against the same spools, auxiliary checkpoint, archive, journal, and stream,
+and requires exact spool/raw/block/publication parity plus V4 auxiliary cursor
+recovery. The updated harness is statically validated but has not yet run in
+this checkout because the host data volume is full and Docker is unavailable.
+The soak wrapper retains bounded JSON evidence. Both lanes are explicitly
+synthetic and do not qualify deployed-node source semantics.
 
 The primary-node adapter remains focused-test and synthetic-runtime proven
 against normalized official examples, not qualified against operator node
@@ -147,6 +152,14 @@ It does not establish committed history or production node compatibility.
 
 ## Current release blockers
 
+- `blocked:raw-archive-compaction` — auxiliary group commits intentionally
+  create small immutable Parquet objects so ACK remains archive-backed. The
+  required idempotent 128–512 MiB packing/compaction, bounded catalog/object/
+  inode growth, upgrade recovery, scrub, and 24-hour soak are not implemented.
+- `blocked:local-runtime-evidence` — the updated NodeLine process E2E/soak is
+  ready to execute, but this host currently reports the data volume as full
+  and the Docker daemon is unavailable. No new M3 runtime or long-soak claim
+  is made.
 - `blocked:license-decision` — Apache-2.0 is current; any dual-license change requires owner/legal approval.
 - `blocked:external` — trusted identities, signed approvals, a second builder, hosted CI evidence, tags, canonical organization repository creation, and publication.
 - `blocked:public-history` — the current recovery/engineering history contains transport refs and author metadata that require a deliberate sanitized export decision.
@@ -160,6 +173,17 @@ It does not establish committed history or production node compatibility.
 No validated secret exposure was found by the 2026-07-28 local audit, but normal secret scanning is not sufficient to approve encoded archives or every remote ref for publication.
 
 ## Latest local evidence
+
+- 2026-08-03 M3A affected-package gate:
+  `cargo +1.97.1 test -p storage-ports -p canonical-archive -p hl-capture
+  --all-targets --all-features --locked --offline` passed with zero failures.
+- 2026-08-03 strict M3A gate:
+  `cargo +1.97.1 clippy -p storage-ports -p canonical-archive -p hl-capture
+  --all-targets --all-features --locked --offline -- -D warnings`, Rustfmt, and
+  `git diff --check` passed. Independent review verdict: GO for the bounded
+  repo-ready slice, HOLD for runtime/production/full-spec readiness.
+- The updated `capture-e2e.sh` and soak wrapper pass shell syntax and ShellCheck.
+  They have not produced a new process report on this host.
 
 - `just state-replay-position-e2e 30 12 4` — retained private synthetic
   position report proves exact opening-checkpoint state, reversal/funding/
@@ -249,13 +273,16 @@ prove a running Alpha Desk product:
 - `just spool-verify`
 - `cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time=60`
 
-The latest V2 E2E reports are retained under ignored
+The latest executed V2 E2E reports are retained under ignored
 `target/evidence/capture-e2e/`; restart and soak reports declare
 `"mode": "synthetic-node-source"`, while the fault report declares
 `"mode": "synthetic-node-source-dependency-outage"` and the failover report
 declares `"mode": "synthetic-dual-source-failover"`. Every report retains
 `"live_source_qualified": false`, the V3 status schema, final disk capacity,
-and final active-source backlog.
+and final active-source backlog. The revised harness emits V3 evidence reports
+containing V4 auxiliary status, checkpoint recovery, cumulative auxiliary
+counts, and the pruned hot-spool summary, but no such revised report is claimed
+until the blocked process run completes.
 The archive summaries require raw observation parity with the spool and
 canonical block count. The Compose smoke verified NATS, ClickHouse, PostgreSQL, MinIO, the OpenTelemetry
 Collector, and VictoriaMetrics, then removed its uniquely owned containers,

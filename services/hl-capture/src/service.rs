@@ -14,7 +14,7 @@ use crate::coordinator::{
 };
 use crate::progress::ReconnectingPostgresProgressStore;
 use crate::secret::read_protected_secret;
-use crate::source_runtime::committed_node_tasks;
+use crate::source_runtime::{auxiliary_node_task, committed_node_tasks};
 use crate::{
     AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig,
     CaptureRuntimeError, OwnedTask, RawSegmentArchive, StatusWriter, synthetic_fixture_block,
@@ -56,11 +56,21 @@ impl ConnectedCapture {
             Arc::clone(&self.coordinator),
             Arc::clone(&self.raw_archive),
             Arc::clone(&self.failover_store),
-            health,
+            Arc::clone(&health),
             cancellation.child_token(),
         )
         .map_err(|_| CaptureRuntimeError::InvalidConfig)?;
         self.infrastructure_tasks.extend(source_tasks);
+        if let Some(auxiliary_task) = auxiliary_node_task(
+            &self.config,
+            Arc::clone(&self.raw_archive),
+            health,
+            cancellation.child_token(),
+        )
+        .map_err(|_| CaptureRuntimeError::InvalidConfig)?
+        {
+            self.infrastructure_tasks.push(auxiliary_task);
+        }
         self.runtime
             .run(cancellation, self.infrastructure_tasks)
             .await

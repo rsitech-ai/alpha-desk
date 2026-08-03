@@ -8,5 +8,6 @@ mod node_stream;
 
 pub use node_files::{NodeBlockDirectoryConfig, NodeBlockDirectorySource};
 pub use node_stream::{
-    NodeFileConfig, NodeLineFileSource, NodeQuarantineRecord, NodeReceiveClock, SystemNodeClock,
+    NodeFileConfig, NodeLineFileSource, NodeLineTailState, NodeQuarantineRecord, NodeReceiveClock,
+    SystemNodeClock,
 };
