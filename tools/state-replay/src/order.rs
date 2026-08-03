@@ -64,6 +64,7 @@ pub fn run_order_e2e(config: &OrderRunConfig) -> Result<OrderEvidence, FixtureRu
         config.block_count,
         config.checkpoint_after,
         config.iterations,
+        1,
         2,
     )?;
     let output_root = create_private_output_root(&config.output_root)?;

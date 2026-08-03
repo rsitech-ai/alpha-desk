@@ -739,3 +739,13 @@ qualification is `synthetic_account_flow_contract_proven`; position, episode,
 liquidation, settlement, funding attribution, authoritative opening balance,
 venue reconciliation, margin models, liquidation price, book, signal,
 execution, Stage 1/2, and deployed/live source remain false.
+
+The separate retained `state-replay position-e2e` report schema is
+`hyperliquid-alpha-desk/state-replay-position-e2e-report/v1`. Its synthetic
+fixture checkpoints exact two-sided trade-anchored quantity and episode state,
+then replays reversal, attributed funding, liquidation, conservative backstop
+interruption, source-observed settlement PnL, and explicit recovery anchors.
+Only `synthetic_position_contract_proven` is true. Deployed/live source,
+authoritative position/balance, reconciliation, protocol entry-price and
+closed-PnL parity, fees, TWAP, backstop basis, margin, liquidation price, book,
+signal, execution, Stage 1/2, and live-product qualification remain false.

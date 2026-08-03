@@ -712,6 +712,10 @@ on them.
   funding-to-episode attribution, backstop, liquidation, or settlement
   behavior; replacement-plan Task 8 owns those scenarios.
 
+> **Completed follow-on (2026-08-03):** Replacement-plan Task 8 adds a
+> separate position-e2e v1 report without changing the account-e2e v1 schema,
+> labels, ordered fields, CLI stdout, or rejection behavior.
+
 - [x] **Step 2: Run red**
 
   ```bash

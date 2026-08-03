@@ -1904,11 +1904,11 @@ labels, exact CLI stdout, and unchanged rejection contracts. Literal report
 byte equality across runs is not required because `replay_elapsed_micros` is
 runtime-dependent.
 
-- [ ] Write RED tests for the report/CLI/compatibility contract, exact suffix
+- [x] Write RED tests for the report/CLI/compatibility contract, exact suffix
   admission, decoded semantics, rejection reasons/rollback, unsafe/existing
   output refusal, and recursive `0700` directory / `0600` file permissions.
-- [ ] Run the focused RED suite and retain the missing-command/module signal.
-- [ ] Implement the smallest separate position runner; do not copy archive,
+- [x] Run the focused RED suite and retain the missing-command/module signal.
+- [x] Implement the smallest separate position runner; do not copy archive,
   checkpoint, output, or work-boundary logic that can be safely shared.
 - [ ] Run the full state-replay package, ledger/replay packages, strict
   all-target/all-feature Clippy, formatting, `just generated`, `just deny`, a
@@ -2075,6 +2075,12 @@ fixed.
   rejection precedence, separates full from segmented receipt proof, and
   accounts every replay path under the shared checked work limit. This is a
   design gate only; implementation and runtime evidence remain open.
+- 2026-08-03: Task 8 GREEN adds the separate position-e2e v1 runner without
+  changing account-e2e v1. Focused and full state-replay tests, strict package
+  Clippy, formatting, diff checks, and a retained `30/12/4` quick recipe pass.
+  This is repo-ready synthetic contract evidence only; broad repository gates,
+  independent implementation review, and the production source/commit join
+  remain open.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.

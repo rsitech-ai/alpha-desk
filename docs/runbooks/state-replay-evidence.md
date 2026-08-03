@@ -240,6 +240,30 @@ liquidation-price, book, signal, execution, Stage 1/2, deployed-source, and
 live-source qualification remain false. Task 8 owns the excluded risk and
 position scenarios.
 
+## Canonical position evidence
+
+Run the bounded synthetic composite-position proof with:
+
+```bash
+just state-replay-position-e2e 30 12 4
+```
+
+The runner creates a private `0700` directory below
+`target/evidence/state-replay-position/` and hardens every retained file to
+`0600`. It refuses existing or unsafe output. Configuration must leave seven
+suffix blocks after the opening-trade checkpoint. The report retains repeated
+full-range receipt equality, byte-identical checkpoint load, segmented suffix
+receipts, exact final state equality, decoded semantic checks, the rejected
+`-2.75` settlement-PnL variant, and duplicate-trade/start-anchor/schema atomic
+rejection reports.
+
+The proof is synthetic only. Preserve the full evidence directory, including
+the main archive, checkpoint generations, semantic variant, three rejection
+archives, and report. A positive report does not qualify deployed/live source,
+authoritative balances or positions, venue reconciliation, protocol entry
+price or closed-PnL parity, fee/TWAP completeness, backstop basis, margin,
+liquidation price, book, signal, execution, Stage 1/2, or a live product.
+
 ## Existing operator archive
 
 Run the same deterministic rebuild and checkpoint-resume proof against an

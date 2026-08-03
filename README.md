@@ -73,6 +73,7 @@ just state-replay-e2e
 just state-replay-trade-e2e
 just state-replay-order-e2e
 just state-replay-market-e2e
+just state-replay-position-e2e
 ```
 
 `just verify` checks the workspace shape, formatting, clippy, architecture boundaries, dependency policy, Rust tests, and Swift tests. It does not start a product runtime.
@@ -111,6 +112,16 @@ profile. It proves only `synthetic_account_flow_contract_proven`; it does not
 qualify positions, episodes, liquidations, settlement, funding attribution,
 margin models, authoritative balances, deployed/live source, Stage 1/2, book,
 signal, or execution semantics.
+`just state-replay-position-e2e` retains the separate synthetic canonical
+position proof: an enriched opening checkpoint followed by reversal, funding,
+liquidation, backstop interruption, settlement, and exact source re-anchor.
+It checks repeated full replay, segmented checkpoint resume, literal decoded
+position/episode/liquidation state, a settlement-PnL semantic mutation, and
+three atomic rejection boundaries. Use `just state-replay-position-soak` for
+the longer bounded profile. This does not qualify deployed/live source,
+authoritative positions or balances, venue reconciliation, protocol entry
+price, source closed PnL, fees, TWAP, backstop basis, margin, liquidation
+price, Stage 1/2, book, signal, execution, or a live product.
 For an existing canonical archive, use `just state-replay-archive-e2e` or
 `just state-replay-archive-soak` with an explicit chain, inclusive range, and
 manifest-boundary checkpoint height. Operator-archive evidence remains

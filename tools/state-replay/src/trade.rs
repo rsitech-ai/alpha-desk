@@ -8,6 +8,7 @@ pub fn run_trade_e2e(config: &TradeRunConfig) -> Result<TradeEvidence, FixtureRu
         config.block_count,
         config.checkpoint_after,
         config.iterations,
+        1,
         2,
     )?;
     let output_root = create_private_output_root(&config.output_root)?;
