@@ -2,6 +2,7 @@
 
 mod account;
 mod checkpoint;
+mod composite;
 mod error;
 mod ledger;
 mod market;
@@ -20,6 +21,9 @@ pub use account::{
     VaultPrincipalFlowCurrentRecordV1, VaultShareFlowCurrentRecordV1,
 };
 pub use checkpoint::{CheckpointArtifact, CheckpointCompatibility};
+pub use composite::{
+    CanonicalStateComponentVersionV1, CanonicalStateError, CanonicalStateReducerV1,
+};
 pub use error::{CheckpointError, LedgerError, ReducerError, StateImageError, StateKeyError};
 pub use ledger::{
     ApplyOutcome, CanonicalLedger, LedgerLimits, MAX_BLOCK_DELTA_ENTRIES,
