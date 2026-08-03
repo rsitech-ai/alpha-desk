@@ -72,22 +72,8 @@ impl SpoolRecord {
 }
 
 pub(crate) fn encode_record(observation: &SourceObservation) -> Result<Vec<u8>, SpoolError> {
-    if !observation.warnings().is_empty() {
-        return Err(SpoolError::UnsupportedWarnings);
-    }
-    if observation.cursor().epoch().len() > MAX_IDENTITY_BYTES
-        || observation.parser_schema_version().len() > MAX_IDENTITY_BYTES
-        || observation.payload().len() > MAX_PAYLOAD_BYTES
-    {
-        return Err(SpoolError::SizeOverflow);
-    }
-    let mut body = Vec::with_capacity(
-        MIN_BODY_BYTES
-            .checked_add(observation.cursor().epoch().len())
-            .and_then(|length| length.checked_add(observation.parser_schema_version().len()))
-            .and_then(|length| length.checked_add(observation.payload().len()))
-            .ok_or(SpoolError::SizeOverflow)?,
-    );
+    let body_capacity = validate_record(observation)?;
+    let mut body = Vec::with_capacity(body_capacity);
     push_text(&mut body, observation.cursor().epoch())?;
     body.extend_from_slice(&observation.cursor().offset().to_le_bytes());
     body.push(class_to_u8(observation.observation_class()));
@@ -105,9 +91,6 @@ pub(crate) fn encode_record(observation: &SourceObservation) -> Result<Vec<u8>, 
     let record_len = CRC_BYTES
         .checked_add(body.len())
         .ok_or(SpoolError::SizeOverflow)?;
-    if record_len > MAX_RECORD_BYTES {
-        return Err(SpoolError::SizeOverflow);
-    }
     let mut encoded = Vec::with_capacity(record_len + 4);
     encoded.extend_from_slice(
         &u32::try_from(record_len)
@@ -117,6 +100,30 @@ pub(crate) fn encode_record(observation: &SourceObservation) -> Result<Vec<u8>, 
     encoded.extend_from_slice(&crc32c::crc32c(&body).to_le_bytes());
     encoded.extend_from_slice(&body);
     Ok(encoded)
+}
+
+pub(crate) fn validate_record(observation: &SourceObservation) -> Result<usize, SpoolError> {
+    if !observation.warnings().is_empty() {
+        return Err(SpoolError::UnsupportedWarnings);
+    }
+    if !valid_text(observation.cursor().epoch())
+        || !valid_text(observation.parser_schema_version())
+        || observation.payload().len() > MAX_PAYLOAD_BYTES
+    {
+        return Err(SpoolError::SizeOverflow);
+    }
+    let body_len = MIN_BODY_BYTES
+        .checked_add(observation.cursor().epoch().len())
+        .and_then(|length| length.checked_add(observation.parser_schema_version().len()))
+        .and_then(|length| length.checked_add(observation.payload().len()))
+        .ok_or(SpoolError::SizeOverflow)?;
+    let record_len = CRC_BYTES
+        .checked_add(body_len)
+        .ok_or(SpoolError::SizeOverflow)?;
+    if record_len > MAX_RECORD_BYTES {
+        return Err(SpoolError::SizeOverflow);
+    }
+    Ok(body_len)
 }
 
 pub(crate) fn decode_record(framed: &[u8], record_offset: u64) -> Result<SpoolRecord, SpoolError> {
@@ -199,11 +206,7 @@ fn class_from_u8(value: u8) -> Option<ObservationClass> {
 }
 
 fn push_text(output: &mut Vec<u8>, value: &str) -> Result<(), SpoolError> {
-    if value.is_empty()
-        || value.len() > MAX_IDENTITY_BYTES
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
+    if !valid_text(value) {
         return Err(SpoolError::SizeOverflow);
     }
     output.extend_from_slice(
@@ -213,6 +216,13 @@ fn push_text(output: &mut Vec<u8>, value: &str) -> Result<(), SpoolError> {
     );
     output.extend_from_slice(value.as_bytes());
     Ok(())
+}
+
+fn valid_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_IDENTITY_BYTES
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 fn read_text(input: &[u8], cursor: &mut usize, record_offset: u64) -> Result<String, SpoolError> {

@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 
 use hl_protocol::{CursorTransition, SourceCursor};
 
-use super::header::SegmentHeaderV1;
+use super::header::SegmentHeader;
 use super::record::{SpoolRecord, decode_record};
 use super::{MAX_RECORD_BYTES, SpoolError, io_error};
 
 pub struct SpoolReader {
     path: PathBuf,
-    header: SegmentHeaderV1,
+    header: SegmentHeader,
     records_offset: u64,
 }
 
@@ -41,7 +41,7 @@ impl SpoolReader {
             .read(true)
             .open(&path)
             .map_err(|source| io_error("opening a spool segment", source))?;
-        let (header, records_offset) = SegmentHeaderV1::read_from(&mut file)?;
+        let (header, records_offset) = SegmentHeader::read_from(&mut file)?;
         Ok(Self {
             path,
             header,
@@ -50,14 +50,14 @@ impl SpoolReader {
     }
 
     #[must_use]
-    pub const fn header(&self) -> &SegmentHeaderV1 {
+    pub const fn header(&self) -> &SegmentHeader {
         &self.header
     }
 
     pub fn stream(&self) -> Result<SpoolRecordStream, SpoolError> {
         let mut file = File::open(&self.path)
             .map_err(|source| io_error("reopening a spool segment", source))?;
-        let (header, records_offset) = SegmentHeaderV1::read_from(&mut file)?;
+        let (header, records_offset) = SegmentHeader::read_from(&mut file)?;
         if header != self.header || records_offset != self.records_offset {
             return Err(SpoolError::InvalidHeader);
         }
@@ -86,7 +86,7 @@ impl SpoolReader {
     pub fn summarize(&self) -> Result<SpoolRecordSummary, SpoolError> {
         let mut file = File::open(&self.path)
             .map_err(|source| io_error("reopening a spool segment", source))?;
-        let (header, records_offset) = SegmentHeaderV1::read_from(&mut file)?;
+        let (header, records_offset) = SegmentHeader::read_from(&mut file)?;
         if header != self.header || records_offset != self.records_offset {
             return Err(SpoolError::InvalidHeader);
         }
@@ -165,7 +165,7 @@ impl SpoolRecordSummary {
 }
 
 pub fn validate_segment_bytes(input: &[u8]) -> Result<u64, SpoolError> {
-    let (_, mut cursor) = SegmentHeaderV1::read_from_slice(input)?;
+    let (_, mut cursor) = SegmentHeader::read_from_slice(input)?;
     let mut records = 0_u64;
     while cursor < input.len() {
         let record_offset = u64::try_from(cursor).map_err(|_| SpoolError::SizeOverflow)?;

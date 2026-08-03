@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use hl_protocol::{CursorTransition, SourceCursor, SourceObservation};
 
-use super::header::SegmentHeaderV1;
+use super::header::SegmentHeader;
 use super::manifest::{CloseReceipt, ClosedSegmentManifestV1, ManifestFields, publish_manifest};
 use super::reader::scan_records;
 use super::record::encode_record;
@@ -33,7 +33,7 @@ pub struct AppendReceipt {
 pub struct SpoolWriter {
     file: File,
     segment_path: PathBuf,
-    header: SegmentHeaderV1,
+    header: SegmentHeader,
     durability: DurabilityPolicy,
     pending_records: u32,
     pending_since: Option<Instant>,
@@ -47,7 +47,7 @@ pub struct SpoolWriter {
 impl SpoolWriter {
     pub fn create(
         directory: impl AsRef<Path>,
-        header: SegmentHeaderV1,
+        header: SegmentHeader,
         durability: DurabilityPolicy,
     ) -> Result<Self, SpoolError> {
         validate_durability(durability)?;
@@ -101,7 +101,7 @@ impl SpoolWriter {
             .write(true)
             .open(&segment_path)
             .map_err(|source| io_error("opening a recovered spool segment", source))?;
-        let (header, records_offset) = SegmentHeaderV1::read_from(&mut file)?;
+        let (header, records_offset) = SegmentHeader::read_from(&mut file)?;
         if segment_path.file_name().and_then(std::ffi::OsStr::to_str)
             != Some(segment_name(header.segment_sequence()).as_str())
         {
@@ -143,7 +143,7 @@ impl SpoolWriter {
     }
 
     #[must_use]
-    pub const fn header(&self) -> &SegmentHeaderV1 {
+    pub const fn header(&self) -> &SegmentHeader {
         &self.header
     }
 

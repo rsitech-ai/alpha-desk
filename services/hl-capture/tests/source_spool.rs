@@ -1,12 +1,16 @@
 use bytes::Bytes;
 use domain_types::SourceId;
 use hl_capture::spool::{
-    DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy,
+    DurabilityPolicy, SegmentHeaderV1, SourceSpool, SourceSpoolAppendDisposition,
+    SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy, SpoolWriter,
 };
 use hl_protocol::{
     ObservationClass, ParseWarning, ReceiveTimestamps, SourceCursor, SourceObservation,
 };
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::time::Duration;
+use storage_ports::CursorPolicy;
 use tempfile::TempDir;
 
 fn config(root: &TempDir, source_version: &str) -> SourceSpoolConfig {
@@ -18,6 +22,20 @@ fn config(root: &TempDir, source_version: &str) -> SourceSpoolConfig {
         [0x31; 32],
         DurabilityPolicy::FsyncEveryRecord,
         SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+    )
+    .unwrap()
+}
+
+fn byte_config(root: &TempDir) -> SourceSpoolConfig {
+    SourceSpoolConfig::try_new_with_cursor_policy(
+        root.path().join("primary-node"),
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        "spool-v1",
+        [0x31; 32],
+        DurabilityPolicy::FsyncEveryRecord,
+        SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+        CursorPolicy::MonotonicByteOffset,
     )
     .unwrap()
 }
@@ -67,18 +85,574 @@ fn source_spool_rotates_with_a_hash_chained_manifest() {
 }
 
 fn observation(offset: u64) -> SourceObservation {
+    observation_with("node-directory-epoch", offset, format!("payload-{offset}"))
+}
+
+fn observation_with(epoch: &str, offset: u64, payload: impl Into<Bytes>) -> SourceObservation {
     SourceObservation::new(
         SourceId::new("primary-node").unwrap(),
         "hyperliquid-node-v1",
         ObservationClass::CommittedBlock,
-        SourceCursor::new("node-directory-epoch", offset).unwrap(),
+        SourceCursor::new(epoch, offset).unwrap(),
         ReceiveTimestamps::new(1_785_240_000_000_000 + offset as i64, offset).unwrap(),
         "node-v1",
-        Bytes::from(format!("payload-{offset}")),
+        payload.into(),
         Vec::new(),
         1024,
     )
     .unwrap()
+}
+
+fn byte_observation(offset: u64) -> SourceObservation {
+    byte_observation_with("node-directory-epoch", offset, format!("payload-{offset}"))
+}
+
+fn byte_observation_with(epoch: &str, offset: u64, payload: impl Into<Bytes>) -> SourceObservation {
+    byte_observation_with_warnings(epoch, offset, payload, Vec::new())
+}
+
+fn byte_observation_with_warnings(
+    epoch: &str,
+    offset: u64,
+    payload: impl Into<Bytes>,
+    warnings: Vec<ParseWarning>,
+) -> SourceObservation {
+    SourceObservation::new(
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        ObservationClass::AuxiliaryLedger,
+        SourceCursor::new(epoch, offset).unwrap(),
+        ReceiveTimestamps::new(1_785_240_000_000_000 + offset as i64, offset).unwrap(),
+        "node-v1",
+        payload.into(),
+        warnings,
+        1024,
+    )
+    .unwrap()
+}
+
+#[test]
+fn byte_offsets_receive_physical_local_sequences_and_resume_after_restart() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+
+    for (offset, expected_sequence) in [(17, 1), (49, 2), (121, 3)] {
+        let appended = spool
+            .append(&byte_observation(offset), 100 + expected_sequence)
+            .unwrap();
+        assert_eq!(appended.local_sequence().get(), expected_sequence as u64);
+        assert_eq!(
+            appended.disposition(),
+            SourceSpoolAppendDisposition::Appended
+        );
+    }
+    assert_eq!(spool.last_local_sequence().unwrap().get(), 3);
+    drop(spool);
+
+    let mut restarted = SourceSpool::open(byte_config(&root), 200).unwrap();
+    assert_eq!(restarted.last_local_sequence().unwrap().get(), 3);
+    assert_eq!(
+        restarted
+            .append(&byte_observation(233), 201)
+            .unwrap()
+            .local_sequence()
+            .get(),
+        4
+    );
+}
+
+#[test]
+fn byte_offset_duplicate_is_idempotent_but_conflicting_content_fails_closed() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    let original = byte_observation_with("node-directory-epoch", 17, Bytes::from_static(b"same"));
+    assert_eq!(
+        spool.append(&original, 101).unwrap().local_sequence().get(),
+        1
+    );
+
+    let duplicate = spool.append(&original, 102).unwrap();
+    assert_eq!(duplicate.local_sequence().get(), 1);
+    assert_eq!(
+        duplicate.disposition(),
+        SourceSpoolAppendDisposition::Duplicate
+    );
+    assert!(duplicate.durability_receipt().is_none());
+    assert!(duplicate.closed_segment().is_none());
+    assert_eq!(
+        SpoolReader::open(spool.active_segment_path())
+            .unwrap()
+            .read_all()
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(spool);
+
+    let mut restarted = SourceSpool::open(byte_config(&root), 200).unwrap();
+    assert_eq!(
+        restarted
+            .append(&original, 201)
+            .unwrap()
+            .local_sequence()
+            .get(),
+        1
+    );
+    let conflicting =
+        byte_observation_with("node-directory-epoch", 17, Bytes::from_static(b"different"));
+    let error = restarted
+        .append(&conflicting, 202)
+        .expect_err("same cursor with different bytes must fail");
+    assert!(matches!(error, SpoolError::CursorConflict));
+    assert_eq!(error.reason_code(), "spool.cursor_conflict");
+    assert_eq!(restarted.last_local_sequence().unwrap().get(), 1);
+}
+
+#[test]
+fn every_retained_byte_cursor_is_idempotent_after_restart_and_old_conflicts_fail_closed() {
+    let root = TempDir::new().unwrap();
+    let retained = [
+        byte_observation_with("node-directory-epoch", 17, "first"),
+        byte_observation_with("node-directory-epoch", 49, "second"),
+        byte_observation_with("node-directory-epoch", 121, "third"),
+    ];
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    for (index, observation) in retained.iter().enumerate() {
+        spool
+            .append(observation, 101 + i64::try_from(index).unwrap())
+            .unwrap();
+    }
+    drop(spool);
+
+    let mut restarted = SourceSpool::open(byte_config(&root), 200).unwrap();
+    for (index, observation) in retained.iter().enumerate() {
+        let duplicate = restarted
+            .append(observation, 201 + i64::try_from(index).unwrap())
+            .unwrap();
+        assert_eq!(
+            duplicate.local_sequence().get(),
+            u64::try_from(index + 1).unwrap()
+        );
+        assert_eq!(
+            duplicate.disposition(),
+            SourceSpoolAppendDisposition::Duplicate
+        );
+    }
+    let conflict = byte_observation_with("node-directory-epoch", 17, "changed");
+    assert!(matches!(
+        restarted.append(&conflict, 204),
+        Err(SpoolError::CursorConflict)
+    ));
+    assert_eq!(restarted.last_local_sequence().unwrap().get(), 3);
+    assert_eq!(
+        SpoolReader::open(restarted.active_segment_path())
+            .unwrap()
+            .read_all()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn warned_byte_cursor_duplicate_is_rejected_instead_of_losing_warning_evidence() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool
+        .append(
+            &byte_observation_with("node-directory-epoch", 17, "same"),
+            101,
+        )
+        .unwrap();
+    let warned = byte_observation_with_warnings(
+        "node-directory-epoch",
+        17,
+        "same",
+        vec![ParseWarning::new("test-warning", "must survive").unwrap()],
+    );
+
+    assert!(matches!(
+        spool.append(&warned, 102),
+        Err(SpoolError::UnsupportedWarnings)
+    ));
+    assert_eq!(spool.last_local_sequence().unwrap().get(), 1);
+}
+
+#[test]
+fn byte_offset_epoch_change_rotates_before_append_and_keeps_sequence() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool
+        .append(&byte_observation_with("epoch-a", 49, "first"), 101)
+        .unwrap();
+
+    let second = spool
+        .append(&byte_observation_with("epoch-b", 7, "second"), 102)
+        .unwrap();
+
+    assert_eq!(second.local_sequence().get(), 2);
+    assert!(second.closed_segment().is_some());
+    assert_eq!(spool.verified_segment_paths().len(), 2);
+    let first_records = SpoolReader::open(&spool.verified_segment_paths()[0])
+        .unwrap()
+        .read_all()
+        .unwrap();
+    let second_records = SpoolReader::open(&spool.verified_segment_paths()[1])
+        .unwrap()
+        .read_all()
+        .unwrap();
+    assert_eq!(first_records[0].cursor().epoch(), "epoch-a");
+    assert_eq!(second_records[0].cursor().epoch(), "epoch-b");
+    drop(spool);
+
+    let mut reopened = SourceSpool::open(byte_config(&root), 200).unwrap();
+    assert_eq!(reopened.last_local_sequence().unwrap().get(), 2);
+    assert_eq!(reopened.last_durable_cursor().unwrap().epoch(), "epoch-b");
+    assert_eq!(reopened.last_durable_cursor().unwrap().offset(), 7);
+    assert_eq!(reopened.cursor_policy(), CursorPolicy::MonotonicByteOffset);
+    let old_epoch_duplicate = reopened
+        .append(&byte_observation_with("epoch-a", 49, "first"), 201)
+        .unwrap();
+    assert_eq!(
+        old_epoch_duplicate.disposition(),
+        SourceSpoolAppendDisposition::Duplicate
+    );
+    assert_eq!(old_epoch_duplicate.local_sequence().get(), 1);
+    assert!(matches!(
+        reopened.append(&byte_observation_with("epoch-a", 100, "reused"), 202),
+        Err(SpoolError::CursorRegression)
+    ));
+}
+
+#[test]
+fn byte_offset_policy_is_bound_into_a_distinct_bounded_spool_identity() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool.append(&byte_observation(17), 101).unwrap();
+    let header = SpoolReader::open(spool.active_segment_path()).unwrap();
+    assert_ne!(header.header().schema_version(), "spool-v1");
+    assert!(header.header().schema_version().len() <= 256);
+    assert_eq!(
+        header.header().cursor_policy(),
+        CursorPolicy::MonotonicByteOffset
+    );
+    assert_eq!(
+        &std::fs::read(spool.active_segment_path()).unwrap()[..8],
+        b"HLSPV002"
+    );
+    let persisted_policy_identity = header.header().schema_version().to_owned();
+    drop(spool);
+
+    let wrong_policy = SourceSpool::open(config(&root, "hyperliquid-node-v1"), 102)
+        .expect_err("cursor policy mismatch must fail closed");
+    assert!(matches!(wrong_policy, SpoolError::SourceMismatch));
+
+    let alias_config = SourceSpoolConfig::try_new(
+        root.path().join("primary-node"),
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        persisted_policy_identity.clone(),
+        [0x31; 32],
+        DurabilityPolicy::FsyncEveryRecord,
+        SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+    )
+    .expect("legacy constructors must retain every previously accepted schema identity");
+    assert!(matches!(
+        SourceSpool::open(alias_config, 103),
+        Err(SpoolError::CursorPolicyMismatch)
+    ));
+
+    let legacy_root = TempDir::new().unwrap();
+    let legacy_alias = SourceSpoolConfig::try_new(
+        legacy_root.path().join("legacy"),
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        persisted_policy_identity.clone(),
+        [0x31; 32],
+        DurabilityPolicy::FsyncEveryRecord,
+        SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+    )
+    .expect("reserved-prefix schemas remain valid under the legacy constructor");
+    let legacy = SourceSpool::open(legacy_alias, 104).unwrap();
+    assert_eq!(
+        SpoolReader::open(legacy.active_segment_path())
+            .unwrap()
+            .header()
+            .schema_version(),
+        persisted_policy_identity
+    );
+    assert!(!legacy_root.path().join("legacy/.cursor-policy-v1").exists());
+}
+
+#[test]
+fn byte_offset_policy_requires_per_record_fsync() {
+    let root = TempDir::new().unwrap();
+    let error = SourceSpoolConfig::try_new_with_cursor_policy(
+        root.path().join("primary-node"),
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        "spool-v1",
+        [0x31; 32],
+        DurabilityPolicy::FsyncEvery {
+            max_records: 2,
+            max_delay: Duration::from_secs(1),
+        },
+        SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+        CursorPolicy::MonotonicByteOffset,
+    )
+    .expect_err("byte-offset acknowledgements require immediate durability");
+
+    assert!(matches!(error, SpoolError::InvalidDurabilityPolicy));
+    assert!(!root.path().join("primary-node").exists());
+}
+
+#[test]
+fn byte_offset_duplicate_index_is_bounded_by_segments_not_record_count() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    for offset in 1..=100 {
+        spool
+            .append(&byte_observation(offset), 100 + offset as i64)
+            .unwrap();
+    }
+    assert_eq!(spool.retained_segment_count(), 1);
+    drop(spool);
+
+    let reopened = SourceSpool::open(byte_config(&root), 300).unwrap();
+    assert_eq!(reopened.last_local_sequence().unwrap().get(), 100);
+    assert_eq!(reopened.retained_segment_count(), 1);
+}
+
+#[test]
+fn byte_offset_preflight_failures_do_not_rotate_or_consume_sequence() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool
+        .append(&byte_observation_with("epoch-a", 17, "first"), 101)
+        .unwrap();
+    let active = spool.active_segment_path().to_owned();
+    let before = std::fs::read(&active).unwrap();
+    let warned = byte_observation_with_warnings(
+        "epoch-b",
+        7,
+        "second",
+        vec![ParseWarning::new("test-warning", "must survive").unwrap()],
+    );
+
+    assert!(matches!(
+        spool.append(&warned, 102),
+        Err(SpoolError::UnsupportedWarnings)
+    ));
+    assert!(matches!(
+        spool.append(&byte_observation_with("epoch-b", 7, "second"), -1),
+        Err(SpoolError::InvalidTimestamp)
+    ));
+    assert_eq!(spool.active_segment_path(), active);
+    assert_eq!(
+        spool.verified_segment_paths(),
+        std::slice::from_ref(&active)
+    );
+    assert!(spool.closed_segments().is_empty());
+    assert_eq!(spool.last_local_sequence().unwrap().get(), 1);
+    assert_eq!(std::fs::read(&active).unwrap(), before);
+
+    let retried = spool
+        .append(&byte_observation_with("epoch-b", 7, "second"), 103)
+        .unwrap();
+    assert_eq!(retried.local_sequence().get(), 2);
+    assert!(retried.closed_segment().is_some());
+}
+
+#[test]
+fn legacy_source_spool_bytes_match_the_v1_writer_and_create_no_policy_sidecar() {
+    let source_root = TempDir::new().unwrap();
+    let writer_root = TempDir::new().unwrap();
+    let schema = "hl-spool-policy-v1:legacy-schema-is-still-valid";
+    let observation = observation_with("node-directory-epoch", 17, "legacy-payload");
+    let source_config = SourceSpoolConfig::try_new(
+        source_root.path().join("legacy"),
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        schema,
+        [0x31; 32],
+        DurabilityPolicy::FsyncEveryRecord,
+        SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+    )
+    .unwrap();
+    let mut source_spool = SourceSpool::open(source_config, 100).unwrap();
+    source_spool.append(&observation, 101).unwrap();
+
+    let header = SegmentHeaderV1::new(
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        schema,
+        1,
+        100,
+        [0x31; 32],
+    )
+    .unwrap();
+    let mut writer = SpoolWriter::create(
+        writer_root.path(),
+        header,
+        DurabilityPolicy::FsyncEveryRecord,
+    )
+    .unwrap();
+    writer.append(&observation, 101).unwrap();
+
+    assert_eq!(
+        &std::fs::read(source_spool.active_segment_path()).unwrap()[..8],
+        b"HLSPV001"
+    );
+    let source_close = source_spool.shutdown(102).unwrap().unwrap();
+    let writer_close = writer.close(102, None).unwrap();
+    let source_segment = std::fs::read(source_close.segment_path()).unwrap();
+    let source_manifest = std::fs::read(source_close.manifest_path()).unwrap();
+    assert_eq!(
+        source_segment,
+        std::fs::read(writer_close.segment_path()).unwrap()
+    );
+    assert_eq!(
+        source_manifest,
+        std::fs::read(writer_close.manifest_path()).unwrap()
+    );
+    assert_eq!(
+        blake3::hash(&source_segment).to_hex().as_str(),
+        "d30b056b57cd9f17f4ae7842d88ffb5120ffcbb7bc557542364a2131afd46719"
+    );
+    assert_eq!(
+        blake3::hash(&source_manifest).to_hex().as_str(),
+        "6317669073ba0da34eeadc5617611aa6f72c7e06bc32de8624c86d24fc0b643d"
+    );
+    assert!(!source_root.path().join("legacy/.cursor-policy-v1").exists());
+}
+
+#[test]
+fn legacy_batched_rotation_retains_the_pre_m2_cursor_behavior() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(
+        SourceSpoolConfig::try_new(
+            root.path().join("legacy"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEvery {
+                max_records: 2,
+                max_delay: Duration::from_secs(3600),
+            },
+            SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap(),
+        )
+        .unwrap(),
+        100,
+    )
+    .unwrap();
+    let first = spool.append(&observation(17), 101).unwrap();
+    assert!(first.durability_receipt().is_none());
+
+    let duplicate_after_rotation = spool.append(&observation(17), 102).unwrap();
+    assert!(duplicate_after_rotation.closed_segment().is_some());
+    assert_eq!(duplicate_after_rotation.local_sequence().get(), 2);
+    assert_eq!(
+        duplicate_after_rotation.disposition(),
+        SourceSpoolAppendDisposition::Appended
+    );
+    assert_eq!(spool.verified_segment_paths().len(), 2);
+}
+
+#[test]
+fn byte_offset_policy_rejects_block_height_observations() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+
+    let error = spool
+        .append(&observation(17), 101)
+        .expect_err("block heights are not byte offsets");
+
+    assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+    assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+    assert!(spool.last_local_sequence().is_none());
+}
+
+#[test]
+fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
+    let root = TempDir::new().unwrap();
+    let error = SourceSpoolConfig::try_new_with_cursor_policy(
+        root.path().join("primary-node"),
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        "x".repeat(257),
+        [0x31; 32],
+        DurabilityPolicy::FsyncEveryRecord,
+        SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+        CursorPolicy::MonotonicByteOffset,
+    )
+    .expect_err("persisted policy identity must stay bounded");
+
+    assert!(matches!(error, SpoolError::InvalidHeader));
+}
+
+#[test]
+fn byte_offset_regression_fails_without_consuming_a_sequence() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool.append(&byte_observation(49), 101).unwrap();
+
+    let error = spool
+        .append(&byte_observation(17), 102)
+        .expect_err("byte offset regression");
+    assert!(matches!(error, SpoolError::CursorRegression));
+    assert_eq!(spool.last_local_sequence().unwrap().get(), 1);
+}
+
+#[test]
+fn incomplete_tail_recovery_does_not_consume_a_local_sequence() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
+    spool.append(&byte_observation(17), 101).unwrap();
+    spool.append(&byte_observation(49), 102).unwrap();
+    let segment = spool.active_segment_path().to_owned();
+    drop(spool);
+
+    OpenOptions::new()
+        .append(true)
+        .open(&segment)
+        .unwrap()
+        .write_all(&[0x08, 0x00])
+        .unwrap();
+
+    let mut recovered = SourceSpool::open(byte_config(&root), 200).unwrap();
+    assert_eq!(recovered.last_local_sequence().unwrap().get(), 2);
+    assert_eq!(
+        recovered
+            .append(&byte_observation(121), 201)
+            .unwrap()
+            .local_sequence()
+            .get(),
+        3
+    );
+}
+
+#[test]
+fn legacy_policy_keeps_its_schema_and_rejects_duplicate_and_epoch_change() {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(config(&root, "hyperliquid-node-v1"), 100).unwrap();
+    spool.append(&observation(17), 101).unwrap();
+    assert_eq!(
+        SpoolReader::open(spool.active_segment_path())
+            .unwrap()
+            .header()
+            .schema_version(),
+        "spool-v1"
+    );
+
+    assert!(matches!(
+        spool.append(&observation(17), 102),
+        Err(SpoolError::CursorRegression)
+    ));
+    assert!(matches!(
+        spool.append(&observation_with("next-epoch", 1, "next"), 103),
+        Err(SpoolError::CursorRegression)
+    ));
 }
 
 #[test]
