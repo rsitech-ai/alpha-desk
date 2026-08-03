@@ -20,9 +20,10 @@ use parquet::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use storage_ports::{
-    ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange, RawArchiveObject,
-    RawObservationBatch, RawObservationRange, RawObservationReceipt,
-    SequencedRawObservationIterator, VerifiedRawManifest,
+    ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
+    RAW_ARCHIVE_MAXIMUM_LOGICAL_MANIFEST_BYTES, RawArchiveObject, RawObservationBatch,
+    RawObservationRange, RawObservationReceipt, SequencedRawObservationIterator,
+    VerifiedRawManifest,
 };
 
 use super::{
@@ -71,6 +72,85 @@ struct RawBatchManifestV2 {
     created_at_micros: i64,
     batch: RawBatchDescriptorV2,
     object: ObjectDescriptorV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EmbeddedRawManifestEvidenceV2 {
+    pub(super) manifest_id: ManifestId,
+    pub(super) canonical_manifest_json: String,
+    pub(super) manifest_sha256: [u8; 32],
+    pub(super) chain_id: ChainId,
+    pub(super) source_id: SourceId,
+    pub(super) partition: String,
+    pub(super) cursor_epoch: String,
+    pub(super) start_offset: u64,
+    pub(super) end_offset: u64,
+    pub(super) first_local_sequence: u64,
+    pub(super) last_local_sequence: u64,
+    pub(super) object_sha256: [u8; 32],
+    pub(super) row_count: u64,
+    pub(super) rolling_content_sha256: [u8; 32],
+}
+
+pub(super) fn validate_embedded_manifest_v2(
+    canonical_manifest_bytes: Vec<u8>,
+    expected_manifest_sha256: [u8; 32],
+) -> Result<EmbeddedRawManifestEvidenceV2, ArchiveError> {
+    let embedded_manifest_bytes = u64::try_from(canonical_manifest_bytes.len())
+        .map_err(|_| ArchiveError::ManifestVerification("embedded raw V2 manifest is too large"))?;
+    if canonical_manifest_bytes.is_empty()
+        || embedded_manifest_bytes > RAW_ARCHIVE_MAXIMUM_LOGICAL_MANIFEST_BYTES
+        || manifest::sha256(&canonical_manifest_bytes) != expected_manifest_sha256
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "embedded raw V2 manifest bytes or hash are invalid",
+        ));
+    }
+    let value: RawBatchManifestV2 = serde_json::from_slice(&canonical_manifest_bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid embedded raw V2 manifest"))?;
+    validate_batch_manifest(&value)?;
+    let first_partition = manifest::partition_for(value.batch.first_received_wall_micros)?;
+    let last_partition = manifest::partition_for(value.batch.last_received_wall_micros)?;
+    SourceCursor::new(value.batch.cursor_epoch.clone(), value.batch.start_offset)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V2 cursor epoch"))?;
+    if !valid_producer_build_id(&value.producer_build_id)
+        || !valid_manifest_identity(&value.batch.source_version)
+        || !valid_manifest_identity(&value.batch.parser_schema_version)
+        || value.batch.first_received_wall_micros < 0
+        || value.batch.last_received_wall_micros < 0
+        || value.batch.first_received_wall_micros > value.batch.last_received_wall_micros
+        || first_partition != last_partition
+        || Path::new(&value.object.relative_path) != expected_object_relative(&value)?
+        || manifest::parse_hash(&value.object.schema_fingerprint_sha256)?
+            != schema::raw_schema_fingerprint()?
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "embedded raw V2 manifest semantics are invalid",
+        ));
+    }
+    if canonical_json(&value)? != canonical_manifest_bytes {
+        return Err(ArchiveError::ManifestVerification(
+            "embedded raw V2 manifest is not canonical",
+        ));
+    }
+    let canonical_manifest_json = String::from_utf8(canonical_manifest_bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("raw V2 manifest is not UTF-8"))?;
+    Ok(EmbeddedRawManifestEvidenceV2 {
+        manifest_id: manifest::manifest_id(expected_manifest_sha256)?,
+        canonical_manifest_json,
+        manifest_sha256: expected_manifest_sha256,
+        chain_id: chain_id(&value.batch.chain_id)?,
+        source_id: source_id(&value.batch.source_id)?,
+        partition: first_partition,
+        cursor_epoch: value.batch.cursor_epoch,
+        start_offset: value.batch.start_offset,
+        end_offset: value.batch.end_offset,
+        first_local_sequence: value.batch.first_local_sequence,
+        last_local_sequence: value.batch.last_local_sequence,
+        object_sha256: manifest::parse_hash(&value.object.sha256)?,
+        row_count: value.object.row_count,
+        rolling_content_sha256: manifest::parse_hash(&value.batch.rolling_content_sha256)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1148,11 +1228,16 @@ fn validate_batch_manifest(value: &RawBatchManifestV2) -> Result<(), ArchiveErro
             "raw V2 local sequence span overflows",
         ))?;
     if value.schema != RAW_BATCH_MANIFEST_SCHEMA_V2
-        || value.producer_build_id.is_empty()
+        || !valid_producer_build_id(&value.producer_build_id)
         || value.created_at_micros < 0
         || value.batch.cursor_policy != RAW_V2_CURSOR_POLICY
         || value.batch.start_offset > value.batch.end_offset
         || value.batch.first_local_sequence == 0
+        || value.batch.first_received_wall_micros < 0
+        || value.batch.last_received_wall_micros < 0
+        || value.batch.first_received_wall_micros > value.batch.last_received_wall_micros
+        || !valid_manifest_identity(&value.batch.source_version)
+        || !valid_manifest_identity(&value.batch.parser_schema_version)
         || value.object.row_count != sequence_count
         || value.object.size_bytes == 0
     {
@@ -1173,6 +1258,43 @@ fn validate_batch_manifest(value: &RawBatchManifestV2) -> Result<(), ArchiveErro
         manifest::parse_hash(hash)?;
     }
     fs::validate_relative(Path::new(&value.object.relative_path))
+}
+
+fn valid_manifest_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.len() <= 256
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_producer_build_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.len() <= 256
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn expected_object_relative(value: &RawBatchManifestV2) -> Result<PathBuf, ArchiveError> {
+    let chain = chain_id(&value.batch.chain_id)?;
+    let source = source_id(&value.batch.source_id)?;
+    let object_hash = manifest::parse_hash(&value.object.sha256)?;
+    let partition = manifest::partition_for(value.batch.first_received_wall_micros)?;
+    Ok(dataset_relative(&chain, &source)
+        .join(partition)
+        .join("objects")
+        .join(format!(
+            "epoch={}",
+            manifest::encoded_component(&value.batch.cursor_epoch)
+        ))
+        .join(format!(
+            "sequences={}-{}",
+            value.batch.first_local_sequence, value.batch.last_local_sequence
+        ))
+        .join(format!(
+            "offsets={}-{}",
+            value.batch.start_offset, value.batch.end_offset
+        ))
+        .join(format!("part-{}.parquet", hex::encode(object_hash))))
 }
 
 fn verify_loaded_batch(
@@ -1198,23 +1320,7 @@ fn verify_and_decode(
     let source = source_id(&value.batch.source_id)?;
     let chain = chain_id(&value.batch.chain_id)?;
     let object_hash = manifest::parse_hash(&value.object.sha256)?;
-    let partition = manifest::partition_for(value.batch.first_received_wall_micros)?;
-    let expected = dataset_relative(&chain, &source)
-        .join(partition)
-        .join("objects")
-        .join(format!(
-            "epoch={}",
-            manifest::encoded_component(&value.batch.cursor_epoch)
-        ))
-        .join(format!(
-            "sequences={}-{}",
-            value.batch.first_local_sequence, value.batch.last_local_sequence
-        ))
-        .join(format!(
-            "offsets={}-{}",
-            value.batch.start_offset, value.batch.end_offset
-        ))
-        .join(format!("part-{}.parquet", hex::encode(object_hash)));
+    let expected = expected_object_relative(value)?;
     if Path::new(&value.object.relative_path) != expected {
         return Err(ArchiveError::ManifestVerification(
             "raw V2 manifest does not bind exact object path",

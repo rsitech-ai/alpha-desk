@@ -7,6 +7,7 @@ mod manifest;
 mod raw;
 mod raw_policy;
 mod raw_v2;
+pub mod raw_v3;
 mod reader;
 mod schema;
 mod writer;
