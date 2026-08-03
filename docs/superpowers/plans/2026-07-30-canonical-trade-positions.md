@@ -1745,10 +1745,15 @@ ledger's exact-version comparison rejects them generically too.
 ### Task 8: Retain composite position replay evidence
 
 **Files:**
-- Modify: `tools/state-replay/src/account.rs`
+- Create: `tools/state-replay/src/position.rs`
+- Modify: `tools/state-replay/src/account.rs` only to reuse private fixture or
+  validation helpers without changing its public report contract
+- Modify: `tools/state-replay/src/shared.rs`
 - Modify: `tools/state-replay/src/lib.rs`
 - Modify: `tools/state-replay/src/main.rs`
-- Modify: `tools/state-replay/tests/account_e2e.rs`
+- Create: `tools/state-replay/tests/position_e2e.rs`
+- Modify: `tools/state-replay/tests/account_e2e.rs` only for compatibility
+  assertions when shared helpers change
 - Modify: `tools/state-replay/tests/cli.rs`
 - Modify: `justfile`
 - Modify: `README.md`
@@ -1758,28 +1763,159 @@ ledger's exact-version comparison rejects them generically too.
 - Modify: `docs/superpowers/plans/2026-07-29-canonical-account-ledger.md`
 - Modify: `docs/superpowers/plans/2026-07-30-canonical-trade-positions.md`
 
-Tasks 1-7 must pass verification and independent code review. Account-plan
-Task 6 then creates and commits the baseline account-flow/composite
-`state-replay account-e2e` runner. This Task 8 extends that exact committed
-baseline with position, episode, liquidation, and settlement scenarios; a
-design review alone never unblocks evidence work.
-Require repeated full replay, checkpoint resume across reversal and funding,
-byte-identical state/full-receipt hashes, exact namespace counts, duplicate
-denial, start-position mismatch rollback, unresolved backstop behavior, and
-schema denial.
+Tasks 1-7 and account-plan Task 6 have passed verification and independent
+code review. Task 6's committed `state-replay account-e2e` v1 schema and CLI
+output are immutable compatibility surfaces. Task 8 reuses the same
+`CanonicalStateReducerV1`, immutable archive/checkpoint path, bounded-work
+guard, output admission, and recursive evidence hardening, but adds the
+separate `state-replay position-e2e` command and report schema
+`hyperliquid-alpha-desk/state-replay-position-e2e-report/v1`. It must not
+silently reinterpret or version-bump the account report.
+
+The generated main archive has an exact prefix/suffix contract. The prefix
+creates reducer-admissible synthetic DEX/asset/market prerequisites and any
+account facts needed by the composite, then applies the enriched opening trade
+at the checkpoint height. Before publication and again after reload, require
+byte-identical canonical state plus exactly two quantity currents, two
+position effects, two resolved episode currents, two open episodes, and two
+episode effects with the frozen values below. A checkpoint that contains only
+prerequisites cannot qualify.
+
+The seven-block suffix must contain, in deterministic order: a trade that
+reverses both participant positions using literal source `start_position`
+anchors; funding attached to an exact open episode; liquidation start;
+liquidation fill; backstop followed in the same block by funding whose episode
+attribution is suppressed; settlement; and an enriched trade that re-anchors
+both accounts from unresolved followed in the same block by funding attached
+to the recovered episode. Configuration is rejected unless
+`blocks >= checkpoint_after + 7`. Padding blocks may contain only
+deterministic supported account facts before the opening trade and must not
+change the required scenario cardinalities.
+
+Require at least two independent full replays with byte-identical final
+canonical state bytes/hash and full-replay receipt hashes. Require the loaded
+checkpoint bytes/hash to equal the pre-publication checkpoint, and require the
+segmented checkpoint resume to reach the full replay's final canonical state
+bytes/hash. Retain segmented suffix receipt hashes as distinct evidence; they
+must not be compared with a full-range receipt. Require exact decoded value
+checks in addition to literal namespace counts. Validate
+the key-bound values for quantity current/effect/unresolved-cause, episode/
+episode-current/effect, liquidation current/start/fill/market-flow/backstop,
+and settlement records. Validate intermediate state immediately after
+backstop and after interrupted funding, not just the recovered final image.
+Assert both participant signs and source anchors,
+reversal close/open episode identities and exact notional components, funding
+event attribution, liquidation provenance, both backstop accounts becoming
+unknown with distinct preserved unresolved-cause facts, suppression of funding
+attribution while interrupted, exact `reanchored_from_unresolved` effects for
+both roles, no invented backstop basis/PnL, and settlement PnL remaining
+source-observed in its immutable fact.
+
+Run independent rejection archives for duplicate enriched `trade_id`, source
+`start_position` mismatch, and canonical schema `1.1.0`. Pin exact replay /
+source / reducer precedence respectively:
+
+```text
+replay.block_quarantined / ledger.reducer_failed /
+  trade_state.trade_id_collision
+replay.block_quarantined / ledger.reducer_failed /
+  position_state.start_position_mismatch
+replay.block_quarantined / ledger.unsupported_event / null
+```
+
+Each rejection applies zero blocks and preserves the pre-block state hash.
+Unresolved backstop is a positive conservative-state/re-anchor scenario,
+never a fabricated rejection.
+
+Extract a pure evidence validator over immutable state entries and a frozen
+fixture expectation. A second otherwise valid replay changes only settlement
+`realized_pnl` from `-2.5` to `-2.75`; keys, namespace counts, and record
+decoding remain valid, but the validator must return dedicated
+`state_replay.position_semantic_mismatch` and must not publish a positive
+report. Do not mutate `StateImage` bytes or add a test-only state injection
+path.
+
+Bound every replay path before creating output. Add a checked shared helper
+whose explicit `extra_full_passes` input preserves account-e2e's existing
+calculation. Task 8 calls it with one extra full pass and three rejection
+blocks, producing exactly:
+
+```text
+total_blocks = blocks * (iterations + 2) + 3
+```
+
+The two added passes are checkpoint/segmented replay and the semantic variant.
+Every addition and multiplication is checked before comparison with
+`MAX_TOTAL_REPLAY_BLOCKS`; overflow or excess is `InvalidConfig`.
+
+#### Frozen Task 8 fixture and oracle
+
+The RED test owns literal constants independent of report construction:
+
+| Surface | Frozen value |
+| --- | --- |
+| chain / market | `mainnet` / `perp:BTC` |
+| accounts | A = `0x1111111111111111111111111111111111111111`; B = `0x2222222222222222222222222222222222222222` |
+| market scales | tick `0.1` at scale 6; lot `0.001` at scale 8 |
+| opening trade | `trd-position-open`; A buyer `start_pos=0`; B seller `start_pos=0`; price `100.000000`; quantity `2.00000000` |
+| checkpoint quantity | A `2.00000000`; B `-2.00000000`; both `first_observation` |
+| reversal trade | `trd-position-reversal`; B buyer `start_pos=-2.00000000`; A seller `start_pos=2.00000000`; price `110.000000`; quantity `3.00000000` |
+| reversal quantity | A `-1.00000000`; B `1.00000000`; old episodes close `trade_reversal`, ordinal-1 episodes open complete from flat |
+| first funding | A paid `1.25`, rate `0.0001`; attached to A's reversed episode |
+| liquidation | `liq-position-e2e`; A; margin `9`; maintenance `10` |
+| liquidation fill | A / `perp:BTC`; price `90.000000`; quantity `0.25000000` |
+| backstop | A to B; `perp:BTC`; quantity `0.50000000`; both current quantities unknown; two preserved cause facts |
+| interrupted funding | A paid `0.5`, rate `0.0001`; no episode/effect mutation |
+| settlement | A / `perp:BTC`; price `0`; quantity `0.25000000`; realized PnL `-2.5` only in settlement fact |
+| recovery trade | `trd-position-recovery`; A buyer `start_pos=4.00000000`; B seller `start_pos=0.00000000`; price `95.000000`; quantity `0.25000000`; both effects `reanchored_from_unresolved` |
+| recovered quantity | A `4.25000000`; B `-0.25000000`; unresolved cause facts remain immutable |
+| recovered funding | A paid `0.75`, rate `0.0001`; attached after recovery |
+
+RED tests must freeze the exact buyer/seller order IDs, transaction/event IDs,
+derived episode ID strings, state keys, exact buy/sell notional components,
+and a literal `BTreeMap<&'static str, usize>` for every allowed namespace.
+Those expectations may not be computed from the replay result or report.
+
+The report test must assert the exact ordered JSON field names and types, the
+complete false-qualification set named below, exactly one true boolean, and
+the literal CLI success line. Runtime values such as hashes, checkpoint ID,
+elapsed time, and receipt hashes are type/shape checked rather than frozen.
 
 Evidence labels:
 
 ```text
+report_schema = hyperliquid-alpha-desk/state-replay-position-e2e-report/v1
 evidence_class = synthetic_canonical_position
 state_semantics = exact_trade_anchored_quantity_and_analytical_episode_flows
 source_qualification = synthetic_unassessed
+reducer_version = hyperliquid-alpha-desk-canonical-state@1.0.0
 ```
 
-Only synthetic contract qualification may be true. Deployed source, protocol
-entry-price parity, source closed-PnL, execution-fee attribution, opening
-balance, margin, liquidation-price, and live-product qualification remain
-false until separately proven.
+Only `synthetic_position_contract_proven` may be true. Account-report v1's
+single positive flag remains unchanged in that separate report. Deployed or
+live source, authoritative opening position/balance, venue reconciliation,
+protocol entry-price parity, source closed-PnL completeness, execution-fee
+attribution, TWAP completeness, backstop cost basis, standard/unified/
+portfolio margin, liquidation-price, book, signal, execution, Stage 1/2, and
+live-product qualification remain false until separately proven.
+
+Account compatibility means unchanged ordered JSON field names/types and
+labels, exact CLI stdout, and unchanged rejection contracts. Literal report
+byte equality across runs is not required because `replay_elapsed_micros` is
+runtime-dependent.
+
+- [ ] Write RED tests for the report/CLI/compatibility contract, exact suffix
+  admission, decoded semantics, rejection reasons/rollback, unsafe/existing
+  output refusal, and recursive `0700` directory / `0600` file permissions.
+- [ ] Run the focused RED suite and retain the missing-command/module signal.
+- [ ] Implement the smallest separate position runner; do not copy archive,
+  checkpoint, output, or work-boundary logic that can be safely shared.
+- [ ] Run the full state-replay package, ledger/replay packages, strict
+  all-target/all-feature Clippy, formatting, `just generated`, `just deny`, a
+  retained quick run, `just oss-audit`, serialized
+  `RUST_TEST_THREADS=1 just verify`, and `git diff --check`.
+- [ ] Independently review the exact implementation range and remediate every
+  blocking finding before recording Task 8 complete.
 
 ## Production source/commit-join gate
 
@@ -1931,6 +2067,14 @@ fixed.
   Independent final review returned GO for this bounded slice; production
   replay evidence and deployed-source qualification remain Task 8 and the
   source/commit-join gate.
+- 2026-08-03: Task 8's evidence contract received independent design-review
+  GO after correction. Account report v1 remains a stable compatibility
+  surface; the separate position report v1 checkpoints actual position and
+  episode state, resumes through reversal/funding/liquidation/backstop/
+  settlement/re-anchor behavior, freezes literal semantic oracles and exact
+  rejection precedence, separates full from segmented receipt proof, and
+  accounts every replay path under the shared checked work limit. This is a
+  design gate only; implementation and runtime evidence remain open.
 - 2026-07-30: Starting from flat was rejected because node trade rows provide
   an exact `start_pos`; ignoring it would make retained-range position state
   false.
