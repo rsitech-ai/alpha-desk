@@ -35,6 +35,33 @@ async fn datafusion_count_matches_verified_manifest_on_a_real_archive() {
     assert_eq!(counted.canonical_events(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn verify_rejects_a_dangling_raw_dataset_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().expect("temporary archive");
+    let archive = LocalParquetArchive::open(
+        temporary.path(),
+        ArchiveConfig::deterministic_fixture("archive-inspect-test", known(1_700_000_000_000_000))
+            .expect("archive config"),
+    )
+    .expect("open archive");
+    archive
+        .append_block(&canonical_block())
+        .expect("archive canonical block");
+    symlink(
+        "missing-raw-dataset",
+        temporary
+            .path()
+            .join("chain=mainnet/dataset=raw_source_observations_byte_v2"),
+    )
+    .expect("create dangling raw dataset symlink");
+
+    let error = verify(temporary.path()).expect_err("unsafe dataset must fail verification");
+    assert_eq!(error.reason_code(), "archive.unsafe_path");
+}
+
 fn canonical_block() -> BlockEnvelope {
     let chain = ChainId::new("mainnet").expect("chain ID");
     let source = SourceId::new("primary-node").expect("source ID");

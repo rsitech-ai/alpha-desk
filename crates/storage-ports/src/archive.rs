@@ -1207,6 +1207,13 @@ pub trait RawObservationArchive: Send + Sync {
         range: RawObservationRange,
     ) -> Result<RawObservationIterator, ArchiveError>;
 
+    fn read_observations_by_sequence(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        range: LocalRecordSequenceRange,
+    ) -> Result<SequencedRawObservationIterator, ArchiveError>;
+
     fn verify_raw_manifest(
         &self,
         manifest: &ManifestId,

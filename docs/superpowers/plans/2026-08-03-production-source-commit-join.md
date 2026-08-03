@@ -523,6 +523,15 @@
   manifest containing that time are intentionally operational across roots.
   The actual manifest hash remains mandatory for finalization within one
   archive.
+- 2026-08-03: Keep byte-offset raw archives physically isolated from frozen
+  V1 under `raw_source_observations_byte_v2` and `_manifests/raw-byte-v2`.
+  Both policies share one chain/source writer lock and inspection rejects any
+  source visible under both datasets. This makes cursor policy a dataset
+  invariant rather than an optional V1 field.
+- 2026-08-03: V2 Parquet rows reuse the frozen V1 raw row schema. Local
+  sequence is an object-global `first_local_sequence + row_index` projection
+  bound by the object path, explicit V2 manifests, and domain-separated
+  rolling hash. Native sparse offsets remain independent evidence.
 
 ## Progress Log
 
@@ -565,6 +574,64 @@
 - 2026-08-03: Next: implement M2 with RED tests while preserving the legacy
   height-contiguous raw manifest bytes and introducing an explicit byte-offset
   cursor policy.
+- 2026-08-03: M2 spool and backlog foundations are committed at `ba649cd`
+  and `e473938`. The V1 segment bytes remain frozen, byte-offset records use
+  explicit `HLSPV002` policy identity and physical local sequence, exact
+  duplicates remain idempotent, conflicts fail closed, and backlog replay
+  advances only after exact sequence acknowledgement.
+- 2026-08-03: Committed the M2D spool-evidence boundary at `fa8f907`
+  (`feat(capture): bind byte spool sequence spans`). Byte-policy closes now
+  publish explicit V2 manifests with authenticated policy and local sequence
+  spans; directory inspection verifies cross-segment policy, hash-chain, and
+  sequence continuity. Pre-M2D `HLSPV002` segments with V1 manifests migrate
+  without renumbering. Full `hl-capture` tests passed 111/111, strict Clippy
+  and formatting passed, and independent quality review returned GO.
+- 2026-08-03: Committed the M2D storage evidence API at `b060bfc`
+  (`feat(storage): expose raw sequence evidence`). It adds checked inclusive
+  local-sequence ranges, owned replay rows, exact batch end-sequence evidence,
+  and explicit policy/range metadata on byte archive objects and receipts;
+  legacy constructors remain contiguous-native with no sequence claim. The
+  full storage-ports package passed 13 tests, strict Clippy passed, and
+  independent requirements review returned GO.
+- 2026-08-03: Next: implement schema-gated V2 raw batch/partition/catalog
+  manifests and sequence replay without changing the frozen V1 Parquet rows
+  or generated archive fixture bytes.
+- 2026-08-03: Implemented the schema-gated V2 raw archive slice. Explicit
+  batch, partition, and source-catalog manifests bind cursor policy, native
+  cursor range, and exact local-sequence span. Catalog generations require
+  contiguous sequence coverage; partitions reject sequence/native overlap;
+  both manifest chains verify to their roots. Exact retries are idempotent,
+  conflicts and policy mixing fail closed before publication, and archive
+  inspection verifies reachable V1 and V2 sources.
+- 2026-08-03: Added `read_observations_by_sequence`. It verifies all selected
+  manifests and Parquet objects before yielding owned `(sequence,
+  observation)` rows, enforces row/byte limits, and returns `RangeUnavailable`
+  for incomplete coverage. Native-offset replay remains the V1-only dense
+  contract.
+- 2026-08-03: V2 archive evidence is green: exact frozen manifest bytes and
+  SHA-256, sparse offsets, exact retry, multi-generation replay, receive-hour
+  partition split, Arrow batch boundary, local-sequence hash binding, sequence
+  gap, native overlap, two-way policy mixing, manifest tamper, and inspection.
+  The expanded scoped storage/archive/analytics/operator suite passed 45
+  tests; strict scoped Clippy, formatting, and diff checks passed with warnings denied.
+  Exact V1 fixture regeneration matched the committed tree byte-for-byte.
+- 2026-08-03: Independent requirements and quality review initially held the
+  V2 slice because the shared lock relocation changed the V1 fixture tree,
+  inspection treated inactive directories as active policy, policy probes used
+  lossy `exists()`, chain verification allowed prepend/insertion generations,
+  and verification did not check every row's receive-hour partition. The lock
+  is now shared at the frozen V1 path; append, read, and inspection use one
+  checked `CURRENT` policy boundary; lineage requires an exact prior prefix;
+  descriptor boundaries and every row's hour are verified. Regressions cover
+  inactive orphans, dual-active policy, dangling pointers, tail extension, and
+  middle-row hour drift. A final requirements hold found a dangling dataset
+  symlink was still treated as absent; dataset discovery now uses checked
+  metadata and both library inspection and `archive-inspect verify` regressions
+  fail closed. Independent requirements and quality re-reviews both returned
+  GO for this bounded M2 slice.
+- 2026-08-03: Next after the reviewed M2 commit: begin M3 by activating the
+  configured `NodeLine` acquisition path with spool-and-archive-before-ACK,
+  bounded backpressure, observable health, restart, and clean-shutdown tests.
 
 ## Rollback / Recovery
 

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use domain_types::{ChainId, SourceId};
 use storage_ports::ArchiveError;
 
-use super::{LocalParquetArchive, manifest, raw, reader};
+use super::{LocalParquetArchive, manifest, raw, raw_policy, raw_v2, reader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveDataset {
@@ -140,8 +140,25 @@ pub fn inspect(archive: &LocalParquetArchive) -> Result<ArchiveInspection, Archi
         if let Some(canonical) = reader::inspect_chain(archive, &chain)? {
             inspection.merge(canonical)?;
         }
-        for source in discover_raw_sources(archive.root(), &chain)? {
+        let legacy_sources =
+            discover_raw_sources(archive.root(), &chain, raw_policy::LEGACY_DATASET)?;
+        let byte_sources =
+            discover_raw_sources(archive.root(), &chain, raw_policy::BYTE_V2_DATASET)?;
+        if legacy_sources
+            .iter()
+            .any(|source| byte_sources.binary_search(source).is_ok())
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "raw source is present under more than one cursor policy",
+            ));
+        }
+        for source in legacy_sources {
             if let Some(raw) = raw::inspect_source(archive, &chain, &source)? {
+                inspection.merge(raw)?;
+            }
+        }
+        for source in byte_sources {
+            if let Some(raw) = raw_v2::inspect_source(archive, &chain, &source)? {
                 inspection.merge(raw)?;
             }
         }
@@ -180,18 +197,31 @@ fn discover_chains(root: &Path) -> Result<Vec<ChainId>, ArchiveError> {
     Ok(chains)
 }
 
-fn discover_raw_sources(root: &Path, chain: &ChainId) -> Result<Vec<SourceId>, ArchiveError> {
+fn discover_raw_sources(
+    root: &Path,
+    chain: &ChainId,
+    dataset_name: &str,
+) -> Result<Vec<SourceId>, ArchiveError> {
+    let policy = match dataset_name {
+        raw_policy::LEGACY_DATASET => raw_policy::RawPolicy::LegacyContiguous,
+        raw_policy::BYTE_V2_DATASET => raw_policy::RawPolicy::MonotonicByteV2,
+        _ => {
+            return Err(ArchiveError::InvalidInput(
+                "unsupported raw archive dataset discovery",
+            ));
+        }
+    };
     let dataset = root
         .join(format!(
             "chain={}",
             manifest::encoded_component(chain.as_str())
         ))
-        .join("dataset=raw_source_observations");
-    if !dataset.exists() {
-        return Ok(Vec::new());
-    }
-    let metadata = std::fs::symlink_metadata(&dataset)
-        .map_err(|_| ArchiveError::Io("inspecting raw archive dataset"))?;
+        .join(format!("dataset={dataset_name}"));
+    let metadata = match std::fs::symlink_metadata(&dataset) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(ArchiveError::Io("inspecting raw archive dataset")),
+    };
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(ArchiveError::UnsafePath);
     }
@@ -218,7 +248,9 @@ fn discover_raw_sources(root: &Path, chain: &ChainId) -> Result<Vec<SourceId>, A
         };
         let source = SourceId::new(manifest::decoded_component(encoded)?)
             .map_err(|_| ArchiveError::ManifestVerification("invalid discovered source ID"))?;
-        sources.push(source);
+        if raw_policy::active_policies(root, chain, &source)?.active(policy) {
+            sources.push(source);
+        }
     }
     sources.sort();
     Ok(sources)

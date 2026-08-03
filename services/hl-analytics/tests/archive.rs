@@ -14,8 +14,8 @@ use hl_protocol::{
     ObservationClass, ParseWarning, ReceiveTimestamps, SourceCursor, SourceObservation,
 };
 use storage_ports::{
-    ArchiveError, CanonicalArchive, CanonicalArchiveMaintenance, RawObservationArchive,
-    RawObservationBatch, RawObservationRange,
+    ArchiveError, CanonicalArchive, CanonicalArchiveMaintenance, CursorPolicy, LocalRecordSequence,
+    LocalRecordSequenceRange, RawObservationArchive, RawObservationBatch, RawObservationRange,
 };
 
 fn known(micros: i64) -> KnownTime {
@@ -135,6 +135,40 @@ fn raw_batch(source: &str, epoch: &str, start: u64, payloads: &[&[u8]]) -> RawOb
         [0xb2; 32],
     )
     .expect("raw observation batch")
+}
+
+fn byte_raw_observation(epoch: &str, offset: u64, payload: &[u8]) -> SourceObservation {
+    SourceObservation::new(
+        SourceId::new("node-trades").expect("source ID"),
+        "capture-v1",
+        ObservationClass::AuxiliaryLedger,
+        SourceCursor::new(epoch, offset).expect("source cursor"),
+        ReceiveTimestamps::new(1_721_779_200_000_000 + offset as i64, 9_000_000 + offset)
+            .expect("receive timestamps"),
+        "raw-parser-v1",
+        Bytes::copy_from_slice(payload),
+        Vec::new(),
+        1024,
+    )
+    .expect("source observation")
+}
+
+fn byte_raw_batch(
+    epoch: &str,
+    offsets_and_payloads: &[(u64, &[u8])],
+    first_local_sequence: u64,
+) -> RawObservationBatch {
+    RawObservationBatch::try_new_byte_offsets(
+        ChainId::new("mainnet").expect("chain ID"),
+        offsets_and_payloads
+            .iter()
+            .map(|(offset, payload)| byte_raw_observation(epoch, *offset, payload))
+            .collect(),
+        [0xa1; 32],
+        [0xb2; 32],
+        LocalRecordSequence::try_new(first_local_sequence).expect("local sequence"),
+    )
+    .expect("sparse byte-offset batch")
 }
 
 #[test]
@@ -527,6 +561,360 @@ fn raw_batch_append_is_idempotent_and_round_trips_exact_observations() {
     assert_eq!(verified.object().row_count(), 2);
     assert_eq!(verified.spool_manifest_blake3(), [0xa1; 32]);
     assert_eq!(verified.spool_segment_blake3(), [0xb2; 32]);
+}
+
+#[test]
+fn byte_raw_batch_append_is_idempotent_and_binds_sequence_evidence() {
+    let temporary = tempfile::tempdir().expect("temporary archive");
+    let archive = archive(&temporary).expect("open archive");
+    let batch = byte_raw_batch(
+        "rotation-7",
+        &[(19, b"first"), (20, b"second"), (47, b"third")],
+        41,
+    );
+
+    let first = archive.append_batch(&batch).expect("append byte batch");
+    let duplicate = archive.append_batch(&batch).expect("append exact retry");
+    assert_eq!(first, duplicate);
+    assert_eq!(first.cursor_policy(), CursorPolicy::MonotonicByteOffset);
+    let range = first.local_sequence_range().expect("sequence evidence");
+    assert_eq!(range.start().get(), 41);
+    assert_eq!(range.end().get(), 43);
+
+    let verified = archive
+        .verify_raw_manifest(first.manifest_id())
+        .expect("verify byte manifest");
+    assert_eq!(verified.cursor_policy(), CursorPolicy::MonotonicByteOffset);
+    assert_eq!(verified.local_sequence_range(), Some(range));
+    assert_eq!(verified.object().row_count(), 3);
+
+    archive
+        .append_batch(&byte_raw_batch("rotation-7", &[(48, b"fourth")], 44))
+        .expect("append contiguous sequence batch");
+    archive
+        .append_batch(&byte_raw_batch(
+            "rotation-7",
+            &[(3_600_000_100, b"fifth")],
+            45,
+        ))
+        .expect("append contiguous sequence in next hour partition");
+
+    let replay_range = LocalRecordSequenceRange::try_new(
+        LocalRecordSequence::try_new(42).expect("sequence start"),
+        LocalRecordSequence::try_new(45).expect("sequence end"),
+    )
+    .expect("sequence replay range");
+    let replayed = archive
+        .read_observations_by_sequence(
+            &ChainId::new("mainnet").expect("chain ID"),
+            &SourceId::new("node-trades").expect("source ID"),
+            replay_range,
+        )
+        .expect("read by sequence")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect sequence replay");
+    assert_eq!(replayed.len(), 4);
+    assert_eq!(replayed[0].local_sequence().get(), 42);
+    assert_eq!(replayed[0].observation().cursor().offset(), 20);
+    assert_eq!(replayed[1].local_sequence().get(), 43);
+    assert_eq!(replayed[1].observation().cursor().offset(), 47);
+    assert_eq!(replayed[2].local_sequence().get(), 44);
+    assert_eq!(replayed[2].observation().cursor().offset(), 48);
+    assert_eq!(replayed[3].local_sequence().get(), 45);
+    assert_eq!(replayed[3].observation().cursor().offset(), 3_600_000_100);
+    let inactive_legacy_orphan = temporary.path().join(
+        "chain=mainnet/dataset=raw_source_observations/source=node-trades/objects/orphan.parquet",
+    );
+    fs::create_dir_all(
+        inactive_legacy_orphan
+            .parent()
+            .expect("inactive orphan parent"),
+    )
+    .expect("create inactive legacy orphan directory");
+    fs::write(&inactive_legacy_orphan, b"unreachable").expect("write inactive legacy orphan");
+    let inspection = archive.inspect().expect("inspect byte archive");
+    assert_eq!(inspection.raw_sources(), 1);
+    assert_eq!(inspection.raw_observations(), 5);
+}
+
+#[test]
+fn byte_raw_archive_hashes_sequence_assignment_and_rejects_manifest_tampering() {
+    let first_root = tempfile::tempdir().expect("temporary archive");
+    let first_archive = archive(&first_root).expect("open archive");
+    let first = first_archive
+        .append_batch(&byte_raw_batch(
+            "rotation-7",
+            &[(19, b"first"), (47, b"second")],
+            41,
+        ))
+        .expect("append byte batch");
+
+    let other_root = tempfile::tempdir().expect("temporary archive");
+    let other_archive = archive(&other_root).expect("open archive");
+    let other = other_archive
+        .append_batch(&byte_raw_batch(
+            "rotation-7",
+            &[(19, b"first"), (47, b"second")],
+            51,
+        ))
+        .expect("append differently sequenced byte batch");
+    assert_ne!(
+        first.rolling_content_sha256(),
+        other.rolling_content_sha256(),
+        "local sequence assignment must be rolling-hash evidence"
+    );
+    assert_ne!(first.manifest_sha256(), other.manifest_sha256());
+
+    let manifest_hash = first
+        .manifest_id()
+        .as_str()
+        .strip_prefix("archive-manifest-v1-")
+        .expect("archive manifest ID hash");
+    let manifest_path = first_root.path().join(format!(
+        "_manifests/raw-byte-v2/manifest-{manifest_hash}.json"
+    ));
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read V2 manifest"))
+            .expect("parse V2 manifest");
+    manifest["batch"]["first_local_sequence"] = serde_json::Value::from(40_u64);
+    fs::write(
+        manifest_path,
+        serde_json::to_vec(&manifest).expect("serialize tampered V2 manifest"),
+    )
+    .expect("tamper V2 manifest");
+
+    let range = LocalRecordSequenceRange::try_new(
+        LocalRecordSequence::try_new(41).expect("sequence start"),
+        LocalRecordSequence::try_new(42).expect("sequence end"),
+    )
+    .expect("sequence range");
+    let error = match first_archive.read_observations_by_sequence(
+        &ChainId::new("mainnet").expect("chain ID"),
+        &SourceId::new("node-trades").expect("source ID"),
+        range,
+    ) {
+        Ok(_) => panic!("tampered V2 manifest must fail before replay"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, ArchiveError::ManifestVerification(_)));
+}
+
+#[test]
+fn byte_raw_archive_replays_across_arrow_batch_boundaries() {
+    let temporary = tempfile::tempdir().expect("temporary archive");
+    let archive = archive(&temporary).expect("open archive");
+    let observations = (0_u64..1_100)
+        .map(|index| {
+            let offset = 10 + index * 2;
+            byte_raw_observation(
+                "rotation-large",
+                offset,
+                format!("payload-{index}").as_bytes(),
+            )
+        })
+        .collect();
+    let batch = RawObservationBatch::try_new_byte_offsets(
+        ChainId::new("mainnet").expect("chain ID"),
+        observations,
+        [0xa1; 32],
+        [0xb2; 32],
+        LocalRecordSequence::try_new(1_000).expect("first sequence"),
+    )
+    .expect("large byte batch");
+    archive
+        .append_batch(&batch)
+        .expect("append large byte batch");
+
+    let replayed = archive
+        .read_observations_by_sequence(
+            &ChainId::new("mainnet").expect("chain ID"),
+            &SourceId::new("node-trades").expect("source ID"),
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(2_022).expect("sequence start"),
+                LocalRecordSequence::try_new(2_025).expect("sequence end"),
+            )
+            .expect("sequence range"),
+        )
+        .expect("replay across Arrow batches")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect Arrow boundary replay");
+    assert_eq!(replayed.len(), 4);
+    for (index, item) in replayed.iter().enumerate() {
+        let sequence = 2_022 + u64::try_from(index).expect("index fits u64");
+        assert_eq!(item.local_sequence().get(), sequence);
+        assert_eq!(
+            item.observation().cursor().offset(),
+            10 + (sequence - 1_000) * 2
+        );
+    }
+}
+
+#[test]
+fn byte_raw_archive_rejects_sequence_gaps_native_overlap_and_policy_mixing() {
+    let temporary = tempfile::tempdir().expect("temporary archive");
+    let byte_archive = archive(&temporary).expect("open archive");
+    byte_archive
+        .append_batch(&byte_raw_batch(
+            "rotation-7",
+            &[(19, b"first"), (47, b"second")],
+            41,
+        ))
+        .expect("append initial byte batch");
+
+    let gap = byte_archive
+        .append_batch(&byte_raw_batch("rotation-7", &[(48, b"gap")], 44))
+        .expect_err("sequence gap must fail closed");
+    assert!(matches!(gap, ArchiveError::InvalidInput(_)));
+
+    let overlap = byte_archive
+        .append_batch(&byte_raw_batch("rotation-7", &[(47, b"overlap")], 43))
+        .expect_err("native overlap must fail closed");
+    assert!(matches!(overlap, ArchiveError::ConflictingRawRange { .. }));
+
+    let legacy_after_v2 = byte_archive
+        .append_batch(&raw_batch("node-trades", "rotation-7", 48, &[b"legacy"]))
+        .expect_err("source policy must not change from V2 to V1");
+    assert!(matches!(legacy_after_v2, ArchiveError::InvalidInput(_)));
+
+    let legacy_first = tempfile::tempdir().expect("temporary archive");
+    let legacy_archive = archive(&legacy_first).expect("open archive");
+    legacy_archive
+        .append_batch(&raw_batch("node-trades", "rotation-7", 19, &[b"legacy"]))
+        .expect("append legacy source");
+    let v2_after_legacy = legacy_archive
+        .append_batch(&byte_raw_batch("rotation-7", &[(20, b"v2")], 42))
+        .expect_err("source policy must not change from V1 to V2");
+    assert!(matches!(v2_after_legacy, ArchiveError::InvalidInput(_)));
+}
+
+#[test]
+fn raw_archive_policy_state_ignores_orphans_and_rejects_dual_current() {
+    let legacy_root = tempfile::tempdir().expect("temporary legacy archive");
+    let legacy_archive = archive(&legacy_root).expect("open legacy archive");
+    legacy_archive
+        .append_batch(&raw_batch("node-trades", "rotation-7", 19, &[b"legacy"]))
+        .expect("append legacy source");
+    let inactive_v2_orphan = legacy_root.path().join(
+        "chain=mainnet/dataset=raw_source_observations_byte_v2/source=node-trades/objects/orphan.parquet",
+    );
+    fs::create_dir_all(
+        inactive_v2_orphan
+            .parent()
+            .expect("inactive V2 orphan parent"),
+    )
+    .expect("create inactive V2 orphan directory");
+    fs::write(&inactive_v2_orphan, b"unreachable").expect("write inactive V2 orphan");
+    assert_eq!(
+        legacy_archive
+            .inspect()
+            .expect("inactive V2 orphan is invisible")
+            .raw_sources(),
+        1
+    );
+
+    let byte_root = tempfile::tempdir().expect("temporary byte archive");
+    let byte_archive = archive(&byte_root).expect("open byte archive");
+    byte_archive
+        .append_batch(&byte_raw_batch("rotation-7", &[(19, b"byte")], 41))
+        .expect("append byte source");
+
+    let legacy_current_relative =
+        "chain=mainnet/dataset=raw_source_observations/source=node-trades/CURRENT";
+    let legacy_current = fs::read(legacy_root.path().join(legacy_current_relative))
+        .expect("read valid legacy current");
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&legacy_current).expect("parse legacy current");
+    let catalog_relative = pointer["manifest_relative_path"]
+        .as_str()
+        .expect("legacy catalog path");
+    let destination_catalog = byte_root.path().join(catalog_relative);
+    fs::create_dir_all(destination_catalog.parent().expect("catalog parent"))
+        .expect("create legacy catalog parent");
+    fs::copy(
+        legacy_root.path().join(catalog_relative),
+        &destination_catalog,
+    )
+    .expect("copy valid legacy catalog");
+    fs::write(
+        byte_root.path().join(legacy_current_relative),
+        legacy_current,
+    )
+    .expect("activate second cursor policy");
+
+    let chain = ChainId::new("mainnet").expect("chain ID");
+    let source = SourceId::new("node-trades").expect("source ID");
+    let sequence_range = LocalRecordSequenceRange::try_new(
+        LocalRecordSequence::try_new(41).expect("sequence start"),
+        LocalRecordSequence::try_new(41).expect("sequence end"),
+    )
+    .expect("sequence range");
+    assert!(matches!(
+        byte_archive.read_observations_by_sequence(&chain, &source, sequence_range),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
+    assert!(matches!(
+        byte_archive.read_observations(
+            &chain,
+            &source,
+            RawObservationRange::try_new("rotation-7", 19, 19).expect("native range")
+        ),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
+    assert!(matches!(
+        byte_archive.inspect(),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_archive_policy_probe_rejects_a_dangling_other_current() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().expect("temporary archive");
+    let archive = archive(&temporary).expect("open archive");
+    archive
+        .append_batch(&byte_raw_batch("rotation-7", &[(19, b"byte")], 41))
+        .expect("append byte source");
+    let legacy_current = temporary
+        .path()
+        .join("chain=mainnet/dataset=raw_source_observations/source=node-trades/CURRENT");
+    symlink("missing-current", legacy_current).expect("create dangling current symlink");
+
+    let error = match archive.read_observations_by_sequence(
+        &ChainId::new("mainnet").expect("chain ID"),
+        &SourceId::new("node-trades").expect("source ID"),
+        LocalRecordSequenceRange::try_new(
+            LocalRecordSequence::try_new(41).expect("sequence start"),
+            LocalRecordSequence::try_new(41).expect("sequence end"),
+        )
+        .expect("sequence range"),
+    ) {
+        Ok(_) => panic!("unsafe policy pointer must fail before replay"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, ArchiveError::UnsafePath));
+    assert!(matches!(archive.inspect(), Err(ArchiveError::UnsafePath)));
+}
+
+#[cfg(unix)]
+#[test]
+fn archive_inspection_rejects_a_dangling_raw_dataset_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().expect("temporary archive");
+    let archive = archive(&temporary).expect("open archive");
+    archive
+        .append_batch(&raw_batch("primary-node", "epoch-a", 19, &[b"legacy"]))
+        .expect("append legacy source");
+    symlink(
+        "missing-byte-dataset",
+        temporary
+            .path()
+            .join("chain=mainnet/dataset=raw_source_observations_byte_v2"),
+    )
+    .expect("create dangling dataset symlink");
+    assert!(matches!(archive.inspect(), Err(ArchiveError::UnsafePath)));
 }
 
 #[test]
