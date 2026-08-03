@@ -161,6 +161,13 @@ No validated secret exposure was found by the 2026-07-28 local audit, but normal
 
 ## Latest local evidence
 
+- `just state-replay-account-e2e 30 12 4` — retained private synthetic account
+  report proves repeat/resume equivalence, exact account-flow/relation/mode
+  namespace cardinalities, typed prerequisite denial, and atomic late-invalid
+  rollback. It is not deployed/live source, authoritative balance, position,
+  episode, liquidation, settlement, funding-attribution, margin-model, or
+  Stage 1/2 qualification.
+
 The following checks passed most recently on 2026-07-29. They establish local code and
 dependency-stack evidence only; they do not close the signed Stage 0 gate or
 prove a running Alpha Desk product:

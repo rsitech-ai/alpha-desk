@@ -685,7 +685,7 @@ on them.
 - Produces: `state-replay account-e2e`, bounded quick/soak recipes, and report
   schema `hyperliquid-alpha-desk/state-replay-account-e2e-report/v1`.
 
-- [ ] **Step 1: Write failing runner and CLI tests**
+- [x] **Step 1: Write failing runner and CLI tests**
 
   Require:
 
@@ -712,13 +712,13 @@ on them.
   funding-to-episode attribution, backstop, liquidation, or settlement
   behavior; replacement-plan Task 8 owns those scenarios.
 
-- [ ] **Step 2: Run red**
+- [x] **Step 2: Run red**
 
   ```bash
   cargo +1.97.1 test -p state-replay --test account_e2e --test cli --locked --offline
   ```
 
-- [ ] **Step 3: Implement honest evidence**
+- [x] **Step 3: Implement honest evidence**
 
   Use:
 
@@ -736,7 +736,7 @@ on them.
   standard/unified/portfolio margin, liquidation-price, book, signal, and
   execution qualification false.
 
-- [ ] **Step 4: Add retained quick and soak recipes**
+- [x] **Step 4: Add retained quick and soak recipes**
 
   ```bash
   just state-replay-account-e2e 30 12 4

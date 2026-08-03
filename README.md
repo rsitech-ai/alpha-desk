@@ -104,6 +104,13 @@ report proves only the generated canonical market contract: Stage 1/2,
 deployed/live source, authoritative metadata, external oracle reconciliation,
 account, position, margin, book, signal, and execution qualification remain
 false.
+`just state-replay-account-e2e` exercises generated canonical account flows,
+relations, and mode changes through the immutable archive and private composite
+checkpoint path. Use `just state-replay-account-soak` for the bounded longer
+profile. It proves only `synthetic_account_flow_contract_proven`; it does not
+qualify positions, episodes, liquidations, settlement, funding attribution,
+margin models, authoritative balances, deployed/live source, Stage 1/2, book,
+signal, or execution semantics.
 For an existing canonical archive, use `just state-replay-archive-e2e` or
 `just state-replay-archive-soak` with an explicit chain, inclusive range, and
 manifest-boundary checkpoint height. Operator-archive evidence remains

@@ -105,6 +105,12 @@ state-replay-market-e2e blocks="100" checkpoint_after="50" iterations="3":
 state-replay-market-soak blocks="1000" checkpoint_after="500" iterations="100":
     run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"; output="target/evidence/state-replay-market/$run_id"; mkdir -p "target/evidence/state-replay-market"; cargo +1.97.1 run --release -p state-replay --locked --offline -- market-e2e --output "$output" --blocks {{quote(blocks)}} --checkpoint-after {{quote(checkpoint_after)}} --iterations {{quote(iterations)}}; printf 'state-replay-market-soak-report:%s/report.json\n' "$output"
 
+state-replay-account-e2e blocks="100" checkpoint_after="50" iterations="3":
+    run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"; output="target/evidence/state-replay-account/$run_id"; mkdir -p "target/evidence/state-replay-account"; cargo +1.97.1 run -p state-replay --locked --offline -- account-e2e --output "$output" --blocks {{quote(blocks)}} --checkpoint-after {{quote(checkpoint_after)}} --iterations {{quote(iterations)}}; printf 'state-replay-account-report:%s/report.json\n' "$output"
+
+state-replay-account-soak blocks="1000" checkpoint_after="500" iterations="100":
+    run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"; output="target/evidence/state-replay-account/$run_id"; mkdir -p "target/evidence/state-replay-account"; cargo +1.97.1 run --release -p state-replay --locked --offline -- account-e2e --output "$output" --blocks {{quote(blocks)}} --checkpoint-after {{quote(checkpoint_after)}} --iterations {{quote(iterations)}}; printf 'state-replay-account-soak-report:%s/report.json\n' "$output"
+
 state-replay-archive-e2e archive chain start_height end_height checkpoint_height iterations="3":
     run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"; output="target/evidence/state-replay-archive/$run_id"; mkdir -p "target/evidence/state-replay-archive"; cargo +1.97.1 run -p state-replay --locked --offline -- archive-e2e --archive {{quote(archive)}} --output "$output" --chain {{quote(chain)}} --start-height {{quote(start_height)}} --end-height {{quote(end_height)}} --checkpoint-height {{quote(checkpoint_height)}} --iterations {{quote(iterations)}}; printf 'state-replay-archive-report:%s/report.json\n' "$output"
 

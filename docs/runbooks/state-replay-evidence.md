@@ -208,6 +208,38 @@ independent rebuilds. Override them with positional
 evidence directory, including the primary, malformed, and unsupported
 archives, metadata-suppression block, checkpoint generations, and report.
 
+## Canonical account evidence
+
+Run the bounded synthetic account-flow/composite proof with:
+
+```bash
+just state-replay-account-e2e 30 12 4
+```
+
+The runner retains a new `0700` directory below
+`target/evidence/state-replay-account/`, with `0600` reports and immutable
+archive/checkpoint material. It refuses existing or unsafe output paths. It
+requires independent full replays with identical final state and full receipt
+hashes, resumes a checkpoint suffix crossing vault and account/margin-mode
+flows, counts the account-flow/relation/mode namespaces, denies missing typed
+asset/market prerequisites, rolls back a late cross-component failure, and
+denies schema `1.1.0`.
+
+The report is synthetic canonical account evidence only:
+
+```text
+evidence_class = synthetic_canonical_account
+state_semantics = exact_observed_account_flows_relations_and_modes
+source_qualification = synthetic_unassessed
+```
+
+Only `synthetic_account_flow_contract_proven` is true. Position, episode,
+liquidation, settlement, funding-attribution, authoritative opening-balance,
+venue-reconciliation, TWAP-completeness, backstop-cost-basis, margin-model,
+liquidation-price, book, signal, execution, Stage 1/2, deployed-source, and
+live-source qualification remain false. Task 8 owns the excluded risk and
+position scenarios.
+
 ## Existing operator archive
 
 Run the same deterministic rebuild and checkpoint-resume proof against an
