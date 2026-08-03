@@ -62,6 +62,48 @@ pub(super) fn validate_checkpoint_entries(
         "200",
         "0",
     )?;
+    assert_checkpoint_current_episode(
+        entries,
+        BUYER,
+        &expected.market,
+        &expected.opening_buyer_episode,
+        &expected.opening_event,
+    )?;
+    assert_checkpoint_current_episode(
+        entries,
+        SELLER,
+        &expected.market,
+        &expected.opening_seller_episode,
+        &expected.opening_event,
+    )?;
+    assert_episode_effect(
+        entries,
+        &expected.opening_event,
+        BUYER,
+        0,
+        &expected.opening_buyer_episode,
+        EpisodeEffectKindV1::Opened,
+        "2.00000000",
+        "200",
+        "0.00000000",
+        "0",
+        "0",
+        None,
+    )?;
+    assert_episode_effect(
+        entries,
+        &expected.opening_event,
+        SELLER,
+        0,
+        &expected.opening_seller_episode,
+        EpisodeEffectKindV1::Opened,
+        "0.00000000",
+        "0",
+        "2.00000000",
+        "200",
+        "0",
+        None,
+    )?;
     if namespace_count(entries, "position-quantity-current.v1") != 2
         || namespace_count(entries, "position-effect-fact.v1") != 2
         || namespace_count(entries, "position-episode-current.v1") != 2
@@ -617,29 +659,7 @@ pub(super) fn validate_final_entries(
     {
         return Err(FixtureRunError::PositionSemanticMismatch);
     }
-    let mut settlement_claim_seen = false;
-    for (key, bytes) in entries.iter().filter(|(key, _)| {
-        key.namespace().starts_with("position-") || key.namespace().starts_with("account-")
-    }) {
-        let value: serde_json::Value =
-            serde_json::from_slice(bytes).map_err(|_| FixtureRunError::PositionSemanticMismatch)?;
-        let Some(raw_pnl) = value.get("realized_pnl") else {
-            continue;
-        };
-        let claimed_pnl = raw_pnl
-            .as_str()
-            .ok_or(FixtureRunError::PositionSemanticMismatch)
-            .and_then(|raw| QuoteAmount::from_str(raw).map_err(FixtureRunError::from))?;
-        if claimed_pnl == QuoteAmount::from_str("-2.5")? {
-            if key != &settlement_key || settlement_claim_seen {
-                return Err(FixtureRunError::PositionSemanticMismatch);
-            }
-            settlement_claim_seen = true;
-        }
-    }
-    if !settlement_claim_seen {
-        return Err(FixtureRunError::PositionSemanticMismatch);
-    }
+    validate_settlement_pnl_exclusivity(entries, &settlement_key)?;
     if entries.iter().any(|(key, bytes)| {
         (key.namespace() == "position-episode.v1"
             || key.namespace() == "position-episode-effect-fact.v1")
@@ -650,6 +670,30 @@ pub(super) fn validate_final_entries(
         return Err(FixtureRunError::PositionSemanticMismatch);
     }
     if namespace_counts(entries) != expected_namespace_counts() {
+        return Err(FixtureRunError::PositionSemanticMismatch);
+    }
+    Ok(())
+}
+
+fn validate_settlement_pnl_exclusivity(
+    entries: &BTreeMap<StateKey, Vec<u8>>,
+    settlement_key: &StateKey,
+) -> Result<(), FixtureRunError> {
+    let mut settlement_claim_seen = false;
+    for (key, bytes) in entries.iter().filter(|(key, _)| {
+        key.namespace().starts_with("position-") || key.namespace().starts_with("account-")
+    }) {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| FixtureRunError::PositionSemanticMismatch)?;
+        let Some(raw_pnl) = value.get("realized_pnl") else {
+            continue;
+        };
+        if key != settlement_key || settlement_claim_seen || raw_pnl.as_str() != Some("-2.5") {
+            return Err(FixtureRunError::PositionSemanticMismatch);
+        }
+        settlement_claim_seen = true;
+    }
+    if !settlement_claim_seen || !entries.contains_key(settlement_key) {
         return Err(FixtureRunError::PositionSemanticMismatch);
     }
     Ok(())
@@ -719,6 +763,36 @@ fn assert_episode_snapshot(
     Ok(())
 }
 
+fn assert_checkpoint_current_episode(
+    entries: &BTreeMap<StateKey, Vec<u8>>,
+    account: Address,
+    market: &MarketId,
+    episode_id: &PositionEpisodeId,
+    last_event: &EventId,
+) -> Result<(), FixtureRunError> {
+    let key = PositionEpisodeCurrentRecordV1::state_key(&account, market)
+        .map_err(|_| FixtureRunError::PositionSemanticMismatch)?;
+    let record = decode_at(entries, &key, PositionEpisodeCurrentRecordV1::decode_at)?;
+    if !checkpoint_current_matches(&record, account, market, episode_id, last_event) {
+        return Err(FixtureRunError::PositionSemanticMismatch);
+    }
+    Ok(())
+}
+
+fn checkpoint_current_matches(
+    record: &PositionEpisodeCurrentRecordV1,
+    account: Address,
+    market: &MarketId,
+    episode_id: &PositionEpisodeId,
+    last_event: &EventId,
+) -> bool {
+    record.account_id() == account
+        && record.market_id() == market
+        && record.episode_id() == Some(episode_id)
+        && record.attribution_resolution() == EpisodeAttributionResolutionV1::Resolved
+        && record.last_event_id() == last_event
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assert_episode_effect(
     entries: &BTreeMap<StateKey, Vec<u8>>,
@@ -738,22 +812,56 @@ fn assert_episode_effect(
     let key = PositionEpisodeEffectFactRecordV1::state_key(event_id, &account, &market, ordinal)
         .map_err(|_| FixtureRunError::PositionSemanticMismatch)?;
     let record = decode_at(entries, &key, PositionEpisodeEffectFactRecordV1::decode_at)?;
-    if record.event_id() != event_id
-        || record.account_id() != account
-        || record.market_id() != &market
-        || record.leg_ordinal() != ordinal
-        || record.episode_id() != episode_id
-        || record.effect_kind() != effect_kind
-        || record.buy_quantity_delta() != Quantity::from_str(buy_quantity)?
-        || record.buy_notional_delta().to_string() != buy_notional
-        || record.sell_quantity_delta() != Quantity::from_str(sell_quantity)?
-        || record.sell_notional_delta().to_string() != sell_notional
-        || record.funding_paid_delta() != QuoteAmount::from_str(funding_paid)?
-        || record.close_cause() != close_cause
-    {
+    if !episode_effect_matches(
+        &record,
+        event_id,
+        account,
+        ordinal,
+        episode_id,
+        effect_kind,
+        buy_quantity,
+        buy_notional,
+        sell_quantity,
+        sell_notional,
+        funding_paid,
+        "0",
+        close_cause,
+    )? {
         return Err(FixtureRunError::PositionSemanticMismatch);
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn episode_effect_matches(
+    record: &PositionEpisodeEffectFactRecordV1,
+    event_id: &EventId,
+    account: Address,
+    ordinal: u8,
+    episode_id: &PositionEpisodeId,
+    effect_kind: EpisodeEffectKindV1,
+    buy_quantity: &str,
+    buy_notional: &str,
+    sell_quantity: &str,
+    sell_notional: &str,
+    funding_paid: &str,
+    funding_received: &str,
+    close_cause: Option<EpisodeCloseCauseV1>,
+) -> Result<bool, FixtureRunError> {
+    let market = MarketId::new(MARKET)?;
+    Ok(record.event_id() == event_id
+        && record.account_id() == account
+        && record.market_id() == &market
+        && record.leg_ordinal() == ordinal
+        && record.episode_id() == episode_id
+        && record.effect_kind() == effect_kind
+        && record.buy_quantity_delta() == Quantity::from_str(buy_quantity)?
+        && record.buy_notional_delta().to_string() == buy_notional
+        && record.sell_quantity_delta() == Quantity::from_str(sell_quantity)?
+        && record.sell_notional_delta().to_string() == sell_notional
+        && record.funding_paid_delta() == QuoteAmount::from_str(funding_paid)?
+        && record.funding_received_delta() == QuoteAmount::from_str(funding_received)?
+        && record.close_cause() == close_cause)
 }
 
 fn assert_quantity(
@@ -1022,4 +1130,133 @@ pub(super) fn fixture_oracle(
             "recovery_seller_sell": "23.75",
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_EVENT: &str = "evt_checkpoint_open";
+    const TEST_EPISODE: &str =
+        "pos_ep_2a8da82f97ac3c5f0382810be9a0bcf72968f884f430d5168d541ccea818666f";
+    const OTHER_EPISODE: &str =
+        "pos_ep_ecdd714df2737000b14bdc6b764dfb66bd5b5fc5c3b5b13fbc812e927e740acd";
+
+    #[test]
+    fn episode_effect_match_rejects_nonzero_received_funding() {
+        let event = EventId::new(TEST_EVENT).expect("event");
+        let market = MarketId::new(MARKET).expect("market");
+        let episode = PositionEpisodeId::new(TEST_EPISODE).expect("episode");
+        let key = PositionEpisodeEffectFactRecordV1::state_key(&event, &BUYER, &market, 0)
+            .expect("effect key");
+        let bytes = opening_effect_bytes("0.5");
+        let record = PositionEpisodeEffectFactRecordV1::decode_at(&key, &bytes)
+            .expect("valid key-bound effect");
+
+        assert!(
+            !episode_effect_matches(
+                &record,
+                &event,
+                BUYER,
+                0,
+                &episode,
+                EpisodeEffectKindV1::Opened,
+                "2.00000000",
+                "200",
+                "0.00000000",
+                "0",
+                "0",
+                "0",
+                None,
+            )
+            .expect("literal comparison")
+        );
+    }
+
+    #[test]
+    fn checkpoint_current_match_rejects_the_wrong_episode_identity() {
+        let event = EventId::new(TEST_EVENT).expect("event");
+        let market = MarketId::new(MARKET).expect("market");
+        let episode = PositionEpisodeId::new(TEST_EPISODE).expect("episode");
+        let wrong_episode = PositionEpisodeId::new(OTHER_EPISODE).expect("other episode");
+        let key = PositionEpisodeCurrentRecordV1::state_key(&BUYER, &market).expect("current key");
+        let record = PositionEpisodeCurrentRecordV1::decode_at(&key, &current_bytes())
+            .expect("valid key-bound current");
+
+        assert!(!checkpoint_current_matches(
+            &record,
+            BUYER,
+            &market,
+            &wrong_episode,
+            &event,
+        ));
+        assert!(checkpoint_current_matches(
+            &record, BUYER, &market, &episode, &event,
+        ));
+    }
+
+    #[test]
+    fn settlement_exclusivity_rejects_any_foreign_realized_pnl_field() {
+        let settlement_key =
+            StateKey::try_new("position-settlement-fact.v1", b"settlement".to_vec())
+                .expect("settlement key");
+        let foreign_key =
+            StateKey::try_new("account-fact.v1", b"foreign".to_vec()).expect("foreign key");
+        let entries = BTreeMap::from([
+            (
+                settlement_key.clone(),
+                br#"{"realized_pnl":"-2.5"}"#.to_vec(),
+            ),
+            (foreign_key, br#"{"realized_pnl":"1"}"#.to_vec()),
+        ]);
+
+        assert!(validate_settlement_pnl_exclusivity(&entries, &settlement_key).is_err());
+    }
+
+    fn opening_effect_bytes(funding_received: &str) -> Vec<u8> {
+        format!(
+            concat!(
+                r#"{{"schema":"hyperliquid-alpha-desk/position-episode-effect-fact/v1","#,
+                r#""event_id":"{TEST_EVENT}","#,
+                r#""account_id":"{BUYER}","#,
+                r#""market_id":"{MARKET}","#,
+                r#""leg_ordinal":0,"#,
+                r#""episode_id":"{TEST_EPISODE}","#,
+                r#""effect_kind":"opened","#,
+                r#""buy_quantity_delta":"2.00000000","#,
+                r#""buy_notional_delta":"200","#,
+                r#""sell_quantity_delta":"0.00000000","#,
+                r#""sell_notional_delta":"0","#,
+                r#""funding_paid_delta":"0","#,
+                r#""funding_received_delta":"{funding_received}","#,
+                r#""close_cause":null,"#,
+                r#""rule_version":"hyperliquid-alpha-desk-canonical-position-episode@1.0.0"}}"#,
+            ),
+            BUYER = BUYER.to_api_string(),
+            TEST_EVENT = TEST_EVENT,
+            MARKET = MARKET,
+            TEST_EPISODE = TEST_EPISODE,
+            funding_received = funding_received,
+        )
+        .into_bytes()
+    }
+
+    fn current_bytes() -> Vec<u8> {
+        format!(
+            concat!(
+                r#"{{"schema":"hyperliquid-alpha-desk/position-episode-current/v1","#,
+                r#""account_id":"{BUYER}","#,
+                r#""market_id":"{MARKET}","#,
+                r#""episode_id":"{TEST_EPISODE}","#,
+                r#""attribution_resolution":"resolved","#,
+                r#""last_event_id":"{TEST_EVENT}","#,
+                r#""last_block_height":1000000}}"#,
+            ),
+            BUYER = BUYER.to_api_string(),
+            MARKET = MARKET,
+            TEST_EPISODE = TEST_EPISODE,
+            TEST_EVENT = TEST_EVENT,
+        )
+        .into_bytes()
+    }
 }
