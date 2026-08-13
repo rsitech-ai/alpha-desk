@@ -1,4 +1,6 @@
-use canonical_archive::{ArchiveConfig, RawArchiveCheckpoint, RawV3Archive};
+use canonical_archive::{
+    ArchiveConfig, RawArchiveCheckpoint, RawArchiveRetentionRequest, RawV3Archive,
+};
 use domain_types::{ChainId, KnownTime, SourceId};
 use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
 use storage_ports::{
@@ -993,4 +995,262 @@ fn gc_reclaims_exclusive_leases_after_their_roots_are_gone() {
 
 fn encode_sha256(hash: [u8; 32]) -> String {
     hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn standalone_hint_pages(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let hints = dataset_dir(root).join("hints");
+    std::fs::read_dir(&hints)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("hint-") && name.ends_with(".json"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn gc_reclaims_standalone_hint_pages_after_pack_embedded_hints_exist() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let first = archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    archive.rebuild_receipt_hints(&chain, &source).unwrap();
+    assert!(!standalone_hint_pages(temporary.path()).is_empty());
+    archive.pack_index(&chain, &source).unwrap();
+    assert!(!standalone_hint_pages(temporary.path()).is_empty());
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .unwrap();
+    assert!(
+        plan.files()
+            .any(|(path, _, _)| path.contains("/hints/hint-") && path.ends_with(".json"))
+    );
+    later
+        .execute_packed_object_gc(&chain, &source, plan.digest(), [0xAB; 32])
+        .unwrap();
+    assert!(standalone_hint_pages(temporary.path()).is_empty());
+    let (first_seq, last_seq) = later
+        .lookup_receipt_hint(&chain, &source, first.manifest_id())
+        .unwrap();
+    assert_eq!((first_seq, last_seq), (1, 1));
+}
+
+#[test]
+fn scrub_and_startup_verify_the_authenticated_tree_and_fail_closed_on_corruption() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    let report = archive.scrub(&chain, &source).unwrap();
+    assert_eq!(report.logical_manifest_count(), 2);
+    assert_eq!(report.packed_range_count(), 0);
+    let mut parquet = Vec::new();
+    collect_parquet(temporary.path(), &mut parquet);
+    std::fs::write(&parquet[0], b"corrupt-object").unwrap();
+    assert!(archive.scrub(&chain, &source).is_err());
+    drop(archive);
+    assert!(
+        RawV3Archive::open(
+            temporary.path(),
+            ArchiveConfig::deterministic_fixture(
+                "raw-v3-io-test",
+                KnownTime::from_unix_micros(FIXTURE_TIME_MICROS).unwrap(),
+            )
+            .unwrap(),
+            generous_capacity().0,
+            generous_capacity().1,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn maintenance_statistics_bind_logical_and_physical_counts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let empty = archive.maintenance_statistics(&chain, &source).unwrap();
+    assert_eq!(empty.logical_manifest_count(), 0);
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    let uncompacted = archive.maintenance_statistics(&chain, &source).unwrap();
+    assert_eq!(uncompacted.logical_manifest_count(), 2);
+    assert_eq!(uncompacted.logical_row_count(), 2);
+    assert_eq!(uncompacted.physical_data_object_count(), 2);
+    assert_eq!(uncompacted.packed_range_count(), 0);
+    assert_eq!(uncompacted.pending_pack_manifest_count(), 2);
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let packed = archive.maintenance_statistics(&chain, &source).unwrap();
+    assert_eq!(packed.logical_manifest_count(), 2);
+    assert_eq!(packed.logical_row_count(), 2);
+    assert_eq!(packed.physical_data_object_count(), 1);
+    assert_eq!(packed.packed_range_count(), 1);
+    assert_eq!(packed.pending_pack_manifest_count(), 0);
+    assert!(packed.physical_data_bytes() > 0);
+    assert!(packed.index_bytes() > 0);
+    assert!(packed.index_inode_count() > 0);
+}
+
+#[test]
+fn authorized_retention_worker_requires_the_exact_plan_digest() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let backup = [0xAB; 32];
+    assert!(RawArchiveRetentionRequest::try_new([0; 32], backup).is_err());
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, backup)
+        .unwrap();
+    assert!(
+        later
+            .apply_authorized_retention(
+                &chain,
+                &source,
+                RawArchiveRetentionRequest::try_new(backup, [0xCD; 32]).unwrap(),
+            )
+            .is_err()
+    );
+    let report = later
+        .apply_authorized_retention(
+            &chain,
+            &source,
+            RawArchiveRetentionRequest::try_new(backup, plan.digest()).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(report.gc().plan_digest(), plan.digest());
+    assert!(report.gc().unlinked_files() > 0);
+    assert_eq!(report.statistics().logical_manifest_count(), 2);
+    assert_eq!(report.statistics().packed_range_count(), 1);
+}
+
+#[test]
+fn restore_replays_journaled_missing_files_and_keeps_unjournaled_vanish_fail_closed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let backup = [0xAB; 32];
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, backup)
+        .unwrap();
+    let (path, object_sha256, byte_len) = plan
+        .files()
+        .find(|(path, _, _)| !path.contains("/leases/"))
+        .map(|(path, hash, len)| (path.to_owned(), hash.to_owned(), len))
+        .expect("eligible file");
+    let backup_root = tempfile::tempdir().unwrap();
+    let backup_file = backup_root.path().join(&path);
+    std::fs::create_dir_all(backup_file.parent().unwrap()).unwrap();
+    std::fs::copy(temporary.path().join(&path), &backup_file).unwrap();
+    let journal = dataset_dir(temporary.path())
+        .join("gc")
+        .join(format!("deletion-{}.log", encode_sha256(plan.digest())));
+    std::fs::write(
+        &journal,
+        format!(
+            "{{\"kind\":\"planned\",\"relative_path\":\"{path}\",\"object_sha256\":\"{object_sha256}\",\"byte_len\":{byte_len}}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::remove_file(temporary.path().join(&path)).unwrap();
+    let restored = later
+        .restore_planned_files_from_backup(
+            &chain,
+            &source,
+            plan.digest(),
+            backup,
+            backup_root.path(),
+        )
+        .unwrap();
+    assert_eq!(restored.restored_files(), 1);
+    assert!(temporary.path().join(&path).is_file());
+
+    let vanish_backup = [0xEF; 32];
+    let vanish = later
+        .plan_packed_object_gc(&chain, &source, vanish_backup)
+        .unwrap();
+    let vanished = vanish
+        .files()
+        .find(|(path, _, _)| !path.contains("/leases/"))
+        .map(|(path, _, _)| path.to_owned())
+        .expect("eligible file");
+    std::fs::remove_file(temporary.path().join(&vanished)).unwrap();
+    assert!(matches!(
+        later.restore_planned_files_from_backup(
+            &chain,
+            &source,
+            vanish.digest(),
+            vanish_backup,
+            backup_root.path(),
+        ),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
+    assert!(matches!(
+        later.execute_packed_object_gc(&chain, &source, vanish.digest(), vanish_backup),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
 }

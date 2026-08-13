@@ -48,9 +48,13 @@ use super::{
 mod checkpoint;
 mod gc;
 mod hint;
+mod retention;
+mod scrub;
 
 pub use checkpoint::{RawArchiveCheckpoint, RawArchiveCheckpointV1, RawArchiveCheckpointV2};
-pub use gc::{RawArchiveGcPlan, RawArchiveGcReceipt};
+pub use gc::{RawArchiveGcPlan, RawArchiveGcReceipt, RawArchiveRestoreReceipt};
+pub use retention::{RawArchiveRetentionReport, RawArchiveRetentionRequest};
+pub use scrub::RawArchiveScrubReport;
 
 #[derive(Debug)]
 pub struct RawV3Archive {
@@ -89,13 +93,15 @@ impl RawV3Archive {
         let root = root
             .canonicalize()
             .map_err(|_| ArchiveError::Io("canonicalizing archive root"))?;
-        Ok(Self {
+        let archive = Self {
             root,
             config,
             writer: Mutex::new(()),
             workload,
             admission,
-        })
+        };
+        scrub::verify_all_sources(&archive)?;
+        Ok(archive)
     }
 
     #[must_use]
@@ -237,6 +243,67 @@ impl RawV3Archive {
             raw_policy::RawPolicy::MonotonicByteV3,
         )?;
         gc::execute_packed_object_gc(self, chain, source, plan_digest, backup_receipt)
+    }
+
+    pub fn restore_planned_files_from_backup(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        plan_digest: [u8; 32],
+        backup_receipt: [u8; 32],
+        backup_root: impl AsRef<Path>,
+    ) -> Result<RawArchiveRestoreReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        gc::restore_planned_files_from_backup(
+            self,
+            chain,
+            source,
+            plan_digest,
+            backup_receipt,
+            backup_root.as_ref(),
+        )
+    }
+
+    pub fn apply_authorized_retention(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        request: RawArchiveRetentionRequest,
+    ) -> Result<RawArchiveRetentionReport, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        retention::apply_authorized_retention(self, chain, source, request)
+    }
+
+    pub fn scrub(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+    ) -> Result<RawArchiveScrubReport, ArchiveError> {
+        scrub::scrub_source(self, chain, source)
+    }
+
+    pub fn maintenance_statistics(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+    ) -> Result<storage_ports::RawArchiveMaintenanceStatistics, ArchiveError> {
+        scrub::maintenance_statistics(self, chain, source)
     }
 
     pub fn rebuild_receipt_hints(
