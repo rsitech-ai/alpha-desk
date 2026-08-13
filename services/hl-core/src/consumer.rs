@@ -133,6 +133,7 @@ impl CanonicalDelivery {
 enum FetchPoisonKind {
     Decode(crate::publication::BlockMarkerError),
     HashMismatch,
+    PendingLimit,
 }
 
 impl FetchPoisonKind {
@@ -140,6 +141,7 @@ impl FetchPoisonKind {
         match self {
             Self::Decode(error) => error.reason_code(),
             Self::HashMismatch => "core.jetstream_hash_mismatch",
+            Self::PendingLimit => "core.jetstream_pending_limit",
         }
     }
 }
@@ -238,6 +240,18 @@ impl FetchPoisonBuilder {
             stream_sequence: frame.stream_sequence,
             consumer_sequence: frame.consumer_sequence,
             delivery_count: frame.delivery_count,
+        }
+    }
+
+    fn from_delivery(delivery: &CanonicalDelivery) -> Self {
+        Self {
+            subject: sanitized_identity(delivery.subject.as_str(), FETCH_UNDECODEABLE_SUBJECT),
+            message_id: sanitized_identity(&delivery.message_id, FETCH_UNDECODEABLE_MESSAGE_ID),
+            payload_sha256: Sha256::digest(&delivery.payload).into(),
+            block_hash: delivery.block_hash,
+            stream_sequence: delivery.stream_sequence,
+            consumer_sequence: delivery.consumer_sequence,
+            delivery_count: delivery.delivery_count,
         }
     }
 
@@ -413,6 +427,7 @@ impl CanonicalPullSource for InMemoryCanonicalSource {
 #[derive(Debug, Default)]
 pub struct InMemoryFetchSource {
     queued: VecDeque<JetStreamFetchFrame>,
+    inflight: BTreeSet<String>,
     acked: BTreeSet<String>,
     poison_pending: bool,
     terminated: bool,
@@ -423,6 +438,7 @@ impl InMemoryFetchSource {
     pub fn new(frames: impl IntoIterator<Item = JetStreamFetchFrame>) -> Self {
         Self {
             queued: frames.into_iter().collect(),
+            inflight: BTreeSet::new(),
             acked: BTreeSet::new(),
             poison_pending: false,
             terminated: false,
@@ -451,7 +467,13 @@ impl CanonicalPullSource for InMemoryFetchSource {
                 break;
             };
             match delivery_from_fetch(frame.as_view()) {
-                Ok(delivery) => batch.push(delivery),
+                Ok(delivery) => {
+                    if !self.inflight.insert(delivery.message_id.clone()) {
+                        self.poison_pending = true;
+                        return Err(pending_limit_poison(&delivery));
+                    }
+                    batch.push(delivery);
+                }
                 Err(error) => {
                     self.poison_pending = true;
                     return Err(error);
@@ -463,6 +485,7 @@ impl CanonicalPullSource for InMemoryFetchSource {
 
     async fn ack(&mut self, message_ids: &[String]) -> Result<(), JetStreamReplayError> {
         for message_id in message_ids {
+            self.inflight.remove(message_id);
             self.acked.insert(message_id.clone());
         }
         Ok(())
@@ -572,13 +595,11 @@ impl CanonicalPullSource for JetStreamPullSource {
                     return Err(error);
                 }
             };
-            if self
-                .inflight
-                .insert(delivery.message_id.clone(), message)
-                .is_some()
-            {
-                return Err(JetStreamReplayError::PendingLimit);
+            if self.inflight.contains_key(&delivery.message_id) {
+                self.poison = Some(message);
+                return Err(pending_limit_poison(&delivery));
             }
+            self.inflight.insert(delivery.message_id.clone(), message);
             deliveries.push(delivery);
         }
         Ok(deliveries)
@@ -1254,6 +1275,10 @@ fn delivery_from_fetch(
     Ok(delivery)
 }
 
+fn pending_limit_poison(delivery: &CanonicalDelivery) -> JetStreamReplayError {
+    FetchPoisonBuilder::from_delivery(delivery).fail(FetchPoisonKind::PendingLimit)
+}
+
 fn wrap_fetch_error(
     poison: FetchPoisonBuilder,
     error: JetStreamReplayError,
@@ -1263,7 +1288,7 @@ fn wrap_fetch_error(
         JetStreamReplayError::HashMismatch => poison.fail(FetchPoisonKind::HashMismatch),
         JetStreamReplayError::Config(error) => JetStreamReplayError::Config(error),
         JetStreamReplayError::IncompleteBlock => JetStreamReplayError::IncompleteBlock,
-        JetStreamReplayError::PendingLimit => JetStreamReplayError::PendingLimit,
+        JetStreamReplayError::PendingLimit => poison.fail(FetchPoisonKind::PendingLimit),
         JetStreamReplayError::Transport => JetStreamReplayError::Transport,
         JetStreamReplayError::FetchDecode(existing) => JetStreamReplayError::FetchDecode(existing),
         JetStreamReplayError::Replay(error) => JetStreamReplayError::Replay(error),

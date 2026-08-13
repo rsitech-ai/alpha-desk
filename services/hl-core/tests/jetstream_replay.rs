@@ -391,6 +391,49 @@ async fn fetch_transport_error_does_not_record_dlq() {
 }
 
 #[tokio::test]
+async fn fetch_duplicate_inflight_id_records_dlq_without_ack_or_state_advance() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let payload_hash: [u8; 32] = Sha256::digest(&delivery.payload).into();
+    let message_id = delivery.message_id.clone();
+    let block_hash = delivery.block_hash;
+    let first = JetStreamFetchFrame::from_delivery(&delivery);
+    let mut duplicate = JetStreamFetchFrame::from_delivery(&delivery);
+    duplicate.stream_sequence = Some(17);
+    duplicate.consumer_sequence = Some(8);
+    duplicate.delivery_count = 2;
+    let mut source = InMemoryFetchSource::new([first, duplicate]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("duplicate in-flight id");
+    assert_eq!(error.reason_code(), "core.jetstream_pending_limit");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(session.ledger().checkpoint().is_none());
+    assert!(!source.acked().contains(&message_id));
+    assert!(source.terminated());
+    assert_fetch_dead_letter(
+        &dead_letter,
+        "core.jetstream_pending_limit",
+        "hl.v1.block.committed",
+        &message_id,
+        payload_hash,
+        block_hash,
+        Some(17),
+        Some(8),
+        2,
+    );
+}
+
+#[tokio::test]
 async fn file_dead_letter_sink_records_fetch_hash_mismatch_with_stream_sequence() {
     let root = private_root();
     let store =
@@ -425,6 +468,54 @@ async fn file_dead_letter_sink_records_fetch_hash_mismatch_with_stream_sequence(
     assert_eq!(value["reason_code"], "core.jetstream_hash_mismatch");
     assert_eq!(value["payload_sha256"], poison_hash);
     assert_eq!(value["stream_sequence"], 99);
+    assert!(value.get("live_qualified").is_none());
+    assert!(value.get("stage_2_qualified").is_none());
+}
+
+#[tokio::test]
+async fn file_dead_letter_sink_records_fetch_pending_limit_with_stream_sequence() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let poison_hash = hex::encode(Sha256::digest(&delivery.payload));
+    let message_id = delivery.message_id.clone();
+    let block_hash = hex::encode(delivery.block_hash);
+    let first = JetStreamFetchFrame::from_delivery(&delivery);
+    let mut duplicate = JetStreamFetchFrame::from_delivery(&delivery);
+    duplicate.stream_sequence = Some(21);
+    duplicate.consumer_sequence = Some(4);
+    duplicate.delivery_count = 6;
+    let path = root.path().join("dead-letter.jsonl");
+    let mut dead_letter = FileDeadLetterSink::open(&path).expect("file dlq");
+    let mut source = InMemoryFetchSource::new([first, duplicate]);
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("duplicate in-flight id");
+    assert_eq!(error.reason_code(), "core.jetstream_pending_limit");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(session.ledger().checkpoint().is_none());
+    assert!(!source.acked().contains(&message_id));
+    assert!(source.terminated());
+    drop(dead_letter);
+
+    let encoded = fs::read_to_string(&path).expect("dlq file");
+    let value: serde_json::Value = serde_json::from_str(encoded.trim()).expect("json");
+    assert_eq!(value["schema_version"], DEAD_LETTER_SCHEMA_V1);
+    assert_eq!(value["reason_code"], "core.jetstream_pending_limit");
+    assert_eq!(value["message_id"], message_id);
+    assert_eq!(value["subject"], "hl.v1.block.committed");
+    assert_eq!(value["payload_sha256"], poison_hash);
+    assert_eq!(value["block_hash"], block_hash);
+    assert_eq!(value["stream_sequence"], 21);
+    assert_eq!(value["consumer_sequence"], 4);
+    assert_eq!(value["retry_count"], 6);
     assert!(value.get("live_qualified").is_none());
     assert!(value.get("stage_2_qualified").is_none());
 }
