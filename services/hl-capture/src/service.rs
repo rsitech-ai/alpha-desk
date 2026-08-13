@@ -185,9 +185,11 @@ pub async fn connect_capture(
         }
     };
     let raw_observation_archive: Arc<dyn RawObservationArchive> =
-        Arc::new(CaptureRawObservationArchive::new(archive, v3_raw));
-    let raw_archive: Arc<dyn RawSegmentArchive> =
-        Arc::new(BlockingRawSegmentArchive::new(raw_observation_archive));
+        Arc::new(CaptureRawObservationArchive::new(archive, v3_raw.clone()));
+    let raw_archive: Arc<dyn RawSegmentArchive> = Arc::new(match v3_raw {
+        Some(v3) => BlockingRawSegmentArchive::with_v3(raw_observation_archive, v3),
+        None => BlockingRawSegmentArchive::new(raw_observation_archive),
+    });
     let failover_store = Arc::new(
         crate::FailoverStore::new(config.runtime().failover_state_path().to_path_buf())
             .map_err(|_| RuntimeConnectError::FailoverState)?,

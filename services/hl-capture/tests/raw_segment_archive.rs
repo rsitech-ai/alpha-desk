@@ -491,8 +491,7 @@ async fn v3_byte_offset_segment_archives_and_open_scrubs() {
     let root = TempDir::new().unwrap();
     let archive_path = root.path().join("archive");
     let archive = open_v3(&archive_path);
-    let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
-    let archiver = BlockingRawSegmentArchive::new(raw_port);
+    let archiver = BlockingRawSegmentArchive::from_v3(archive.clone());
     let mut source_spool = byte_spool(&root);
     for offset in [19, 47, 85] {
         source_spool
@@ -520,8 +519,35 @@ async fn v3_byte_offset_segment_archives_and_open_scrubs() {
 
     let chain = ChainId::new("mainnet").unwrap();
     let source = SourceId::new("node-fills").unwrap();
+    match archive.load_checkpoint(&chain, &source).unwrap() {
+        Some(canonical_archive::RawArchiveCheckpoint::V2(loaded)) => {
+            assert_eq!(loaded.entries(), &entries);
+        }
+        other => panic!("expected archive-side V2 CURRENT, got {other:?}"),
+    }
     let scrub = archive.scrub(&chain, &source).unwrap();
     assert_eq!(scrub.logical_manifest_count(), 2);
+    let spool_evidence = RawSpoolArchiveEvidence::try_new(
+        closed.manifest_hash(),
+        closed.manifest().segment_blake3(),
+        closed.manifest().first_local_sequence().unwrap(),
+        closed.manifest().max_cursor().clone(),
+        closed.manifest().last_local_sequence().unwrap(),
+        closed.manifest().record_count(),
+    )
+    .unwrap();
+    archiver
+        .verify_archived_segment(
+            &RawSegmentArchiveVerification::new(
+                chain.clone(),
+                source.clone(),
+                spool_evidence,
+                summary.manifest_ids().to_vec(),
+            )
+            .with_checkpoint_entries(entries),
+        )
+        .await
+        .unwrap();
     drop(archive);
 
     let reopened = open_v3(&archive_path);
@@ -535,8 +561,7 @@ async fn v3_byte_offset_segment_archives_and_open_scrubs() {
 async fn v3_archive_failure_before_publication_leaves_zero_receipts() {
     let root = TempDir::new().unwrap();
     let archive = open_v3(&root.path().join("archive"));
-    let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
-    let archiver = BlockingRawSegmentArchive::new(raw_port);
+    let archiver = BlockingRawSegmentArchive::from_v3(archive.clone());
     let mut source_spool = byte_spool(&root);
     source_spool
         .append(&byte_observation(19, 1_000), 1_000)
@@ -560,4 +585,99 @@ async fn v3_archive_failure_before_publication_leaves_zero_receipts() {
 
     assert_eq!(error.reason_code(), "spool.segment_size_mismatch");
     assert!(archive.inspect_sources().unwrap().is_empty());
+    assert!(
+        archive
+            .load_checkpoint(
+                &ChainId::new("mainnet").unwrap(),
+                &SourceId::new("node-fills").unwrap(),
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn v3_checkpoint_current_failure_is_not_a_successful_archive() {
+    let root = TempDir::new().unwrap();
+    let data = open_v3(&root.path().join("archive"));
+    let checkpoint_store = open_v3(&root.path().join("checkpoint-only"));
+    let archiver = BlockingRawSegmentArchive::with_v3(
+        Arc::clone(&data) as Arc<dyn RawObservationArchive>,
+        checkpoint_store.clone(),
+    );
+    let mut source_spool = byte_spool(&root);
+    source_spool
+        .append(&byte_observation(19, 1_000), 1_000)
+        .unwrap();
+    let closed = source_spool.shutdown(200).unwrap().unwrap();
+
+    let error = archiver
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(1024),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.reason_code(), "archive.range_unavailable");
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    assert!(data.load_checkpoint(&chain, &source).unwrap().is_none());
+    assert!(
+        checkpoint_store
+            .load_checkpoint(&chain, &source)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn v3_verify_requires_archive_side_checkpoint_current() {
+    let root = TempDir::new().unwrap();
+    let archive = open_v3(&root.path().join("archive"));
+    let append_only =
+        BlockingRawSegmentArchive::new(Arc::clone(&archive) as Arc<dyn RawObservationArchive>);
+    let mut source_spool = byte_spool(&root);
+    source_spool
+        .append(&byte_observation(19, 1_000), 1_000)
+        .unwrap();
+    let closed = source_spool.shutdown(200).unwrap().unwrap();
+    let summary = append_only
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(1024),
+        )
+        .await
+        .unwrap();
+    let entries = summary.checkpoint_entries().unwrap().unwrap();
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    assert!(archive.load_checkpoint(&chain, &source).unwrap().is_none());
+
+    let spool_evidence = RawSpoolArchiveEvidence::try_new(
+        closed.manifest_hash(),
+        closed.manifest().segment_blake3(),
+        closed.manifest().first_local_sequence().unwrap(),
+        closed.manifest().max_cursor().clone(),
+        closed.manifest().last_local_sequence().unwrap(),
+        closed.manifest().record_count(),
+    )
+    .unwrap();
+    let verification = RawSegmentArchiveVerification::new(
+        chain.clone(),
+        source.clone(),
+        spool_evidence,
+        summary.manifest_ids().to_vec(),
+    )
+    .with_checkpoint_entries(entries);
+    let error = BlockingRawSegmentArchive::from_v3(archive.clone())
+        .verify_archived_segment(&verification)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.reason_code(),
+        "capture_raw_archive.verification_mismatch"
+    );
 }
