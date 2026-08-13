@@ -29,12 +29,12 @@ export function ToneBadge({
   )
 }
 
-export function LiveDot({ live }: { live: boolean }) {
+export function LiveDot({ pulse }: { pulse: boolean }) {
   return (
     <span
       className={cn(
         "inline-block size-1.5 rounded-full bg-muted-foreground",
-        live && "desk-live-dot bg-health-green"
+        pulse && "desk-live-dot"
       )}
       aria-hidden="true"
     />

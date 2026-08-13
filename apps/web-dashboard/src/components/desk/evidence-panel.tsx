@@ -44,6 +44,7 @@ import {
   type AuxiliarySourceStatus,
   type CaptureStatus,
 } from "@/lib/contracts"
+import { mapApiError } from "@/lib/fail-closed"
 
 export function EvidenceCard({
   loading,
@@ -95,25 +96,31 @@ function EvidenceBody({
           </EmptyHeader>
         </Empty>
       )
-    case "http-error":
+    case "http-error": {
+      const view = mapApiError(outcome.status, outcome.error)
       return (
-        <FieldTable
-          caption="hl.api.error.v1"
-          rows={[
-            {
-              field: "schema_version",
-              value: outcome.error.schema_version,
-              omitted: false,
-            },
-            { field: "code", value: outcome.error.code, omitted: false },
-            {
-              field: "reason_code",
-              value: outcome.error.reason_code,
-              omitted: false,
-            },
-          ]}
-        />
+        <div className="flex flex-col gap-2">
+          <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
+          <p className="text-xs text-muted-foreground">{view.detail}</p>
+          <FieldTable
+            caption="hl.api.error.v1"
+            rows={[
+              {
+                field: "schema_version",
+                value: outcome.error.schema_version,
+                omitted: false,
+              },
+              { field: "code", value: outcome.error.code, omitted: false },
+              {
+                field: "reason_code",
+                value: outcome.error.reason_code,
+                omitted: false,
+              },
+            ]}
+          />
+        </div>
       )
+    }
     case "ok":
       return <EvidenceDetail status={outcome.data} raw={outcome.raw} />
     default: {
@@ -188,7 +195,8 @@ function AuxiliarySection({
           <EmptyTitle>auxiliary_sources omitted</EmptyTitle>
           <EmptyDescription>
             The V4 contract omits auxiliary_sources when no node-line adapters
-            are enabled. This UI does not invent fills or charts.
+            are enabled. Auxiliary qualification is not live-source
+            qualification. This UI does not invent fills or charts.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -198,7 +206,8 @@ function AuxiliarySection({
   return (
     <div className="flex flex-col gap-2">
       <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
-        auxiliary_sources ({sources.length})
+        auxiliary_sources ({sources.length}) · aux qualification is not
+        live-qualified
       </p>
       <Table>
         <TableHeader>
@@ -234,13 +243,7 @@ function AuxiliarySection({
                 </ToneBadge>
               </TableCell>
               <TableCell>
-                <ToneBadge
-                  tone={
-                    source.qualification === "qualified" ? "green" : "neutral"
-                  }
-                >
-                  {source.qualification}
-                </ToneBadge>
+                <ToneBadge tone="neutral">{source.qualification}</ToneBadge>
               </TableCell>
               <TableCell className="font-mono text-xs tabular-nums">
                 {source.spool_records}
@@ -270,14 +273,23 @@ function AuxiliarySection({
           </summary>
           <FieldTable
             caption={source.source_id}
-            rows={AUXILIARY_SOURCE_FIELD_ORDER.map((field) => {
-              const record = source as unknown as Record<string, unknown>
-              return {
-                field,
-                value: record[field],
-                omitted: record[field] === undefined,
-              }
-            })}
+            rows={[
+              ...AUXILIARY_SOURCE_FIELD_ORDER.map((field) => {
+                const record = source as unknown as Record<string, unknown>
+                return {
+                  field,
+                  value: record[field],
+                  omitted: record[field] === undefined,
+                }
+              }),
+              ...Object.keys(source.extra_fields)
+                .sort()
+                .map((field) => ({
+                  field,
+                  value: source.extra_fields[field],
+                  omitted: false,
+                })),
+            ]}
           />
         </details>
       ))}

@@ -19,6 +19,7 @@ import { FieldTable } from "@/components/desk/field-table"
 import { ToneBadge } from "@/components/desk/chips"
 import type { EndpointOutcome } from "@/lib/api"
 import type { ApiError } from "@/lib/contracts"
+import { mapApiError } from "@/lib/fail-closed"
 
 export function StreamsCard({
   loading,
@@ -83,15 +84,12 @@ function StreamBody({
         </Empty>
       )
     case "http-error": {
-      const unspecified =
-        outcome.status === 501 &&
-        outcome.error.reason_code === "stream.websocket_unspecified"
+      const view = mapApiError(outcome.status, outcome.error)
+      const unspecified = view.family === "stream_unspecified"
       return (
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <ToneBadge tone={unspecified ? "yellow" : "red"}>
-              HTTP {outcome.status}
-            </ToneBadge>
+            <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
             <ToneBadge tone="neutral">{outcome.error.code}</ToneBadge>
           </div>
           {unspecified ? (
@@ -103,13 +101,15 @@ function StreamBody({
                 <EmptyTitle>stream unspecified</EmptyTitle>
                 <EmptyDescription>
                   hl.stream.v1 defines CanonicalEventBatch with next_cursor but
-                  does not specify a WebSocket resume protocol. hl-api
-                  fail-closes these paths with typed 501. This dashboard does
-                  not invent live fills or charts.
+                  does not specify a WebSocket resume protocol. GET and
+                  WebSocket upgrades fail-close with typed 501. This dashboard
+                  does not invent live fills or charts.
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>
-          ) : null}
+          ) : (
+            <p className="text-xs text-muted-foreground">{view.detail}</p>
+          )}
           <FieldTable
             caption="/v1/stream"
             rows={[

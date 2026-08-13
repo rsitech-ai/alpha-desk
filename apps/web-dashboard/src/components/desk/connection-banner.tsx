@@ -16,7 +16,7 @@ export type ConnectionKind =
   | "unauthorized"
   | "degraded"
   | "unavailable"
-  | "live"
+  | "polling"
 
 export function ConnectionBanner({
   kind,
@@ -49,8 +49,14 @@ export function ConnectionBanner({
       </Empty>
     )
   }
-  if (kind === "live") {
-    return null
+  if (kind === "polling") {
+    return (
+      <Alert>
+        <ActivityIcon />
+        <AlertTitle className="font-mono">polling</AlertTitle>
+        <AlertDescription>{detail}</AlertDescription>
+      </Alert>
+    )
   }
 
   const variant =

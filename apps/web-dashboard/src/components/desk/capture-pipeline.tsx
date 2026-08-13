@@ -22,13 +22,21 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ToneBadge } from "@/components/desk/chips"
+import { FieldTable } from "@/components/desk/field-table"
 import { captureHealthTone, readyTone, sourceHealthTone } from "@/lib/tone"
 import type { EndpointOutcome } from "@/lib/api"
 import {
+  isRecord,
   CAPTURE_STATUS_SCHEMA_VERSION,
   type CaptureStatus,
 } from "@/lib/contracts"
-import { formatDiskFree, formatOmitted, formatUnixMicros } from "@/lib/format"
+import { mapApiError } from "@/lib/fail-closed"
+import {
+  formatDiskFree,
+  formatJsonValue,
+  formatOmitted,
+  formatUnixMicros,
+} from "@/lib/format"
 
 export function CapturePipelineCard({
   loading,
@@ -95,22 +103,23 @@ function CaptureBody({
           </EmptyHeader>
         </Empty>
       )
-    case "http-error":
+    case "http-error": {
+      const view = mapApiError(outcome.status, outcome.error)
       return (
         <Empty>
           <EmptyHeader>
             <EmptyMedia variant="icon">
               <DatabaseIcon />
             </EmptyMedia>
-            <EmptyTitle>
-              HTTP {outcome.status} · {outcome.error.code}
-            </EmptyTitle>
+            <EmptyTitle>{view.title}</EmptyTitle>
             <EmptyDescription>
-              {outcome.error.schema_version} · {outcome.error.reason_code}
+              {view.detail} {outcome.error.schema_version} ·{" "}
+              {outcome.error.code} · {outcome.error.reason_code}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
       )
+    }
     case "ok":
       return <Pipeline status={outcome.data} httpStatus={outcome.status} />
     default: {
@@ -254,6 +263,66 @@ function Pipeline({
           value={status.last_error_reason ?? formatOmitted("last_error_reason")}
         />
       </dl>
+      <ExtraStatusFields extras={status.extra_fields} />
+    </div>
+  )
+}
+
+function ExtraStatusFields({ extras }: { extras: Record<string, unknown> }) {
+  const keys = Object.keys(extras).sort()
+  if (keys.length === 0) {
+    return null
+  }
+  const restart = extras.restart_reconstruction
+  const maintenance = extras.maintenance
+  const rest = keys.filter(
+    (key) => key !== "restart_reconstruction" && key !== "maintenance"
+  )
+  const maintenanceRecord = isRecord(maintenance) ? maintenance : undefined
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
+        extra snapshot fields
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Rendered when present. Unknown keys are listed and ignored. They are not
+        live-source qualification.
+      </p>
+      {restart !== undefined ? (
+        <Pair field="restart_reconstruction" value={formatJsonValue(restart)} />
+      ) : null}
+      {maintenance !== undefined ? (
+        <div className="flex flex-col gap-2">
+          <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
+            maintenance
+          </p>
+          {maintenanceRecord ? (
+            <FieldTable
+              caption="maintenance"
+              rows={Object.keys(maintenanceRecord)
+                .sort()
+                .map((field) => ({
+                  field,
+                  value: maintenanceRecord[field],
+                  omitted: false,
+                }))}
+            />
+          ) : (
+            <p className="font-mono text-xs">{formatJsonValue(maintenance)}</p>
+          )}
+        </div>
+      ) : null}
+      {rest.length > 0 ? (
+        <FieldTable
+          caption="unrecognized capture fields"
+          rows={rest.map((field) => ({
+            field,
+            value: extras[field],
+            omitted: false,
+          }))}
+        />
+      ) : null}
     </div>
   )
 }

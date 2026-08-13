@@ -1,6 +1,10 @@
 export const HEALTH_SCHEMA_VERSION = "hl.health.v1" as const
 export const CAPTURE_STATUS_SCHEMA_VERSION = "hl.capture.status.v4" as const
+export const CAPTURE_STATUS_SCHEMA_V5 = "hl.capture.status.v5" as const
 export const API_ERROR_SCHEMA_VERSION = "hl.api.error.v1" as const
+
+export type CaptureStatusSchema =
+  typeof CAPTURE_STATUS_SCHEMA_VERSION | typeof CAPTURE_STATUS_SCHEMA_V5
 
 export type HealthState =
   "HEALTH_STATE_GREEN" | "HEALTH_STATE_AMBER" | "HEALTH_STATE_RED"
@@ -44,10 +48,12 @@ export interface AuxiliarySourceStatus {
   last_durable_wall_micros?: number
   quarantine_reason?: string
   last_error_reason?: string
+  restart_reconstruction?: string
+  extra_fields: Record<string, unknown>
 }
 
 export interface CaptureStatus {
-  schema_version: typeof CAPTURE_STATUS_SCHEMA_VERSION
+  schema_version: CaptureStatusSchema
   snapshot_at_micros: number
   build_id: string
   chain_id: string
@@ -66,6 +72,7 @@ export interface CaptureStatus {
   disk_free_basis_points?: number
   archive_manifest_id?: string
   auxiliary_sources?: AuxiliarySourceStatus[]
+  extra_fields: Record<string, unknown>
 }
 
 export const CAPTURE_STATUS_FIELD_ORDER = [
@@ -114,6 +121,7 @@ export const AUXILIARY_SOURCE_FIELD_ORDER = [
   "last_durable_wall_micros",
   "quarantine_reason",
   "last_error_reason",
+  "restart_reconstruction",
 ] as const
 
 export type ParseResult<T> =
@@ -200,11 +208,7 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   if (!isRecord(value)) {
     return { ok: false, detail: "capture status body is not an object" }
   }
-  const schema_version = requireConst(
-    value,
-    "schema_version",
-    CAPTURE_STATUS_SCHEMA_VERSION
-  )
+  const schema_version = requireCaptureSchema(value)
   if (!schema_version.ok) {
     return schema_version
   }
@@ -325,6 +329,7 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
       disk_free_basis_points: disk_free_basis_points.value,
       archive_manifest_id: archive_manifest_id.value,
       auxiliary_sources: auxiliary_sources.value,
+      extra_fields: collectExtraFields(value, CAPTURE_STATUS_FIELD_ORDER),
     },
   }
 }
@@ -359,6 +364,47 @@ const AUXILIARY_QUALIFICATION = [
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function requireCaptureSchema(
+  object: Record<string, unknown>
+): ParseResult<CaptureStatusSchema> {
+  const value = object.schema_version
+  if (
+    value === CAPTURE_STATUS_SCHEMA_VERSION ||
+    value === CAPTURE_STATUS_SCHEMA_V5
+  ) {
+    return { ok: true, value }
+  }
+  return {
+    ok: false,
+    detail: `schema_version must be ${CAPTURE_STATUS_SCHEMA_VERSION} or ${CAPTURE_STATUS_SCHEMA_V5}`,
+  }
+}
+
+function collectExtraFields(
+  object: Record<string, unknown>,
+  known: readonly string[]
+): Record<string, unknown> {
+  const allowed = new Set(known)
+  const extras: Record<string, unknown> = {}
+  for (const [key, fieldValue] of Object.entries(object)) {
+    if (!allowed.has(key)) {
+      extras[key] = fieldValue
+    }
+  }
+  return extras
+}
+
+function optionalIgnoredString(
+  object: Record<string, unknown>,
+  field: string
+): string | undefined {
+  const value = object[field]
+  if (typeof value === "string" && value.length > 0) {
+    return value
+  }
+  return undefined
 }
 
 function requireConst<T extends string>(
@@ -575,6 +621,11 @@ function parseAuxiliarySource(
       last_durable_wall_micros: last_durable_wall_micros.value,
       quarantine_reason: quarantine_reason.value,
       last_error_reason: last_error_reason.value,
+      restart_reconstruction: optionalIgnoredString(
+        value,
+        "restart_reconstruction"
+      ),
+      extra_fields: collectExtraFields(value, AUXILIARY_SOURCE_FIELD_ORDER),
     },
   }
 }
