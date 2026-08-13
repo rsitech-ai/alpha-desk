@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use domain_types::{BlockHeight, ChainId, SourceId};
@@ -148,6 +149,8 @@ pub struct RuntimeConfig {
     backpressure_timeout_millis: u64,
     shutdown_grace_millis: u64,
     disk_reserve_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status_listen: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -175,6 +178,9 @@ impl RuntimeConfig {
             || !(1..=MAX_DISK_RESERVE_BYTES).contains(&self.disk_reserve_bytes)
         {
             return Err(ConfigError::InvalidRuntimeLimit);
+        }
+        if let Some(listen) = &self.status_listen {
+            validate_status_listen(listen)?;
         }
         Ok(())
     }
@@ -273,6 +279,15 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn disk_reserve_bytes(&self) -> u64 {
         self.disk_reserve_bytes
+    }
+
+    #[must_use]
+    pub fn status_listen(&self) -> Option<SocketAddr> {
+        self.status_listen.as_ref().map(|value| {
+            value
+                .parse()
+                .expect("RuntimeConfig is constructed only through validated deserialization")
+        })
     }
 }
 
@@ -580,6 +595,8 @@ pub enum ConfigError {
     InvalidNatsStream,
     #[error("capture runtime limit is outside the supported range")]
     InvalidRuntimeLimit,
+    #[error("capture operator status listen address is invalid")]
+    InvalidStatusListen,
     #[error("validated capture configuration could not be serialized")]
     Serialization,
 }
@@ -621,6 +638,7 @@ impl ConfigError {
             Self::InvalidNatsServer => "capture_config.invalid_nats_server",
             Self::InvalidNatsStream => "capture_config.invalid_nats_stream",
             Self::InvalidRuntimeLimit => "capture_config.invalid_runtime_limit",
+            Self::InvalidStatusListen => "capture_config.invalid_status_listen",
             Self::Serialization => "capture_config.serialization",
         }
     }
@@ -670,6 +688,17 @@ fn validate_nats_server(value: &str) -> Result<(), ConfigError> {
     }
 
     Ok(())
+}
+
+fn validate_status_listen(value: &str) -> Result<(), ConfigError> {
+    let address: SocketAddr = value
+        .parse()
+        .map_err(|_| ConfigError::InvalidStatusListen)?;
+    if address.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidStatusListen)
+    }
 }
 
 fn validate_identity(value: &str) -> Result<(), ()> {

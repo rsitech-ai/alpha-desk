@@ -133,6 +133,19 @@ To validate the local dependency stack separately:
 just stage-0-compose-smoke
 ```
 
+Operator capture status can be watched without starting PostgreSQL or NATS.
+`status_listen` in capture config (default in the example: `127.0.0.1:8741`)
+is served by `hl-capture run`, or independently by `serve-status` against the
+status file:
+
+```sh
+cargo +1.97.1 run -p hl-capture --locked --offline -- \
+  serve-status --config config/capture.example.toml --listen 127.0.0.1:8741
+```
+
+This is a watch surface for `hl.capture.status.v4`. It is not live-source
+qualification or a production desk.
+
 For focused commands and development conventions, read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Repository map

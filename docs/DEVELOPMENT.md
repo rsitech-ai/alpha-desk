@@ -183,6 +183,13 @@ reports bounded Node V1 auxiliary-source byte lag, archive depth, partial-line,
 qualification, quarantine, and durable cursor state. See
 [`contracts/capture-status-v4.md`](contracts/capture-status-v4.md).
 
+When `runtime.status_listen` is a loopback address, `hl-capture run` also
+serves that snapshot over HTTP (`GET /status`, `GET /healthz`, SSE
+`GET /events`). `hl-capture serve-status --config <path> [--listen <addr>]`
+serves the same file without starting capture. Bind addresses must be
+loopback. This HTTP surface does not replace `hl-api` `/v1/capture/status`,
+which reads the status file on disk.
+
 The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
 drip-feeds deterministic empty transaction-block records and auxiliary fill

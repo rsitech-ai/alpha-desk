@@ -485,6 +485,16 @@ impl CaptureStatus {
     }
 
     #[must_use]
+    pub const fn health(&self) -> CaptureHealth {
+        self.health
+    }
+
+    #[must_use]
+    pub const fn ready(&self) -> bool {
+        self.ready
+    }
+
+    #[must_use]
     pub fn into_terminal(
         mut self,
         snapshot_at: KnownTime,

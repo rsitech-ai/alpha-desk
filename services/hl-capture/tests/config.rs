@@ -62,6 +62,13 @@ fn example_configuration_is_strict_valid_and_complete() {
     assert_eq!(config.runtime().max_pending_blocks(), 4_096);
     assert_eq!(config.runtime().nats_max_ack_inflight(), 4_096);
     assert_eq!(config.runtime().shutdown_grace_millis(), 15_000);
+    assert_eq!(
+        config
+            .runtime()
+            .status_listen()
+            .map(|addr| addr.to_string()),
+        Some("127.0.0.1:8741".to_owned())
+    );
     assert_eq!(config.sources().len(), 2);
     assert_eq!(
         config
@@ -272,6 +279,11 @@ fn queue_payload_segment_rotation_and_durability_limits_fail_closed() {
             "max_delay_millis = 100",
             "max_delay_millis = 0",
             "capture_config.invalid_durability_policy",
+        ),
+        (
+            "status_listen = \"127.0.0.1:8741\"",
+            "status_listen = \"8.8.8.8:8741\"",
+            "capture_config.invalid_status_listen",
         ),
     ];
 
