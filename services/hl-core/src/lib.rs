@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod consumer;
+mod publication;
 mod replay;
 mod source;
 
@@ -9,6 +11,17 @@ use canonical_ledger::{
 };
 use storage_ports::{AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateStoreError};
 
+pub use consumer::{
+    CanonicalDelivery, CanonicalPullSource, InMemoryCanonicalSource, JetStreamPullSource,
+    JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
+    JetStreamReplayReport, JetStreamReplaySession, committed_block_delivery,
+    committed_event_delivery,
+};
+pub use publication::{
+    BLOCK_COMMITTED_SUBJECT, BLOCK_MARKER_SCHEMA_V1, BLOCK_PROVISIONAL_SUBJECT, BlockMarkerError,
+    CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker, decode_committed_block_marker,
+    encode_committed_block_marker, encode_event_payload, subject_for_event_kind,
+};
 pub use replay::{LocalReplayError, LocalReplayReport, LocalReplaySession, replay_block_durably};
 pub use source::{
     BlockSourceError, CanonicalBlockSource, DirectoryBlockSource, InMemoryBlockSource,

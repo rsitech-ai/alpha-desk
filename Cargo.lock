@@ -2023,14 +2023,17 @@ name = "hl-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "blake3",
  "canonical-events",
  "canonical-ledger",
  "canonical-state-store",
  "domain-types",
+ "futures-util",
  "hex",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "storage-ports",
  "tempfile",
  "thiserror 2.0.19",
