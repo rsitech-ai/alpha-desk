@@ -1,0 +1,282 @@
+import { ShieldAlertIcon } from "lucide-react"
+
+import { ToneBadge } from "@/components/desk/chips"
+import { FieldTable } from "@/components/desk/field-table"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  INVALID_QUERY_PROBE_PATH,
+  QUERY_BUDGET_PROBE_PATH,
+  STREAM_PATH,
+  type DeskFeed,
+  type EndpointOutcome,
+} from "@/lib/api"
+import type { ApiError, CaptureStatus } from "@/lib/contracts"
+import {
+  mapApiError,
+  type FailClosedFamily,
+  type FailClosedView,
+} from "@/lib/fail-closed"
+
+export function FailClosedCard({
+  loading,
+  feed,
+}: {
+  loading: boolean
+  feed: DeskFeed | undefined
+}) {
+  return (
+    <Card size="sm">
+      <CardHeader className="border-b">
+        <CardTitle>Fail-closed API states</CardTitle>
+        <CardDescription>
+          Typed 503 / 429 / 400 / 501 from hl-api. Empty is not green. This is
+          not Stage 6 and not live-qualified.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {loading || !feed ? (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <Skeleton className="h-36 w-full" />
+            <Skeleton className="h-36 w-full" />
+            <Skeleton className="h-36 w-full" />
+            <Skeleton className="h-36 w-full" />
+          </div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <Lane
+              label="503 capture status"
+              path="/v1/capture/status"
+              expected="snapshot_missing"
+              body={captureLane(feed.captureStatus)}
+            />
+            <Lane
+              label="400 invalid query"
+              path={INVALID_QUERY_PROBE_PATH}
+              expected="invalid_query"
+              body={feed.invalidQuery}
+            />
+            <Lane
+              label="429 query budget"
+              path={QUERY_BUDGET_PROBE_PATH}
+              expected="query_budget"
+              body={budgetLane(feed)}
+            />
+            <Lane
+              label="501 streams"
+              path={STREAM_PATH}
+              expected="stream_unspecified"
+              body={streamLane(feed.stream)}
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function Lane({
+  label,
+  path,
+  expected,
+  body,
+}: {
+  label: string
+  path: string
+  expected: FailClosedFamily
+  body: LaneBody
+}) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border p-3">
+      <div className="flex flex-col gap-1">
+        <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
+          {label}
+        </p>
+        <p className="font-mono text-[11px] text-muted-foreground">{path}</p>
+      </div>
+      <LaneContent expected={expected} body={body} />
+    </div>
+  )
+}
+
+type LaneBody =
+  | { kind: "observed"; view: FailClosedView }
+  | { kind: "not_observed"; status?: number; detail: string }
+  | { kind: "invalid"; status: number; detail: string }
+  | { kind: "network"; detail: string }
+
+function LaneContent({
+  expected,
+  body,
+}: {
+  expected: FailClosedFamily
+  body: LaneBody
+}) {
+  switch (body.kind) {
+    case "network":
+      return (
+        <Empty className="py-2">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <ShieldAlertIcon />
+            </EmptyMedia>
+            <EmptyTitle>disconnected</EmptyTitle>
+            <EmptyDescription>{body.detail}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )
+    case "invalid":
+      return (
+        <Empty className="py-2">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <ShieldAlertIcon />
+            </EmptyMedia>
+            <EmptyTitle>untyped HTTP {body.status}</EmptyTitle>
+            <EmptyDescription>{body.detail}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )
+    case "not_observed":
+      return (
+        <div className="flex flex-col gap-2">
+          <ToneBadge tone="neutral">not observed</ToneBadge>
+          <p className="text-xs text-muted-foreground">
+            {body.status === undefined
+              ? body.detail
+              : `HTTP ${body.status} · ${body.detail}`}{" "}
+            Expected family {expected}. Not a PASS.
+          </p>
+        </div>
+      )
+    case "observed": {
+      const matched = body.view.family === expected
+      return (
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <ToneBadge tone={body.view.tone}>{body.view.title}</ToneBadge>
+            {matched ? null : (
+              <ToneBadge tone="neutral">{body.view.family}</ToneBadge>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">{body.view.detail}</p>
+          <FieldTable
+            caption={body.view.title}
+            rows={[
+              {
+                field: "http_status",
+                value: body.view.httpStatus,
+                omitted: false,
+              },
+              { field: "code", value: body.view.code, omitted: false },
+              {
+                field: "reason_code",
+                value: body.view.reasonCode,
+                omitted: false,
+              },
+            ]}
+          />
+        </div>
+      )
+    }
+    default: {
+      const _exhaustive: never = body
+      return _exhaustive
+    }
+  }
+}
+
+function captureLane(outcome: EndpointOutcome<CaptureStatus>): LaneBody {
+  switch (outcome.kind) {
+    case "network":
+      return outcome
+    case "invalid":
+      return {
+        kind: "invalid",
+        status: outcome.status,
+        detail: outcome.detail,
+      }
+    case "http-error":
+      return {
+        kind: "observed",
+        view: mapApiError(outcome.status, outcome.error),
+      }
+    case "ok":
+      return {
+        kind: "not_observed",
+        status: outcome.status,
+        detail:
+          "snapshot present this poll. Missing-status 503 was not returned.",
+      }
+    default: {
+      const _exhaustive: never = outcome
+      return _exhaustive
+    }
+  }
+}
+
+function budgetLane(feed: DeskFeed): LaneBody {
+  const live = liveBudgetView(feed)
+  if (live) {
+    return { kind: "observed", view: live }
+  }
+  return feed.queryBudget
+}
+
+function liveBudgetView(feed: DeskFeed): FailClosedView | undefined {
+  const outcomes = [
+    feed.healthz,
+    feed.readyz,
+    feed.canonicalHealth,
+    feed.captureStatus,
+    feed.stream,
+  ]
+  for (const outcome of outcomes) {
+    if (outcome.kind === "http-error" && outcome.status === 429) {
+      return mapApiError(outcome.status, outcome.error)
+    }
+  }
+  return undefined
+}
+
+function streamLane(outcome: EndpointOutcome<ApiError>): LaneBody {
+  switch (outcome.kind) {
+    case "network":
+      return outcome
+    case "invalid":
+      return {
+        kind: "invalid",
+        status: outcome.status,
+        detail: outcome.detail,
+      }
+    case "http-error":
+      return {
+        kind: "observed",
+        view: mapApiError(outcome.status, outcome.error),
+      }
+    case "ok":
+      return {
+        kind: "not_observed",
+        status: outcome.status,
+        detail:
+          "unexpected 200 on /v1/stream. Fills and charts are still not shown.",
+      }
+    default: {
+      const _exhaustive: never = outcome
+      return _exhaustive
+    }
+  }
+}

@@ -9,16 +9,19 @@ import {
 } from "@/components/desk/connection-banner"
 import { DataHealthCard } from "@/components/desk/data-health"
 import { EvidenceCard } from "@/components/desk/evidence-panel"
+import { FailClosedCard } from "@/components/desk/fail-closed-panel"
 import { StreamsCard } from "@/components/desk/streams-panel"
 import { Separator } from "@/components/ui/separator"
 import { useHlApi, type FeedState } from "@/hooks/use-hl-api"
 import {
   HL_API_ORIGIN,
   POLL_INTERVAL_MS,
+  STREAM_PATH,
   type DeskFeed,
   type EndpointOutcome,
 } from "@/lib/api"
-import type { CaptureStatus, HealthAssessment } from "@/lib/contracts"
+import type { ApiError, CaptureStatus, HealthAssessment } from "@/lib/contracts"
+import { mapApiError } from "@/lib/fail-closed"
 
 export function App() {
   const state = useHlApi()
@@ -37,14 +40,15 @@ export function App() {
               </h1>
               <p className="max-w-2xl text-sm text-muted-foreground">
                 Read-only research surface for hl-api. Not a trading client, not
-                Stage 6, not live-source qualification.
+                Stage 6, not live-source qualification, and not a Stage PASS.
               </p>
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
                 <LiveDot
-                  live={
-                    connection.kind === "live" || connection.kind === "degraded"
+                  pulse={
+                    connection.kind === "polling" ||
+                    connection.kind === "degraded"
                   }
                 />
                 <span>{connection.kind}</span>
@@ -61,6 +65,7 @@ export function App() {
       </header>
       <main className="mx-auto flex max-w-[1600px] flex-col gap-4 px-6 py-6">
         <ConnectionBanner kind={connection.kind} detail={connection.detail} />
+        <FailClosedCard loading={state.phase === "loading"} feed={feed} />
         <div className="grid items-start gap-4 xl:grid-cols-12">
           <div className="xl:col-span-4">
             <DataHealthCard
@@ -161,7 +166,11 @@ function deriveConnection(state: FeedState): {
       detail: "API reachable; health, ready, or capture is not green/ready.",
     }
   }
-  return { kind: "live", detail: "polls succeeding" }
+  return {
+    kind: "polling",
+    detail:
+      "Polls succeeding. Not live-qualified, not Stage 6, no invented fills.",
+  }
 }
 
 function unavailableReason(feed: DeskFeed): string {
@@ -202,6 +211,9 @@ function StatusStrip({ feed }: { feed: DeskFeed | undefined }) {
       <Chip label="/v1/capture/status">
         <CaptureChip outcome={feed.captureStatus} />
       </Chip>
+      <Chip label={STREAM_PATH}>
+        <ErrorChip outcome={feed.stream} />
+      </Chip>
     </div>
   )
 }
@@ -227,12 +239,14 @@ function HealthChip({
       return <ToneBadge tone="red">disconnected</ToneBadge>
     case "invalid":
       return <ToneBadge tone="red">invalid</ToneBadge>
-    case "http-error":
+    case "http-error": {
+      const view = mapApiError(outcome.status, outcome.error)
       return (
-        <ToneBadge tone="red">
+        <ToneBadge tone={view.tone}>
           {outcome.status} {outcome.error.reason_code}
         </ToneBadge>
       )
+    }
     case "ok":
       return (
         <ToneBadge tone={healthStateTone(outcome.data.state)}>
@@ -256,12 +270,14 @@ function ReadyChip({
       return <ToneBadge tone="red">disconnected</ToneBadge>
     case "invalid":
       return <ToneBadge tone="red">invalid</ToneBadge>
-    case "http-error":
+    case "http-error": {
+      const view = mapApiError(outcome.status, outcome.error)
       return (
-        <ToneBadge tone="red">
+        <ToneBadge tone={view.tone}>
           {outcome.status} {outcome.error.reason_code}
         </ToneBadge>
       )
+    }
     case "ok": {
       const unready =
         outcome.status === 503 || outcome.data.state !== "HEALTH_STATE_GREEN"
@@ -284,12 +300,14 @@ function CaptureChip({ outcome }: { outcome: EndpointOutcome<CaptureStatus> }) {
       return <ToneBadge tone="red">disconnected</ToneBadge>
     case "invalid":
       return <ToneBadge tone="red">invalid</ToneBadge>
-    case "http-error":
+    case "http-error": {
+      const view = mapApiError(outcome.status, outcome.error)
       return (
-        <ToneBadge tone="red">
+        <ToneBadge tone={view.tone}>
           {outcome.status} {outcome.error.reason_code}
         </ToneBadge>
       )
+    }
     case "ok":
       return (
         <span className="flex items-center gap-1">
@@ -301,6 +319,29 @@ function CaptureChip({ outcome }: { outcome: EndpointOutcome<CaptureStatus> }) {
           </ToneBadge>
         </span>
       )
+    default: {
+      const _exhaustive: never = outcome
+      return _exhaustive
+    }
+  }
+}
+
+function ErrorChip({ outcome }: { outcome: EndpointOutcome<ApiError> }) {
+  switch (outcome.kind) {
+    case "network":
+      return <ToneBadge tone="red">disconnected</ToneBadge>
+    case "invalid":
+      return <ToneBadge tone="red">invalid</ToneBadge>
+    case "http-error": {
+      const view = mapApiError(outcome.status, outcome.error)
+      return (
+        <ToneBadge tone={view.tone}>
+          {outcome.status} {outcome.error.reason_code}
+        </ToneBadge>
+      )
+    }
+    case "ok":
+      return <ToneBadge tone="red">unexpected 200</ToneBadge>
     default: {
       const _exhaustive: never = outcome
       return _exhaustive

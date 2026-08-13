@@ -25,6 +25,7 @@ import {
   assertNever,
   type HealthAssessment,
 } from "@/lib/contracts"
+import { mapApiError } from "@/lib/fail-closed"
 import { formatUnixMicros } from "@/lib/format"
 
 export function DataHealthCard({
@@ -101,12 +102,13 @@ function HealthBlock({
           </EmptyHeader>
         </Empty>
       )
-    case "http-error":
+    case "http-error": {
+      const view = mapApiError(outcome.status, outcome.error)
       return (
         <div className="flex flex-col gap-2 rounded-lg border p-3">
           <div className="flex items-center justify-between gap-2">
             <p className="font-mono text-xs text-muted-foreground">{title}</p>
-            <ToneBadge tone="red">HTTP {outcome.status}</ToneBadge>
+            <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
           </div>
           <FieldTable
             caption={title}
@@ -126,6 +128,7 @@ function HealthBlock({
           />
         </div>
       )
+    }
     case "ok": {
       const assessment = outcome.data
       const rows = HEALTH_FIELD_ORDER.map((field) => {

@@ -6,9 +6,13 @@ import {
   type CaptureStatus,
   type HealthAssessment,
 } from "@/lib/contracts"
+import { classifyHttpBody, type ProbeOutcome } from "@/lib/fail-closed"
 
 export const DEFAULT_HL_API_ORIGIN = "http://127.0.0.1:8788"
 export const POLL_INTERVAL_MS = 1_000
+export const INVALID_QUERY_PROBE_PATH = "/v1/health?offset=1"
+export const QUERY_BUDGET_PROBE_PATH = "/v1/health?limit=999999"
+export const STREAM_PATH = "/v1/stream"
 
 export const HL_API_ORIGIN =
   import.meta.env.VITE_HL_API_ORIGIN ?? DEFAULT_HL_API_ORIGIN
@@ -26,18 +30,29 @@ export interface DeskFeed {
   canonicalHealth: EndpointOutcome<HealthAssessment>
   captureStatus: EndpointOutcome<CaptureStatus>
   stream: EndpointOutcome<ApiError>
+  invalidQuery: ProbeOutcome
+  queryBudget: ProbeOutcome
 }
 
 export async function fetchDeskFeed(signal: AbortSignal): Promise<DeskFeed> {
   const fetchedAt = Date.now()
-  const [healthz, readyz, canonicalHealth, captureStatus, stream] =
-    await Promise.all([
-      fetchHealth("/healthz", signal),
-      fetchHealth("/readyz", signal),
-      fetchHealth("/v1/health", signal),
-      fetchCapture("/v1/capture/status", signal),
-      fetchExpectedStream("/v1/stream", signal),
-    ])
+  const [
+    healthz,
+    readyz,
+    canonicalHealth,
+    captureStatus,
+    stream,
+    invalidQuery,
+    queryBudget,
+  ] = await Promise.all([
+    fetchHealth("/healthz", signal),
+    fetchHealth("/readyz", signal),
+    fetchHealth("/v1/health", signal),
+    fetchCapture("/v1/capture/status", signal),
+    fetchExpectedStream(STREAM_PATH, signal),
+    fetchProbe(INVALID_QUERY_PROBE_PATH, signal),
+    fetchProbe(QUERY_BUDGET_PROBE_PATH, signal),
+  ])
   return {
     fetchedAt,
     healthz,
@@ -45,6 +60,8 @@ export async function fetchDeskFeed(signal: AbortSignal): Promise<DeskFeed> {
     canonicalHealth,
     captureStatus,
     stream,
+    invalidQuery,
+    queryBudget,
   }
 }
 
@@ -179,6 +196,17 @@ async function fetchExpectedStream(
     status: result.status,
     detail: error.detail,
   }
+}
+
+async function fetchProbe(
+  path: string,
+  signal: AbortSignal
+): Promise<ProbeOutcome> {
+  const result = await fetchJson(path, signal)
+  if (result.kind === "network") {
+    return result
+  }
+  return classifyHttpBody(result.status, result.value)
 }
 
 function asHttpError(status: number, value: unknown): EndpointOutcome<never> {
