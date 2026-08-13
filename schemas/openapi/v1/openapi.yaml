@@ -1,0 +1,217 @@
+openapi: 3.1.0
+info:
+  title: Hyperliquid Alpha Desk API
+  version: "0.1.0"
+  description: >
+    Read-only local REST surface generated from hl.health.v1,
+    hl.capture.status.v4, and the fail-closed HTTP router.
+    hl.stream.v1 defines CanonicalEventBatch with next_cursor but does not
+    specify a WebSocket resume protocol, so stream paths return typed 501.
+    This document is not a production authentication, availability, or SLO
+    contract.
+servers:
+  - url: http://127.0.0.1:8788
+    description: Loopback development listener
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Process liveness as hl.health.v1
+      security: []
+      responses:
+        "200":
+          description: Process is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness aggregate as hl.health.v1
+      responses:
+        "200":
+          description: Configured snapshots are present and valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/health:
+    get:
+      operationId: getCanonicalHealth
+      summary: Canonical health snapshot
+      responses:
+        "200":
+          description: Validated hl.health.v1 snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/capture/status:
+    get:
+      operationId: getCaptureStatus
+      summary: Capture status snapshot
+      responses:
+        "200":
+          description: Validated hl.capture.status.v4 snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/stream:
+    get:
+      operationId: getStream
+      summary: Reserved stream path
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+  /v1/stream/canonical-events:
+    get:
+      operationId: getCanonicalEventStream
+      summary: Reserved canonical event stream path
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+  /v1/openapi.yaml:
+    get:
+      operationId: getOpenapi
+      summary: OpenAPI document for this surface
+      responses:
+        "200":
+          description: OpenAPI 3.1 document
+          content:
+            application/yaml:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Required when auth.mode = credential. loopback-dev binds loopback and
+        skips the bearer. This is not production OIDC or mTLS.
+  schemas:
+    HealthAssessment:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - scope
+        - state
+        - reason_code
+        - observed_at_micros
+        - suppresses
+      properties:
+        schema_version:
+          type: string
+          const: hl.health.v1
+        scope:
+          type: string
+        state:
+          type: string
+          enum:
+            - HEALTH_STATE_GREEN
+            - HEALTH_STATE_AMBER
+            - HEALTH_STATE_RED
+        reason_code:
+          type: string
+        observed_at_micros:
+          type: integer
+          minimum: 0
+        suppresses:
+          type: array
+          items:
+            type: string
+    CaptureStatus:
+      type: object
+      required:
+        - schema_version
+        - snapshot_at_micros
+        - build_id
+        - chain_id
+        - health
+        - ready
+        - active_committed_source
+        - primary_source_health
+        - pending_blocks
+      properties:
+        schema_version:
+          type: string
+          const: hl.capture.status.v4
+        snapshot_at_micros:
+          type: integer
+          minimum: 0
+        build_id:
+          type: string
+        chain_id:
+          type: string
+        health:
+          type: string
+          enum:
+            - green
+            - yellow
+            - red
+        ready:
+          type: boolean
+        active_committed_source:
+          type: string
+        primary_source_health:
+          type: string
+        pending_blocks:
+          type: integer
+          minimum: 0
+    ApiError:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - code
+        - reason_code
+      properties:
+        schema_version:
+          type: string
+          const: hl.api.error.v1
+        code:
+          type: string
+        reason_code:
+          type: string
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer credential
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Unavailable:
+      description: Snapshot missing or invalid; no invented fills
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    NotImplemented:
+      description: Stream transport is unspecified by proto and fail-closes
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
