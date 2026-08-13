@@ -13,6 +13,17 @@ use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+const DEFAULT_QUERY_BUDGETS: &str = concat!(
+    "schema_version = \"hl.api.query_budgets.v1\"\n",
+    "max_rows = 1024\n",
+    "timeout_ms = 2000\n",
+    "max_concurrency = 8\n",
+);
+
+fn write_query_budgets(directory: &Path, body: &str) {
+    std::fs::write(directory.join("api-query-budgets.toml"), body).expect("write query budgets");
+}
+
 fn write_config(
     directory: &Path,
     bind: &str,
@@ -33,6 +44,8 @@ fn write_config(
     if let Some(path) = capture_status {
         body.push_str(&format!("capture_status = \"{}\"\n", path.display()));
     }
+    write_query_budgets(directory, DEFAULT_QUERY_BUDGETS);
+    body.push_str("\n[query_budgets]\nfile = \"api-query-budgets.toml\"\n");
     std::fs::write(&config_path, body).expect("write config");
     config_path
 }
@@ -245,6 +258,9 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     assert!(document.contains("HEALTH_STATE_GREEN"));
     assert!(document.contains("hl.capture.status.v4"));
     assert!(document.contains("501"));
+    assert!(document.contains("query_budget_exceeded"));
+    assert!(document.contains("429"));
+    assert!(document.contains("max_rows"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
