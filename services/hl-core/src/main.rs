@@ -104,8 +104,7 @@ impl CliError {
 async fn run_core(config: CoreConfig) -> Result<(), CliError> {
     let cancellation = CancellationToken::new();
     let grace = config.shutdown_grace();
-    let runtime =
-        CoreRuntime::open(config).map_err(|error| CliError::Stable(error.reason_code()))?;
+    let runtime = CoreRuntime::from_config(config);
     let run = runtime.run_jetstream(cancellation.clone());
     tokio::pin!(run);
     tokio::select! {

@@ -292,17 +292,51 @@ async fn connect_transport_failure_is_visible_on_loopback_status() {
     assert!(!snapshot.live_qualified());
 }
 
-#[tokio::test]
-async fn missing_store_fails_closed_before_status_listen_bind() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_store_parent_is_visible_on_loopback_status() {
     let root = private_root();
     let missing = root.path().join("absent").join("state");
     let config =
         CoreConfig::from_toml(&valid_toml(&missing, 200, Some("127.0.0.1:0"))).expect("config");
-    let error = match CoreRuntime::open(config) {
-        Ok(_) => panic!("missing store"),
-        Err(error) => error,
+    let runtime = CoreRuntime::from_config(config);
+    let status = runtime.status().clone();
+    let cancellation = CancellationToken::new();
+    let run = runtime.run_jetstream(cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.snapshot().fail_closed_reason() == Some("core_runtime.store") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fail_closed");
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 503);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ok"], false);
+        assert_eq!(health["ready"], false);
+        assert_eq!(health["reason_code"], "core_runtime.store");
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["fail_closed_reason"], "core_runtime.store");
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        cancellation.cancel();
     };
+    let (result, ()) = tokio::join!(run, probe);
+    let error = result.expect_err("missing store");
     assert_eq!(error.reason_code(), "core_runtime.store");
+    let snapshot = status.snapshot();
+    assert!(!snapshot.ready());
+    assert!(!snapshot.live_qualified());
 }
 
 fn valid_toml(store_path: &std::path::Path, first_height: u64, listen: Option<&str>) -> String {

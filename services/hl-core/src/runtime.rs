@@ -9,37 +9,28 @@ use crate::{
     JetStreamReplayReport, JetStreamReplaySession, StatusError,
 };
 
+type CoreSession = JetStreamReplaySession<WatermarkOnlyReducerV1, SyncedWriteBatchStore>;
+
 pub struct CoreRuntime {
     config: CoreConfig,
-    session: JetStreamReplaySession<WatermarkOnlyReducerV1, SyncedWriteBatchStore>,
+    session: Option<CoreSession>,
     status: CoreStatusHandle,
 }
 
 impl CoreRuntime {
-    pub fn open(config: CoreConfig) -> Result<Self, CoreRuntimeError> {
-        let store =
-            SyncedWriteBatchStore::open(config.store_path(), StateImageLimits::production())
-                .map_err(CoreRuntimeError::Store)?;
-        let jetstream = config.jetstream_config()?;
-        let session = JetStreamReplaySession::open(
-            config.chain_id(),
-            config.first_height(),
-            WatermarkOnlyReducerV1,
-            LedgerLimits::production(),
-            store,
-            StateImageLimits::production(),
-        )?
-        .with_fetch_batch(jetstream.fetch_batch())?
-        .with_dead_letter_consumer(jetstream.durable_name());
-        let last_applied = session
-            .ledger()
-            .checkpoint()
-            .map(|checkpoint| checkpoint.block_height().get());
-        Ok(Self {
+    #[must_use]
+    pub fn from_config(config: CoreConfig) -> Self {
+        Self {
             config,
-            session,
-            status: CoreStatusHandle::starting(last_applied),
-        })
+            session: None,
+            status: CoreStatusHandle::starting(None),
+        }
+    }
+
+    pub fn open(config: CoreConfig) -> Result<Self, CoreRuntimeError> {
+        let mut runtime = Self::from_config(config);
+        runtime.open_store()?;
+        Ok(runtime)
     }
 
     #[must_use]
@@ -48,27 +39,35 @@ impl CoreRuntime {
     }
 
     pub async fn run_jetstream(
-        self,
+        mut self,
         cancellation: CancellationToken,
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
-        let mut dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
-        let config = self.config.jetstream_config()?;
+        let jetstream = self.config.jetstream_config()?;
         let status_cancellation = cancellation.child_token();
         let status_task = self
             .spawn_status_server(status_cancellation.clone())
             .await?;
-        let mut source = match self
-            .session
-            .connect_source(|| JetStreamPullSource::connect(config), &mut dead_letter)
-            .await
-        {
+        if let Err(error) = self.open_store() {
+            return self
+                .latch_fail_closed(error, cancellation, status_cancellation, status_task)
+                .await;
+        }
+        let mut dead_letter = match FileDeadLetterSink::open(self.config.dead_letter_path()) {
+            Ok(dead_letter) => dead_letter,
+            Err(error) => {
+                return self
+                    .latch_fail_closed(error.into(), cancellation, status_cancellation, status_task)
+                    .await;
+            }
+        };
+        let connect_result = Self::opened(&self.session)
+            .connect_source(|| JetStreamPullSource::connect(jetstream), &mut dead_letter)
+            .await;
+        let mut source = match connect_result {
             Ok(source) => source,
             Err(error) => {
-                self.status.fail_closed(error.reason_code());
-                if status_task.is_some() {
-                    cancellation.cancelled().await;
-                }
-                return Self::stop_status(status_cancellation, status_task, Err(error.into()))
+                return self
+                    .latch_fail_closed(error.into(), cancellation, status_cancellation, status_task)
                     .await;
             }
         };
@@ -83,15 +82,27 @@ impl CoreRuntime {
     }
 
     pub async fn run_source<Src: CanonicalPullSource>(
-        self,
+        mut self,
         source: &mut Src,
         cancellation: CancellationToken,
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
-        let dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
         let status_cancellation = cancellation.child_token();
         let status_task = self
             .spawn_status_server(status_cancellation.clone())
             .await?;
+        if let Err(error) = self.open_store() {
+            return self
+                .latch_fail_closed(error, cancellation, status_cancellation, status_task)
+                .await;
+        }
+        let dead_letter = match FileDeadLetterSink::open(self.config.dead_letter_path()) {
+            Ok(dead_letter) => dead_letter,
+            Err(error) => {
+                return self
+                    .latch_fail_closed(error.into(), cancellation, status_cancellation, status_task)
+                    .await;
+            }
+        };
         self.consume_with_status(
             source,
             dead_letter,
@@ -100,6 +111,49 @@ impl CoreRuntime {
             status_task,
         )
         .await
+    }
+
+    fn open_store(&mut self) -> Result<(), CoreRuntimeError> {
+        if self.session.is_some() {
+            return Ok(());
+        }
+        let session = Self::open_session(&self.config)?;
+        let last_applied = session
+            .ledger()
+            .checkpoint()
+            .map(|checkpoint| checkpoint.block_height().get());
+        self.status.set_last_applied_watermark(last_applied);
+        self.session = Some(session);
+        Ok(())
+    }
+
+    fn open_session(config: &CoreConfig) -> Result<CoreSession, CoreRuntimeError> {
+        let store =
+            SyncedWriteBatchStore::open(config.store_path(), StateImageLimits::production())
+                .map_err(CoreRuntimeError::Store)?;
+        let jetstream = config.jetstream_config()?;
+        Ok(JetStreamReplaySession::open(
+            config.chain_id(),
+            config.first_height(),
+            WatermarkOnlyReducerV1,
+            LedgerLimits::production(),
+            store,
+            StateImageLimits::production(),
+        )?
+        .with_fetch_batch(jetstream.fetch_batch())?
+        .with_dead_letter_consumer(jetstream.durable_name()))
+    }
+
+    fn opened(session: &Option<CoreSession>) -> &CoreSession {
+        session
+            .as_ref()
+            .expect("file-store is opened before JetStream consume")
+    }
+
+    fn opened_mut(session: &mut Option<CoreSession>) -> &mut CoreSession {
+        session
+            .as_mut()
+            .expect("file-store is opened before JetStream consume")
     }
 
     async fn spawn_status_server(
@@ -118,6 +172,20 @@ impl CoreRuntime {
             }
             None => Ok(None),
         }
+    }
+
+    async fn latch_fail_closed(
+        &self,
+        error: CoreRuntimeError,
+        cancellation: CancellationToken,
+        status_cancellation: CancellationToken,
+        status_task: Option<JoinHandle<Result<(), StatusError>>>,
+    ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
+        self.status.fail_closed(error.reason_code());
+        if status_task.is_some() {
+            cancellation.cancelled().await;
+        }
+        Self::stop_status(status_cancellation, status_task, Err(error)).await
     }
 
     async fn consume_with_status<Src, Dlq>(
@@ -166,15 +234,21 @@ impl CoreRuntime {
         Src: CanonicalPullSource,
         Dlq: DeadLetterSink,
     {
+        let (last_height, state_hash) = {
+            let session = Self::opened(&self.session);
+            (
+                session
+                    .ledger()
+                    .checkpoint()
+                    .map(|checkpoint| checkpoint.block_height()),
+                session.ledger().state_hash(),
+            )
+        };
         let mut report = JetStreamReplayReport {
             applied: 0,
             already_applied: 0,
-            last_height: self
-                .session
-                .ledger()
-                .checkpoint()
-                .map(|checkpoint| checkpoint.block_height()),
-            state_hash: self.session.ledger().state_hash(),
+            last_height,
+            state_hash,
             live_qualified: false,
             stage_2_qualified: false,
         };
@@ -183,7 +257,7 @@ impl CoreRuntime {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Ok(report),
-                result = self.session.consume_available(source, dead_letter) => {
+                result = Self::opened_mut(&mut self.session).consume_available(source, dead_letter) => {
                     report = match result {
                         Ok(report) => {
                             debug_assert!(!report.live_qualified);

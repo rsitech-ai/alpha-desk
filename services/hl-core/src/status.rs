@@ -132,6 +132,10 @@ impl CoreStatusHandle {
         });
     }
 
+    pub(crate) fn set_last_applied_watermark(&self, last_applied_watermark: Option<u64>) {
+        self.lock().last_applied_watermark = last_applied_watermark;
+    }
+
     pub(crate) fn set_listen_addr(&self, listen: SocketAddr) {
         *self.listen_lock() = Some(listen);
     }
