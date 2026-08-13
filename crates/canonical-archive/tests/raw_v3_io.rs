@@ -215,3 +215,70 @@ fn cursor_epoch_lookup_and_offset_read_use_authenticated_sequence_truth() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].cursor().offset(), 40);
 }
+
+fn dataset_dir(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("chain=mainnet")
+        .join("dataset=raw_source_observations_byte_v3")
+        .join("source=node-fills")
+}
+
+#[test]
+fn pack_index_rotates_journal_generation_and_keeps_replay() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10, 11], b"ab")).unwrap();
+    archive.append_batch(&batch(3, &[20], b"cd")).unwrap();
+    let dataset = dataset_dir(temporary.path());
+    let generation_one = std::fs::read(dataset.join("journals/generation-1.log")).unwrap();
+    let packed_root = archive.pack_index(&chain, &source).expect("pack index");
+    let generation_one_after = std::fs::read(dataset.join("journals/generation-1.log")).unwrap();
+    assert_eq!(generation_one, generation_one_after);
+    assert!(dataset.join("journals/generation-2.log").is_file());
+    let packs: Vec<_> = std::fs::read_dir(dataset.join("index-packs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("pack"))
+        .collect();
+    assert_eq!(packs.len(), 1);
+    archive.append_batch(&batch(4, &[30], b"ef")).unwrap();
+    let replayed = archive
+        .read_observations_by_sequence(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(4).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(replayed.len(), 4);
+    assert_eq!(replayed[0].observation().payload().as_ref(), b"ab");
+    assert_eq!(replayed[3].observation().payload().as_ref(), b"ef");
+    let packed_again = archive.pack_index(&chain, &source).expect("second pack");
+    assert_ne!(packed_root, packed_again);
+    assert!(dataset.join("journals/generation-3.log").is_file());
+    let generation_one_final = std::fs::read(dataset.join("journals/generation-1.log")).unwrap();
+    assert_eq!(generation_one, generation_one_final);
+}
+
+#[test]
+fn pack_index_is_noop_when_the_active_journal_has_one_record() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    let first_hash = archive.pack_index(&chain, &source).unwrap();
+    let second_hash = archive.pack_index(&chain, &source).unwrap();
+    assert_eq!(first_hash, second_hash);
+    assert!(
+        !dataset_dir(temporary.path())
+            .join("journals/generation-2.log")
+            .exists()
+    );
+}

@@ -21,21 +21,23 @@ use parquet::{
 use sha2::{Digest, Sha256};
 use storage_ports::{
     ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
-    RawArchiveCapacityBudgets, RawArchiveDurableFormatEnvelope, RawArchiveObject,
-    RawArchiveProductionCapacityAdmission, RawArchiveWorkloadEnvelope, RawObservationArchive,
-    RawObservationBatch, RawObservationIterator, RawObservationRange, RawObservationReceipt,
-    SequencedRawObservationIterator, VerifiedRawManifest,
+    RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES, RawArchiveCapacityBudgets,
+    RawArchiveDurableFormatEnvelope, RawArchiveObject, RawArchiveProductionCapacityAdmission,
+    RawArchiveWorkloadEnvelope, RawObservationArchive, RawObservationBatch, RawObservationIterator,
+    RawObservationRange, RawObservationReceipt, SequencedRawObservationIterator,
+    VerifiedRawManifest,
 };
 
 use super::{
     ArchiveConfig, fs, manifest, raw, raw_policy,
     raw_v3::{
-        self, JournalGenerationBuilderV3, LogicalCommitDescriptorV3, LogicalCommitManifestV3,
-        LogicalObjectDescriptorV3, MAX_JOURNAL_BYTES, RAW_BYTE_DATASET_V3, RootBundleV3,
-        SequenceLeafEntryV3, SequenceNodeRefV3, SequenceStorageRefV3, append_logical_entry,
-        journal_file_identity, load_sequence_internal_from_journal,
-        load_sequence_leaf_from_journal, logical_object_relative_path,
-        parse_logical_commit_manifest, parse_root_bundle, root_bundle_hash,
+        self, IndexPackBytes, JournalGenerationBuilderV3, LogicalCommitDescriptorV3,
+        LogicalCommitManifestV3, LogicalObjectDescriptorV3, MAX_JOURNAL_BYTES, RAW_BYTE_DATASET_V3,
+        RootBundleV3, SequenceLeafEntryV3, SequenceNodeRefV3, SequenceStorageRefV3,
+        append_logical_entry, journal_file_identity, journal_needs_rotation,
+        load_sequence_internal, load_sequence_leaf, logical_object_relative_path,
+        pack_journal_leaves, parse_logical_commit_manifest, parse_root_bundle, root_bundle_hash,
+        seed_rotated_journal_root,
     },
     schema,
 };
@@ -93,6 +95,19 @@ impl RawV3Archive {
 
     fn now(&self) -> Result<KnownTime, ArchiveError> {
         self.config.now()
+    }
+
+    pub fn pack_index(&self, chain: &ChainId, source: &SourceId) -> Result<[u8; 32], ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        pack_index_locked(self, chain, source, self.now()?)
     }
 }
 
@@ -168,7 +183,17 @@ fn append_batch(
         raw_policy::RawPolicy::MonotonicByteV3,
     )?;
 
-    let current = load_current_root(archive, chain, source)?;
+    let mut current = load_current_root(archive, chain, source)?;
+    if let Some((root, _)) = current.as_ref()
+        && journal_needs_rotation(
+            root.journal_prefix().committed_record_count(),
+            root.journal_prefix().committed_prefix_length(),
+            root.sequence_root().depth(),
+        )
+    {
+        pack_index_locked(archive, chain, source, durable_at)?;
+        current = load_current_root(archive, chain, source)?;
+    }
     let descriptor = commit_descriptor(batch)?;
     if let Some((root, journal_bytes)) = current.as_ref() {
         archive.workload.validate_backlog(
@@ -264,6 +289,12 @@ fn append_batch(
         }
     };
 
+    let packs = match current.as_ref() {
+        Some((root, journal_bytes)) => {
+            load_packs_for_tree(archive, chain, source, root.sequence_root(), journal_bytes)?
+        }
+        None => IndexPackBytes::new(),
+    };
     let entry = SequenceLeafEntryV3::try_new_logical(
         commit.commit().first_local_sequence(),
         commit.commit().last_local_sequence(),
@@ -275,6 +306,7 @@ fn append_batch(
     )?;
     let sequence_root = append_logical_entry(
         &mut journal,
+        &packs,
         previous_root.as_ref(),
         chain.clone(),
         source.clone(),
@@ -605,15 +637,194 @@ fn load_current_root(
     Ok(Some((root, journal_bytes)))
 }
 
+fn pack_index_locked(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    durable_at: KnownTime,
+) -> Result<[u8; 32], ArchiveError> {
+    let (root, journal_bytes) =
+        load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    if root.journal_prefix().committed_record_count() <= 1 {
+        return root_bundle_hash(&root);
+    }
+    let dataset = dataset_relative(chain, source);
+    let mut packs =
+        load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
+    let (pack, packed_leaves) = pack_journal_leaves(
+        chain.clone(),
+        source.clone(),
+        root.journal_prefix().generation(),
+        root.sequence_root(),
+        &journal_bytes,
+        &packs,
+    )?;
+    let pack_hash = pack.object_sha256();
+    let pack_relative = dataset.join(pack.manifest().object_relative_path());
+    fs::publish_immutable(&archive.root, &pack_relative, pack.bytes())?;
+    let published = fs::read_regular(
+        &archive.root,
+        &pack_relative,
+        RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
+    )?;
+    pack.verify_bytes(&published)?;
+    let manifest_relative = dataset.join(format!(
+        "index-packs/{}.manifest.json",
+        hex::encode(pack_hash)
+    ));
+    fs::publish_immutable(
+        &archive.root,
+        &manifest_relative,
+        &manifest::canonical_json(pack.manifest())?,
+    )?;
+    packs.insert(pack_hash, pack.bytes().to_vec());
+
+    let next_journal_generation =
+        root.journal_prefix()
+            .generation()
+            .checked_add(1)
+            .ok_or(ArchiveError::InvalidInput(
+                "raw V3 journal generation overflows",
+            ))?;
+    let mut journal = JournalGenerationBuilderV3::try_new(
+        next_journal_generation,
+        journal_file_identity(next_journal_generation)?,
+        journal_relative(&dataset, next_journal_generation),
+    )?;
+    let sequence_root = seed_rotated_journal_root(
+        &mut journal,
+        &packs,
+        &packed_leaves,
+        &journal_bytes,
+        root.sequence_root(),
+    )?;
+    let journal_commit = journal.commit_prefix(&sequence_root)?;
+    fs::extend_append_only(
+        &archive.root,
+        Path::new(journal_commit.prefix().relative_path()),
+        &[],
+        journal_commit.bytes(),
+        MAX_JOURNAL_BYTES,
+    )?;
+    let previous_pointer = fs::read_regular(&archive.root, &dataset.join("CURRENT"), 64 * 1024)?;
+    let next_generation = root
+        .generation()
+        .checked_add(1)
+        .ok_or(ArchiveError::InvalidInput(
+            "raw V3 root generation overflows",
+        ))?;
+    let previous_root_hash = root_bundle_hash(&root)?;
+    let bundle = RootBundleV3::try_new(
+        chain.clone(),
+        source.clone(),
+        next_generation,
+        Some(previous_root_hash),
+        &journal_commit,
+        durable_at,
+    )?;
+    let bundle_bytes = raw_v3::canonical_root_bytes(&bundle)?;
+    let bundle_hash = root_bundle_hash(&bundle)?;
+    let bundle_relative = root_relative(&dataset, bundle_hash);
+    fs::publish_immutable(&archive.root, &bundle_relative, &bundle_bytes)?;
+    let pointer = manifest::CurrentPointerV1 {
+        schema: manifest::CURRENT_POINTER_SCHEMA_V1.to_owned(),
+        manifest_relative_path: raw::path_string(&bundle_relative)?,
+        manifest_sha256: hex::encode(bundle_hash),
+    };
+    let pointer_bytes = manifest::canonical_json(&pointer)?;
+    fs::publish_current_cas(
+        &archive.root,
+        &dataset.join("CURRENT"),
+        Some(&previous_pointer),
+        &pointer_bytes,
+    )?;
+    let readback = load_current_root(archive, chain, source)?.ok_or(
+        ArchiveError::ManifestVerification("raw V3 packed CURRENT readback is missing"),
+    )?;
+    if root_bundle_hash(&readback.0)? != bundle_hash {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 packed CURRENT readback does not bind the published root",
+        ));
+    }
+    Ok(bundle_hash)
+}
+
+fn load_packs_for_tree(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root: &SequenceNodeRefV3,
+    journal_bytes: &[u8],
+) -> Result<IndexPackBytes, ArchiveError> {
+    let dataset = dataset_relative(chain, source);
+    let mut packs = IndexPackBytes::new();
+    load_packs_walk(archive, &dataset, journal_bytes, &mut packs, root)?;
+    Ok(packs)
+}
+
+fn load_packs_walk(
+    archive: &RawV3Archive,
+    dataset: &Path,
+    journal_bytes: &[u8],
+    packs: &mut IndexPackBytes,
+    node: &SequenceNodeRefV3,
+) -> Result<(), ArchiveError> {
+    ensure_pack_loaded(archive, dataset, packs, node.locator())?;
+    if node.depth() == 0 {
+        return Ok(());
+    }
+    let page = load_sequence_internal(journal_bytes, packs, node)?;
+    for child in page.children() {
+        load_packs_walk(archive, dataset, journal_bytes, packs, child)?;
+    }
+    Ok(())
+}
+
+fn ensure_pack_loaded(
+    archive: &RawV3Archive,
+    dataset: &Path,
+    packs: &mut IndexPackBytes,
+    locator: &raw_v3::SequencePageLocatorV3,
+) -> Result<(), ArchiveError> {
+    let Some(hash) = locator.index_pack_sha256()? else {
+        return Ok(());
+    };
+    if packs.contains_key(&hash) {
+        return Ok(());
+    }
+    let relative = locator
+        .index_pack_relative_path()
+        .ok_or(ArchiveError::ManifestVerification(
+            "index pack locator is missing a path",
+        ))?;
+    let path = dataset.join(relative);
+    let bytes = fs::read_regular(&archive.root, &path, RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES)?;
+    if manifest::sha256(&bytes) != hash {
+        return Err(ArchiveError::ManifestVerification(
+            "index pack path does not bind exact bytes",
+        ));
+    }
+    packs.insert(hash, bytes);
+    Ok(())
+}
+
 fn find_exact_logical(
     archive: &RawV3Archive,
     root: &RootBundleV3,
     journal_bytes: &[u8],
     descriptor: &LogicalCommitDescriptorV3,
 ) -> Result<Option<RawObservationReceipt>, ArchiveError> {
+    let packs = load_packs_for_tree(
+        archive,
+        &root.chain_id()?,
+        &root.source_id()?,
+        root.sequence_root(),
+        journal_bytes,
+    )?;
     let Some(entry) = lookup_leaf_covering(
         root.sequence_root(),
         journal_bytes,
+        &packs,
         descriptor.first_local_sequence(),
         descriptor.last_local_sequence(),
     )?
@@ -651,6 +862,7 @@ fn find_exact_logical(
 fn lookup_leaf_covering(
     node: &SequenceNodeRefV3,
     journal_bytes: &[u8],
+    packs: &IndexPackBytes,
     first: u64,
     last: u64,
 ) -> Result<Option<SequenceLeafEntryV3>, ArchiveError> {
@@ -658,7 +870,7 @@ fn lookup_leaf_covering(
         return Ok(None);
     }
     if node.depth() == 0 {
-        let page = load_sequence_leaf_from_journal(journal_bytes, node)?;
+        let page = load_sequence_leaf(journal_bytes, packs, node)?;
         return Ok(page
             .entries()
             .iter()
@@ -667,9 +879,9 @@ fn lookup_leaf_covering(
             })
             .cloned());
     }
-    let page = load_sequence_internal_from_journal(journal_bytes, node)?;
+    let page = load_sequence_internal(journal_bytes, packs, node)?;
     for child in page.children() {
-        if let Some(entry) = lookup_leaf_covering(child, journal_bytes, first, last)? {
+        if let Some(entry) = lookup_leaf_covering(child, journal_bytes, packs, first, last)? {
             return Ok(Some(entry));
         }
     }
@@ -679,6 +891,7 @@ fn lookup_leaf_covering(
 fn collect_overlapping_leaves(
     node: &SequenceNodeRefV3,
     journal_bytes: &[u8],
+    packs: &IndexPackBytes,
     range: LocalRecordSequenceRange,
     output: &mut Vec<SequenceLeafEntryV3>,
 ) -> Result<(), ArchiveError> {
@@ -688,7 +901,7 @@ fn collect_overlapping_leaves(
         return Ok(());
     }
     if node.depth() == 0 {
-        let page = load_sequence_leaf_from_journal(journal_bytes, node)?;
+        let page = load_sequence_leaf(journal_bytes, packs, node)?;
         for entry in page.entries() {
             if entry.last_local_sequence() >= range.start().get()
                 && entry.first_local_sequence() <= range.end().get()
@@ -698,9 +911,9 @@ fn collect_overlapping_leaves(
         }
         return Ok(());
     }
-    let page = load_sequence_internal_from_journal(journal_bytes, node)?;
+    let page = load_sequence_internal(journal_bytes, packs, node)?;
     for child in page.children() {
-        collect_overlapping_leaves(child, journal_bytes, range, output)?;
+        collect_overlapping_leaves(child, journal_bytes, packs, range, output)?;
     }
     Ok(())
 }
@@ -708,10 +921,11 @@ fn collect_overlapping_leaves(
 fn walk_logical_leaves(
     node: &SequenceNodeRefV3,
     journal_bytes: &[u8],
+    packs: &IndexPackBytes,
     visit: &mut impl FnMut(&SequenceLeafEntryV3) -> Result<bool, ArchiveError>,
 ) -> Result<bool, ArchiveError> {
     if node.depth() == 0 {
-        let page = load_sequence_leaf_from_journal(journal_bytes, node)?;
+        let page = load_sequence_leaf(journal_bytes, packs, node)?;
         for entry in page.entries() {
             if visit(entry)? {
                 return Ok(true);
@@ -719,9 +933,9 @@ fn walk_logical_leaves(
         }
         return Ok(false);
     }
-    let page = load_sequence_internal_from_journal(journal_bytes, node)?;
+    let page = load_sequence_internal(journal_bytes, packs, node)?;
     for child in page.children() {
-        if walk_logical_leaves(child, journal_bytes, visit)? {
+        if walk_logical_leaves(child, journal_bytes, packs, visit)? {
             return Ok(true);
         }
     }
@@ -749,9 +963,17 @@ fn verify_logical_at_sequence(
     manifest_sha256: [u8; 32],
     expected_range: LocalRecordSequenceRange,
 ) -> Result<VerifiedRawManifest, ArchiveError> {
+    let packs = load_packs_for_tree(
+        archive,
+        &root.chain_id()?,
+        &root.source_id()?,
+        root.sequence_root(),
+        journal_bytes,
+    )?;
     let entry = lookup_leaf_covering(
         root.sequence_root(),
         journal_bytes,
+        &packs,
         expected_range.start().get(),
         expected_range.end().get(),
     )?
@@ -786,8 +1008,15 @@ fn verify_raw_manifest(
     let source = loaded.commit().source_id()?;
     let (root, journal_bytes) = load_current_root(archive, &chain, &source)?
         .ok_or(ArchiveError::ReceiptIndexRebuildRequired)?;
+    let packs = load_packs_for_tree(
+        archive,
+        &chain,
+        &source,
+        root.sequence_root(),
+        &journal_bytes,
+    )?;
     let mut found = false;
-    walk_logical_leaves(root.sequence_root(), &journal_bytes, &mut |entry| {
+    walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
         if entry.storage().logical_manifest_sha256()? == Some(hash) {
             found = true;
             Ok(true)
@@ -1002,8 +1231,15 @@ fn read_observations_by_sequence(
     }
     let (root, journal_bytes) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
     let mut leaves = Vec::new();
-    collect_overlapping_leaves(root.sequence_root(), &journal_bytes, range, &mut leaves)?;
+    collect_overlapping_leaves(
+        root.sequence_root(),
+        &journal_bytes,
+        &packs,
+        range,
+        &mut leaves,
+    )?;
     leaves.sort_by_key(SequenceLeafEntryV3::first_local_sequence);
     let mut total_bytes = 0_u64;
     let mut replayed = Vec::new();
@@ -1118,7 +1354,8 @@ fn contains_raw_cursor_epoch(
         return Ok(false);
     };
     let mut found = false;
-    walk_logical_leaves(root.sequence_root(), &journal_bytes, &mut |entry| {
+    let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
+    walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
         let Some(hash) = entry.storage().logical_manifest_sha256()? else {
             return Ok(false);
         };
