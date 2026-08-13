@@ -76,8 +76,13 @@ enum DeletionJournalRecordV3 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeletionState {
-    Planned,
-    Unlinked,
+    Planned {
+        object_sha256: [u8; 32],
+        byte_len: u64,
+    },
+    Unlinked {
+        object_sha256: [u8; 32],
+    },
     DirectorySynced,
 }
 
@@ -94,10 +99,14 @@ impl RawArchiveGcPlan {
         self.digest
     }
 
-    pub fn files(&self) -> impl Iterator<Item = (&str, u64)> {
-        self.files
-            .iter()
-            .map(|file| (file.relative_path.as_str(), file.byte_len))
+    pub fn files(&self) -> impl Iterator<Item = (&str, &str, u64)> {
+        self.files.iter().map(|file| {
+            (
+                file.relative_path.as_str(),
+                file.object_sha256.as_str(),
+                file.byte_len,
+            )
+        })
     }
 
     #[must_use]
@@ -211,13 +220,19 @@ pub fn execute_packed_object_gc(
         let path = PathBuf::from(&file.relative_path);
         fs::validate_relative(&path)?;
         let hash = manifest::parse_hash(&file.object_sha256)?;
-        let state = states.get(&file.relative_path).copied();
+        let mut state = states.get(&file.relative_path).copied();
         if state == Some(DeletionState::DirectorySynced) {
             unlinked_files = unlinked_files.saturating_add(1);
             unlinked_bytes = unlinked_bytes.saturating_add(file.byte_len);
             continue;
         }
+        let exists = fs::exists_regular(&archive.root, &path)?;
         if state.is_none() {
+            if !exists {
+                return Err(ArchiveError::ManifestVerification(
+                    "eligible object is missing before unlink; restore from backup",
+                ));
+            }
             append_record(
                 archive,
                 &journal_relative,
@@ -227,24 +242,31 @@ pub fn execute_packed_object_gc(
                     byte_len: file.byte_len,
                 },
             )?;
-            states.insert(file.relative_path.clone(), DeletionState::Planned);
+            let planned = DeletionState::Planned {
+                object_sha256: hash,
+                byte_len: file.byte_len,
+            };
+            state = Some(planned);
+            states.insert(file.relative_path.clone(), planned);
         }
-        if state != Some(DeletionState::Unlinked) {
-            if !fs::exists_regular(&archive.root, &path)? {
+        journal_matches_plan(file, hash, state)?;
+        if !matches!(state, Some(DeletionState::Unlinked { .. })) {
+            if exists {
+                recheck_before_unlink(
+                    archive,
+                    chain,
+                    source,
+                    current_hash,
+                    backup_receipt,
+                    &plan,
+                    file,
+                )?;
+                fs::unlink_regular_matching(&archive.root, &path, hash, file.byte_len)?;
+            } else if !matches!(state, Some(DeletionState::Planned { .. })) {
                 return Err(ArchiveError::ManifestVerification(
-                    "eligible object is missing before unlink; restore from backup",
+                    "eligible object vanished without a matching deletion journal",
                 ));
             }
-            recheck_before_unlink(
-                archive,
-                chain,
-                source,
-                current_hash,
-                backup_receipt,
-                &plan,
-                file,
-            )?;
-            fs::unlink_regular_matching(&archive.root, &path, hash, file.byte_len)?;
             append_record(
                 archive,
                 &journal_relative,
@@ -253,6 +275,12 @@ pub fn execute_packed_object_gc(
                     object_sha256: file.object_sha256.clone(),
                 },
             )?;
+            states.insert(
+                file.relative_path.clone(),
+                DeletionState::Unlinked {
+                    object_sha256: hash,
+                },
+            );
         }
         append_record(
             archive,
@@ -284,20 +312,44 @@ fn exclusive_gc_leases(
     let dataset = dataset_relative(chain, source);
     let checkpoint_hash = super::checkpoint::checkpoint_root_sha256(archive, chain, source)?;
     let mut leases = Vec::new();
+    let mut locked = BTreeSet::new();
     for hash in list_root_hashes(archive, &dataset)? {
         if hash == current_hash || checkpoint_hash == Some(hash) {
             continue;
         }
-        let relative = dataset.join(RawArchiveRootLeaseIdentity::new(hash).relative_path());
-        leases.push(fs::open_exclusive_lease(&archive.root, &relative)?);
-        let (loaded, _) = load_verified_root(archive, chain, source, hash)?;
-        if root_bundle_hash(&loaded)? != hash {
-            return Err(ArchiveError::ManifestVerification(
-                "exclusive GC lease does not bind the selected root",
-            ));
+        lock_exclusive_root(archive, chain, source, &dataset, hash, &mut leases)?;
+        locked.insert(hash);
+    }
+    for hash in list_lease_hashes(archive, &dataset)? {
+        if hash == current_hash || checkpoint_hash == Some(hash) || locked.contains(&hash) {
+            continue;
         }
+        lock_exclusive_root(archive, chain, source, &dataset, hash, &mut leases)?;
     }
     Ok(leases)
+}
+
+fn lock_exclusive_root(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    dataset: &Path,
+    hash: [u8; 32],
+    leases: &mut Vec<File>,
+) -> Result<(), ArchiveError> {
+    let relative = dataset.join(RawArchiveRootLeaseIdentity::new(hash).relative_path());
+    leases.push(fs::open_exclusive_lease(&archive.root, &relative)?);
+    let root_path = root_relative(dataset, hash);
+    if !fs::exists_regular(&archive.root, &root_path)? {
+        return Ok(());
+    }
+    let (loaded, _) = load_verified_root(archive, chain, source, hash)?;
+    if root_bundle_hash(&loaded)? != hash {
+        return Err(ArchiveError::ManifestVerification(
+            "exclusive GC lease does not bind the selected root",
+        ));
+    }
+    Ok(())
 }
 
 fn eligible_files(
@@ -355,6 +407,26 @@ fn eligible_files(
             &protected,
             &mut eligible,
         )?;
+        insert_eligible(
+            archive,
+            dataset.join(RawArchiveRootLeaseIdentity::new(hash).relative_path()),
+            &protected,
+            &mut eligible,
+        )?;
+    }
+    for hash in list_lease_hashes(archive, &dataset)? {
+        if hash == current_hash || checkpoint_hash == Some(hash) {
+            continue;
+        }
+        if fs::exists_regular(&archive.root, &root_relative(&dataset, hash))? {
+            continue;
+        }
+        insert_eligible(
+            archive,
+            dataset.join(RawArchiveRootLeaseIdentity::new(hash).relative_path()),
+            &protected,
+            &mut eligible,
+        )?;
     }
     eligible.retain(|path, _| !protected.contains(path));
     Ok(eligible.into_values().collect())
@@ -386,6 +458,12 @@ fn collect_packed_input_objects(
             insert_eligible(
                 archive,
                 PathBuf::from(commit.object().relative_path()),
+                protected,
+                eligible,
+            )?;
+            insert_eligible(
+                archive,
+                super::logical_manifest_relative(input.manifest_sha256()?),
                 protected,
                 eligible,
             )?;
@@ -449,12 +527,13 @@ fn protect_leaf(
             let pack = load_pack_manifest(archive, chain, source, entry)?;
             protected.insert(dataset.join(pack.object().relative_path()));
             for input in pack.inputs() {
+                if skip_packed_inputs {
+                    continue;
+                }
                 let commit =
                     parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
                 protected.insert(super::logical_manifest_relative(input.manifest_sha256()?));
-                if !skip_packed_inputs {
-                    protected.insert(PathBuf::from(commit.object().relative_path()));
-                }
+                protected.insert(PathBuf::from(commit.object().relative_path()));
             }
         }
     }
@@ -599,11 +678,29 @@ fn load_deletion_states(
         let record: DeletionJournalRecordV3 = serde_json::from_str(line)
             .map_err(|_| ArchiveError::ManifestVerification("invalid deletion journal record"))?;
         match record {
-            DeletionJournalRecordV3::Planned { relative_path, .. } => {
-                states.insert(relative_path, DeletionState::Planned);
+            DeletionJournalRecordV3::Planned {
+                relative_path,
+                object_sha256,
+                byte_len,
+            } => {
+                states.insert(
+                    relative_path,
+                    DeletionState::Planned {
+                        object_sha256: manifest::parse_hash(&object_sha256)?,
+                        byte_len,
+                    },
+                );
             }
-            DeletionJournalRecordV3::Unlinked { relative_path, .. } => {
-                states.insert(relative_path, DeletionState::Unlinked);
+            DeletionJournalRecordV3::Unlinked {
+                relative_path,
+                object_sha256,
+            } => {
+                states.insert(
+                    relative_path,
+                    DeletionState::Unlinked {
+                        object_sha256: manifest::parse_hash(&object_sha256)?,
+                    },
+                );
             }
             DeletionJournalRecordV3::DirectorySynced { relative_path } => {
                 states.insert(relative_path, DeletionState::DirectorySynced);
@@ -624,15 +721,49 @@ fn append_record(
 }
 
 fn list_root_hashes(archive: &RawV3Archive, dataset: &Path) -> Result<Vec<[u8; 32]>, ArchiveError> {
-    let names = fs::list_regular_names(&archive.root, &dataset.join("roots"))?;
+    list_named_hashes(archive, &dataset.join("roots"), "root-", ".json")
+}
+
+fn list_lease_hashes(
+    archive: &RawV3Archive,
+    dataset: &Path,
+) -> Result<Vec<[u8; 32]>, ArchiveError> {
+    list_named_hashes(archive, &dataset.join("leases"), "root-", ".lease")
+}
+
+fn list_named_hashes(
+    archive: &RawV3Archive,
+    relative: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> Result<Vec<[u8; 32]>, ArchiveError> {
+    let names = fs::list_regular_names(&archive.root, relative)?;
     let mut hashes = Vec::new();
     for name in names {
-        let hash = parse_named_hash(&name, "root-", ".json")?;
-        hashes.push(hash);
+        hashes.push(parse_named_hash(&name, prefix, suffix)?);
     }
     hashes.sort();
     hashes.dedup();
     Ok(hashes)
+}
+
+fn journal_matches_plan(
+    file: &GcPlanFileV3,
+    plan_hash: [u8; 32],
+    state: Option<DeletionState>,
+) -> Result<(), ArchiveError> {
+    match state {
+        Some(DeletionState::Planned {
+            object_sha256,
+            byte_len,
+        }) if object_sha256 == plan_hash && byte_len == file.byte_len => Ok(()),
+        Some(DeletionState::Unlinked { object_sha256 }) if object_sha256 == plan_hash => Ok(()),
+        Some(DeletionState::DirectorySynced) => Ok(()),
+        None => Ok(()),
+        Some(_) => Err(ArchiveError::ManifestVerification(
+            "deletion journal does not match the authorized plan",
+        )),
+    }
 }
 
 fn parse_named_hash(name: &str, prefix: &str, suffix: &str) -> Result<[u8; 32], ArchiveError> {

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use domain_types::{ChainId, ManifestId, SourceId};
 use serde::{Deserialize, Serialize};
-use storage_ports::{ArchiveError, LocalRecordSequence, RAW_ARCHIVE_MAXIMUM_SEQUENCE_PAGE_BYTES};
+use storage_ports::{ArchiveError, LocalRecordSequence, RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES};
 
 use super::{
     RawV3Archive, dataset_relative, lease_root, load_current_root, load_pack_manifest,
@@ -11,8 +11,8 @@ use super::{
 use crate::{
     fs, manifest,
     raw_v3::{
-        ReceiptHintEntryV3, ReceiptHintPageV3, parse_logical_commit_manifest,
-        parse_receipt_hint_page, root_bundle_hash,
+        BuiltIndexPackV3, IndexPackPageKindV3, ReceiptHintEntryV3, ReceiptHintPageV3,
+        parse_logical_commit_manifest, parse_receipt_hint_page, root_bundle_hash,
     },
 };
 
@@ -37,6 +37,8 @@ struct ReceiptHintIndexPageRefV3 {
     sha256: String,
     first_manifest_sha256: String,
     last_manifest_sha256: String,
+    offset: u64,
+    length: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +60,38 @@ pub fn rebuild_receipt_hints(
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
     let _lease = lease_root(archive, chain, source, &root)?;
     let root_hash = root_bundle_hash(&root)?;
-    let mut entries = collect_hint_entries(archive, chain, source, &root, &journal_bytes)?;
+    let pages = pages_for_tree(archive, chain, source, &root, &journal_bytes)?;
+    let dataset = dataset_relative(chain, source);
+    let mut refs = Vec::new();
+    for page in &pages {
+        let bytes = manifest::canonical_json(page)?;
+        let hash = manifest::sha256(&bytes);
+        let relative = hint_page_relative(&dataset, hash);
+        fs::publish_immutable(&archive.root, &relative, &bytes)?;
+        let first = page.entries()[0].manifest_sha256()?;
+        let last = page.entries()[page.entries().len() - 1].manifest_sha256()?;
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| ArchiveError::InvalidInput("receipt hint page exceeds u64"))?;
+        refs.push(ReceiptHintIndexPageRefV3 {
+            relative_path: crate::raw::path_string(&relative)?,
+            sha256: hex::encode(hash),
+            first_manifest_sha256: hex::encode(first),
+            last_manifest_sha256: hex::encode(last),
+            offset: 0,
+            length,
+        });
+    }
+    publish_hint_index(archive, chain, source, root_hash, &dataset, refs)
+}
+
+pub(super) fn pages_for_tree(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root: &crate::raw_v3::RootBundleV3,
+    journal_bytes: &[u8],
+) -> Result<Vec<ReceiptHintPageV3>, ArchiveError> {
+    let mut entries = collect_hint_entries(archive, chain, source, root, journal_bytes)?;
     let mut keyed = entries
         .drain(..)
         .map(|entry| Ok((entry.manifest_sha256()?, entry)))
@@ -75,23 +108,85 @@ pub fn rebuild_receipt_hints(
             "receipt hint rebuild requires at least one logical commit",
         ));
     }
-    let dataset = dataset_relative(chain, source);
     let mut pages = Vec::new();
     for chunk in entries.chunks(HINT_PAGE_FANOUT) {
-        let page = ReceiptHintPageV3::try_new(chain.clone(), source.clone(), chunk.to_vec())?;
-        let bytes = manifest::canonical_json(&page)?;
+        pages.push(ReceiptHintPageV3::try_new(
+            chain.clone(),
+            source.clone(),
+            chunk.to_vec(),
+        )?);
+    }
+    Ok(pages)
+}
+
+pub(super) fn publish_from_index_pack(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root_hash: [u8; 32],
+    dataset: &Path,
+    pack: &BuiltIndexPackV3,
+    hint_pages: &[ReceiptHintPageV3],
+) -> Result<[u8; 32], ArchiveError> {
+    let pack_relative = dataset.join(pack.manifest().object_relative_path());
+    let mut refs = Vec::new();
+    let pack_pages = pack
+        .manifest()
+        .pages()
+        .iter()
+        .filter(|page| page.kind() == IndexPackPageKindV3::ReceiptHint);
+    for (built, locator) in hint_pages.iter().zip(pack_pages) {
+        let bytes = manifest::canonical_json(built)?;
         let hash = manifest::sha256(&bytes);
-        let relative = hint_page_relative(&dataset, hash);
-        fs::publish_immutable(&archive.root, &relative, &bytes)?;
-        let first = chunk[0].manifest_sha256()?;
-        let last = chunk[chunk.len() - 1].manifest_sha256()?;
-        pages.push(ReceiptHintIndexPageRefV3 {
-            relative_path: crate::raw::path_string(&relative)?,
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| ArchiveError::InvalidInput("receipt hint page exceeds u64"))?;
+        if locator.length() != length {
+            return Err(ArchiveError::ManifestVerification(
+                "index pack receipt hint page length mismatch",
+            ));
+        }
+        let start = usize::try_from(locator.offset()).map_err(|_| {
+            ArchiveError::ManifestVerification(
+                "index pack receipt hint offset exceeds address space",
+            )
+        })?;
+        let end = start
+            .checked_add(bytes.len())
+            .ok_or(ArchiveError::ManifestVerification(
+                "index pack receipt hint page slice overflows",
+            ))?;
+        if pack.bytes().get(start..end) != Some(bytes.as_slice()) {
+            return Err(ArchiveError::ManifestVerification(
+                "index pack receipt hint page bytes mismatch",
+            ));
+        }
+        let first = built.entries()[0].manifest_sha256()?;
+        let last = built.entries()[built.entries().len() - 1].manifest_sha256()?;
+        refs.push(ReceiptHintIndexPageRefV3 {
+            relative_path: crate::raw::path_string(&pack_relative)?,
             sha256: hex::encode(hash),
             first_manifest_sha256: hex::encode(first),
             last_manifest_sha256: hex::encode(last),
+            offset: locator.offset(),
+            length,
         });
     }
+    if refs.len() != hint_pages.len() {
+        return Err(ArchiveError::ManifestVerification(
+            "index pack is missing embedded receipt hint pages",
+        ));
+    }
+    publish_hint_index(archive, chain, source, root_hash, dataset, refs)
+}
+
+fn publish_hint_index(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root_hash: [u8; 32],
+    dataset: &Path,
+    pages: Vec<ReceiptHintIndexPageRefV3>,
+) -> Result<[u8; 32], ArchiveError> {
     let index = ReceiptHintIndexV3 {
         schema: RAW_HINT_INDEX_SCHEMA_V3.to_owned(),
         root_sha256: hex::encode(root_hash),
@@ -101,10 +196,9 @@ pub fn rebuild_receipt_hints(
     };
     let index_bytes = manifest::canonical_json(&index)?;
     let index_hash = manifest::sha256(&index_bytes);
-    let index_relative = hint_index_relative(&dataset, index_hash);
+    let index_relative = hint_index_relative(dataset, index_hash);
     fs::publish_immutable(&archive.root, &index_relative, &index_bytes)?;
-    let previous =
-        fs::try_read_regular(&archive.root, &hint_current_relative(&dataset), 64 * 1024)?;
+    let previous = fs::try_read_regular(&archive.root, &hint_current_relative(dataset), 64 * 1024)?;
     let pointer = manifest::CurrentPointerV1 {
         schema: manifest::CURRENT_POINTER_SCHEMA_V1.to_owned(),
         manifest_relative_path: crate::raw::path_string(&index_relative)?,
@@ -112,7 +206,7 @@ pub fn rebuild_receipt_hints(
     };
     fs::publish_current_cas(
         &archive.root,
-        &hint_current_relative(&dataset),
+        &hint_current_relative(dataset),
         previous.as_deref(),
         &manifest::canonical_json(&pointer)?,
     )?;
@@ -137,15 +231,8 @@ pub fn lookup_receipt_hint(
                 && encoded.as_str() <= page.last_manifest_sha256.as_str()
         })
         .ok_or(ArchiveError::ReceiptIndexRebuildRequired)?;
-    let page_bytes = fs::read_regular(
-        &archive.root,
-        Path::new(&page_ref.relative_path),
-        RAW_ARCHIVE_MAXIMUM_SEQUENCE_PAGE_BYTES,
-    )
-    .map_err(|_| ArchiveError::ReceiptIndexRebuildRequired)?;
-    if hex::encode(manifest::sha256(&page_bytes)) != page_ref.sha256 {
-        return Err(ArchiveError::ReceiptIndexRebuildRequired);
-    }
+    let page_bytes = load_hint_page_bytes(archive, page_ref)
+        .map_err(|_| ArchiveError::ReceiptIndexRebuildRequired)?;
     let page = parse_receipt_hint_page(&page_bytes)
         .map_err(|_| ArchiveError::ReceiptIndexRebuildRequired)?;
     let (first, last) = page
@@ -256,6 +343,44 @@ fn load_hint_index(
         ));
     }
     Ok(reconstructed)
+}
+
+fn load_hint_page_bytes(
+    archive: &RawV3Archive,
+    page_ref: &ReceiptHintIndexPageRefV3,
+) -> Result<Vec<u8>, ArchiveError> {
+    if page_ref.length == 0 {
+        return Err(ArchiveError::ManifestVerification(
+            "receipt hint page length is zero",
+        ));
+    }
+    let bytes = fs::read_regular(
+        &archive.root,
+        Path::new(&page_ref.relative_path),
+        RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
+    )?;
+    let start = usize::try_from(page_ref.offset).map_err(|_| {
+        ArchiveError::ManifestVerification("receipt hint page offset exceeds address space")
+    })?;
+    let length = usize::try_from(page_ref.length).map_err(|_| {
+        ArchiveError::ManifestVerification("receipt hint page length exceeds address space")
+    })?;
+    let end = start
+        .checked_add(length)
+        .ok_or(ArchiveError::ManifestVerification(
+            "receipt hint page slice overflows",
+        ))?;
+    let slice = bytes
+        .get(start..end)
+        .ok_or(ArchiveError::ManifestVerification(
+            "receipt hint page slice is outside the object",
+        ))?;
+    if hex::encode(manifest::sha256(slice)) != page_ref.sha256 {
+        return Err(ArchiveError::ManifestVerification(
+            "receipt hint page path does not bind exact bytes",
+        ));
+    }
+    Ok(slice.to_vec())
 }
 
 fn hint_current_relative(dataset: &Path) -> PathBuf {

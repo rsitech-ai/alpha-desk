@@ -896,6 +896,7 @@ fn pack_index_locked(
     let dataset = dataset_relative(chain, source);
     let mut packs =
         load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
+    let hint_pages = hint::pages_for_tree(archive, chain, source, &root, &journal_bytes)?;
     let (pack, packed_leaves) = pack_journal_leaves(
         chain.clone(),
         source.clone(),
@@ -903,6 +904,7 @@ fn pack_index_locked(
         root.sequence_root(),
         &journal_bytes,
         &packs,
+        &hint_pages,
     )?;
     let pack_hash = pack.object_sha256();
     let pack_relative = dataset.join(pack.manifest().object_relative_path());
@@ -991,6 +993,15 @@ fn pack_index_locked(
             "raw V3 packed CURRENT readback does not bind the published root",
         ));
     }
+    hint::publish_from_index_pack(
+        archive,
+        chain,
+        source,
+        bundle_hash,
+        &dataset,
+        &pack,
+        &hint_pages,
+    )?;
     Ok(bundle_hash)
 }
 
@@ -1462,7 +1473,51 @@ fn verify_raw_manifest(
 ) -> Result<VerifiedRawManifest, ArchiveError> {
     let hash = manifest::hash_from_manifest_id(manifest_id)?;
     let relative = logical_manifest_relative(hash);
-    let loaded = load_logical_commit(archive, &relative, hash)?;
+    if let Some(loaded) = try_load_logical_commit(archive, &relative, hash)? {
+        return verify_raw_manifest_with_commit(archive, &loaded, hash);
+    }
+    let mut matched = None;
+    for (chain, source) in discover_v3_sources(archive)? {
+        let Some((root, journal_bytes)) = load_current_root(archive, &chain, &source)? else {
+            continue;
+        };
+        let _lease = lease_root(archive, &chain, &source, &root)?;
+        let packs = load_packs_for_tree(
+            archive,
+            &chain,
+            &source,
+            root.sequence_root(),
+            &journal_bytes,
+        )?;
+        let mut found = None;
+        walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
+            if leaf_contains_manifest(archive, &chain, &source, entry, hash)? {
+                found = Some(entry.clone());
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })?;
+        let Some(entry) = found else {
+            continue;
+        };
+        if matched.is_some() {
+            return Err(ArchiveError::ManifestVerification(
+                "logical commit hash is present in more than one raw V3 source",
+            ));
+        }
+        matched = Some(verify_leaf_without_original(
+            archive, &chain, &source, &entry, hash,
+        )?);
+    }
+    matched.ok_or(ArchiveError::ReceiptIndexRebuildRequired)
+}
+
+fn verify_raw_manifest_with_commit(
+    archive: &RawV3Archive,
+    loaded: &LogicalCommitManifestV3,
+    hash: [u8; 32],
+) -> Result<VerifiedRawManifest, ArchiveError> {
     let chain = loaded.commit().chain_id()?;
     let source = loaded.commit().source_id()?;
     let (root, journal_bytes) = load_current_root(archive, &chain, &source)?
@@ -1488,11 +1543,95 @@ fn verify_raw_manifest(
         return Err(ArchiveError::ReceiptIndexRebuildRequired);
     };
     match entry.storage() {
-        SequenceStorageRefV3::Logical { .. } => verify_loaded_commit(archive, &loaded, hash),
+        SequenceStorageRefV3::Logical { .. } => verify_loaded_commit(archive, loaded, hash),
         SequenceStorageRefV3::Packed { .. } => {
-            verify_packed_manifest(archive, &chain, &source, &entry, &loaded, hash)
+            verify_packed_manifest(archive, &chain, &source, &entry, loaded, hash)
         }
     }
+}
+
+fn verify_leaf_without_original(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+    hash: [u8; 32],
+) -> Result<VerifiedRawManifest, ArchiveError> {
+    match entry.storage() {
+        SequenceStorageRefV3::Logical { .. } => Err(ArchiveError::ManifestVerification(
+            "uncompacted logical commit is missing its original manifest file",
+        )),
+        SequenceStorageRefV3::Packed { .. } => {
+            verify_packed_manifest_from_embed(archive, chain, source, entry, hash)
+        }
+    }
+}
+
+fn verify_packed_manifest_from_embed(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+    hash: [u8; 32],
+) -> Result<VerifiedRawManifest, ArchiveError> {
+    let (pack, rows) = load_verified_pack_rows(archive, chain, source, entry)?;
+    let input = pack
+        .inputs()
+        .iter()
+        .find(|input| input.manifest_sha256().ok() == Some(hash))
+        .ok_or(ArchiveError::ManifestVerification(
+            "packed slice does not contain the expected logical commit",
+        ))?;
+    let embedded = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+    if manifest::sha256(input.canonical_manifest_json().as_bytes()) != hash {
+        return Err(ArchiveError::ManifestVerification(
+            "packed embedded logical commit hash mismatch",
+        ));
+    }
+    verified_from_packed_input(&embedded, input, &rows, hash)
+}
+
+fn try_load_logical_commit(
+    archive: &RawV3Archive,
+    relative: &Path,
+    expected_hash: [u8; 32],
+) -> Result<Option<LogicalCommitManifestV3>, ArchiveError> {
+    if !fs::exists_regular(&archive.root, relative)? {
+        return Ok(None);
+    }
+    load_logical_commit(archive, relative, expected_hash).map(Some)
+}
+
+fn discover_v3_sources(archive: &RawV3Archive) -> Result<Vec<(ChainId, SourceId)>, ArchiveError> {
+    let mut sources = Vec::new();
+    for chain_name in fs::list_directory_names(&archive.root, Path::new(""))? {
+        let Some(chain) = chain_name.strip_prefix("chain=") else {
+            continue;
+        };
+        let chain_id = ChainId::new(chain)
+            .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 chain directory"))?;
+        let chain_relative = PathBuf::from(&chain_name);
+        for dataset_name in fs::list_directory_names(&archive.root, &chain_relative)? {
+            if dataset_name != format!("dataset={RAW_BYTE_DATASET_V3}") {
+                continue;
+            }
+            let dataset_relative_path = chain_relative.join(&dataset_name);
+            for source_name in fs::list_directory_names(&archive.root, &dataset_relative_path)? {
+                let Some(source) = source_name.strip_prefix("source=") else {
+                    return Err(ArchiveError::ManifestVerification(
+                        "raw V3 source directory is not content-addressed",
+                    ));
+                };
+                sources.push((
+                    chain_id.clone(),
+                    SourceId::new(source).map_err(|_| {
+                        ArchiveError::ManifestVerification("invalid raw V3 source directory")
+                    })?,
+                ));
+            }
+        }
+    }
+    Ok(sources)
 }
 
 fn verify_loaded_commit(
