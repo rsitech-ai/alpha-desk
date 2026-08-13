@@ -40,6 +40,6 @@ fn invalid_command_returns_usage_exit_code() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(output.stderr).expect("UTF-8 stderr"),
-        "usage: archive-inspect <verify|count> <archive-root>\n       archive-inspect <import-plan|import-publish|import-approve> <archive-root> <chain> <source>\n"
+        "usage: archive-inspect <verify|count> <archive-root>\n       archive-inspect <import-plan|import-publish|import-approve> <archive-root> <chain> <source>\n       archive-inspect <import-backup|import-reclaim> <archive-root> <chain> <source> <backup-root>\n"
     );
 }

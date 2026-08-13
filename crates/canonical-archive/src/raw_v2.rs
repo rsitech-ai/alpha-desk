@@ -1692,6 +1692,16 @@ pub(crate) fn load_verified_import_batches(
     Ok((catalog.value.generation, catalog.hash, batches))
 }
 
+pub(crate) fn load_catalog_sha256(
+    archive: &LocalParquetArchive,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<[u8; 32], ArchiveError> {
+    Ok(load_current_catalog(archive, chain, source)?
+        .ok_or(ArchiveError::RangeUnavailable)?
+        .hash)
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;

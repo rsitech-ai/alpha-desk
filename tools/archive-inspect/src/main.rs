@@ -8,7 +8,8 @@ use domain_types::{ChainId, SourceId};
 use storage_ports::{ArchiveError, RawArchiveCapacityBudgets, RawArchiveWorkloadEnvelope};
 
 const USAGE: &str = "usage: archive-inspect <verify|count> <archive-root>
-       archive-inspect <import-plan|import-publish|import-approve> <archive-root> <chain> <source>";
+       archive-inspect <import-plan|import-publish|import-approve> <archive-root> <chain> <source>
+       archive-inspect <import-backup|import-reclaim> <archive-root> <chain> <source> <backup-root>";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -93,6 +94,51 @@ async fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
                         hex_digest(approval.v3_root_sha256()),
                         hex_digest(approval.checkpoint_sha256()),
                         hex_digest(approval.parity_digest())
+                    );
+                }
+                _ => return Err(CliError::Usage),
+            }
+        }
+        [_, command, root, chain, source, backup_root] => {
+            let command = command.to_str().ok_or(CliError::Usage)?;
+            let chain = chain.to_str().ok_or(CliError::Usage)?;
+            let source = source.to_str().ok_or(CliError::Usage)?;
+            let backup_root = backup_root.to_str().ok_or(CliError::Usage)?;
+            let chain = ChainId::new(chain).map_err(|_| CliError::Usage)?;
+            let source = SourceId::new(source).map_err(|_| CliError::Usage)?;
+            let archive = open_v3(Path::new(root))?;
+            match command {
+                "import-backup" => {
+                    let receipt = archive.backup_v2_import_originals(
+                        &chain,
+                        &source,
+                        Path::new(backup_root),
+                    )?;
+                    println!(
+                        "PASS backup_receipt={} files={}",
+                        hex_digest(receipt.digest()),
+                        receipt.files().count()
+                    );
+                }
+                "import-reclaim" => {
+                    let receipt = archive.backup_v2_import_originals(
+                        &chain,
+                        &source,
+                        Path::new(backup_root),
+                    )?;
+                    let plan = archive.plan_v2_import_reclaim(&chain, &source, receipt.digest())?;
+                    let executed = archive.execute_v2_import_reclaim(
+                        &chain,
+                        &source,
+                        plan.digest(),
+                        receipt.digest(),
+                    )?;
+                    println!(
+                        "PASS backup_receipt={} plan={} unlinked_files={} unlinked_bytes={}",
+                        hex_digest(receipt.digest()),
+                        hex_digest(plan.digest()),
+                        executed.unlinked_files(),
+                        executed.unlinked_bytes()
                     );
                 }
                 _ => return Err(CliError::Usage),
