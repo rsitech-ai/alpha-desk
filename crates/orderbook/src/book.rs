@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use domain_types::{BlockHeight, MarketId, OrderId, OrderSide, Price, Quantity};
 
@@ -164,12 +164,12 @@ impl OrderBook {
 
     #[must_use]
     pub fn l2_bids(&self) -> Vec<L2Level> {
-        aggregate_l2(self.bids.values(), true)
+        aggregate_l2(self.bids.values(), true).unwrap_or_default()
     }
 
     #[must_use]
     pub fn l2_asks(&self) -> Vec<L2Level> {
-        aggregate_l2(self.asks.values(), false)
+        aggregate_l2(self.asks.values(), false).unwrap_or_default()
     }
 
     #[must_use]
@@ -292,6 +292,8 @@ impl OrderBook {
         {
             return Err("crossed or locked book".to_owned());
         }
+        aggregate_l2(self.bids.values(), true)?;
+        aggregate_l2(self.asks.values(), false)?;
         Ok(())
     }
 
@@ -325,19 +327,31 @@ fn ask_key(order: &RestingOrder) -> (Price, u64, OrderId) {
     (order.price, order.sequence, order.order_id.clone())
 }
 
-fn aggregate_l2<'a>(orders: impl Iterator<Item = &'a RestingOrder>, bids: bool) -> Vec<L2Level> {
+fn aggregate_l2<'a>(
+    orders: impl Iterator<Item = &'a RestingOrder>,
+    bids: bool,
+) -> Result<Vec<L2Level>, String> {
     let mut levels: BTreeMap<Price, (Quantity, u32)> = BTreeMap::new();
     for order in orders {
-        let entry = levels.entry(order.price).or_insert_with(|| {
-            (
-                Quantity::from_raw(0, order.remaining.scale()).unwrap_or(order.remaining),
-                0,
-            )
-        });
-        if let Ok(sum) = entry.0.checked_add(order.remaining) {
-            entry.0 = sum;
-            entry.1 = entry.1.saturating_add(1);
+        match levels.entry(order.price) {
+            Entry::Vacant(vacant) => {
+                let zero = Quantity::from_raw(0, order.remaining.scale())
+                    .map_err(|_| "invalid quantity scale".to_owned())?;
+                vacant.insert((zero, 0));
+            }
+            Entry::Occupied(_) => {}
         }
+        let entry = levels
+            .get_mut(&order.price)
+            .ok_or_else(|| "l2 level index is inconsistent".to_owned())?;
+        entry.0 = entry
+            .0
+            .checked_add(order.remaining)
+            .map_err(|_| "l2 aggregation overflow".to_owned())?;
+        entry.1 = entry
+            .1
+            .checked_add(1)
+            .ok_or_else(|| "l2 order count overflow".to_owned())?;
     }
     let mut out: Vec<L2Level> = levels
         .into_iter()
@@ -350,5 +364,5 @@ fn aggregate_l2<'a>(orders: impl Iterator<Item = &'a RestingOrder>, bids: bool) 
     if bids {
         out.reverse();
     }
-    out
+    Ok(out)
 }
