@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     MarketError,
     math::{COUNT_SCALE, USD_SCALE},
-    sentiment::{DimensionUnit, MarketFeatureSnapshot, ScoredDimension},
+    sentiment::{DimensionUnit, MarketFeatureSnapshot, ObservedBookAndFills, ScoredDimension},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,15 +37,21 @@ pub fn crowding_components_from_snapshot(
     positions: &[CrowdingPosition],
     remaining_capacity: UsdAmount,
 ) -> Result<CrowdingComponents, MarketError> {
-    snapshot.require_observed_book_and_fills()?;
-    crowding_components(positions, remaining_capacity, &snapshot.health)
+    crowding_components(
+        positions,
+        remaining_capacity,
+        snapshot.require_observed_book_and_fills()?,
+    )
 }
 
+/// Crowding components from caller marks. Marks are admitted only with
+/// [`ObservedBookAndFills`] issued after book and fills are observed.
 pub fn crowding_components(
     positions: &[CrowdingPosition],
     remaining_capacity: UsdAmount,
-    health: &HealthAssessment,
+    evidence: ObservedBookAndFills<'_>,
 ) -> Result<CrowdingComponents, MarketError> {
+    let health = evidence.health();
     if positions.is_empty() {
         return Err(MarketError::InsufficientHistory { what: "crowding" });
     }

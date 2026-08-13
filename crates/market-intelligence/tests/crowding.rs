@@ -45,7 +45,7 @@ fn originator_plus_followers_raises_saturation_without_inflating_independent_cou
             leverage_milli: 200_000,
         });
     }
-    let components = crowding_components(&positions, usd(50), &health()).unwrap();
+    let components = crowding_from_caller_marks(&positions, usd(50)).unwrap();
     assert_eq!(
         components.independent_entity_count.raw_value.raw(),
         2_000_000
@@ -80,8 +80,8 @@ fn dispersed_entries_cluster_less_than_tight_cohort() {
             leverage_milli: 100_000,
         })
         .collect();
-    let left = crowding_components(&dispersed, usd(100), &health()).unwrap();
-    let right = crowding_components(&clustered, usd(100), &health()).unwrap();
+    let left = crowding_from_caller_marks(&dispersed, usd(100)).unwrap();
+    let right = crowding_from_caller_marks(&clustered, usd(100)).unwrap();
     assert!(left.entry_clustering.raw_value.raw() < right.entry_clustering.raw_value.raw());
 }
 
@@ -145,13 +145,39 @@ fn invented_mark_position() -> CrowdingPosition {
     }
 }
 
+fn observed_snapshot() -> MarketFeatureSnapshot {
+    crowding_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+    )
+}
+
+fn crowding_from_caller_marks(
+    positions: &[CrowdingPosition],
+    remaining_capacity: UsdAmount,
+) -> Result<market_intelligence::CrowdingComponents, MarketError> {
+    let snapshot = observed_snapshot();
+    crowding_components(
+        positions,
+        remaining_capacity,
+        snapshot.require_observed_book_and_fills()?,
+    )
+}
+
 #[test]
-fn missing_book_or_fills_refuses_crowding_without_inventing_marks() {
+fn caller_supplied_marks_with_not_observed_book_or_fills_cannot_produce_crowding_components() {
     let positions = vec![invented_mark_position()];
     let missing_book = crowding_snapshot(
         FeatureValue::Missing(MissingReason::NotObserved),
         FeatureValue::Missing(MissingReason::NotObserved),
     );
+    assert!(matches!(
+        missing_book.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "book" })
+    ));
     assert!(matches!(
         crowding_components_from_snapshot(&missing_book, &positions, usd(50)),
         Err(MarketError::MissingInput { name: "book" })
@@ -164,16 +190,26 @@ fn missing_book_or_fills_refuses_crowding_without_inventing_marks() {
         FeatureValue::Missing(MissingReason::NotObserved),
     );
     assert!(matches!(
+        missing_fills.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "fills" })
+    ));
+    assert!(matches!(
         crowding_components_from_snapshot(&missing_fills, &positions, usd(50)),
         Err(MarketError::MissingInput { name: "fills" })
     ));
-    let observed = crowding_snapshot(
-        FeatureValue::Decimal {
-            raw: 20_000 * 100_000_000,
-            scale: 8,
-        },
-        FeatureValue::Boolean(true),
-    );
-    let components = crowding_components_from_snapshot(&observed, &positions, usd(50)).unwrap();
+}
+
+#[test]
+fn missing_book_or_fills_refuses_crowding_without_inventing_marks() {
+    let positions = vec![invented_mark_position()];
+    let observed = observed_snapshot();
+    let components = crowding_components(
+        &positions,
+        usd(50),
+        observed.require_observed_book_and_fills().unwrap(),
+    )
+    .unwrap();
     assert!(components.capacity_consumed.raw_value.raw() > 0);
+    let from_snapshot = crowding_components_from_snapshot(&observed, &positions, usd(50)).unwrap();
+    assert_eq!(components, from_snapshot);
 }

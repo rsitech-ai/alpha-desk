@@ -242,7 +242,7 @@ impl MarketFeatureSnapshot {
         Ok(ObservationStatus::from_feature(self.values.get(&key)))
     }
 
-    pub fn require_observed_book_and_fills(&self) -> Result<(), MarketError> {
+    pub fn require_observed_book_and_fills(&self) -> Result<ObservedBookAndFills<'_>, MarketError> {
         match self.observation("book")? {
             ObservationStatus::Observed => {}
             ObservationStatus::Missing(_) => {
@@ -255,7 +255,25 @@ impl MarketFeatureSnapshot {
                 return Err(MarketError::MissingInput { name: "fills" });
             }
         }
-        Ok(())
+        Ok(ObservedBookAndFills {
+            health: &self.health,
+        })
+    }
+}
+
+/// Proof that book and fills were observed on a market snapshot.
+///
+/// Callers cannot construct this value; only
+/// [`MarketFeatureSnapshot::require_observed_book_and_fills`] issues it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservedBookAndFills<'a> {
+    health: &'a HealthAssessment,
+}
+
+impl ObservedBookAndFills<'_> {
+    #[must_use]
+    pub fn health(&self) -> &HealthAssessment {
+        self.health
     }
 }
 

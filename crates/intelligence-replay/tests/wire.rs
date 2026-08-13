@@ -648,6 +648,10 @@ fn missing_book_or_fills_cannot_emit_crowding_fragility_or_live_signals() {
     assert!(!report.market_snapshots.is_empty());
     for snapshot in &report.market_snapshots {
         assert!(matches!(
+            snapshot.require_observed_book_and_fills(),
+            Err(MarketError::MissingInput { name: "book" })
+        ));
+        assert!(matches!(
             crowding_components_from_snapshot(snapshot, &invented_marks, remaining),
             Err(MarketError::MissingInput { name: "book" })
         ));
