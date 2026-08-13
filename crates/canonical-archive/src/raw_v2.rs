@@ -88,8 +88,12 @@ pub(super) struct EmbeddedRawManifestEvidenceV2 {
     pub(super) first_local_sequence: u64,
     pub(super) last_local_sequence: u64,
     pub(super) object_sha256: [u8; 32],
+    pub(super) object_size_bytes: u64,
+    pub(super) object_relative_path: String,
     pub(super) row_count: u64,
     pub(super) rolling_content_sha256: [u8; 32],
+    pub(super) spool_manifest_blake3: [u8; 32],
+    pub(super) spool_segment_blake3: [u8; 32],
 }
 
 pub(super) fn validate_embedded_manifest_v2(
@@ -148,8 +152,12 @@ pub(super) fn validate_embedded_manifest_v2(
         first_local_sequence: value.batch.first_local_sequence,
         last_local_sequence: value.batch.last_local_sequence,
         object_sha256: manifest::parse_hash(&value.object.sha256)?,
+        object_size_bytes: value.object.size_bytes,
+        object_relative_path: value.object.relative_path,
         row_count: value.object.row_count,
         rolling_content_sha256: manifest::parse_hash(&value.batch.rolling_content_sha256)?,
+        spool_manifest_blake3: manifest::parse_hash(&value.batch.spool_manifest_blake3)?,
+        spool_segment_blake3: manifest::parse_hash(&value.batch.spool_segment_blake3)?,
     })
 }
 
@@ -532,7 +540,7 @@ fn batch_descriptor(batch: &RawObservationBatch) -> Result<RawBatchDescriptorV2,
     })
 }
 
-fn rolling_content_hash(batch: &RawObservationBatch) -> Result<[u8; 32], ArchiveError> {
+pub(crate) fn rolling_content_hash(batch: &RawObservationBatch) -> Result<[u8; 32], ArchiveError> {
     let mut hasher = Sha256::new();
     hash_frame(&mut hasher, RAW_V2_ROLLING_HASH_DOMAIN)?;
     hash_frame(&mut hasher, RAW_V2_CURSOR_POLICY.as_bytes())?;
@@ -1585,7 +1593,7 @@ fn dataset_relative(chain: &ChainId, source: &SourceId) -> PathBuf {
     )
 }
 
-fn global_manifest_relative(hash: [u8; 32]) -> PathBuf {
+pub(crate) fn global_manifest_relative(hash: [u8; 32]) -> PathBuf {
     PathBuf::from("_manifests")
         .join("raw-byte-v2")
         .join(format!("manifest-{}.json", hex::encode(hash)))
@@ -1619,6 +1627,69 @@ const fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_
 
 fn extends_at_tail<T: PartialEq>(previous: &[T], current: &[T]) -> bool {
     current.len() == previous.len().saturating_add(1) && current.starts_with(previous)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedV2ImportBatch {
+    pub(crate) manifest_id: ManifestId,
+    pub(crate) manifest_sha256: [u8; 32],
+    pub(crate) canonical_bytes: Vec<u8>,
+    pub(crate) first_local_sequence: u64,
+    pub(crate) last_local_sequence: u64,
+    pub(crate) partition: String,
+    pub(crate) observations: Vec<SourceObservation>,
+    pub(crate) object_size_bytes: u64,
+}
+
+pub(crate) fn load_verified_import_batches(
+    archive: &LocalParquetArchive,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<(u64, [u8; 32], Vec<VerifiedV2ImportBatch>), ArchiveError> {
+    let catalog =
+        load_current_catalog(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let mut batches = Vec::with_capacity(catalog.value.batches.len());
+    let mut expected_sequence = 1_u64;
+    for reference in &catalog.value.batches {
+        let loaded = load_batch_ref(archive.root(), reference)?;
+        let canonical_bytes = canonical_json(&loaded.value)?;
+        if manifest::sha256(&canonical_bytes) != loaded.hash {
+            return Err(ArchiveError::ManifestVerification(
+                "raw V2 batch canonical bytes do not match the catalog receipt",
+            ));
+        }
+        let (observations, object) = verify_and_decode(archive, &loaded.value)?;
+        if loaded.value.batch.first_local_sequence != expected_sequence {
+            return Err(ArchiveError::ManifestVerification(
+                "raw V2 catalog local sequence is not contiguous from one",
+            ));
+        }
+        let partition = manifest::partition_for(loaded.value.batch.first_received_wall_micros)?;
+        batches.push(VerifiedV2ImportBatch {
+            manifest_id: manifest::manifest_id(loaded.hash)?,
+            manifest_sha256: loaded.hash,
+            canonical_bytes,
+            first_local_sequence: loaded.value.batch.first_local_sequence,
+            last_local_sequence: loaded.value.batch.last_local_sequence,
+            partition,
+            observations,
+            object_size_bytes: object.size_bytes(),
+        });
+        expected_sequence = loaded
+            .value
+            .batch
+            .last_local_sequence
+            .checked_add(1)
+            .ok_or(ArchiveError::InvalidInput(
+                "raw V2 local sequence overflows",
+            ))?;
+    }
+    if batches.is_empty() {
+        return Err(ArchiveError::InvalidInput(
+            "raw V2 import requires at least one verified batch",
+        ));
+    }
+    Ok((catalog.value.generation, catalog.hash, batches))
 }
 
 #[cfg(test)]
