@@ -76,7 +76,9 @@ paths:
         maintenance object. Missing files return 503 snapshot_missing;
         fail-closed validation failures return 503 snapshot_invalid,
         including v4 documents that smuggle maintenance and v5 documents
-        that omit it. The body is the snapshot as read. This surface does
+        that omit it. The body is the snapshot as read. Optional
+        throughput_records_per_sec and throughput_blocks_per_sec are
+        last-heartbeat integers, not live-qualified. This surface does
         not invent fills and does not mark sources live or qualified.
       parameters:
         - $ref: "#/components/parameters/Limit"
@@ -211,7 +213,9 @@ components:
         hl.capture.status.v4 and omit maintenance. Maintenance documents use
         hl.capture.status.v5 and require CaptureMaintenance. Extra snapshot
         fields such as auxiliary_sources are passed through when present.
-        This is not a fills feed and does not mark sources live or qualified.
+        Optional throughput_records_per_sec and throughput_blocks_per_sec are
+        last-heartbeat integers, not live-qualified. This is not a fills feed
+        and does not mark sources live or qualified.
       oneOf:
         - $ref: "#/components/schemas/CaptureStatusV4"
         - $ref: "#/components/schemas/CaptureStatusV5"
@@ -252,6 +256,18 @@ components:
         pending_blocks:
           type: integer
           minimum: 0
+        throughput_records_per_sec:
+          type: integer
+          minimum: 0
+          description: >
+            Last-heartbeat archive-acknowledged auxiliary record rate for the
+            completed status-heartbeat window. Optional integer; not live-qualified.
+        throughput_blocks_per_sec:
+          type: integer
+          minimum: 0
+          description: >
+            Last-heartbeat captured committed-block rate for the completed
+            status-heartbeat window. Optional integer; not live-qualified.
     CaptureStatusV4:
       description: >
         Inactive capture status. maintenance is omitted; documents that
