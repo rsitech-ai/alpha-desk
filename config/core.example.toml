@@ -8,6 +8,9 @@ idle_poll_millis = 250
 [store]
 path = "state/core-file-store"
 
+[dead_letter]
+path = "state/dead-letter.jsonl"
+
 [status]
 listen = "127.0.0.1:8742"
 

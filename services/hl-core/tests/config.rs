@@ -13,6 +13,10 @@ fn example_config_is_valid_and_does_not_claim_qualification() {
         "127.0.0.1:8742".parse().expect("addr")
     );
     assert_eq!(config.jetstream_config().expect("nats").fetch_batch(), 64);
+    assert_eq!(
+        config.dead_letter_path(),
+        Path::new("state/dead-letter.jsonl")
+    );
     assert_eq!(CANONICAL_STREAM, "HL_CANONICAL");
 }
 
@@ -66,6 +70,17 @@ fn qualification_claims_are_rejected_as_unknown_fields() {
     .expect_err("qualification claims");
     assert_eq!(error, CoreConfigError::InvalidToml);
     assert_eq!(error.reason_code(), "core_config.invalid_toml");
+}
+
+#[test]
+fn unsafe_dead_letter_path_fails_closed() {
+    let error = CoreConfig::from_toml(&valid_toml(Path::new("state/core-file-store")).replace(
+        "[nats]",
+        "[dead_letter]\npath = \"../escape.jsonl\"\n\n[nats]",
+    ))
+    .expect_err("parent traversal");
+    assert_eq!(error, CoreConfigError::InvalidDeadLetterPath);
+    assert_eq!(error.reason_code(), "core_config.invalid_dead_letter_path");
 }
 
 #[test]

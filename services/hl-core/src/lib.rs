@@ -2,6 +2,7 @@
 
 mod config;
 mod consumer;
+mod dead_letter;
 mod publication;
 mod replay;
 mod runtime;
@@ -20,6 +21,10 @@ pub use consumer::{
     JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
     JetStreamReplayReport, JetStreamReplaySession, committed_block_delivery,
     committed_event_delivery,
+};
+pub use dead_letter::{
+    DEAD_LETTER_SCHEMA_V1, DeadLetterError, DeadLetterRecord, DeadLetterSink, FileDeadLetterSink,
+    InMemoryDeadLetterSink,
 };
 pub use publication::{
     BLOCK_COMMITTED_SUBJECT, BLOCK_MARKER_SCHEMA_V1, BLOCK_PROVISIONAL_SUBJECT, BlockMarkerError,

@@ -27,6 +27,8 @@ pub struct CoreConfig {
     nats: Option<NatsConfig>,
     #[serde(default)]
     status: Option<StatusConfig>,
+    #[serde(default)]
+    dead_letter: Option<DeadLetterConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +41,12 @@ struct StoreConfig {
 #[serde(deny_unknown_fields)]
 struct StatusConfig {
     listen: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeadLetterConfig {
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +79,7 @@ impl CoreConfig {
         }
         let store = self.store.as_ref().ok_or(CoreConfigError::MissingStore)?;
         validate_runtime_path(&store.path)?;
+        validate_dead_letter_path(&self.dead_letter_path())?;
         let nats = self.nats.as_ref().ok_or(CoreConfigError::MissingNats)?;
         validate_nats_server(&nats.server_url)?;
         validate_identity(&nats.stream).map_err(|_| CoreConfigError::InvalidNatsStream)?;
@@ -123,6 +132,14 @@ impl CoreConfig {
     }
 
     #[must_use]
+    pub fn dead_letter_path(&self) -> PathBuf {
+        self.dead_letter
+            .as_ref()
+            .map(|dead_letter| dead_letter.path.clone())
+            .unwrap_or_else(|| default_dead_letter_path(self.store_path()))
+    }
+
+    #[must_use]
     pub const fn shutdown_grace(&self) -> Duration {
         Duration::from_millis(self.shutdown_grace_millis)
     }
@@ -153,6 +170,8 @@ pub enum CoreConfigError {
     InvalidChainId,
     #[error("hl-core store path is unsafe")]
     InvalidStorePath,
+    #[error("hl-core dead-letter path is unsafe")]
+    InvalidDeadLetterPath,
     #[error("hl-core NATS server URL is invalid or contains inline credentials")]
     InvalidNatsServer,
     #[error("hl-core NATS stream is not the canonical production stream")]
@@ -178,6 +197,7 @@ impl CoreConfigError {
             Self::MissingNats => "core_config.missing_nats",
             Self::InvalidChainId => "core_config.invalid_chain_id",
             Self::InvalidStorePath => "core_config.invalid_store_path",
+            Self::InvalidDeadLetterPath => "core_config.invalid_dead_letter_path",
             Self::InvalidNatsServer => "core_config.invalid_nats_server",
             Self::InvalidNatsStream => "core_config.invalid_nats_stream",
             Self::InvalidNatsIdentity => "core_config.invalid_nats_identity",
@@ -205,17 +225,35 @@ impl From<JetStreamReplayConfigError> for CoreConfigError {
 }
 
 fn validate_runtime_path(path: &Path) -> Result<(), CoreConfigError> {
-    if path.as_os_str().is_empty()
+    if path_is_unsafe(path) {
+        Err(CoreConfigError::InvalidStorePath)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_dead_letter_path(path: &Path) -> Result<(), CoreConfigError> {
+    if path_is_unsafe(path) {
+        Err(CoreConfigError::InvalidDeadLetterPath)
+    } else {
+        Ok(())
+    }
+}
+
+fn default_dead_letter_path(store_path: &Path) -> PathBuf {
+    match store_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join("dead-letter.jsonl"),
+        _ => PathBuf::from("dead-letter.jsonl"),
+    }
+}
+
+fn path_is_unsafe(path: &Path) -> bool {
+    path.as_os_str().is_empty()
         || path == Path::new("/")
         || path.as_os_str().len() > MAX_RUNTIME_PATH_BYTES
         || path
             .components()
             .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-    {
-        Err(CoreConfigError::InvalidStorePath)
-    } else {
-        Ok(())
-    }
 }
 
 fn validate_status_listen(value: &str) -> Result<SocketAddr, CoreConfigError> {
