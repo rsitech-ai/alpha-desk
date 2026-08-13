@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::claims::serialize_unclaimed;
 use crate::experiment::ExperimentStatus;
 use execution_sim::SimulationResult;
 
@@ -12,7 +13,13 @@ pub struct ResearchReport {
     pub walk_forward: &'static str,
     pub holdout: &'static str,
     pub shadow_live: &'static str,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub alpha_quality_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub alpha_qualified: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub significance_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
     pub net_pnl: String,
     pub filled_quantity: String,
@@ -42,6 +49,8 @@ impl ResearchReport {
             holdout: "not_evaluated",
             shadow_live: "not_evaluated",
             alpha_quality_claimed: false,
+            alpha_qualified: false,
+            significance_claimed: false,
             stage_pass_claimed: false,
             net_pnl: result.net_pnl().to_string(),
             filled_quantity: result.filled_quantity().to_string(),
@@ -69,13 +78,20 @@ pub struct ResearchStatus {
     pub shadow_capture: bool,
     pub synthetic_estimators: bool,
     pub variant_ledger: bool,
-    pub significance_claimed: bool,
     pub synthetic_catalog: bool,
     pub promotion_withhold_only: bool,
     pub onnx_production: bool,
     pub trading_signer: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub significance_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub alpha_quality_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub alpha_qualified: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub locked_corpus: bool,
 }
 
 impl ResearchStatus {
@@ -92,13 +108,15 @@ impl ResearchStatus {
             shadow_capture: true,
             synthetic_estimators: true,
             variant_ledger: true,
-            significance_claimed: false,
             synthetic_catalog: true,
             promotion_withhold_only: true,
             onnx_production: false,
             trading_signer: false,
+            significance_claimed: false,
             alpha_quality_claimed: false,
+            alpha_qualified: false,
             stage_pass_claimed: false,
+            locked_corpus: false,
         }
     }
 }
