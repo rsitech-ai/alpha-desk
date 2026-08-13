@@ -28,6 +28,20 @@ pub enum ResearchError {
     Model(String),
     #[error("research cannot sign or place live orders")]
     TradingSignerForbidden,
+    #[error("observation is missing {field}")]
+    MissingObservation { field: &'static str },
+    #[error("training sample is insufficient to fit {field}")]
+    InsufficientTrain { field: &'static str },
+    #[error("estimator variance is unmodeled at {field}")]
+    UnmodeledVariance { field: &'static str },
+    #[error("estimator class is not an approved research adapter")]
+    UnsupportedEstimator,
+    #[error("research metric calculation failed at {field}")]
+    Metric { field: &'static str },
+    #[error("statistical significance is not claimed")]
+    SignificanceNotClaimed,
+    #[error("variant ledger records are immutable")]
+    ImmutableVariant,
 }
 
 impl ResearchError {
@@ -48,6 +62,13 @@ impl ResearchError {
             Self::Simulation(_) => "hl_research.simulation",
             Self::Model(_) => "hl_research.model",
             Self::TradingSignerForbidden => "hl_research.trading_signer_forbidden",
+            Self::MissingObservation { .. } => "hl_research.missing_observation",
+            Self::InsufficientTrain { .. } => "hl_research.insufficient_train",
+            Self::UnmodeledVariance { .. } => "hl_research.unmodeled_variance",
+            Self::UnsupportedEstimator => "hl_research.unsupported_estimator",
+            Self::Metric { .. } => "hl_research.metric",
+            Self::SignificanceNotClaimed => "hl_research.significance_not_claimed",
+            Self::ImmutableVariant => "hl_research.immutable_variant",
         }
     }
 }

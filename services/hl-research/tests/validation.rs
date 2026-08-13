@@ -90,6 +90,8 @@ fn discovery_cannot_read_holdout_bytes() {
                 label_start: BlockHeight::new(50),
                 label_end: BlockHeight::new(55),
                 payload: "train-only".to_owned(),
+                features: Vec::new(),
+                outcome: None,
             },
             LabeledRow {
                 id: "holdout-secret".to_owned(),
@@ -97,6 +99,8 @@ fn discovery_cannot_read_holdout_bytes() {
                 label_start: BlockHeight::new(155),
                 label_end: BlockHeight::new(160),
                 payload: "must-not-enter-train".to_owned(),
+                features: Vec::new(),
+                outcome: None,
             },
         ],
     )
@@ -155,6 +159,8 @@ fn leaked_training_row_in_holdout_batch_is_refused() {
                 label_start: BlockHeight::new(50),
                 label_end: BlockHeight::new(55),
                 payload: "train-only".to_owned(),
+                features: Vec::new(),
+                outcome: None,
             },
             LabeledRow {
                 id: "holdout-secret".to_owned(),
@@ -162,6 +168,8 @@ fn leaked_training_row_in_holdout_batch_is_refused() {
                 label_start: BlockHeight::new(155),
                 label_end: BlockHeight::new(160),
                 payload: "must-not-enter-train".to_owned(),
+                features: Vec::new(),
+                outcome: None,
             },
         ],
     )
@@ -195,6 +203,8 @@ fn label_overlapping_holdout_is_refused_at_dataset_construction() {
             label_start: BlockHeight::new(50),
             label_end: BlockHeight::new(155),
             payload: "into-holdout".to_owned(),
+            features: Vec::new(),
+            outcome: None,
         }],
     )
     .unwrap_err();
@@ -272,6 +282,9 @@ fn status_does_not_claim_locked_holdout_or_stage_pass() {
     assert!(status.synthetic_walk_forward);
     assert!(status.holdout_isolation);
     assert!(status.shadow_capture);
+    assert!(status.synthetic_estimators);
+    assert!(status.variant_ledger);
+    assert!(!status.significance_claimed);
     assert!(!status.alpha_quality_claimed);
     assert!(!status.stage_pass_claimed);
     assert!(!status.trading_signer);
