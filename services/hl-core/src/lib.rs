@@ -1,10 +1,19 @@
 #![forbid(unsafe_code)]
 
+mod replay;
+mod source;
+
 use canonical_events::BlockEnvelope;
 use canonical_ledger::{
     CanonicalLedger, EventReducer, LedgerError, PrepareOutcome, StateCheckpoint, StateDelta,
 };
 use storage_ports::{AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateStoreError};
+
+pub use replay::{LocalReplayError, LocalReplayReport, LocalReplaySession, replay_block_durably};
+pub use source::{
+    BlockSourceError, CanonicalBlockSource, DirectoryBlockSource, InMemoryBlockSource,
+    LOCAL_REPLAY_BLOCK_SCHEMA, decode_local_replay_block,
+};
 
 #[derive(Debug)]
 pub enum DurableApplyOutcome {
