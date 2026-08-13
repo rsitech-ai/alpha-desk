@@ -12,9 +12,10 @@ use domain_types::{
 };
 use hl_core::{
     CanonicalPullSource, CanonicalSubject, DEAD_LETTER_SCHEMA_V1, FileDeadLetterSink,
-    InMemoryCanonicalSource, InMemoryDeadLetterSink, JetStreamReplayAuth, JetStreamReplayConfig,
-    JetStreamReplayConfigError, JetStreamReplaySession, committed_block_delivery,
-    committed_event_delivery, decode_committed_block_marker, encode_committed_block_marker,
+    InMemoryCanonicalSource, InMemoryDeadLetterSink, InMemoryFetchSource, JetStreamFetchFrame,
+    JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
+    JetStreamReplaySession, committed_block_delivery, committed_event_delivery,
+    decode_committed_block_marker, encode_committed_block_marker,
 };
 use sha2::{Digest as _, Sha256};
 use storage_ports::ArchiveReceipt;
@@ -182,6 +183,252 @@ async fn payload_hash_mismatch_fails_closed() {
     );
 }
 
+#[tokio::test]
+async fn fetch_missing_headers_records_dlq_without_ack_or_state_advance() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let payload_hash: [u8; 32] = Sha256::digest(&delivery.payload).into();
+    let mut frame = JetStreamFetchFrame::from_delivery(&delivery);
+    frame.headers = None;
+    frame.stream_sequence = Some(11);
+    frame.consumer_sequence = Some(2);
+    frame.delivery_count = 4;
+    let mut source = InMemoryFetchSource::new([frame]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("missing headers");
+    assert_eq!(error.reason_code(), "core.jetstream_decode");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(session.ledger().checkpoint().is_none());
+    assert!(source.acked().is_empty());
+    assert!(source.terminated());
+    assert_fetch_dead_letter(
+        &dead_letter,
+        "core.jetstream_decode",
+        "hl.v1.block.committed",
+        "undecodable",
+        payload_hash,
+        [0; 32],
+        Some(11),
+        Some(2),
+        4,
+    );
+}
+
+#[tokio::test]
+async fn fetch_publication_hash_mismatch_records_dlq_with_payload_hash_and_stream_seq() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let payload_hash: [u8; 32] = Sha256::digest(&delivery.payload).into();
+    let message_id = delivery.message_id.clone();
+    let block_hash = delivery.block_hash;
+    let mut frame = JetStreamFetchFrame::from_delivery(&delivery);
+    frame.stream_sequence = Some(42);
+    frame.consumer_sequence = Some(7);
+    frame.delivery_count = 3;
+    if let Some(headers) = frame.headers.as_mut() {
+        headers.insert("Alpha-Desk-Publication-SHA256", hex::encode([0xab; 32]));
+    }
+    let mut source = InMemoryFetchSource::new([frame]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("fetch hash mismatch");
+    assert_eq!(error.reason_code(), "core.jetstream_hash_mismatch");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(session.ledger().checkpoint().is_none());
+    assert!(!source.acked().contains(&message_id));
+    assert!(source.terminated());
+    assert_fetch_dead_letter(
+        &dead_letter,
+        "core.jetstream_hash_mismatch",
+        "hl.v1.block.committed",
+        &message_id,
+        payload_hash,
+        block_hash,
+        Some(42),
+        Some(7),
+        3,
+    );
+}
+
+#[tokio::test]
+async fn fetch_malformed_publication_hash_records_dlq() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let payload_hash: [u8; 32] = Sha256::digest(&delivery.payload).into();
+    let message_id = delivery.message_id.clone();
+    let block_hash = delivery.block_hash;
+    let mut frame = JetStreamFetchFrame::from_delivery(&delivery);
+    frame.stream_sequence = Some(9);
+    if let Some(headers) = frame.headers.as_mut() {
+        headers.insert("Alpha-Desk-Publication-SHA256", "not-a-hash");
+    }
+    let mut source = InMemoryFetchSource::new([frame]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("malformed publication hash");
+    assert_eq!(error.reason_code(), "core.jetstream_decode");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(source.acked().is_empty());
+    assert!(source.terminated());
+    assert_fetch_dead_letter(
+        &dead_letter,
+        "core.jetstream_decode",
+        "hl.v1.block.committed",
+        &message_id,
+        payload_hash,
+        block_hash,
+        Some(9),
+        None,
+        0,
+    );
+}
+
+#[tokio::test]
+async fn fetch_provisional_subject_records_dlq_without_ack() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let payload_hash: [u8; 32] = Sha256::digest(&delivery.payload).into();
+    let message_id = delivery.message_id.clone();
+    let mut frame = JetStreamFetchFrame::from_delivery(&delivery);
+    frame.subject = "hl.v1.block.provisional".to_owned();
+    frame.stream_sequence = Some(5);
+    let mut source = InMemoryFetchSource::new([frame]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("provisional subject");
+    assert_eq!(error.reason_code(), "core.jetstream_provisional");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(!source.acked().contains(&message_id));
+    assert!(source.terminated());
+    assert_eq!(
+        dead_letter.records()[0].subject(),
+        "hl.v1.block.provisional"
+    );
+    assert_eq!(dead_letter.records()[0].payload_sha256(), payload_hash);
+    assert_eq!(dead_letter.records()[0].stream_sequence(), Some(5));
+}
+
+#[tokio::test]
+async fn valid_fetch_frame_applies_without_dlq_or_term() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let message_id = delivery.message_id.clone();
+    let mut source = InMemoryFetchSource::new([JetStreamFetchFrame::from_delivery(&delivery)]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let report = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect("valid fetch frame");
+    assert_eq!(report.applied, 1);
+    assert!(!report.live_qualified);
+    assert!(!report.stage_2_qualified);
+    assert!(source.acked().contains(&message_id));
+    assert!(!source.terminated());
+    assert!(dead_letter.records().is_empty());
+}
+
+#[tokio::test]
+async fn fetch_transport_error_does_not_record_dlq() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let mut source = TransportFailSource;
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("transport");
+    assert_eq!(error.reason_code(), "core.jetstream_transport");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(dead_letter.records().is_empty());
+}
+
+#[tokio::test]
+async fn file_dead_letter_sink_records_fetch_hash_mismatch_with_stream_sequence() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let poison_hash = hex::encode(Sha256::digest(&delivery.payload));
+    let mut frame = JetStreamFetchFrame::from_delivery(&delivery);
+    frame.stream_sequence = Some(99);
+    if let Some(headers) = frame.headers.as_mut() {
+        headers.insert("Alpha-Desk-Publication-SHA256", hex::encode([0xcd; 32]));
+    }
+    let path = root.path().join("dead-letter.jsonl");
+    let mut dead_letter = FileDeadLetterSink::open(&path).expect("file dlq");
+    let mut source = InMemoryFetchSource::new([frame]);
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("fetch hash mismatch");
+    assert_eq!(error.reason_code(), "core.jetstream_hash_mismatch");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(source.terminated());
+    drop(dead_letter);
+
+    let encoded = fs::read_to_string(&path).expect("dlq file");
+    let value: serde_json::Value = serde_json::from_str(encoded.trim()).expect("json");
+    assert_eq!(value["schema_version"], DEAD_LETTER_SCHEMA_V1);
+    assert_eq!(value["reason_code"], "core.jetstream_hash_mismatch");
+    assert_eq!(value["payload_sha256"], poison_hash);
+    assert_eq!(value["stream_sequence"], 99);
+    assert!(value.get("live_qualified").is_none());
+    assert!(value.get("stage_2_qualified").is_none());
+}
+
 #[test]
 fn marker_roundtrip_matches_the_frozen_publication_layout() {
     let block = empty_block(200, 7);
@@ -343,6 +590,50 @@ fn assert_one_dead_letter(
         JetStreamReplayConfig::default_durable_name()
     );
     assert!(record.failed_at_unix_micros() >= 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_fetch_dead_letter(
+    sink: &InMemoryDeadLetterSink,
+    reason_code: &str,
+    subject: &str,
+    message_id: &str,
+    payload_sha256: [u8; 32],
+    block_hash: [u8; 32],
+    stream_sequence: Option<u64>,
+    consumer_sequence: Option<u64>,
+    retry_count: u64,
+) {
+    assert_eq!(sink.records().len(), 1);
+    let record = &sink.records()[0];
+    assert_eq!(record.reason_code(), reason_code);
+    assert_eq!(record.subject(), subject);
+    assert_eq!(record.message_id(), message_id);
+    assert_eq!(record.payload_sha256(), payload_sha256);
+    assert_eq!(record.block_hash(), block_hash);
+    assert_eq!(record.stream_sequence(), stream_sequence);
+    assert_eq!(record.consumer_sequence(), consumer_sequence);
+    assert_eq!(record.retry_count(), retry_count);
+    assert_eq!(
+        record.consumer(),
+        JetStreamReplayConfig::default_durable_name()
+    );
+    assert!(record.failed_at_unix_micros() >= 0);
+}
+
+struct TransportFailSource;
+
+impl CanonicalPullSource for TransportFailSource {
+    async fn fetch(
+        &mut self,
+        _max_messages: usize,
+    ) -> Result<Vec<hl_core::CanonicalDelivery>, JetStreamReplayError> {
+        Err(JetStreamReplayError::Transport)
+    }
+
+    async fn ack(&mut self, _message_ids: &[String]) -> Result<(), JetStreamReplayError> {
+        Ok(())
+    }
 }
 
 fn open_session(

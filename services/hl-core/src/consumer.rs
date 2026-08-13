@@ -9,7 +9,7 @@ use std::{
 use async_nats::{
     ConnectOptions,
     header::NATS_MESSAGE_ID,
-    jetstream::{self, consumer::pull::Config as PullConfig, context::ContextBuilder},
+    jetstream::{self, AckKind, consumer::pull::Config as PullConfig, context::ContextBuilder},
 };
 use canonical_events::{BlockEnvelope, CanonicalEventEnvelope, ConfirmationClass};
 use canonical_ledger::{EventReducer, LedgerLimits, StateImageLimits};
@@ -36,6 +36,8 @@ const MAX_FETCH_BATCH: usize = 10_000;
 const MAX_PENDING_BLOCKS: usize = 64;
 const MAX_SECRET_BYTES: u64 = 16_384;
 const DEFAULT_DURABLE_NAME: &str = "hl-core-file-replay";
+const FETCH_UNDECODEABLE_SUBJECT: &str = "hl.v1.fetch.undecodable";
+const FETCH_UNDECODEABLE_MESSAGE_ID: &str = "undecodable";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JetStreamReplayReport {
@@ -127,6 +129,191 @@ impl CanonicalDelivery {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchPoisonKind {
+    Decode(crate::publication::BlockMarkerError),
+    HashMismatch,
+}
+
+impl FetchPoisonKind {
+    const fn reason_code(self) -> &'static str {
+        match self {
+            Self::Decode(error) => error.reason_code(),
+            Self::HashMismatch => "core.jetstream_hash_mismatch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchPoison {
+    kind: FetchPoisonKind,
+    subject: String,
+    message_id: String,
+    payload_sha256: [u8; 32],
+    block_hash: [u8; 32],
+    stream_sequence: Option<u64>,
+    consumer_sequence: Option<u64>,
+    delivery_count: u64,
+}
+
+impl FetchPoison {
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        self.kind.reason_code()
+    }
+
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    #[must_use]
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+
+    #[must_use]
+    pub const fn payload_sha256(&self) -> [u8; 32] {
+        self.payload_sha256
+    }
+
+    #[must_use]
+    pub const fn block_hash(&self) -> [u8; 32] {
+        self.block_hash
+    }
+
+    #[must_use]
+    pub const fn stream_sequence(&self) -> Option<u64> {
+        self.stream_sequence
+    }
+
+    #[must_use]
+    pub const fn consumer_sequence(&self) -> Option<u64> {
+        self.consumer_sequence
+    }
+
+    #[must_use]
+    pub const fn retry_count(&self) -> u64 {
+        self.delivery_count
+    }
+
+    fn to_record(
+        &self,
+        consumer: &str,
+        failed_at_unix_micros: i64,
+    ) -> Result<DeadLetterRecord, DeadLetterError> {
+        DeadLetterRecord::try_new(
+            self.reason_code(),
+            self.subject.as_str(),
+            self.message_id.as_str(),
+            self.stream_sequence,
+            self.consumer_sequence,
+            self.payload_sha256,
+            self.block_hash,
+            consumer,
+            self.delivery_count,
+            failed_at_unix_micros,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FetchPoisonBuilder {
+    subject: String,
+    message_id: String,
+    payload_sha256: [u8; 32],
+    block_hash: [u8; 32],
+    stream_sequence: Option<u64>,
+    consumer_sequence: Option<u64>,
+    delivery_count: u64,
+}
+
+impl FetchPoisonBuilder {
+    fn from_view(frame: &JetStreamFetchView<'_>) -> Self {
+        Self {
+            subject: sanitized_identity(frame.subject, FETCH_UNDECODEABLE_SUBJECT),
+            message_id: FETCH_UNDECODEABLE_MESSAGE_ID.to_owned(),
+            payload_sha256: Sha256::digest(frame.payload).into(),
+            block_hash: [0; 32],
+            stream_sequence: frame.stream_sequence,
+            consumer_sequence: frame.consumer_sequence,
+            delivery_count: frame.delivery_count,
+        }
+    }
+
+    fn fail(self, kind: FetchPoisonKind) -> JetStreamReplayError {
+        JetStreamReplayError::FetchDecode(Box::new(FetchPoison {
+            kind,
+            subject: self.subject,
+            message_id: self.message_id,
+            payload_sha256: self.payload_sha256,
+            block_hash: self.block_hash,
+            stream_sequence: self.stream_sequence,
+            consumer_sequence: self.consumer_sequence,
+            delivery_count: self.delivery_count,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JetStreamFetchFrame {
+    pub subject: String,
+    pub headers: Option<async_nats::HeaderMap>,
+    pub payload: Vec<u8>,
+    pub stream_sequence: Option<u64>,
+    pub consumer_sequence: Option<u64>,
+    pub delivery_count: u64,
+}
+
+impl JetStreamFetchFrame {
+    #[must_use]
+    pub fn from_delivery(delivery: &CanonicalDelivery) -> Self {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(NATS_MESSAGE_ID, delivery.message_id.as_str());
+        headers.insert(HEADER_SCHEMA, delivery.schema.as_str());
+        headers.insert(HEADER_CHAIN, delivery.chain_id.as_str());
+        headers.insert(HEADER_BLOCK_HEIGHT, delivery.block_height.to_string());
+        headers.insert(HEADER_BLOCK_HASH, hex::encode(delivery.block_hash));
+        headers.insert(HEADER_ARCHIVE_RECEIPT, delivery.archive_receipt_id.as_str());
+        headers.insert(
+            HEADER_ARCHIVE_MANIFEST_SHA256,
+            hex::encode(delivery.archive_manifest_sha256),
+        );
+        headers.insert(
+            HEADER_PUBLICATION_SHA256,
+            hex::encode(delivery.publication_sha256),
+        );
+        Self {
+            subject: delivery.subject.as_str().to_owned(),
+            headers: Some(headers),
+            payload: delivery.payload.clone(),
+            stream_sequence: delivery.stream_sequence,
+            consumer_sequence: delivery.consumer_sequence,
+            delivery_count: delivery.delivery_count,
+        }
+    }
+
+    fn as_view(&self) -> JetStreamFetchView<'_> {
+        JetStreamFetchView {
+            subject: &self.subject,
+            headers: self.headers.as_ref(),
+            payload: &self.payload,
+            stream_sequence: self.stream_sequence,
+            consumer_sequence: self.consumer_sequence,
+            delivery_count: self.delivery_count,
+        }
+    }
+}
+
+struct JetStreamFetchView<'a> {
+    subject: &'a str,
+    headers: Option<&'a async_nats::HeaderMap>,
+    payload: &'a [u8],
+    stream_sequence: Option<u64>,
+    consumer_sequence: Option<u64>,
+    delivery_count: u64,
+}
+
 pub fn committed_block_delivery(
     block: &BlockEnvelope,
     receipt: &storage_ports::ArchiveReceipt,
@@ -173,6 +360,10 @@ pub trait CanonicalPullSource {
         &mut self,
         message_ids: &[String],
     ) -> impl Future<Output = Result<(), JetStreamReplayError>> + Send;
+
+    fn term_poison(&mut self) -> impl Future<Output = Result<(), JetStreamReplayError>> + Send {
+        async { Ok(()) }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -219,9 +410,77 @@ impl CanonicalPullSource for InMemoryCanonicalSource {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct InMemoryFetchSource {
+    queued: VecDeque<JetStreamFetchFrame>,
+    acked: BTreeSet<String>,
+    poison_pending: bool,
+    terminated: bool,
+}
+
+impl InMemoryFetchSource {
+    #[must_use]
+    pub fn new(frames: impl IntoIterator<Item = JetStreamFetchFrame>) -> Self {
+        Self {
+            queued: frames.into_iter().collect(),
+            acked: BTreeSet::new(),
+            poison_pending: false,
+            terminated: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn acked(&self) -> &BTreeSet<String> {
+        &self.acked
+    }
+
+    #[must_use]
+    pub const fn terminated(&self) -> bool {
+        self.terminated
+    }
+}
+
+impl CanonicalPullSource for InMemoryFetchSource {
+    async fn fetch(
+        &mut self,
+        max_messages: usize,
+    ) -> Result<Vec<CanonicalDelivery>, JetStreamReplayError> {
+        let mut batch = Vec::new();
+        for _ in 0..max_messages {
+            let Some(frame) = self.queued.pop_front() else {
+                break;
+            };
+            match delivery_from_fetch(frame.as_view()) {
+                Ok(delivery) => batch.push(delivery),
+                Err(error) => {
+                    self.poison_pending = true;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(batch)
+    }
+
+    async fn ack(&mut self, message_ids: &[String]) -> Result<(), JetStreamReplayError> {
+        for message_id in message_ids {
+            self.acked.insert(message_id.clone());
+        }
+        Ok(())
+    }
+
+    async fn term_poison(&mut self) -> Result<(), JetStreamReplayError> {
+        if self.poison_pending {
+            self.poison_pending = false;
+            self.terminated = true;
+        }
+        Ok(())
+    }
+}
+
 pub struct JetStreamPullSource {
     consumer: jetstream::consumer::Consumer<PullConfig>,
     inflight: BTreeMap<String, jetstream::Message>,
+    poison: Option<jetstream::Message>,
     fetch_batch: usize,
 }
 
@@ -284,6 +543,7 @@ impl JetStreamPullSource {
         Ok(Self {
             consumer,
             inflight: BTreeMap::new(),
+            poison: None,
             fetch_batch: config.fetch_batch,
         })
     }
@@ -305,7 +565,13 @@ impl CanonicalPullSource for JetStreamPullSource {
         let mut deliveries = Vec::new();
         while let Some(message) = batch.next().await {
             let message = message.map_err(|_| JetStreamReplayError::Transport)?;
-            let delivery = delivery_from_jetstream(&message)?;
+            let delivery = match delivery_from_jetstream(&message) {
+                Ok(delivery) => delivery,
+                Err(error) => {
+                    self.poison = Some(message);
+                    return Err(error);
+                }
+            };
             if self
                 .inflight
                 .insert(delivery.message_id.clone(), message)
@@ -330,6 +596,16 @@ impl CanonicalPullSource for JetStreamPullSource {
                 .map_err(|_| JetStreamReplayError::Transport)?;
         }
         Ok(())
+    }
+
+    async fn term_poison(&mut self) -> Result<(), JetStreamReplayError> {
+        let Some(message) = self.poison.take() else {
+            return Ok(());
+        };
+        message
+            .ack_with(AckKind::Term)
+            .await
+            .map_err(|_| JetStreamReplayError::Transport)
     }
 }
 
@@ -475,6 +751,8 @@ pub enum JetStreamReplayError {
     PendingLimit,
     #[error("JetStream connection or acknowledgement failed")]
     Transport,
+    #[error("JetStream fetch header, hash, or decode failed")]
+    FetchDecode(Box<FetchPoison>),
     #[error(transparent)]
     Replay(#[from] LocalReplayError),
     #[error(transparent)]
@@ -493,6 +771,7 @@ impl JetStreamReplayError {
             Self::IncompleteBlock => "core.jetstream_incomplete_block",
             Self::PendingLimit => "core.jetstream_pending_limit",
             Self::Transport => "core.jetstream_transport",
+            Self::FetchDecode(poison) => poison.reason_code(),
             Self::Replay(LocalReplayError::Durable(DurableApplyError::Ledger(error))) => {
                 error.reason_code()
             }
@@ -570,7 +849,14 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
                 .map(|checkpoint| checkpoint.block_height()),
         );
         loop {
-            let batch = source.fetch(self.fetch_batch).await?;
+            let batch = match source.fetch(self.fetch_batch).await {
+                Ok(batch) => batch,
+                Err(error) => {
+                    return Err(self
+                        .persist_fetch_decode_fail_closed(source, dead_letter, error)
+                        .await);
+                }
+            };
             if batch.is_empty() {
                 if self.assembler.has_pending() {
                     let identity = self
@@ -635,6 +921,31 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
         ) {
             Ok(record) => match dead_letter.persist(&record) {
                 Ok(()) => error,
+                Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+            },
+            Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+        }
+    }
+
+    async fn persist_fetch_decode_fail_closed<Src, Dlq>(
+        &self,
+        source: &mut Src,
+        dead_letter: &mut Dlq,
+        error: JetStreamReplayError,
+    ) -> JetStreamReplayError
+    where
+        Src: CanonicalPullSource,
+        Dlq: DeadLetterSink,
+    {
+        let JetStreamReplayError::FetchDecode(poison) = &error else {
+            return error;
+        };
+        match poison.to_record(&self.dead_letter_consumer, failed_at_unix_micros()) {
+            Ok(record) => match dead_letter.persist(&record) {
+                Ok(()) => {
+                    let _ = source.term_poison().await;
+                    error
+                }
                 Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
             },
             Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
@@ -827,33 +1138,100 @@ impl BlockAssembler {
 fn delivery_from_jetstream(
     message: &jetstream::Message,
 ) -> Result<CanonicalDelivery, JetStreamReplayError> {
-    let headers = message
-        .headers
-        .as_ref()
-        .ok_or(crate::publication::BlockMarkerError::Malformed)?;
-    let subject = CanonicalSubject::parse(message.subject.as_str())?;
-    let message_id = headers
-        .get(NATS_MESSAGE_ID)
-        .map(|value| value.as_str().to_owned())
-        .ok_or(crate::publication::BlockMarkerError::Malformed)?;
-    let schema = header(headers, HEADER_SCHEMA)?;
-    let chain_id = header(headers, HEADER_CHAIN)?;
-    let block_height = header(headers, HEADER_BLOCK_HEIGHT)?
-        .parse::<u64>()
-        .map_err(|_| crate::publication::BlockMarkerError::Malformed)?;
-    let block_hash_header = header(headers, HEADER_BLOCK_HASH)?;
-    let block_hash = parse_hash32(&block_hash_header)?;
-    let archive_receipt_id = header(headers, HEADER_ARCHIVE_RECEIPT)?;
-    let archive_manifest_header = header(headers, HEADER_ARCHIVE_MANIFEST_SHA256)?;
-    let archive_manifest_sha256 = parse_hash32(&archive_manifest_header)?;
-    let publication_header = header(headers, HEADER_PUBLICATION_SHA256)?;
-    let publication_sha256 = parse_hash32(&publication_header)?;
-    let payload = message.payload.to_vec();
-    let digest: [u8; 32] = Sha256::digest(&payload).into();
-    if digest != publication_sha256 {
-        return Err(JetStreamReplayError::HashMismatch);
+    let (stream_sequence, consumer_sequence, delivery_count) = match message.info() {
+        Ok(info) => (
+            Some(info.stream_sequence),
+            Some(info.consumer_sequence),
+            u64::try_from(info.delivered.max(0)).unwrap_or(0),
+        ),
+        Err(_) => (None, None, 0),
+    };
+    delivery_from_fetch(JetStreamFetchView {
+        subject: message.subject.as_str(),
+        headers: message.headers.as_ref(),
+        payload: message.payload.as_ref(),
+        stream_sequence,
+        consumer_sequence,
+        delivery_count,
+    })
+}
+
+fn delivery_from_fetch(
+    frame: JetStreamFetchView<'_>,
+) -> Result<CanonicalDelivery, JetStreamReplayError> {
+    let mut poison = FetchPoisonBuilder::from_view(&frame);
+    let Some(headers) = frame.headers else {
+        return Err(poison.fail(FetchPoisonKind::Decode(
+            crate::publication::BlockMarkerError::Malformed,
+        )));
+    };
+    let subject = match CanonicalSubject::parse(frame.subject) {
+        Ok(subject) => {
+            poison.subject = sanitized_identity(subject.as_str(), FETCH_UNDECODEABLE_SUBJECT);
+            subject
+        }
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    let message_id = match headers.get(NATS_MESSAGE_ID) {
+        Some(value) => value.as_str().to_owned(),
+        None => {
+            return Err(poison.fail(FetchPoisonKind::Decode(
+                crate::publication::BlockMarkerError::Malformed,
+            )));
+        }
+    };
+    poison.message_id = sanitized_identity(&message_id, FETCH_UNDECODEABLE_MESSAGE_ID);
+    let schema = match header(headers, HEADER_SCHEMA) {
+        Ok(value) => value,
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    let chain_id = match header(headers, HEADER_CHAIN) {
+        Ok(value) => value,
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    let block_height = match header(headers, HEADER_BLOCK_HEIGHT) {
+        Ok(value) => match value.parse::<u64>() {
+            Ok(height) => height,
+            Err(_) => {
+                return Err(poison.fail(FetchPoisonKind::Decode(
+                    crate::publication::BlockMarkerError::Malformed,
+                )));
+            }
+        },
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    let block_hash = match header(headers, HEADER_BLOCK_HASH) {
+        Ok(value) => match parse_hash32(&value) {
+            Ok(hash) => {
+                poison.block_hash = hash;
+                hash
+            }
+            Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+        },
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    let archive_receipt_id = match header(headers, HEADER_ARCHIVE_RECEIPT) {
+        Ok(value) => value,
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    let archive_manifest_sha256 = match header(headers, HEADER_ARCHIVE_MANIFEST_SHA256) {
+        Ok(value) => match parse_hash32(&value) {
+            Ok(hash) => hash,
+            Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+        },
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    let publication_sha256 = match header(headers, HEADER_PUBLICATION_SHA256) {
+        Ok(value) => match parse_hash32(&value) {
+            Ok(hash) => hash,
+            Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+        },
+        Err(error) => return Err(poison.fail(FetchPoisonKind::Decode(error))),
+    };
+    if poison.payload_sha256 != publication_sha256 {
+        return Err(poison.fail(FetchPoisonKind::HashMismatch));
     }
-    let mut delivery = CanonicalDelivery::try_new(
+    let mut delivery = match CanonicalDelivery::try_new(
         subject,
         message_id,
         schema,
@@ -862,17 +1240,44 @@ fn delivery_from_jetstream(
         block_hash,
         archive_receipt_id,
         archive_manifest_sha256,
-        payload,
-    )?;
+        frame.payload.to_vec(),
+    ) {
+        Ok(delivery) => delivery,
+        Err(error) => return Err(wrap_fetch_error(poison, error)),
+    };
     if delivery.publication_sha256 != publication_sha256 {
-        return Err(JetStreamReplayError::HashMismatch);
+        return Err(poison.fail(FetchPoisonKind::HashMismatch));
     }
-    if let Ok(info) = message.info() {
-        delivery.stream_sequence = Some(info.stream_sequence);
-        delivery.consumer_sequence = Some(info.consumer_sequence);
-        delivery.delivery_count = u64::try_from(info.delivered.max(0)).unwrap_or(0);
-    }
+    delivery.stream_sequence = frame.stream_sequence;
+    delivery.consumer_sequence = frame.consumer_sequence;
+    delivery.delivery_count = frame.delivery_count;
     Ok(delivery)
+}
+
+fn wrap_fetch_error(
+    poison: FetchPoisonBuilder,
+    error: JetStreamReplayError,
+) -> JetStreamReplayError {
+    match error {
+        JetStreamReplayError::Decode(decode) => poison.fail(FetchPoisonKind::Decode(decode)),
+        JetStreamReplayError::HashMismatch => poison.fail(FetchPoisonKind::HashMismatch),
+        JetStreamReplayError::Config(error) => JetStreamReplayError::Config(error),
+        JetStreamReplayError::IncompleteBlock => JetStreamReplayError::IncompleteBlock,
+        JetStreamReplayError::PendingLimit => JetStreamReplayError::PendingLimit,
+        JetStreamReplayError::Transport => JetStreamReplayError::Transport,
+        JetStreamReplayError::FetchDecode(existing) => JetStreamReplayError::FetchDecode(existing),
+        JetStreamReplayError::Replay(error) => JetStreamReplayError::Replay(error),
+        JetStreamReplayError::DeadLetter(error) => JetStreamReplayError::DeadLetter(error),
+        JetStreamReplayError::Overflow => JetStreamReplayError::Overflow,
+    }
+}
+
+fn sanitized_identity(value: &str, fallback: &'static str) -> String {
+    if validate_identity(value).is_ok() {
+        value.to_owned()
+    } else {
+        fallback.to_owned()
+    }
 }
 
 fn header(

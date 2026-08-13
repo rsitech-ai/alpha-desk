@@ -17,10 +17,10 @@ use storage_ports::{AtomicStateCommit, AtomicStateStore, StateCommitDisposition,
 
 pub use config::{CoreConfig, CoreConfigError};
 pub use consumer::{
-    CanonicalDelivery, CanonicalPullSource, InMemoryCanonicalSource, JetStreamPullSource,
-    JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
-    JetStreamReplayReport, JetStreamReplaySession, committed_block_delivery,
-    committed_event_delivery,
+    CanonicalDelivery, CanonicalPullSource, FetchPoison, InMemoryCanonicalSource,
+    InMemoryFetchSource, JetStreamFetchFrame, JetStreamPullSource, JetStreamReplayAuth,
+    JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError, JetStreamReplayReport,
+    JetStreamReplaySession, committed_block_delivery, committed_event_delivery,
 };
 pub use dead_letter::{
     DEAD_LETTER_SCHEMA_V1, DeadLetterError, DeadLetterRecord, DeadLetterSink, FileDeadLetterSink,
