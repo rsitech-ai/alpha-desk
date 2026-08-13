@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
-use crate::status::{CaptureHealth, CaptureStatus, read_status};
+use crate::status::{CaptureHealth, read_status, read_status_snapshot_bytes};
 
 const MAX_REQUEST_BYTES: usize = 8_192;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -190,8 +190,7 @@ async fn write_events(
 }
 
 fn load_status_bytes(path: &Path) -> Result<Vec<u8>, OperatorError> {
-    let status: CaptureStatus = read_status(path).map_err(OperatorError::Status)?;
-    serde_json::to_vec(&status).map_err(|_| OperatorError::Serialization)
+    read_status_snapshot_bytes(path).map_err(OperatorError::Status)
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {

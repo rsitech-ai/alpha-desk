@@ -187,8 +187,10 @@ When `runtime.status_listen` is a loopback address, `hl-capture run` also
 serves that snapshot over HTTP (`GET /status`, `GET /healthz`, SSE
 `GET /events`). `hl-capture serve-status --config <path> [--listen <addr>]`
 serves the same file without starting capture. Bind addresses must be
-loopback. This HTTP surface does not replace `hl-api` `/v1/capture/status`,
-which reads the status file on disk.
+loopback. `GET /status` fail-closed-reads inactive `hl.capture.status.v4`
+(no `maintenance`) and `hl.capture.status.v5` (`maintenance` required), and
+returns the snapshot bytes as read. This HTTP surface does not replace
+`hl-api` `/v1/capture/status`, which reads the status file on disk.
 
 The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
