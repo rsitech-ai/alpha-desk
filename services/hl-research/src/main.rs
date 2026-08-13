@@ -7,11 +7,11 @@ use std::process::ExitCode;
 
 use hl_research::{
     ResearchError, ResearchStatus, run_evaluate_folds_bytes, run_holdout_isolation_bytes,
-    run_shadow_capture_bytes, run_synthetic_bytes, run_walk_forward_bytes,
+    run_promote_bytes, run_shadow_capture_bytes, run_synthetic_bytes, run_walk_forward_bytes,
 };
 use serde::Serialize;
 
-const USAGE: &str = "usage: hl-research <status|run-synthetic|walk-forward|holdout-isolation|shadow-capture|evaluate-folds> [--fixture <path>] [--bundle <dir>] [--approved-key <hex>] [--output <path>]";
+const USAGE: &str = "usage: hl-research <status|run-synthetic|walk-forward|holdout-isolation|shadow-capture|evaluate-folds|promote> [--fixture <path>] [--bundle <dir>] [--approved-key <hex>] [--output <path>]";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -82,6 +82,7 @@ fn execute(arguments: Vec<OsString>) -> Result<String, ResearchError> {
         Command::EvaluateFolds { fixture } => {
             write_json(run_evaluate_folds_bytes(&read_fixture(&fixture)?)?)
         }
+        Command::Promote { fixture } => write_json(run_promote_bytes(&read_fixture(&fixture)?)?),
     }
 }
 
@@ -114,6 +115,9 @@ enum Command {
         fixture: PathBuf,
     },
     EvaluateFolds {
+        fixture: PathBuf,
+    },
+    Promote {
         fixture: PathBuf,
     },
 }
@@ -160,7 +164,8 @@ impl Command {
                     output,
                 })
             }
-            "walk-forward" | "holdout-isolation" | "shadow-capture" | "evaluate-folds" => {
+            "walk-forward" | "holdout-isolation" | "shadow-capture" | "evaluate-folds"
+            | "promote" => {
                 let mut fixture = None;
                 while let Some(flag) = args.next() {
                     let flag = flag.into_string().map_err(|_| ResearchError::Usage)?;
@@ -180,6 +185,7 @@ impl Command {
                     "holdout-isolation" => Self::HoldoutIsolation { fixture },
                     "shadow-capture" => Self::ShadowCapture { fixture },
                     "evaluate-folds" => Self::EvaluateFolds { fixture },
+                    "promote" => Self::Promote { fixture },
                     _ => return Err(ResearchError::Usage),
                 })
             }

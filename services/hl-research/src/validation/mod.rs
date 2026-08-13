@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ResearchError;
 use crate::experiment::ExperimentManifest;
 
-pub use evaluate::{FoldEstimatorReport, run_evaluate_folds_bytes};
+pub use evaluate::{FoldEstimatorReport, run_evaluate_folds_bytes, run_promote_bytes};
 pub use holdout::{
     HoldoutIsolationReport, HoldoutState, refuse_leaked_holdout_batch, run_holdout_isolation_bytes,
 };
