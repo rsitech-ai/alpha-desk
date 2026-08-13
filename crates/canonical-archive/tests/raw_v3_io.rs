@@ -618,7 +618,7 @@ fn packed_object_gc_unlinks_through_a_crash_recoverable_journal() {
     let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
     let chain = ChainId::new("mainnet").unwrap();
     let source = SourceId::new("node-fills").unwrap();
-    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    let first = archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
     archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
     archive
         .pack_logical_range(
@@ -695,6 +695,52 @@ fn packed_object_gc_unlinks_through_a_crash_recoverable_journal() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(rows.len(), 2);
+
+    let dataset = dataset_dir(temporary.path());
+    let remaining_roots: Vec<_> = std::fs::read_dir(dataset.join("roots"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(remaining_roots.len(), 1);
+    let remaining_leases: Vec<_> = std::fs::read_dir(dataset.join("leases"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for lease in &remaining_leases {
+        let name = lease.file_name().unwrap().to_str().unwrap();
+        let hex = name
+            .strip_prefix("root-")
+            .and_then(|value| value.strip_suffix(".lease"))
+            .unwrap();
+        assert!(
+            dataset
+                .join("roots")
+                .join(format!("root-{hex}.json"))
+                .is_file(),
+            "unlocked lease survived after its root was unreferenced"
+        );
+    }
+    let manifests: Vec<_> =
+        std::fs::read_dir(temporary.path().join("_manifests").join("raw-byte-v3"))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+    assert!(
+        manifests.is_empty(),
+        "packed logical manifests must be eligible after digest-authenticated packing"
+    );
+    let verified = later.verify_raw_manifest(first.manifest_id()).unwrap();
+    assert_eq!(verified.manifest_sha256(), first.manifest_sha256());
+    later
+        .verify_raw_manifest_at_sequence(first.manifest_id(), first.local_sequence_range().unwrap())
+        .unwrap();
 }
 
 #[test]
@@ -797,10 +843,154 @@ fn gc_fails_closed_when_an_eligible_object_vanishes_before_unlink() {
     let plan = later
         .plan_packed_object_gc(&chain, &source, [0xAB; 32])
         .unwrap();
-    let (path, _) = plan.files().next().expect("eligible file");
+    let (path, _, _) = plan.files().next().expect("eligible file");
     std::fs::remove_file(temporary.path().join(path)).unwrap();
     assert!(matches!(
         later.execute_packed_object_gc(&chain, &source, plan.digest(), [0xAB; 32]),
         Err(ArchiveError::ManifestVerification(_))
     ));
+}
+
+#[test]
+fn pack_index_embeds_receipt_hint_pages() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let first = archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive.pack_index(&chain, &source).unwrap();
+    let (first_seq, last_seq) = archive
+        .lookup_receipt_hint(&chain, &source, first.manifest_id())
+        .unwrap();
+    assert_eq!(first_seq, 1);
+    assert_eq!(last_seq, 1);
+    let hints = dataset_dir(temporary.path()).join("hints");
+    let standalone_pages: Vec<_> = std::fs::read_dir(&hints)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| {
+            name.to_str()
+                .is_some_and(|value| value.starts_with("hint-"))
+        })
+        .collect();
+    assert!(
+        standalone_pages.is_empty(),
+        "pack_index must embed hint pages in the index pack"
+    );
+    let packs: Vec<_> = std::fs::read_dir(dataset_dir(temporary.path()).join("index-packs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("pack"))
+        .collect();
+    assert_eq!(packs.len(), 1);
+}
+
+#[test]
+fn gc_resumes_when_a_journaled_planned_file_is_already_gone() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .unwrap();
+    let (path, object_sha256, byte_len) = plan
+        .files()
+        .find(|(path, _, _)| !path.contains("/leases/"))
+        .map(|(path, hash, len)| (path.to_owned(), hash.to_owned(), len))
+        .expect("eligible file");
+    let journal = dataset_dir(temporary.path())
+        .join("gc")
+        .join(format!("deletion-{}.log", encode_sha256(plan.digest())));
+    std::fs::write(
+        &journal,
+        format!(
+            "{{\"kind\":\"planned\",\"relative_path\":\"{path}\",\"object_sha256\":\"{object_sha256}\",\"byte_len\":{byte_len}}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::remove_file(temporary.path().join(&path)).unwrap();
+    let receipt = later
+        .execute_packed_object_gc(&chain, &source, plan.digest(), [0xAB; 32])
+        .unwrap();
+    assert_eq!(receipt.unlinked_files(), plan.files().count() as u64);
+}
+
+#[test]
+fn gc_reclaims_exclusive_leases_after_their_roots_are_gone() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let backup = [0xAB; 32];
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, backup)
+        .unwrap();
+    let old_root = plan
+        .files()
+        .map(|(path, _, _)| path.to_owned())
+        .find(|path| path.contains("/roots/root-") && path.ends_with(".json"))
+        .expect("old root is eligible");
+    later
+        .execute_packed_object_gc(&chain, &source, plan.digest(), backup)
+        .unwrap();
+    assert!(!temporary.path().join(&old_root).exists());
+    let name = std::path::Path::new(&old_root)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_prefix("root-"))
+        .and_then(|value| value.strip_suffix(".json"))
+        .unwrap();
+    let leftover = dataset_dir(temporary.path())
+        .join("leases")
+        .join(format!("root-{name}.lease"));
+    std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+    std::fs::write(&leftover, b"stale-exclusive-lease").unwrap();
+    let leftover_plan = later
+        .plan_packed_object_gc(&chain, &source, backup)
+        .unwrap();
+    assert!(
+        leftover_plan
+            .files()
+            .any(|(path, _, _)| path.ends_with(&format!("leases/root-{name}.lease")))
+    );
+    later
+        .execute_packed_object_gc(&chain, &source, leftover_plan.digest(), backup)
+        .unwrap();
+    assert!(!leftover.exists());
+}
+
+fn encode_sha256(hash: [u8; 32]) -> String {
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }

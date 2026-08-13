@@ -372,8 +372,24 @@ fn open_lease(
 }
 
 pub fn list_regular_names(root: &Path, relative: &Path) -> Result<Vec<String>, ArchiveError> {
-    validate_relative(relative)?;
-    let path = root.join(relative);
+    list_child_names(root, relative, false)
+}
+
+pub fn list_directory_names(root: &Path, relative: &Path) -> Result<Vec<String>, ArchiveError> {
+    list_child_names(root, relative, true)
+}
+
+fn list_child_names(
+    root: &Path,
+    relative: &Path,
+    directories: bool,
+) -> Result<Vec<String>, ArchiveError> {
+    let path = if relative.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        validate_relative(relative)?;
+        root.join(relative)
+    };
     match fs::symlink_metadata(&path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -394,7 +410,12 @@ pub fn list_regular_names(root: &Path, relative: &Path) -> Result<Vec<String>, A
         if metadata.file_type().is_symlink() {
             return Err(ArchiveError::UnsafePath);
         }
-        if metadata.is_file() {
+        let matches = if directories {
+            metadata.is_dir()
+        } else {
+            metadata.is_file()
+        };
+        if matches {
             let name = name.to_str().ok_or(ArchiveError::UnsafePath)?.to_owned();
             names.push(name);
         }

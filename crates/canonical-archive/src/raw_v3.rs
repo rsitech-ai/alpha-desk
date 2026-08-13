@@ -423,6 +423,21 @@ impl IndexPackPageRefV3 {
                 "index pack page slice overflows",
             ))
     }
+
+    #[must_use]
+    pub const fn kind(&self) -> IndexPackPageKindV3 {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[must_use]
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -498,6 +513,11 @@ impl IndexPackManifestV3 {
             object_size_bytes,
             pages,
         })
+    }
+
+    #[must_use]
+    pub fn pages(&self) -> &[IndexPackPageRefV3] {
+        &self.pages
     }
 
     #[must_use]
@@ -3370,6 +3390,7 @@ pub(crate) fn pack_journal_leaves(
     root: &SequenceNodeRefV3,
     journal: &[u8],
     packs: &IndexPackBytes,
+    hint_pages: &[ReceiptHintPageV3],
 ) -> Result<(BuiltIndexPackV3, BTreeMap<u64, SequenceNodeRefV3>), ArchiveError> {
     let mut builder = IndexPackBuilderV3::try_new(chain_id, source_id, pack_generation)?;
     let mut packed_pages = BTreeMap::new();
@@ -3378,6 +3399,9 @@ pub(crate) fn pack_journal_leaves(
         return Err(ArchiveError::InvalidInput(
             "index packing requires at least one journal-located leaf",
         ));
+    }
+    for page in hint_pages {
+        builder.push_receipt_hint(page)?;
     }
     let pack = builder.finish()?;
     let mut packed_refs = BTreeMap::new();
@@ -4554,7 +4578,7 @@ mod tests {
         assert_eq!(root.depth(), 1);
         let old = journal.commit_prefix(&root).unwrap();
         let (pack, packed_leaves) =
-            pack_journal_leaves(chain.clone(), source.clone(), 1, &root, old.bytes(), &empty)
+            pack_journal_leaves(chain.clone(), source.clone(), 1, &root, old.bytes(), &empty, &[])
                 .unwrap();
         assert_eq!(packed_leaves.len(), 2);
         let mut packs = IndexPackBytes::new();
