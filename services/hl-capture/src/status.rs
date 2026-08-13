@@ -463,6 +463,10 @@ pub struct CaptureStatus {
     archive_manifest_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error_reason: Option<String>,
+    #[serde(default)]
+    throughput_records_per_sec: u32,
+    #[serde(default)]
+    throughput_blocks_per_sec: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     auxiliary_sources: Vec<AuxiliarySourceStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -496,6 +500,8 @@ impl CaptureStatus {
             disk_free_basis_points: None,
             archive_manifest_id: None,
             last_error_reason: None,
+            throughput_records_per_sec: 0,
+            throughput_blocks_per_sec: 0,
             auxiliary_sources: Vec::new(),
             maintenance: None,
         }
@@ -562,6 +568,13 @@ impl CaptureStatus {
     }
 
     #[must_use]
+    pub const fn with_throughput(mut self, records_per_sec: u32, blocks_per_sec: u32) -> Self {
+        self.throughput_records_per_sec = records_per_sec;
+        self.throughput_blocks_per_sec = blocks_per_sec;
+        self
+    }
+
+    #[must_use]
     pub fn with_auxiliary_sources(mut self, sources: Vec<AuxiliarySourceStatus>) -> Self {
         self.auxiliary_sources = sources;
         self
@@ -591,6 +604,16 @@ impl CaptureStatus {
     #[must_use]
     pub const fn ready(&self) -> bool {
         self.ready
+    }
+
+    #[must_use]
+    pub const fn throughput_records_per_sec(&self) -> u32 {
+        self.throughput_records_per_sec
+    }
+
+    #[must_use]
+    pub const fn throughput_blocks_per_sec(&self) -> u32 {
+        self.throughput_blocks_per_sec
     }
 
     #[must_use]
@@ -999,6 +1022,77 @@ mod tests {
         assert_eq!(read_status(&path), Err(StatusError::InvalidField));
     }
 
+    #[test]
+    fn v4_status_exposes_windowed_throughput_without_qualification() {
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_throughput(3, 1);
+        status.validate().unwrap();
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert_eq!(value["throughput_records_per_sec"], 3);
+        assert_eq!(value["throughput_blocks_per_sec"], 1);
+        assert!(value.get("maintenance").is_none());
+        assert_eq!(status.throughput_records_per_sec(), 3);
+        assert_eq!(status.throughput_blocks_per_sec(), 1);
+    }
+
+    #[test]
+    fn status_reader_rejects_invalid_throughput_and_reconstruction_values() {
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_throughput(3, 1);
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("status.json");
+
+        let mut negative = serde_json::to_value(&status).unwrap();
+        negative["throughput_records_per_sec"] = serde_json::json!(-1);
+        fs::write(&path, serde_json::to_vec(&negative).unwrap()).unwrap();
+        assert_eq!(read_status(&path), Err(StatusError::Serialization));
+
+        let mut fractional = serde_json::to_value(&status).unwrap();
+        fractional["throughput_blocks_per_sec"] = serde_json::json!(1.5);
+        fs::write(&path, serde_json::to_vec(&fractional).unwrap()).unwrap();
+        assert_eq!(read_status(&path), Err(StatusError::Serialization));
+
+        let mut named = serde_json::to_value(&status).unwrap();
+        named["throughput_records_per_sec"] = serde_json::json!("fast");
+        fs::write(&path, serde_json::to_vec(&named).unwrap()).unwrap();
+        assert_eq!(read_status(&path), Err(StatusError::Serialization));
+
+        let mut reconstruction = AuxiliarySourceStatus::starting("node-fills");
+        reconstruction.record_recovered("node-file-v1:epoch", 47, 3, 1_000, None);
+        let mut reconstructed = serde_json::to_value(
+            CaptureStatus::new(
+                KnownTime::from_unix_micros(1_000).unwrap(),
+                "build-v1",
+                ChainId::new("mainnet").unwrap(),
+                CaptureHealth::Yellow,
+            )
+            .with_auxiliary_sources(vec![reconstruction]),
+        )
+        .unwrap();
+        reconstructed["auxiliary_sources"][0]["restart_reconstruction"] =
+            serde_json::json!("live-qualified");
+        fs::write(&path, serde_json::to_vec(&reconstructed).unwrap()).unwrap();
+        assert_eq!(read_status(&path), Err(StatusError::Serialization));
+
+        let mut incomplete_without_durable = AuxiliarySourceStatus::starting("node-fills");
+        incomplete_without_durable.restart_reconstruction = RestartReconstruction::Incomplete;
+        assert_eq!(
+            incomplete_without_durable.validate(),
+            Err(StatusError::InvalidField)
+        );
+    }
+
     #[derive(Debug, serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     #[expect(dead_code)]
@@ -1030,6 +1124,10 @@ mod tests {
         archive_manifest_id: Option<String>,
         #[serde(default)]
         last_error_reason: Option<String>,
+        #[serde(default)]
+        throughput_records_per_sec: u32,
+        #[serde(default)]
+        throughput_blocks_per_sec: u32,
         #[serde(default)]
         auxiliary_sources: Vec<AuxiliarySourceStatus>,
     }
@@ -1129,6 +1227,8 @@ mod tests {
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["schema_version"], "hl.capture.status.v4");
         assert!(value.get("maintenance").is_none());
+        assert_eq!(value["throughput_records_per_sec"], 0);
+        assert_eq!(value["throughput_blocks_per_sec"], 0);
 
         let published = status.with_maintenance(Some(CaptureMaintenanceStatus::idle(true, false)));
         published.validate().unwrap();
