@@ -2542,6 +2542,17 @@ version = "0.1.0"
 [[package]]
 name = "market-intelligence"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+ "wallet-intelligence",
+]
 
 [[package]]
 name = "matchers"
@@ -3786,6 +3797,17 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "signal-core"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "market-intelligence",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+ "wallet-intelligence",
+]
 
 [[package]]
 name = "signal-hook-registry"
