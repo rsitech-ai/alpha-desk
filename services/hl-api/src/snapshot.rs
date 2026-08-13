@@ -242,8 +242,29 @@ fn require_non_negative_int(object: &Map<String, Value>, field: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{SnapshotError, parse_capture_status_bytes};
+    use super::{
+        CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, MAINTENANCE_FIELDS, SnapshotError,
+        parse_capture_status_bytes,
+    };
+    use crate::openapi::openapi_yaml;
     use std::path::Path;
+
+    #[test]
+    fn openapi_document_describes_v4_v5_maintenance_and_503() {
+        let document = openapi_yaml();
+        assert!(document.contains(CAPTURE_STATUS_SCHEMA_V4));
+        assert!(document.contains(CAPTURE_STATUS_SCHEMA_V5));
+        assert!(document.contains("503"));
+        assert!(document.contains(SnapshotError::Missing.reason_code()));
+        assert!(document.contains(SnapshotError::Invalid.reason_code()));
+        for field in MAINTENANCE_FIELDS {
+            assert!(
+                document.contains(field),
+                "OpenAPI missing maintenance field {field}"
+            );
+        }
+        assert!(!document.contains("live-qualified"));
+    }
 
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(

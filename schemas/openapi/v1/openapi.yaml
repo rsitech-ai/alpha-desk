@@ -69,11 +69,22 @@ paths:
     get:
       operationId: getCaptureStatus
       summary: Capture status snapshot
+      description: >
+        Fail-closed read of the configured capture snapshot. Inactive
+        snapshots are hl.capture.status.v4 and omit maintenance.
+        Maintenance snapshots are hl.capture.status.v5 and require a typed
+        maintenance object. Missing files return 503 snapshot_missing;
+        fail-closed validation failures return 503 snapshot_invalid,
+        including v4 documents that smuggle maintenance and v5 documents
+        that omit it. The body is the snapshot as read. This surface does
+        not invent fills and does not mark sources live or qualified.
       parameters:
         - $ref: "#/components/parameters/Limit"
       responses:
         "200":
-          description: Validated hl.capture.status.v4 or hl.capture.status.v5 snapshot
+          description: >
+            Validated inactive hl.capture.status.v4 or maintenance
+            hl.capture.status.v5 snapshot
           content:
             application/json:
               schema:
@@ -85,7 +96,14 @@ paths:
         "429":
           $ref: "#/components/responses/QueryBudgetExceeded"
         "503":
-          $ref: "#/components/responses/Unavailable"
+          description: >
+            Capture snapshot missing (reason_code snapshot_missing) or
+            fail-closed invalid (reason_code snapshot_invalid). No invented
+            fills.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/stream:
     get:
       operationId: getStream
@@ -188,6 +206,16 @@ components:
           items:
             type: string
     CaptureStatus:
+      description: >
+        Fail-closed capture operator snapshot. Inactive documents use
+        hl.capture.status.v4 and omit maintenance. Maintenance documents use
+        hl.capture.status.v5 and require CaptureMaintenance. Extra snapshot
+        fields such as auxiliary_sources are passed through when present.
+        This is not a fills feed and does not mark sources live or qualified.
+      oneOf:
+        - $ref: "#/components/schemas/CaptureStatusV4"
+        - $ref: "#/components/schemas/CaptureStatusV5"
+    CaptureStatusBase:
       type: object
       required:
         - schema_version
@@ -202,9 +230,6 @@ components:
       properties:
         schema_version:
           type: string
-          enum:
-            - hl.capture.status.v4
-            - hl.capture.status.v5
         snapshot_at_micros:
           type: integer
           minimum: 0
@@ -227,11 +252,90 @@ components:
         pending_blocks:
           type: integer
           minimum: 0
-        maintenance:
-          type: object
+    CaptureStatusV4:
+      description: >
+        Inactive capture status. maintenance is omitted; documents that
+        smuggle it are snapshot_invalid.
+      allOf:
+        - $ref: "#/components/schemas/CaptureStatusBase"
+        - type: object
+          properties:
+            schema_version:
+              type: string
+              const: hl.capture.status.v4
+          not:
+            required:
+              - maintenance
+    CaptureStatusV5:
+      description: >
+        Capture status with required maintenance visibility. Omitting
+        maintenance is snapshot_invalid.
+      allOf:
+        - $ref: "#/components/schemas/CaptureStatusBase"
+        - type: object
+          required:
+            - maintenance
+          properties:
+            schema_version:
+              type: string
+              const: hl.capture.status.v5
+            maintenance:
+              $ref: "#/components/schemas/CaptureMaintenance"
+    CaptureMaintenance:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - kill_switch
+        - health
+        - pending_pack_manifest_count
+        - packed_range_count
+        - logical_manifest_count
+        - physical_data_object_count
+        - retention_authorized
+      properties:
+        enabled:
+          type: boolean
+        kill_switch:
+          type: boolean
+        health:
+          type: string
+          enum:
+            - green
+            - yellow
+            - red
+        reason_code:
+          type: string
+          description: Omitted when health is green; required when yellow or red.
+        pending_pack_manifest_count:
+          type: integer
+          minimum: 0
+        packed_range_count:
+          type: integer
+          minimum: 0
+        logical_manifest_count:
+          type: integer
+          minimum: 0
+        physical_data_object_count:
+          type: integer
+          minimum: 0
+        last_scrub_at_micros:
+          type: integer
+          minimum: 0
+        last_pack_index_at_micros:
+          type: integer
+          minimum: 0
+        last_pack_data_at_micros:
+          type: integer
+          minimum: 0
+        last_retention_at_micros:
+          type: integer
+          minimum: 0
+        retention_authorized:
+          type: boolean
           description: >
-            Required on hl.capture.status.v5 and omitted on v4.
-            V4 documents that smuggle this field are rejected.
+            Whether a verified backup-receipt artifact currently authorizes
+            packed-object retention. A configured token is not enough.
     ApiError:
       type: object
       additionalProperties: false

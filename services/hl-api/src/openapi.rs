@@ -1,7 +1,8 @@
 /// Checked-in OpenAPI document generated from the health proto JSON fields,
-/// capture-status v4/v5 required keys, fail-closed query budgets, and the HTTP
-/// router. This is not a production authentication, availability, or SLO
-/// contract.
+/// capture-status v4 (inactive) / v5 (maintenance) required keys, fail-closed
+/// query budgets, and the HTTP router. This is not a production
+/// authentication, availability, or SLO contract, and it does not invent
+/// fills or mark sources live or qualified.
 pub fn openapi_yaml() -> &'static str {
     include_str!("../../../schemas/openapi/v1/openapi.yaml")
 }
@@ -13,6 +14,16 @@ pub const HEALTH_JSON_FIELDS: &[&str] = &[
     "reason_code",
     "observed_at_micros",
     "suppresses",
+];
+
+pub const CAPTURE_STATUS_SCHEMA_IDS: &[&str] = &[
+    crate::snapshot::CAPTURE_STATUS_SCHEMA_V4,
+    crate::snapshot::CAPTURE_STATUS_SCHEMA_V5,
+];
+
+pub const SNAPSHOT_UNAVAILABLE_REASON_CODES: &[&str] = &[
+    crate::snapshot::SnapshotError::Missing.reason_code(),
+    crate::snapshot::SnapshotError::Invalid.reason_code(),
 ];
 
 pub const ROUTER_PATHS: &[&str] = &[

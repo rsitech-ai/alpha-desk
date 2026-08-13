@@ -12,4 +12,7 @@ pub use budget::{BudgetError, QueryBudgets, QueryPermit};
 pub use config::{ApiConfig, AuthMode, ConfigError};
 pub use error::{ERROR_SCHEMA_VERSION, ErrorBody};
 pub use http::{ApiHandle, AppState, serve, spawn_local, spawn_state};
-pub use openapi::{HEALTH_JSON_FIELDS, ROUTER_PATHS, openapi_yaml};
+pub use openapi::{
+    CAPTURE_STATUS_SCHEMA_IDS, HEALTH_JSON_FIELDS, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
+    openapi_yaml,
+};
