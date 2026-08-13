@@ -643,6 +643,37 @@ pub struct WireOrderRejected {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireTriggerOrderActivated {
+    pub order_id: String,
+    pub trigger_price: String,
+    pub oracle_price: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireTwapStarted {
+    pub order_id: String,
+    pub account_id: String,
+    pub market_id: String,
+    pub total_quantity: String,
+    pub end_time_micros: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireTwapSliceFilled {
+    pub order_id: String,
+    pub slice_index: u32,
+    pub fill_price: String,
+    pub fill_quantity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireTwapCompleted {
+    pub order_id: String,
+    pub filled_quantity: String,
+    pub average_price: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireDepositCredited {
     pub account_id: String,
     pub asset_id: String,
@@ -1101,6 +1132,128 @@ pub fn decode_order_rejected(bytes: &[u8]) -> Result<WireOrderRejected, PayloadC
         account_id: message.account_id,
         reason_code: message.reason_code,
         reason: message.reason,
+    })
+}
+
+pub fn encode_trigger_order_activated(
+    value: &WireTriggerOrderActivated,
+) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_trigger_order_activated(value.clone())?;
+    Ok(wrap_payload(
+        "TriggerOrderActivated",
+        generated::hl::canonical::v1::TriggerOrderActivated {
+            order_id: value.order_id,
+            trigger_price: value.trigger_price,
+            oracle_price: value.oracle_price,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_trigger_order_activated(
+    bytes: &[u8],
+) -> Result<WireTriggerOrderActivated, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::TriggerOrderActivated::decode(
+        unwrap_payload("TriggerOrderActivated", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "TriggerOrderActivated".to_owned(),
+        source,
+    })?;
+    validate_trigger_order_activated(WireTriggerOrderActivated {
+        order_id: message.order_id,
+        trigger_price: message.trigger_price,
+        oracle_price: message.oracle_price,
+    })
+}
+
+pub fn encode_twap_started(value: &WireTwapStarted) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_twap_started(value.clone())?;
+    Ok(wrap_payload(
+        "TwapStarted",
+        generated::hl::canonical::v1::TwapStarted {
+            order_id: value.order_id,
+            account_id: value.account_id,
+            market_id: value.market_id,
+            total_quantity: value.total_quantity,
+            end_time_micros: value.end_time_micros,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_twap_started(bytes: &[u8]) -> Result<WireTwapStarted, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::TwapStarted::decode(
+        unwrap_payload("TwapStarted", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "TwapStarted".to_owned(),
+        source,
+    })?;
+    validate_twap_started(WireTwapStarted {
+        order_id: message.order_id,
+        account_id: message.account_id,
+        market_id: message.market_id,
+        total_quantity: message.total_quantity,
+        end_time_micros: message.end_time_micros,
+    })
+}
+
+pub fn encode_twap_slice_filled(value: &WireTwapSliceFilled) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_twap_slice_filled(value.clone())?;
+    Ok(wrap_payload(
+        "TwapSliceFilled",
+        generated::hl::canonical::v1::TwapSliceFilled {
+            order_id: value.order_id,
+            slice_index: value.slice_index,
+            fill_price: value.fill_price,
+            fill_quantity: value.fill_quantity,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_twap_slice_filled(bytes: &[u8]) -> Result<WireTwapSliceFilled, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::TwapSliceFilled::decode(
+        unwrap_payload("TwapSliceFilled", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "TwapSliceFilled".to_owned(),
+        source,
+    })?;
+    validate_twap_slice_filled(WireTwapSliceFilled {
+        order_id: message.order_id,
+        slice_index: message.slice_index,
+        fill_price: message.fill_price,
+        fill_quantity: message.fill_quantity,
+    })
+}
+
+pub fn encode_twap_completed(value: &WireTwapCompleted) -> Result<Vec<u8>, PayloadCodecError> {
+    let value = validate_twap_completed(value.clone())?;
+    Ok(wrap_payload(
+        "TwapCompleted",
+        generated::hl::canonical::v1::TwapCompleted {
+            order_id: value.order_id,
+            filled_quantity: value.filled_quantity,
+            average_price: value.average_price,
+        }
+        .encode_to_vec(),
+    ))
+}
+
+pub fn decode_twap_completed(bytes: &[u8]) -> Result<WireTwapCompleted, PayloadCodecError> {
+    let message = generated::hl::canonical::v1::TwapCompleted::decode(
+        unwrap_payload("TwapCompleted", bytes)?.as_slice(),
+    )
+    .map_err(|source| PayloadCodecError::Decode {
+        kind: "TwapCompleted".to_owned(),
+        source,
+    })?;
+    validate_twap_completed(WireTwapCompleted {
+        order_id: message.order_id,
+        filled_quantity: message.filled_quantity,
+        average_price: message.average_price,
     })
 }
 
@@ -2099,11 +2252,36 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
         "OrderCancelled" => default_message::<generated::hl::canonical::v1::OrderCancelled>(),
         "OrderRejected" => default_message::<generated::hl::canonical::v1::OrderRejected>(),
         "TriggerOrderActivated" => {
-            default_message::<generated::hl::canonical::v1::TriggerOrderActivated>()
+            return encode_trigger_order_activated(&WireTriggerOrderActivated {
+                order_id: "synthetic-default-order".to_owned(),
+                trigger_price: "1".to_owned(),
+                oracle_price: "1".to_owned(),
+            });
         }
-        "TwapStarted" => default_message::<generated::hl::canonical::v1::TwapStarted>(),
-        "TwapSliceFilled" => default_message::<generated::hl::canonical::v1::TwapSliceFilled>(),
-        "TwapCompleted" => default_message::<generated::hl::canonical::v1::TwapCompleted>(),
+        "TwapStarted" => {
+            return encode_twap_started(&WireTwapStarted {
+                order_id: "synthetic-default-order".to_owned(),
+                account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+                market_id: "perp:BTC".to_owned(),
+                total_quantity: "1".to_owned(),
+                end_time_micros: 1_700_000_000_000_000,
+            });
+        }
+        "TwapSliceFilled" => {
+            return encode_twap_slice_filled(&WireTwapSliceFilled {
+                order_id: "synthetic-default-order".to_owned(),
+                slice_index: 0,
+                fill_price: "1".to_owned(),
+                fill_quantity: "1".to_owned(),
+            });
+        }
+        "TwapCompleted" => {
+            return encode_twap_completed(&WireTwapCompleted {
+                order_id: "synthetic-default-order".to_owned(),
+                filled_quantity: "1".to_owned(),
+                average_price: "1".to_owned(),
+            });
+        }
         "TradeMatched" => {
             return encode_trade_matched(&WireTradeMatched {
                 trade_id: None,
@@ -2323,17 +2501,6 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
     ) {
         validate_account_payload_size(kind, bytes)?;
     }
-    let message = unwrap_payload(kind, bytes)?;
-    macro_rules! decode {
-        ($type:ty) => {
-            <$type>::decode(message.as_slice())
-                .map(|_| ())
-                .map_err(|source| PayloadCodecError::Decode {
-                    kind: kind.to_owned(),
-                    source,
-                })
-        };
-    }
     match kind {
         "OrderAccepted" => decode_order_accepted(bytes).map(|_| ()),
         "OrderRested" => decode_order_rested(bytes).map(|_| ()),
@@ -2342,10 +2509,10 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "OrderFilled" => decode_order_filled(bytes).map(|_| ()),
         "OrderCancelled" => decode_order_cancelled(bytes).map(|_| ()),
         "OrderRejected" => decode_order_rejected(bytes).map(|_| ()),
-        "TriggerOrderActivated" => decode!(generated::hl::canonical::v1::TriggerOrderActivated),
-        "TwapStarted" => decode!(generated::hl::canonical::v1::TwapStarted),
-        "TwapSliceFilled" => decode!(generated::hl::canonical::v1::TwapSliceFilled),
-        "TwapCompleted" => decode!(generated::hl::canonical::v1::TwapCompleted),
+        "TriggerOrderActivated" => decode_trigger_order_activated(bytes).map(|_| ()),
+        "TwapStarted" => decode_twap_started(bytes).map(|_| ()),
+        "TwapSliceFilled" => decode_twap_slice_filled(bytes).map(|_| ()),
+        "TwapCompleted" => decode_twap_completed(bytes).map(|_| ()),
         "TradeMatched" => decode_trade_matched(bytes).map(|_| ()),
         "DepositCredited" => decode_deposit_credited(bytes).map(|_| ()),
         "WithdrawalDebited" => decode_withdrawal_debited(bytes).map(|_| ()),
@@ -2672,6 +2839,56 @@ fn validate_order_rejected(
     value.reason_code =
         required_bounded_text("OrderRejected", "reason_code", value.reason_code, 128)?;
     value.reason = required_bounded_text("OrderRejected", "reason", value.reason, 1_024)?;
+    Ok(value)
+}
+
+fn validate_trigger_order_activated(
+    mut value: WireTriggerOrderActivated,
+) -> Result<WireTriggerOrderActivated, PayloadCodecError> {
+    value.order_id = required_payload_field("TriggerOrderActivated", "order_id", value.order_id)?;
+    value.trigger_price = required_payload_field(
+        "TriggerOrderActivated",
+        "trigger_price",
+        value.trigger_price,
+    )?;
+    value.oracle_price =
+        required_payload_field("TriggerOrderActivated", "oracle_price", value.oracle_price)?;
+    Ok(value)
+}
+
+fn validate_twap_started(mut value: WireTwapStarted) -> Result<WireTwapStarted, PayloadCodecError> {
+    value.order_id = required_payload_field("TwapStarted", "order_id", value.order_id)?;
+    value.account_id = required_payload_field("TwapStarted", "account_id", value.account_id)?;
+    value.market_id = required_payload_field("TwapStarted", "market_id", value.market_id)?;
+    value.total_quantity =
+        required_payload_field("TwapStarted", "total_quantity", value.total_quantity)?;
+    if value.end_time_micros < 0 {
+        return Err(PayloadCodecError::Invalid {
+            kind: "TwapStarted".to_owned(),
+            reason: "end_time_micros must be nonnegative".to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+fn validate_twap_slice_filled(
+    mut value: WireTwapSliceFilled,
+) -> Result<WireTwapSliceFilled, PayloadCodecError> {
+    value.order_id = required_payload_field("TwapSliceFilled", "order_id", value.order_id)?;
+    value.fill_price = required_payload_field("TwapSliceFilled", "fill_price", value.fill_price)?;
+    value.fill_quantity =
+        required_payload_field("TwapSliceFilled", "fill_quantity", value.fill_quantity)?;
+    Ok(value)
+}
+
+fn validate_twap_completed(
+    mut value: WireTwapCompleted,
+) -> Result<WireTwapCompleted, PayloadCodecError> {
+    value.order_id = required_payload_field("TwapCompleted", "order_id", value.order_id)?;
+    value.filled_quantity =
+        required_payload_field("TwapCompleted", "filled_quantity", value.filled_quantity)?;
+    value.average_price =
+        required_payload_field("TwapCompleted", "average_price", value.average_price)?;
     Ok(value)
 }
 
