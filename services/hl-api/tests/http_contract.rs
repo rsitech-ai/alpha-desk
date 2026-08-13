@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hl_api::{
-    ApiConfig, AppState, AuthMode, HEALTH_JSON_FIELDS, ROUTER_PATHS, openapi_yaml, spawn_local,
+    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, HEALTH_JSON_FIELDS, ROUTER_PATHS,
+    SNAPSHOT_UNAVAILABLE_REASON_CODES, openapi_yaml, spawn_local,
 };
 use http::Request;
 use serde_json::Value;
@@ -308,12 +309,50 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         assert!(document.contains(field), "missing health field {field}");
     }
     assert!(document.contains("HEALTH_STATE_GREEN"));
-    assert!(document.contains("hl.capture.status.v4"));
-    assert!(document.contains("hl.capture.status.v5"));
+    for schema_id in CAPTURE_STATUS_SCHEMA_IDS {
+        assert!(
+            document.contains(schema_id),
+            "missing capture status schema {schema_id}"
+        );
+    }
+    assert!(document.contains("503"));
+    for reason_code in SNAPSHOT_UNAVAILABLE_REASON_CODES {
+        assert!(
+            document.contains(reason_code),
+            "missing snapshot reason {reason_code}"
+        );
+    }
     assert!(document.contains("501"));
     assert!(document.contains("query_budget_exceeded"));
     assert!(document.contains("429"));
     assert!(document.contains("max_rows"));
+    assert!(
+        !document.contains("live-qualified"),
+        "OpenAPI must not claim live-qualified sources"
+    );
+}
+
+#[tokio::test]
+async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
+    let directory = tempdir().expect("temporary directory");
+    let state = state_from(directory.path(), "loopback-dev", None, None, None);
+    let (status, body) = call(&state, "/v1/openapi.yaml", &[]).await;
+    assert_eq!(status, 200);
+    let document = body.as_str().expect("OpenAPI YAML");
+    assert_eq!(document, openapi_yaml());
+    for schema_id in CAPTURE_STATUS_SCHEMA_IDS {
+        assert!(
+            document.contains(schema_id),
+            "served OpenAPI missing {schema_id}"
+        );
+    }
+    assert!(document.contains("503"));
+    for reason_code in SNAPSHOT_UNAVAILABLE_REASON_CODES {
+        assert!(
+            document.contains(reason_code),
+            "served OpenAPI missing {reason_code}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
