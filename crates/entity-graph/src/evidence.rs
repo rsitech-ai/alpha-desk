@@ -51,6 +51,27 @@ impl LinkKind {
         }
     }
 
+    /// Identity-bearing hard links that may form an administrative group.
+    ///
+    /// Vault membership is a hard protocol fact (a depositor is certainly in
+    /// that vault) but does not collapse distinct depositors into one entity.
+    /// Soft evidence never forms a group.
+    #[must_use]
+    pub const fn forms_administrative_group(self) -> bool {
+        match self {
+            Self::ProtocolSubaccount
+            | Self::ProtocolVaultManager
+            | Self::ApprovedOperatorAnnotation => true,
+            Self::ProtocolVaultMembership
+            | Self::FundingPath
+            | Self::CoordinatedExecution
+            | Self::SizePriceFingerprint
+            | Self::LeaderFollower
+            | Self::CounterpartyInventoryHandoff
+            | Self::StrategyMigration => false,
+        }
+    }
+
     #[must_use]
     pub const fn evidence_family(self) -> EvidenceFamily {
         match self {
