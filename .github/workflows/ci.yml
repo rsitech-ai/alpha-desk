@@ -226,6 +226,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install just 1.42.4 from verified archive
+        timeout-minutes: 5
+        env:
+          JUST_SHA256: 678efc1cfbd5fa5a88375daa7e2f3864a049d6d63a0296df925a2ae5f516cb56
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/just.tar.gz" \
+            https://github.com/casey/just/releases/download/1.42.4/just-1.42.4-x86_64-unknown-linux-musl.tar.gz
+          echo "$JUST_SHA256  $RUNNER_TEMP/just.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
+          chmod 0755 "$RUNNER_TEMP/bin/just"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/just" --version | grep -F 'just 1.42.4'
+
       - name: Pull and validate exact locked images
         timeout-minutes: 20
         run: |

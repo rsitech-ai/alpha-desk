@@ -1260,15 +1260,26 @@ fn compose_signal_interruption_cleans_only_the_interrupted_gate_project() {
     let fixture = ComposeSmokeFixture::new();
     let mut child = fixture.spawn("signal");
     wait_for_path(&fixture.signal_marker);
-    let status = Command::new("/bin/kill")
-        .args(["-TERM", &format!("-{}", child.id())])
+    let pid = child.id();
+    let leader = Command::new("/bin/kill")
+        .args(["-s", "TERM", "--", &pid.to_string()])
         .status()
         .unwrap();
-    assert!(status.success());
+    let group = Command::new("/bin/kill")
+        .args(["-s", "TERM", "--", &format!("-{pid}")])
+        .status()
+        .unwrap();
+    assert!(
+        leader.success() || group.success(),
+        "TERM must reach the smoke script leader or its process group: leader={leader:?} group={group:?}"
+    );
 
     let status = child.wait().unwrap();
 
-    assert!(!status.success());
+    assert!(
+        !status.success(),
+        "SIGINT/SIGTERM must fail the smoke script, got {status:?}"
+    );
     let calls = fixture.calls();
     let cleanup = calls
         .lines()
@@ -1811,7 +1822,7 @@ impl ComposeSmokeFixture {
                 "      timeout) exit 124 ;;\n",
                 "      signal)\n",
                 "        : > \"$STAGE_GATE_SIGNAL_MARKER\"\n",
-                "        sleep 30\n",
+                "        exec /bin/sleep 30\n",
                 "        ;;\n",
                 "      success) exit 0 ;;\n",
                 "      *) exit 92 ;;\n",
