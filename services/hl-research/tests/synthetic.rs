@@ -77,6 +77,8 @@ fn synthetic_experiment_runs_and_does_not_claim_stage_pass() {
     assert!(!report.alpha_qualified);
     assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
+    assert!(!report.live_corpus);
+    assert!(!report.replica_cmds_used);
     assert_eq!(report.walk_forward, "not_evaluated");
     assert_eq!(report.holdout, "not_evaluated");
     assert_eq!(report.shadow_live, "not_evaluated");

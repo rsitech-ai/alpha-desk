@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::claims::serialize_unclaimed;
+use crate::claims::{serialize_denied_true, serialize_unclaimed};
 use crate::error::ResearchError;
 
 use super::purge::assert_train_labels_do_not_overlap_validation;
@@ -20,6 +20,10 @@ pub struct WalkForwardReport {
     pub significance_claimed: bool,
     #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub live_corpus: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub replica_cmds_used: bool,
     pub fold_count: usize,
     pub fold_hash: String,
     pub folds: Vec<FoldAssignment>,
@@ -68,6 +72,8 @@ pub fn run_walk_forward(dataset: &ResearchDataset) -> Result<WalkForwardReport, 
         alpha_qualified: false,
         significance_claimed: false,
         stage_pass_claimed: false,
+        live_corpus: false,
+        replica_cmds_used: false,
         fold_count: assignments.len(),
         fold_hash: hex::encode(fold_hash),
         folds: assignments,

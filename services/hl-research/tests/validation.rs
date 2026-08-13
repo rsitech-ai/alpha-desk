@@ -48,6 +48,8 @@ fn overlapping_labels_are_purged_and_embargo_excludes_adjacent_rows() {
     assert!(!report.alpha_qualified);
     assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
+    assert!(!report.live_corpus);
+    assert!(!report.replica_cmds_used);
 
     let fold0 = &report.folds[0];
     assert_eq!(fold0.train_ids, vec!["train-safe"]);
@@ -144,6 +146,8 @@ fn holdout_isolation_cannot_see_training_rows_and_does_not_pass() {
     assert!(!report.alpha_qualified);
     assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
+    assert!(!report.live_corpus);
+    assert!(!report.replica_cmds_used);
     assert_eq!(report.training_rows_visible, 0);
     assert_eq!(report.holdout_rows, 1);
     let mut claimed = report.clone();
@@ -156,6 +160,8 @@ fn holdout_isolation_cannot_see_training_rows_and_does_not_pass() {
     assert_eq!(encoded["holdout_passed"], false);
     assert_eq!(encoded["alpha_qualified"], false);
     assert_eq!(encoded["significance_claimed"], false);
+    assert_eq!(encoded["live_corpus"], false);
+    assert_eq!(encoded["replica_cmds_used"], false);
 }
 
 #[test]
@@ -305,5 +311,7 @@ fn status_does_not_claim_locked_holdout_or_stage_pass() {
     assert!(!status.alpha_qualified);
     assert!(!status.stage_pass_claimed);
     assert!(!status.locked_corpus);
+    assert!(!status.live_corpus);
+    assert!(!status.replica_cmds_used);
     assert!(!status.trading_signer);
 }

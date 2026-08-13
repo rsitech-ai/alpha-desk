@@ -28,6 +28,8 @@ fn shadow_capture_records_decision_then_later_outcome() {
     assert!(!report.alpha_qualified);
     assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
+    assert!(!report.live_corpus);
+    assert!(!report.replica_cmds_used);
     assert_eq!(report.decisions, 1);
     assert_eq!(report.outcomes, 1);
 }

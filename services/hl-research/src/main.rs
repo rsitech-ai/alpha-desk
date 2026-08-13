@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use hl_research::{
-    ResearchError, ResearchStatus, run_evaluate_folds_bytes, run_holdout_isolation_bytes,
-    run_promote_bytes, run_shadow_capture_bytes, run_synthetic_bytes, run_walk_forward_bytes,
+    ResearchError, ResearchStatus, load_corpus_path, run_evaluate_folds_bytes,
+    run_holdout_isolation_bytes, run_promote_bytes, run_shadow_capture_bytes, run_synthetic_bytes,
+    run_walk_forward_bytes,
 };
 use serde::Serialize;
 
@@ -50,7 +51,7 @@ fn execute(arguments: Vec<OsString>) -> Result<String, ResearchError> {
             approved_key,
             output,
         } => {
-            let bytes = fs::read(&fixture).map_err(|_| ResearchError::InvalidFixture)?;
+            let bytes = load_corpus_path(&fixture)?;
             let key = match approved_key {
                 Some(hex_key) => {
                     let decoded =
@@ -87,7 +88,7 @@ fn execute(arguments: Vec<OsString>) -> Result<String, ResearchError> {
 }
 
 fn read_fixture(path: &std::path::Path) -> Result<Vec<u8>, ResearchError> {
-    fs::read(path).map_err(|_| ResearchError::InvalidFixture)
+    load_corpus_path(path)
 }
 
 fn write_json<T: Serialize>(value: T) -> Result<String, ResearchError> {
