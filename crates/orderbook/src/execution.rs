@@ -7,7 +7,8 @@ use domain_types::{
 
 use crate::book::{BookHealth, OrderBook};
 
-const UNMODELED_FEE_SCHEDULE: &str = "none";
+pub const FEE_SCHEDULE_NONE: &str = "none";
+pub const FEE_SCHEDULE_TAKER_100BPS_V1: &str = "taker-100bps@1.0.0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionRequest {
@@ -66,26 +67,13 @@ pub fn quote_execution(
     if request.quantity.raw() <= 0 {
         return Err(ExecutionError::InvalidQuantity);
     }
-    if request.max_participation != ProbabilityPpm::ONE {
-        return Err(ExecutionError::UnsupportedAssumption(
-            "partial participation is unmodeled",
-        ));
-    }
-    if request.exit_stress_multiplier != ProbabilityPpm::ONE {
-        return Err(ExecutionError::UnsupportedAssumption(
-            "stressed exit cost is unmodeled",
-        ));
-    }
-    if request.fee_schedule_id.as_str() != UNMODELED_FEE_SCHEDULE {
-        return Err(ExecutionError::UnsupportedAssumption(
-            "fee schedules are unmodeled",
-        ));
-    }
     if !latency_is_point_estimate(latency) {
         return Err(ExecutionError::UnsupportedAssumption(
             "latency-dependent fill times are unmodeled",
         ));
     }
+    let fee_bps = taker_fee_bps(&request.fee_schedule_id)?;
+    let quantity = scale_quantity(request.quantity, request.max_participation)?;
 
     let (best_bid, best_ask) = match (book.best_bid(), book.best_ask()) {
         (Some(bid), Some(ask)) => (bid.price, ask.price),
@@ -96,10 +84,11 @@ pub fn quote_execution(
         }
     };
 
-    let mut remaining = request.quantity;
-    let mut filled = Quantity::from_raw(0, request.quantity.scale())
-        .map_err(|_| ExecutionError::InvalidQuantity)?;
+    let mut remaining = quantity;
+    let mut filled =
+        Quantity::from_raw(0, quantity.scale()).map_err(|_| ExecutionError::InvalidQuantity)?;
     let mut notional: Option<ExactQuoteNotional> = None;
+    let mut capacity_by_cost = BTreeMap::new();
     let opposite = match request.side {
         OrderSide::Buy => book.l2_asks(),
         OrderSide::Sell => book.l2_bids(),
@@ -127,6 +116,11 @@ pub fn quote_execution(
         remaining = remaining
             .checked_sub(take)
             .map_err(|_| ExecutionError::InsufficientLiquidity)?;
+        let prefix_vwap = exact_vwap(notional.as_ref(), filled)?;
+        let prefix_impact = exact_impact_bps(prefix_vwap, best_bid, best_ask)?;
+        let prefix_usd =
+            usd_from_notional(notional.as_ref().ok_or(ExecutionError::InexactMetric)?)?;
+        capacity_by_cost.insert(prefix_impact, prefix_usd);
     }
     if remaining.raw() != 0 {
         return Err(ExecutionError::InsufficientLiquidity);
@@ -134,6 +128,13 @@ pub fn quote_execution(
     let vwap = exact_vwap(notional.as_ref(), filled)?;
     let spread_bps = exact_spread_bps(best_bid, best_ask)?;
     let impact_bps = exact_impact_bps(vwap, best_bid, best_ask)?;
+    if capacity_by_cost.is_empty() {
+        return Err(ExecutionError::InexactMetric);
+    }
+    let normal_exit_cost_bps = spread_bps
+        .checked_add(fee_bps)
+        .map_err(|_| ExecutionError::InexactMetric)?;
+    let stressed_exit_cost_bps = scale_bps(normal_exit_cost_bps, request.exit_stress_multiplier)?;
     Ok(ExecutionEstimate {
         fill_probability: ProbabilityPpm::ONE,
         expected_fill_quantity: filled,
@@ -144,9 +145,9 @@ pub fn quote_execution(
         impact_bps,
         queue_uncertainty: ProbabilityPpm::ZERO,
         time_to_fill: *latency,
-        normal_exit_cost_bps: spread_bps,
-        stressed_exit_cost_bps: spread_bps,
-        capacity_by_cost: BTreeMap::new(),
+        normal_exit_cost_bps,
+        stressed_exit_cost_bps,
+        capacity_by_cost,
         as_of_block: book.as_of_block(),
     })
 }
@@ -155,6 +156,51 @@ fn latency_is_point_estimate(latency: &LatencyDistribution) -> bool {
     latency.p10_micros == latency.p50_micros
         && latency.p50_micros == latency.p90_micros
         && latency.p90_micros == latency.p99_micros
+}
+
+fn taker_fee_bps(schedule: &FeeScheduleId) -> Result<BasisPoints, ExecutionError> {
+    let raw = match schedule.as_str() {
+        FEE_SCHEDULE_NONE => 0,
+        FEE_SCHEDULE_TAKER_100BPS_V1 => 100,
+        _ => {
+            return Err(ExecutionError::UnsupportedAssumption(
+                "unknown fee schedule",
+            ));
+        }
+    };
+    BasisPoints::from_raw(raw, 0).map_err(|_| ExecutionError::InexactMetric)
+}
+
+fn scale_quantity(
+    quantity: Quantity,
+    participation: ProbabilityPpm,
+) -> Result<Quantity, ExecutionError> {
+    let raw = scale_i128(quantity.raw(), participation)?;
+    if raw <= 0 {
+        return Err(ExecutionError::InvalidQuantity);
+    }
+    Quantity::from_raw(raw, quantity.scale()).map_err(|_| ExecutionError::InvalidQuantity)
+}
+
+fn scale_bps(bps: BasisPoints, stress: ProbabilityPpm) -> Result<BasisPoints, ExecutionError> {
+    let raw = scale_i128(bps.raw(), stress)?;
+    BasisPoints::from_raw(raw, bps.scale()).map_err(|_| ExecutionError::InexactMetric)
+}
+
+fn scale_i128(value: i128, probability: ProbabilityPpm) -> Result<i128, ExecutionError> {
+    let product = num_bigint::BigInt::from(value) * i128::from(probability.ppm());
+    let denominator = num_bigint::BigInt::from(1_000_000_i128);
+    let quotient = &product / &denominator;
+    let remainder = &product - &quotient * &denominator;
+    if remainder != num_bigint::BigInt::from(0) {
+        return Err(ExecutionError::InexactMetric);
+    }
+    i128::try_from(&quotient).map_err(|_| ExecutionError::InexactMetric)
+}
+
+fn usd_from_notional(notional: &ExactQuoteNotional) -> Result<UsdAmount, ExecutionError> {
+    let raw = i128::try_from(notional.coefficient()).map_err(|_| ExecutionError::InexactMetric)?;
+    UsdAmount::from_raw(raw, notional.scale()).map_err(|_| ExecutionError::InexactMetric)
 }
 
 fn exact_vwap(

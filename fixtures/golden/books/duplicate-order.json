@@ -1,0 +1,30 @@
+{
+  "schema": "hl.orderbook.fixture.v1",
+  "id": "duplicate-order",
+  "source_qualification": "synthetic_unassessed",
+  "stage_1_qualified": false,
+  "stage_2_qualified": false,
+  "market_id": "perp:ETH",
+  "start_block": 1,
+  "price_scale": 0,
+  "quantity_scale": 0,
+  "ops": [
+    {
+      "op": "Snapshot",
+      "sequence": 8,
+      "as_of_block": 8,
+      "orders": [
+        {"order_id": "dup", "side": "buy", "price": "100", "remaining": "1", "sequence": 1},
+        {"order_id": "dup", "side": "buy", "price": "99", "remaining": "1", "sequence": 2}
+      ]
+    }
+  ],
+  "expected": {
+    "health": {"kind": "Red", "reason": "duplicate order id"},
+    "sequence": 8,
+    "as_of_block": 8,
+    "active_order_ids": [],
+    "l2_bids": [],
+    "l2_asks": []
+  }
+}

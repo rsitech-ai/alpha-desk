@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
+
 use domain_types::{
     BasisPoints, BlockHeight, FeeScheduleId, LatencyDistribution, MarketId, OrderId, OrderSide,
-    Price, ProbabilityPpm, Quantity,
+    Price, ProbabilityPpm, Quantity, UsdAmount,
 };
 use orderbook::{
-    BookHealth, ExecutionError, ExecutionRequest, OrderBook, RestingOrder, quote_execution,
+    BookHealth, ExecutionError, ExecutionRequest, FEE_SCHEDULE_NONE, FEE_SCHEDULE_TAKER_100BPS_V1,
+    OrderBook, RestingOrder, quote_execution,
 };
 
 #[test]
@@ -36,6 +39,14 @@ fn healthy_two_sided_book_quotes_exact_vwap_spread_and_impact() {
     assert_eq!(estimate.p50_vwap, price("101"));
     assert_eq!(estimate.spread_bps, bps(200));
     assert_eq!(estimate.impact_bps, bps(100));
+    assert_eq!(estimate.normal_exit_cost_bps, bps(200));
+    assert_eq!(estimate.stressed_exit_cost_bps, bps(200));
+    assert_eq!(estimate.p10_vwap, estimate.p50_vwap);
+    assert_eq!(estimate.p90_vwap, estimate.p50_vwap);
+    assert_eq!(
+        estimate.capacity_by_cost,
+        BTreeMap::from([(bps(100), usd("202"))])
+    );
     assert_eq!(estimate.fill_probability, ProbabilityPpm::ONE);
     assert_eq!(estimate.time_to_fill, latency);
 
@@ -78,6 +89,58 @@ fn two_level_visible_vwap_is_exact_when_spread_divides() {
     assert_eq!(estimate.p50_vwap, price("101"));
     assert_eq!(estimate.spread_bps, bps(5_000));
     assert_eq!(estimate.impact_bps, bps(2_625));
+    assert_eq!(
+        estimate.capacity_by_cost,
+        BTreeMap::from([(bps(2_500), usd("100")), (bps(2_625), usd("202"))])
+    );
+}
+
+#[test]
+fn exact_fee_participation_and_stress_are_applied_without_inventing_vwap_bands() {
+    let market = MarketId::new("perp:BTC").unwrap();
+    let mut book = OrderBook::awaiting_snapshot(market.clone(), BlockHeight::new(1));
+    book.apply_snapshot(
+        1,
+        BlockHeight::new(20),
+        vec![
+            RestingOrder {
+                order_id: OrderId::new("bid-1").unwrap(),
+                side: OrderSide::Buy,
+                price: price("99"),
+                remaining: qty("10"),
+                sequence: 1,
+            },
+            RestingOrder {
+                order_id: OrderId::new("ask-1").unwrap(),
+                side: OrderSide::Sell,
+                price: price("101"),
+                remaining: qty("2"),
+                sequence: 2,
+            },
+        ],
+    );
+
+    let mut fee = buy_request(&market, "2");
+    fee.fee_schedule_id = FeeScheduleId::new(FEE_SCHEDULE_TAKER_100BPS_V1).unwrap();
+    let with_fee = quote_execution(&book, &fee, &point_latency()).unwrap();
+    assert_eq!(with_fee.p50_vwap, price("101"));
+    assert_eq!(with_fee.normal_exit_cost_bps, bps(300));
+    assert_eq!(with_fee.stressed_exit_cost_bps, bps(300));
+
+    let mut half = buy_request(&market, "2");
+    half.max_participation = ProbabilityPpm::from_ppm(500_000).unwrap();
+    let half_fill = quote_execution(&book, &half, &point_latency()).unwrap();
+    assert_eq!(half_fill.expected_fill_quantity, qty("1"));
+    assert_eq!(
+        half_fill.capacity_by_cost,
+        BTreeMap::from([(bps(100), usd("101"))])
+    );
+
+    let mut stressed = buy_request(&market, "2");
+    stressed.exit_stress_multiplier = ProbabilityPpm::from_ppm(500_000).unwrap();
+    let stressed_quote = quote_execution(&book, &stressed, &point_latency()).unwrap();
+    assert_eq!(stressed_quote.normal_exit_cost_bps, bps(200));
+    assert_eq!(stressed_quote.stressed_exit_cost_bps, bps(100));
 }
 
 #[test]
@@ -151,7 +214,7 @@ fn unmodeled_assumptions_and_inexact_metrics_are_refused() {
     assert_eq!(
         quote_execution(&book, &fee, &point_latency()),
         Err(ExecutionError::UnsupportedAssumption(
-            "fee schedules are unmodeled",
+            "unknown fee schedule"
         ))
     );
 
@@ -159,9 +222,7 @@ fn unmodeled_assumptions_and_inexact_metrics_are_refused() {
     participation.max_participation = ProbabilityPpm::from_ppm(500_000).unwrap();
     assert_eq!(
         quote_execution(&book, &participation, &point_latency()),
-        Err(ExecutionError::UnsupportedAssumption(
-            "partial participation is unmodeled",
-        ))
+        Err(ExecutionError::InexactMetric)
     );
 
     let distributed = LatencyDistribution::new(1, 2, 3, 4).unwrap();
@@ -198,7 +259,7 @@ fn buy_request(market: &MarketId, quantity: &str) -> ExecutionRequest {
         side: OrderSide::Buy,
         quantity: qty(quantity),
         max_participation: ProbabilityPpm::ONE,
-        fee_schedule_id: FeeScheduleId::new("none").unwrap(),
+        fee_schedule_id: FeeScheduleId::new(FEE_SCHEDULE_NONE).unwrap(),
         exit_stress_multiplier: ProbabilityPpm::ONE,
     }
 }
@@ -217,4 +278,8 @@ fn qty(value: &str) -> Quantity {
 
 fn bps(raw: i128) -> BasisPoints {
     BasisPoints::from_raw(raw, 0).unwrap()
+}
+
+fn usd(value: &str) -> UsdAmount {
+    UsdAmount::parse_at_scale(value, 0).unwrap()
 }
