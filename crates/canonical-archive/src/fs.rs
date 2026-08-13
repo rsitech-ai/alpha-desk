@@ -313,6 +313,28 @@ pub fn open_writer_lock(root: &Path, relative: &Path) -> Result<File, ArchiveErr
     Ok(file)
 }
 
+pub fn open_shared_lease(root: &Path, relative: &Path) -> Result<File, ArchiveError> {
+    validate_relative(relative)?;
+    let parent_relative = relative.parent().ok_or(ArchiveError::UnsafePath)?;
+    ensure_directory(root, parent_relative)?;
+    let path = root.join(relative);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|_| ArchiveError::Io("opening archive root lease"))?;
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|_| ArchiveError::Io("inspecting archive root lease"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ArchiveError::UnsafePath);
+    }
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared)
+        .map_err(|_| ArchiveError::WriterBusy)?;
+    Ok(file)
+}
+
 fn validate_existing_components(root: &Path, relative: &Path) -> Result<(), ArchiveError> {
     let mut current = root.to_path_buf();
     for component in relative.components() {
