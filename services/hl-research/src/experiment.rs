@@ -154,15 +154,19 @@ impl ExperimentRegistry {
         }
     }
 
-    pub fn open_holdout(&self, _experiment_id: &ExperimentId) -> Result<(), ResearchError> {
+    pub fn get(&self, experiment_id: &ExperimentId) -> Result<&ExperimentRecord, ResearchError> {
+        self.records
+            .iter()
+            .find(|record| record.experiment_id == *experiment_id)
+            .ok_or(ResearchError::InvalidFixture)
+    }
+
+    pub fn open_locked_holdout(&self, experiment_id: &ExperimentId) -> Result<(), ResearchError> {
+        let _ = self.get(experiment_id)?;
         Err(ResearchError::HoldoutNotImplemented)
     }
 
-    pub fn run_walk_forward(&self, _experiment_id: &ExperimentId) -> Result<(), ResearchError> {
-        Err(ResearchError::WalkForwardNotImplemented)
-    }
-
-    pub fn capture_shadow_live(&self, _experiment_id: &ExperimentId) -> Result<(), ResearchError> {
-        Err(ResearchError::ShadowLiveNotImplemented)
+    pub fn open_holdout(&self, experiment_id: &ExperimentId) -> Result<(), ResearchError> {
+        self.open_locked_holdout(experiment_id)
     }
 }
