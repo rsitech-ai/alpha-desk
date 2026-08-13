@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -399,6 +400,7 @@ pub struct CaptureRuntimeConfig {
     heartbeat_interval: Duration,
     shutdown_grace: Duration,
     build_id: String,
+    status_listen: Option<SocketAddr>,
 }
 
 impl CaptureRuntimeConfig {
@@ -430,7 +432,14 @@ impl CaptureRuntimeConfig {
             heartbeat_interval,
             shutdown_grace,
             build_id,
+            status_listen: None,
         })
+    }
+
+    #[must_use]
+    pub const fn with_status_listen(mut self, status_listen: Option<SocketAddr>) -> Self {
+        self.status_listen = status_listen;
+        self
     }
 }
 
@@ -573,6 +582,19 @@ impl CaptureRuntime {
                 }
             }
         }));
+
+        if let Some(listen) = self.config.status_listen {
+            let status_path = self.status_writer.path().to_path_buf();
+            let operator_cancellation = cancellation.child_token();
+            tasks.push(OwnedTask::new("operator-status", async move {
+                crate::operator::serve_operator_status(status_path, listen, operator_cancellation)
+                    .await
+                    .map_err(|error| AppError::TaskFailed {
+                        task: "operator-status",
+                        reason_code: error.reason_code(),
+                    })
+            }));
+        }
 
         let result = run_owned_tasks(cancellation, self.config.shutdown_grace, tasks).await;
         let final_health = if result.is_ok() {

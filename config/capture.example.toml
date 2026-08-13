@@ -22,6 +22,7 @@ publish_timeout_millis = 5000
 backpressure_timeout_millis = 5000
 shutdown_grace_millis = 15000
 disk_reserve_bytes = 10737418240
+status_listen = "127.0.0.1:8741"
 
 [spool]
 path = "state/capture-spool"
