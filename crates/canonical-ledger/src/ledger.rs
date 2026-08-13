@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use canonical_events::{BlockEnvelope, ConfirmationClass};
+use canonical_events::BlockEnvelope;
 use domain_types::{BlockHeight, ChainId};
 
 use crate::{
@@ -388,13 +388,7 @@ impl<R: EventReducer> CanonicalLedger<R> {
         if block.chain_id() != self.state.chain_id() {
             return Err(LedgerError::ChainMismatch);
         }
-        if !matches!(
-            block.confirmation_class(),
-            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent
-        ) {
-            return Err(LedgerError::NonCommittedBlock);
-        }
-        Ok(())
+        crate::correction::require_committed_confirmation(block.confirmation_class())
     }
 
     fn duplicate_checkpoint(

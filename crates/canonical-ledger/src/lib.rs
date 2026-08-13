@@ -3,6 +3,7 @@
 mod account;
 mod checkpoint;
 mod composite;
+mod correction;
 mod error;
 mod ledger;
 mod market;
@@ -26,6 +27,7 @@ pub use checkpoint::{CheckpointArtifact, CheckpointCompatibility};
 pub use composite::{
     CanonicalStateComponentVersionV1, CanonicalStateError, CanonicalStateReducerV1,
 };
+pub use correction::{ConfirmationAdmission, admit_confirmation, require_committed_confirmation};
 pub use error::{CheckpointError, LedgerError, ReducerError, StateImageError, StateKeyError};
 pub use ledger::{
     ApplyOutcome, CanonicalLedger, LedgerLimits, MAX_BLOCK_DELTA_ENTRIES,
