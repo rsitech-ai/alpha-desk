@@ -137,7 +137,15 @@ fn fragility(red_book: bool, unsupported: bool) -> FragilityResult {
             },
         ),
     );
-    simulate_fragility(&scenario, &[account], &book, -100).unwrap()
+    let snapshot = snapshot(HealthState::Green, green_values(&[]));
+    simulate_fragility(
+        &scenario,
+        &[account],
+        &book,
+        -100,
+        snapshot.require_observed_book_and_fills().unwrap(),
+    )
+    .unwrap()
 }
 
 fn context(
