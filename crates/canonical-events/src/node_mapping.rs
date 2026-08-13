@@ -29,6 +29,30 @@ pub enum MappingDisposition {
 pub enum EvidenceOnlyReason {
     MissingBlockContext,
     UnsupportedCanonicalSemantics,
+    OneSidedFill,
+    AuxiliaryOrderStatus,
+    AuxiliaryBookDiff,
+    IncompleteLedgerTransfer,
+    IncompleteLiquidation,
+    AuxiliaryMarketMetadata,
+}
+
+impl EvidenceOnlyReason {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::MissingBlockContext => "canonical_mapping.missing_block_context",
+            Self::UnsupportedCanonicalSemantics => {
+                "canonical_mapping.unsupported_canonical_semantics"
+            }
+            Self::OneSidedFill => "canonical_mapping.one_sided_fill",
+            Self::AuxiliaryOrderStatus => "canonical_mapping.auxiliary_order_status",
+            Self::AuxiliaryBookDiff => "canonical_mapping.auxiliary_book_diff",
+            Self::IncompleteLedgerTransfer => "canonical_mapping.incomplete_ledger_transfer",
+            Self::IncompleteLiquidation => "canonical_mapping.incomplete_liquidation",
+            Self::AuxiliaryMarketMetadata => "canonical_mapping.auxiliary_market_metadata",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -269,13 +293,8 @@ pub fn map_node_v1_record(
     catalog: &MarketCatalogV1,
     context: &NodeV1MappingContext,
 ) -> Result<MappingDisposition, MappingError> {
-    if record.kind() == NodeRecordKind::EmptyBatch {
-        return Ok(MappingDisposition::EmptyBlock);
-    }
-    if record.stream() != NodeStreamKind::Trades || record.kind() != NodeRecordKind::Trade {
-        return Ok(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::UnsupportedCanonicalSemantics,
-        ));
+    if let Some(disposition) = non_trade_disposition(record.stream(), record.kind()) {
+        return Ok(disposition);
     }
     let Some(block_number) = record.block_number() else {
         return Ok(MappingDisposition::EvidenceOnly(
@@ -337,6 +356,39 @@ pub fn map_node_v1_record(
     }
 
     Ok(MappingDisposition::Mapped(events))
+}
+
+fn non_trade_disposition(
+    stream: NodeStreamKind,
+    kind: NodeRecordKind,
+) -> Option<MappingDisposition> {
+    match kind {
+        NodeRecordKind::EmptyBatch => Some(MappingDisposition::EmptyBlock),
+        NodeRecordKind::Trade if stream == NodeStreamKind::Trades => None,
+        NodeRecordKind::Fill => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::OneSidedFill,
+        )),
+        NodeRecordKind::OrderStatus => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryOrderStatus,
+        )),
+        NodeRecordKind::RawBookDiff => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryBookDiff,
+        )),
+        NodeRecordKind::Transfer => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::IncompleteLedgerTransfer,
+        )),
+        NodeRecordKind::Liquidation => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::IncompleteLiquidation,
+        )),
+        NodeRecordKind::MarketMetadata => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryMarketMetadata,
+        )),
+        NodeRecordKind::Trade | NodeRecordKind::TransactionBlock | NodeRecordKind::MiscEvent => {
+            Some(MappingDisposition::EvidenceOnly(
+                EvidenceOnlyReason::UnsupportedCanonicalSemantics,
+            ))
+        }
+    }
 }
 
 fn required_u64(
