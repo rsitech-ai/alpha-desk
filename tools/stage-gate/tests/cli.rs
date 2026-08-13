@@ -685,15 +685,18 @@ fn approval_verifier_mutating_a_tracked_file_fails_final_snapshot_check() {
     let verifier = repository.join("fake-gpgv");
     let script = format!(
         concat!(
-            "#!/bin/bash\n",
-            "set -euo pipefail\n",
+            "#!/bin/sh\n",
+            "set -eu\n",
             "printf '%s\\n' mutated >> \"{}\"\n",
-            "statement=\"${{@:$#}}\"\n",
-            "case \"${{statement}}\" in\n",
-            "  *platform-data*) fingerprint=0123456789abcdef0123456789abcdef01234567 ;;\n",
-            "  *) fingerprint=89abcdef0123456789abcdef0123456789abcdef ;;\n",
-            "esac\n",
-            "printf '[GNUPG:] VALIDSIG %s\\n' \"${{fingerprint}}\"\n",
+            "statement=\"$1\"\n",
+            "for arg in \"$@\"; do\n",
+            "  statement=\"$arg\"\n",
+            "done\n",
+            "fingerprint=89abcdef0123456789abcdef0123456789abcdef\n",
+            "if /usr/bin/grep -F '\"role\":\"platform-data\"' \"$statement\" >/dev/null 2>&1; then\n",
+            "  fingerprint=0123456789abcdef0123456789abcdef01234567\n",
+            "fi\n",
+            "printf '[GNUPG:] VALIDSIG %s\\n' \"$fingerprint\"\n",
         ),
         repository.join("design.md").display()
     );
@@ -1444,12 +1447,14 @@ fn stage_gate_cli_check_helper() {
             thread::sleep(Duration::from_millis(10));
         }
     }
+    std::process::exit(0);
 }
 
 #[test]
 fn stage_gate_cli_identity_helper() {
     println!("fixture-tool 1.0.0");
     println!("host: fixture-target");
+    std::process::exit(0);
 }
 
 fn stage_gate_binary() -> &'static str {
