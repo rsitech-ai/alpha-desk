@@ -34,6 +34,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<ApiConfig>,
+    snapshot_read_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 pub struct ApiHandle {
@@ -61,10 +62,13 @@ impl Drop for ApiHandle {
 }
 
 pub async fn spawn_local(config: ApiConfig) -> Result<ApiHandle, std::io::Error> {
-    let listener = TcpListener::bind(config.bind()).await?;
+    spawn_state(AppState::from_config(config)).await
+}
+
+pub async fn spawn_state(state: AppState) -> Result<ApiHandle, std::io::Error> {
+    let listener = TcpListener::bind(state.inner.bind()).await?;
     let addr = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let state = AppState::from_config(config);
     let join = tokio::spawn(async move {
         let _ = serve(listener, state, shutdown_rx).await;
     });
@@ -107,12 +111,25 @@ impl AppState {
     pub fn from_config(config: ApiConfig) -> Self {
         Self {
             inner: Arc::new(config),
+            snapshot_read_hook: None,
+        }
+    }
+
+    /// Installs a hook that runs on the blocking pool before snapshot-backed
+    /// `/v1/health` and `/v1/capture/status` reads. Tests use this as a
+    /// blocking snapshot double; production callers must not install a hook.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_snapshot_read_hook(self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            inner: self.inner,
+            snapshot_read_hook: Some(Arc::new(hook)),
         }
     }
 
     #[must_use]
-    pub fn handle(&self, request: Request<Bytes>) -> (StatusCode, Vec<u8>) {
-        let response = self.dispatch(&request);
+    pub async fn handle(&self, request: Request<Bytes>) -> (StatusCode, Vec<u8>) {
+        let response = self.dispatch_request(request).await;
         let status = response.status();
         let body = response
             .into_body()
@@ -139,34 +156,25 @@ impl AppState {
                 ErrorBody::new("data_unavailable", "request_body"),
             );
         }
-        let request = Request::from_parts(parts, collected);
+        self.dispatch_request(Request::from_parts(parts, collected))
+            .await
+    }
+
+    async fn dispatch_request(&self, request: Request<Bytes>) -> Response<Full<Bytes>> {
         if let Some(response) = self.ungated_response(&request) {
             return response;
         }
+        let query = request.uri().query().map(str::to_owned);
+        let state = self.clone();
         match self
             .inner
             .query_budgets()
-            .execute(request.uri().query(), async { self.route(&request) })
+            .execute(query.as_deref(), move || state.route(&request))
             .await
         {
             Ok(response) => response,
             Err(error) => budget_response(error),
         }
-    }
-
-    fn dispatch(&self, request: &Request<Bytes>) -> Response<Full<Bytes>> {
-        if let Some(response) = self.ungated_response(request) {
-            return response;
-        }
-        let _permit = match self
-            .inner
-            .query_budgets()
-            .check_and_acquire(request.uri().query())
-        {
-            Ok(permit) => permit,
-            Err(error) => return budget_response(error),
-        };
-        self.route(request)
     }
 
     fn ungated_response(&self, request: &Request<Bytes>) -> Option<Response<Full<Bytes>>> {
@@ -283,6 +291,7 @@ impl AppState {
     }
 
     fn canonical_health(&self) -> Response<Full<Bytes>> {
+        self.run_snapshot_read_hook();
         match load_canonical_health(self.inner.canonical_health_path()) {
             Ok(assessment) => health_response(StatusCode::OK, &assessment),
             Err(error) => snapshot_unavailable(error),
@@ -290,9 +299,16 @@ impl AppState {
     }
 
     fn capture_status(&self) -> Response<Full<Bytes>> {
+        self.run_snapshot_read_hook();
         match load_capture_status(self.inner.capture_status_path()) {
             Ok(value) => json_value_response(StatusCode::OK, &value),
             Err(error) => snapshot_unavailable(error),
+        }
+    }
+
+    fn run_snapshot_read_hook(&self) {
+        if let Some(hook) = &self.snapshot_read_hook {
+            hook();
         }
     }
 }
