@@ -284,6 +284,8 @@ fn status_does_not_claim_locked_holdout_or_stage_pass() {
     assert!(status.shadow_capture);
     assert!(status.synthetic_estimators);
     assert!(status.variant_ledger);
+    assert!(status.synthetic_catalog);
+    assert!(status.promotion_withhold_only);
     assert!(!status.significance_claimed);
     assert!(!status.alpha_quality_claimed);
     assert!(!status.stage_pass_claimed);

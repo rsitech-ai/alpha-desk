@@ -10,6 +10,10 @@ pub const METRIC_SCALE: u8 = 8;
 pub enum EstimatorClass {
     MeanOutcome,
     UnivariateLinear,
+    NoTrade,
+    Momentum,
+    MeanReversion,
+    RawFeature,
 }
 
 impl EstimatorClass {
@@ -18,6 +22,10 @@ impl EstimatorClass {
         match self {
             Self::MeanOutcome => "mean_outcome",
             Self::UnivariateLinear => "univariate_linear",
+            Self::NoTrade => "no_trade",
+            Self::Momentum => "momentum",
+            Self::MeanReversion => "mean_reversion",
+            Self::RawFeature => "raw_feature",
         }
     }
 }
@@ -44,8 +52,12 @@ impl LinearModel {
 
     pub fn predict(&self, features: &[Decimal]) -> Result<Decimal, ResearchError> {
         match self.class {
-            EstimatorClass::MeanOutcome => Ok(self.intercept),
-            EstimatorClass::UnivariateLinear => {
+            EstimatorClass::MeanOutcome | EstimatorClass::NoTrade | EstimatorClass::Momentum => {
+                Ok(self.intercept)
+            }
+            EstimatorClass::UnivariateLinear
+            | EstimatorClass::MeanReversion
+            | EstimatorClass::RawFeature => {
                 if self.weights.len() != 1 || features.len() != 1 {
                     return Err(ResearchError::UnsupportedEstimator);
                 }
@@ -84,6 +96,10 @@ pub fn fit(
     match class {
         EstimatorClass::MeanOutcome => fit_mean(outcomes),
         EstimatorClass::UnivariateLinear => fit_univariate(features, outcomes),
+        EstimatorClass::NoTrade => fit_no_trade(),
+        EstimatorClass::Momentum => fit_momentum(outcomes),
+        EstimatorClass::MeanReversion => fit_mean_reversion(features, outcomes),
+        EstimatorClass::RawFeature => fit_raw_feature(features),
     }
 }
 
@@ -117,6 +133,78 @@ fn fit_mean(outcomes: &[Decimal]) -> Result<LinearModel, ResearchError> {
         intercept: mean(outcomes)?,
         weights: Vec::new(),
     })
+}
+
+fn fit_no_trade() -> Result<LinearModel, ResearchError> {
+    Ok(LinearModel {
+        class: EstimatorClass::NoTrade,
+        intercept: zero()?,
+        weights: Vec::new(),
+    })
+}
+
+fn fit_momentum(outcomes: &[Decimal]) -> Result<LinearModel, ResearchError> {
+    let last = outcomes
+        .last()
+        .ok_or(ResearchError::InsufficientTrain { field: "momentum" })?;
+    Ok(LinearModel {
+        class: EstimatorClass::Momentum,
+        intercept: last
+            .rescale(METRIC_SCALE, RoundingMode::TowardZero)
+            .map_err(|_| ResearchError::Metric {
+                field: "momentum.scale",
+            })?,
+        weights: Vec::new(),
+    })
+}
+
+fn fit_mean_reversion(
+    features: &[Vec<Decimal>],
+    outcomes: &[Decimal],
+) -> Result<LinearModel, ResearchError> {
+    require_univariate(features)?;
+    let neg_one = Decimal::from_raw(-1, 0)
+        .map_err(|_| ResearchError::Metric {
+            field: "mean_reversion",
+        })?
+        .rescale(METRIC_SCALE, RoundingMode::TowardZero)
+        .map_err(|_| ResearchError::Metric {
+            field: "mean_reversion",
+        })?;
+    Ok(LinearModel {
+        class: EstimatorClass::MeanReversion,
+        intercept: mean(outcomes)?,
+        weights: vec![neg_one],
+    })
+}
+
+fn fit_raw_feature(features: &[Vec<Decimal>]) -> Result<LinearModel, ResearchError> {
+    require_univariate(features)?;
+    let one = Decimal::from_raw(1, 0)
+        .map_err(|_| ResearchError::Metric {
+            field: "raw_feature",
+        })?
+        .rescale(METRIC_SCALE, RoundingMode::TowardZero)
+        .map_err(|_| ResearchError::Metric {
+            field: "raw_feature",
+        })?;
+    Ok(LinearModel {
+        class: EstimatorClass::RawFeature,
+        intercept: zero()?,
+        weights: vec![one],
+    })
+}
+
+fn require_univariate(features: &[Vec<Decimal>]) -> Result<(), ResearchError> {
+    if features.is_empty() {
+        return Err(ResearchError::InsufficientTrain {
+            field: "univariate_feature",
+        });
+    }
+    if features.iter().any(|row| row.len() != 1) {
+        return Err(ResearchError::UnsupportedEstimator);
+    }
+    Ok(())
 }
 
 fn fit_univariate(
@@ -196,6 +284,6 @@ fn fit_univariate(
     })
 }
 
-fn zero() -> Result<Decimal, ResearchError> {
+pub(crate) fn zero() -> Result<Decimal, ResearchError> {
     Decimal::from_raw(0, METRIC_SCALE).map_err(|_| ResearchError::Metric { field: "zero" })
 }
