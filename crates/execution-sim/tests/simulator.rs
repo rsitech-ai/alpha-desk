@@ -3,9 +3,9 @@ use domain_types::{
     Quantity, SignalId, UsdAmount,
 };
 use execution_sim::{
-    BookLevel, BookSnapshot, CostModel, ExitPolicy, FailureInjection, FeeSchedule, FundingSchedule,
-    ImpactModel, LatencyAssumptions, LatencyModel, OrderPolicy, PortfolioLimits, SignalSnapshot,
-    SimError, SimulationEvent, SimulationRequest, SlippageModel, run,
+    BookLevel, BookSnapshot, CostModel, ExitPolicy, FailureInjection, FeeSchedule, FillClass,
+    FundingSchedule, ImpactModel, LatencyAssumptions, LatencyModel, OrderPolicy, PortfolioLimits,
+    SignalSnapshot, SimError, SimulationEvent, SimulationRequest, SlippageModel, run,
 };
 
 fn ts(micros: i64) -> ProtocolTime {
@@ -448,4 +448,159 @@ fn fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/simulation")
         .join(name)
+}
+
+fn filled_round_trip() -> execution_sim::SimulationResult {
+    let books = vec![
+        book(0, "100", "10", "101", "10"),
+        book(1_000_000, "100", "10", "101", "10"),
+    ];
+    run(&request(
+        books,
+        cost_model("0.001", "0", "0", 0, 3_600_000_000, "0"),
+        OrderPolicy::market(),
+        1_000_000,
+    ))
+    .unwrap()
+}
+
+#[test]
+fn simulated_fills_are_labeled_synthetic_not_venue() {
+    let result = filled_round_trip();
+    assert_eq!(result.fill_class, FillClass::Synthetic);
+    assert!(!result.fills_invented);
+    assert!(!result.live_execution);
+    assert!(!result.venue_fill);
+    let mut saw_fill = false;
+    for event in result.events() {
+        match event {
+            SimulationEvent::Fill {
+                fill_class,
+                venue_fill,
+                ..
+            }
+            | SimulationEvent::PartialFill {
+                fill_class,
+                venue_fill,
+                ..
+            } => {
+                saw_fill = true;
+                assert_eq!(*fill_class, FillClass::Synthetic);
+                assert!(!*venue_fill);
+            }
+            SimulationEvent::SignalObserved { .. }
+            | SimulationEvent::OrderSubmitted { .. }
+            | SimulationEvent::OrderRested { .. }
+            | SimulationEvent::Cancelled { .. }
+            | SimulationEvent::FundingApplied { .. }
+            | SimulationEvent::ExitSubmitted { .. }
+            | SimulationEvent::PositionClosed { .. }
+            | SimulationEvent::Rejected { .. } => {}
+        }
+    }
+    assert!(saw_fill);
+    let encoded: serde_json::Value =
+        serde_json::from_slice(&result.encode_json().unwrap()).unwrap();
+    assert_eq!(encoded["fill_class"], "synthetic");
+    assert_eq!(encoded["fills_invented"], false);
+    assert_eq!(encoded["live_execution"], false);
+    assert_eq!(encoded["venue_fill"], false);
+}
+
+#[test]
+fn report_fails_closed_if_fills_invented_would_be_true() {
+    let mut result = filled_round_trip();
+    result.fills_invented = true;
+    assert_eq!(
+        result.encode_json().unwrap_err(),
+        SimError::FillsInventedForbidden
+    );
+    assert_eq!(
+        result.refuse_invented_or_live().unwrap_err(),
+        SimError::FillsInventedForbidden
+    );
+    assert!(serde_json::to_value(&result).is_err());
+}
+
+#[test]
+fn report_fails_closed_if_live_execution_would_be_true() {
+    let mut result = filled_round_trip();
+    result.live_execution = true;
+    assert_eq!(
+        result.encode_json().unwrap_err(),
+        SimError::LiveExecutionForbidden
+    );
+    assert_eq!(
+        result.refuse_invented_or_live().unwrap_err(),
+        SimError::LiveExecutionForbidden
+    );
+    assert!(serde_json::to_value(&result).is_err());
+}
+
+#[test]
+fn venue_fill_claim_and_live_signer_are_refused() {
+    assert_eq!(
+        FillClass::venue().unwrap_err(),
+        SimError::VenueFillForbidden
+    );
+    let mut result = filled_round_trip();
+    result.venue_fill = true;
+    assert_eq!(
+        result.encode_json().unwrap_err(),
+        SimError::VenueFillForbidden
+    );
+    result.venue_fill = false;
+    result.fill_class = FillClass::Venue;
+    assert_eq!(
+        result.encode_json().unwrap_err(),
+        SimError::VenueFillForbidden
+    );
+    result.fill_class = FillClass::Synthetic;
+    assert_eq!(
+        result.attach_trading_signer(b"secret").unwrap_err(),
+        SimError::TradingSignerForbidden
+    );
+    assert_eq!(
+        result.promote_to_live_execution().unwrap_err(),
+        SimError::LiveExecutionForbidden
+    );
+}
+
+#[test]
+fn sources_and_fixtures_do_not_reference_replica_cmds_or_a_live_corpus() {
+    let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src = crate_root.join("src");
+    let fixtures = crate_root.join("../../fixtures/simulation");
+    for root in [src, fixtures] {
+        walk_text_files(&root, &mut |path, text| {
+            assert!(
+                !text.contains("replica_cmds"),
+                "{} must not reference replica_cmds",
+                path.display()
+            );
+            assert!(
+                !text.contains("live_corpus"),
+                "{} must not reference a live corpus",
+                path.display()
+            );
+        });
+    }
+}
+
+fn walk_text_files(dir: &std::path::Path, visit: &mut impl FnMut(&std::path::Path, &str)) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            walk_text_files(&path, visit);
+            continue;
+        }
+        let allowed = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext, "rs" | "json" | "toml"));
+        if allowed {
+            let text = std::fs::read_to_string(&path).unwrap();
+            visit(&path, &text);
+        }
+    }
 }

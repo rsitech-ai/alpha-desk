@@ -22,6 +22,12 @@ pub enum SimError {
     UnmodeledFunding,
     #[error("execution-sim cannot sign or place live orders")]
     TradingSignerForbidden,
+    #[error("execution-sim cannot claim invented fills")]
+    FillsInventedForbidden,
+    #[error("execution-sim cannot claim live execution")]
+    LiveExecutionForbidden,
+    #[error("execution-sim fills are synthetic and are not venue fills")]
+    VenueFillForbidden,
 }
 
 impl SimError {
@@ -38,6 +44,9 @@ impl SimError {
             Self::UnmodeledExit => "execution_sim.unmodeled_exit",
             Self::UnmodeledFunding => "execution_sim.unmodeled_funding",
             Self::TradingSignerForbidden => "execution_sim.trading_signer_forbidden",
+            Self::FillsInventedForbidden => "execution_sim.fills_invented",
+            Self::LiveExecutionForbidden => "execution_sim.live_execution",
+            Self::VenueFillForbidden => "execution_sim.venue_fill",
         }
     }
 }

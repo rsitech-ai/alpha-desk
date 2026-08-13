@@ -8,7 +8,7 @@ use crate::error::SimError;
 use crate::exit::ExitPolicy;
 use crate::failure::FailureInjection;
 use crate::fees::FundingSchedule;
-use crate::fill::{CostedFill, FillCostParams, costed_walk};
+use crate::fill::{CostedFill, FillClass, FillCostParams, costed_walk};
 use crate::funding::funding_over_hold;
 use crate::math::{align_qty, qty_is_zero, quote_notional, zero_usd};
 use crate::order::{OrderPolicy, OrderType, entry_is_buy};
@@ -150,11 +150,19 @@ pub enum SimulationEvent {
         at: ProtocolTime,
         quantity: Quantity,
         price: Price,
+        #[serde(serialize_with = "crate::honesty::serialize_synthetic_fill_class")]
+        fill_class: FillClass,
+        #[serde(serialize_with = "crate::honesty::serialize_denied_true")]
+        venue_fill: bool,
     },
     Fill {
         at: ProtocolTime,
         quantity: Quantity,
         price: Price,
+        #[serde(serialize_with = "crate::honesty::serialize_synthetic_fill_class")]
+        fill_class: FillClass,
+        #[serde(serialize_with = "crate::honesty::serialize_denied_true")]
+        venue_fill: bool,
     },
     Cancelled {
         at: ProtocolTime,
@@ -178,6 +186,14 @@ pub enum SimulationEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SimulationResult {
+    #[serde(serialize_with = "crate::honesty::serialize_synthetic_fill_class")]
+    pub fill_class: FillClass,
+    #[serde(serialize_with = "crate::honesty::serialize_denied_true")]
+    pub fills_invented: bool,
+    #[serde(serialize_with = "crate::honesty::serialize_denied_true")]
+    pub live_execution: bool,
+    #[serde(serialize_with = "crate::honesty::serialize_denied_true")]
+    pub venue_fill: bool,
     events: Vec<SimulationEvent>,
     filled_quantity: Quantity,
     missed_quantity: Quantity,
@@ -257,6 +273,38 @@ impl SimulationResult {
     #[must_use]
     pub const fn trace_hash(&self) -> [u8; 32] {
         self.trace_hash
+    }
+
+    pub fn refuse_invented_or_live(&self) -> Result<(), SimError> {
+        if self.fills_invented {
+            return Err(SimError::FillsInventedForbidden);
+        }
+        if self.live_execution {
+            return Err(SimError::LiveExecutionForbidden);
+        }
+        if self.venue_fill {
+            return Err(SimError::VenueFillForbidden);
+        }
+        self.fill_class.admit_simulated()?;
+        for event in &self.events {
+            refuse_event(event)?;
+        }
+        Ok(())
+    }
+
+    pub fn encode_json(&self) -> Result<Vec<u8>, SimError> {
+        self.refuse_invented_or_live()?;
+        serde_json::to_vec(self).map_err(|_| SimError::InvalidRequest {
+            field: "report.json",
+        })
+    }
+
+    pub fn attach_trading_signer(&self, _material: &[u8]) -> Result<(), SimError> {
+        Err(SimError::TradingSignerForbidden)
+    }
+
+    pub fn promote_to_live_execution(&self) -> Result<(), SimError> {
+        Err(SimError::LiveExecutionForbidden)
     }
 }
 
@@ -390,7 +438,7 @@ pub fn run(request: &SimulationRequest) -> Result<SimulationResult, SimError> {
         None,
         fill_costs(request, true),
     )?;
-    push_fill_events(&mut events, exit_at, &exit_fill, entry.filled_quantity);
+    push_fill_events(&mut events, exit_at, &exit_fill, entry.filled_quantity)?;
     if qty_is_zero(exit_fill.filled_quantity) {
         return Err(SimError::UnmodeledExit);
     }
@@ -422,7 +470,7 @@ fn execute_entry(
         OrderType::Market | OrderType::Ioc | OrderType::Alo => None,
     };
     let immediate = costed_walk(book, buy, requested, limit, ppm, fill_costs(request, true))?;
-    push_fill_events(events, arrival, &immediate, original);
+    push_fill_events(events, arrival, &immediate, original)?;
 
     match request.order_policy.order_type() {
         OrderType::Market | OrderType::Ioc | OrderType::Alo => Ok(immediate),
@@ -464,7 +512,7 @@ fn rest_gtc(
         if qty_is_zero(extra.filled_quantity) {
             continue;
         }
-        push_fill_events(events, book.effective_at(), &extra, original);
+        push_fill_events(events, book.effective_at(), &extra, original)?;
         fill = merge_fills(fill, extra)?;
     }
     if !qty_is_zero(fill.remaining_quantity) {
@@ -474,6 +522,8 @@ fn rest_gtc(
 }
 
 fn merge_fills(left: CostedFill, right: CostedFill) -> Result<CostedFill, SimError> {
+    left.admit_synthetic()?;
+    right.admit_synthetic()?;
     let filled = left.filled_quantity.checked_add(right.filled_quantity)?;
     let notional = left.quote_notional.checked_add(right.quote_notional)?;
     let vwap = if qty_is_zero(filled) {
@@ -487,17 +537,17 @@ fn merge_fills(left: CostedFill, right: CostedFill) -> Result<CostedFill, SimErr
             )?;
         Some(Price::from_raw(price.raw(), price.scale())?)
     };
-    Ok(CostedFill {
-        filled_quantity: filled,
-        remaining_quantity: right.remaining_quantity,
+    CostedFill::synthetic(
+        filled,
+        right.remaining_quantity,
         vwap,
-        quote_notional: notional,
-        fee: left.fee.checked_add(right.fee)?,
-        slippage: left.slippage.checked_add(right.slippage)?,
-        impact: left.impact.checked_add(right.impact)?,
-        spread_cost: left.spread_cost.checked_add(right.spread_cost)?,
-        is_taker: left.is_taker || right.is_taker,
-    })
+        notional,
+        left.fee.checked_add(right.fee)?,
+        left.slippage.checked_add(right.slippage)?,
+        left.impact.checked_add(right.impact)?,
+        left.spread_cost.checked_add(right.spread_cost)?,
+        left.is_taker || right.is_taker,
+    )
 }
 
 fn push_fill_events(
@@ -505,26 +555,32 @@ fn push_fill_events(
     at: ProtocolTime,
     fill: &CostedFill,
     original_request: Quantity,
-) {
+) -> Result<(), SimError> {
+    fill.admit_synthetic()?;
     if qty_is_zero(fill.filled_quantity) {
-        return;
+        return Ok(());
     }
     let Some(price) = fill.vwap else {
-        return;
+        return Ok(());
     };
     if fill.filled_quantity < original_request {
         events.push(SimulationEvent::PartialFill {
             at,
             quantity: fill.filled_quantity,
             price,
+            fill_class: FillClass::Synthetic,
+            venue_fill: false,
         });
     } else {
         events.push(SimulationEvent::Fill {
             at,
             quantity: fill.filled_quantity,
             price,
+            fill_class: FillClass::Synthetic,
+            venue_fill: false,
         });
     }
+    Ok(())
 }
 
 fn fill_costs(request: &SimulationRequest, is_taker: bool) -> FillCostParams {
@@ -559,6 +615,10 @@ fn finish(input: FinishInput<'_>) -> Result<SimulationResult, SimError> {
         direction,
         funding_schedule,
     } = input;
+    entry.admit_synthetic()?;
+    if let Some(fill) = exit.as_ref() {
+        fill.admit_synthetic()?;
+    }
     let filled = entry.filled_quantity;
     let (exit_fees, exit_vwap, exit_slip, exit_impact, exit_spread, exit_notional) = match exit {
         Some(fill) => (
@@ -615,8 +675,12 @@ fn finish(input: FinishInput<'_>) -> Result<SimulationResult, SimError> {
         .checked_add(slippage)?
         .checked_add(impact)?;
     let net_pnl = gross.checked_sub(costs)?.checked_sub(funding)?;
-    let trace_hash = hash_events(&events);
-    Ok(SimulationResult {
+    let trace_hash = hash_events(&events)?;
+    let result = SimulationResult {
+        fill_class: FillClass::Synthetic,
+        fills_invented: false,
+        live_execution: false,
+        venue_fill: false,
         events,
         filled_quantity: filled,
         missed_quantity: missed,
@@ -630,14 +694,44 @@ fn finish(input: FinishInput<'_>) -> Result<SimulationResult, SimError> {
         spread_cost,
         net_pnl,
         trace_hash,
-    })
+    };
+    result.refuse_invented_or_live()?;
+    Ok(result)
 }
 
-fn hash_events(events: &[SimulationEvent]) -> [u8; 32] {
+fn refuse_event(event: &SimulationEvent) -> Result<(), SimError> {
+    match event {
+        SimulationEvent::PartialFill {
+            fill_class,
+            venue_fill,
+            ..
+        }
+        | SimulationEvent::Fill {
+            fill_class,
+            venue_fill,
+            ..
+        } => {
+            fill_class.admit_simulated()?;
+            if *venue_fill {
+                return Err(SimError::VenueFillForbidden);
+            }
+            Ok(())
+        }
+        SimulationEvent::SignalObserved { .. }
+        | SimulationEvent::OrderSubmitted { .. }
+        | SimulationEvent::OrderRested { .. }
+        | SimulationEvent::Cancelled { .. }
+        | SimulationEvent::FundingApplied { .. }
+        | SimulationEvent::ExitSubmitted { .. }
+        | SimulationEvent::PositionClosed { .. }
+        | SimulationEvent::Rejected { .. } => Ok(()),
+    }
+}
+
+fn hash_events(events: &[SimulationEvent]) -> Result<[u8; 32], SimError> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"hl.execution-sim.trace.v1");
-    if let Ok(encoded) = serde_json::to_vec(events) {
-        hasher.update(&encoded);
-    }
-    *hasher.finalize().as_bytes()
+    let encoded = serde_json::to_vec(events).map_err(|_| SimError::VenueFillForbidden)?;
+    hasher.update(&encoded);
+    Ok(*hasher.finalize().as_bytes())
 }
