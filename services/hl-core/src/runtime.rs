@@ -1,5 +1,6 @@
 use canonical_ledger::{LedgerLimits, StateImageLimits, WatermarkOnlyReducerV1};
 use canonical_state_store::SyncedWriteBatchStore;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -52,6 +53,10 @@ impl CoreRuntime {
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
         let mut dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
         let config = self.config.jetstream_config()?;
+        let status_cancellation = cancellation.child_token();
+        let status_task = self
+            .spawn_status_server(status_cancellation.clone())
+            .await?;
         let mut source = match self
             .session
             .connect_source(|| JetStreamPullSource::connect(config), &mut dead_letter)
@@ -60,11 +65,21 @@ impl CoreRuntime {
             Ok(source) => source,
             Err(error) => {
                 self.status.fail_closed(error.reason_code());
-                return Err(error.into());
+                if status_task.is_some() {
+                    cancellation.cancelled().await;
+                }
+                return Self::stop_status(status_cancellation, status_task, Err(error.into()))
+                    .await;
             }
         };
-        self.run_source_with_dead_letter(&mut source, dead_letter, cancellation)
-            .await
+        self.consume_with_status(
+            &mut source,
+            dead_letter,
+            cancellation,
+            status_cancellation,
+            status_task,
+        )
+        .await
     }
 
     pub async fn run_source<Src: CanonicalPullSource>(
@@ -73,38 +88,62 @@ impl CoreRuntime {
         cancellation: CancellationToken,
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
         let dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
-        self.run_source_with_dead_letter(source, dead_letter, cancellation)
-            .await
+        let status_cancellation = cancellation.child_token();
+        let status_task = self
+            .spawn_status_server(status_cancellation.clone())
+            .await?;
+        self.consume_with_status(
+            source,
+            dead_letter,
+            cancellation,
+            status_cancellation,
+            status_task,
+        )
+        .await
     }
 
-    async fn run_source_with_dead_letter<Src, Dlq>(
-        mut self,
-        source: &mut Src,
-        mut dead_letter: Dlq,
+    async fn spawn_status_server(
+        &self,
         cancellation: CancellationToken,
-    ) -> Result<JetStreamReplayReport, CoreRuntimeError>
-    where
-        Src: CanonicalPullSource,
-        Dlq: DeadLetterSink,
-    {
-        let status_cancellation = cancellation.child_token();
-        let status_task = match self.config.status_listen() {
+    ) -> Result<Option<JoinHandle<Result<(), StatusError>>>, CoreRuntimeError> {
+        match self.config.status_listen() {
             Some(listen) => {
                 let listener = crate::status::bind_loopback(listen).await?;
                 self.status
                     .set_listen_addr(listener.local_addr().map_err(|_| StatusError::Bind)?);
                 let status = self.status.clone();
-                let status_cancellation = status_cancellation.clone();
-                Some(tokio::spawn(async move {
-                    crate::accept_status(listener, status, status_cancellation).await
-                }))
+                Ok(Some(tokio::spawn(async move {
+                    crate::accept_status(listener, status, cancellation).await
+                })))
             }
-            None => None,
-        };
+            None => Ok(None),
+        }
+    }
+
+    async fn consume_with_status<Src, Dlq>(
+        mut self,
+        source: &mut Src,
+        mut dead_letter: Dlq,
+        cancellation: CancellationToken,
+        status_cancellation: CancellationToken,
+        status_task: Option<JoinHandle<Result<(), StatusError>>>,
+    ) -> Result<JetStreamReplayReport, CoreRuntimeError>
+    where
+        Src: CanonicalPullSource,
+        Dlq: DeadLetterSink,
+    {
         self.status.mark_ready();
         let result = self
             .consume_until_cancelled(source, &mut dead_letter, cancellation)
             .await;
+        Self::stop_status(status_cancellation, status_task, result).await
+    }
+
+    async fn stop_status(
+        status_cancellation: CancellationToken,
+        status_task: Option<JoinHandle<Result<(), StatusError>>>,
+        result: Result<JetStreamReplayReport, CoreRuntimeError>,
+    ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
         status_cancellation.cancel();
         if let Some(task) = status_task {
             match task.await {
