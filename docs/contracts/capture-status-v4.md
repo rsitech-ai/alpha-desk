@@ -42,7 +42,11 @@ Each entry contains:
 - optional `quarantine_reason`: the durable parser/schema disposition which
   keeps the source quarantined; and
 - optional `last_error_reason`: the current retry or latched failure reason,
-  kept separate from durable quarantine history.
+  kept separate from durable quarantine history; and
+- `restart_reconstruction`: `not-required`, `incomplete`, or `complete`.
+  Absent values deserialize as `not-required`. Recovered durable sources start
+  `incomplete` until the live tail binds, then `complete`. `incomplete` and
+  `complete` are invalid unless the durable cursor fields are present together.
 
 The durable epoch, offset, local sequence, and last-durable time are present
 together after the first verified group commit. `tail_cursor_epoch` may be
@@ -52,6 +56,14 @@ local sequence as zero. A quarantined entry always carries
 `quarantine_reason`; a latched entry always carries `last_error_reason`. A
 quarantined source can simultaneously expose a temporary transport outage in
 `last_error_reason` without losing the quarantine cause.
+
+## Windowed throughput
+
+`throughput_records_per_sec` and `throughput_blocks_per_sec` are unsigned
+integer rates sampled over the status-heartbeat interval. They count
+archive-acknowledged auxiliary records and captured committed blocks in that
+window, then reset. Absent fields deserialize as zero. They describe the last
+completed window only and are not a live-qualification or Stage PASS claim.
 
 ## Durability and quarantine semantics
 

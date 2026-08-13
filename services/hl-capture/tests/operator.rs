@@ -94,6 +94,7 @@ fn sample_status() -> CaptureStatus {
     )
     .with_durable_height(Some(BlockHeight::new(12)))
     .with_capture_capacity(1, Some(BlockHeight::new(12)), Some(4_200))
+    .with_throughput(3, 1)
     .with_last_error_reason(Some("capture_runtime.recovering".to_owned()));
     let mut value = serde_json::to_value(&status).expect("serialize sample");
     value["auxiliary_sources"] = serde_json::json!([{
@@ -144,6 +145,8 @@ async fn operator_status_serves_v4_json_health_and_sse() {
     assert_eq!(value["schema_version"], "hl.capture.status.v4");
     assert_eq!(value["durable_height"], 12);
     assert_eq!(value["capture_backlog_records"], 1);
+    assert_eq!(value["throughput_records_per_sec"], 3);
+    assert_eq!(value["throughput_blocks_per_sec"], 1);
     assert_eq!(
         value["auxiliary_sources"][0]["restart_reconstruction"],
         "incomplete"
