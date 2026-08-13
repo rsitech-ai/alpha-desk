@@ -7,11 +7,15 @@ use canonical_archive::{
     RawV3SourceInspection,
 };
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
-use storage_ports::{ArchiveError, RawArchiveCapacityBudgets, RawArchiveWorkloadEnvelope};
+use storage_ports::{
+    ArchiveError, LocalRecordSequence, LocalRecordSequenceRange, RawArchiveCapacityBudgets,
+    RawArchiveWorkloadEnvelope, RawObservationArchive,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationSummary {
     inspection: ArchiveInspection,
+    v3: Option<V3InspectSummary>,
 }
 
 impl VerificationSummary {
@@ -19,12 +23,20 @@ impl VerificationSummary {
     pub const fn inspection(&self) -> &ArchiveInspection {
         &self.inspection
     }
+
+    #[must_use]
+    pub const fn v3(&self) -> Option<&V3InspectSummary> {
+        self.v3.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountSummary {
     canonical_events: u64,
     canonical_objects: u64,
+    v3_sources: u64,
+    v3_logical_rows: u64,
+    v3_logical_manifests: u64,
 }
 
 impl CountSummary {
@@ -36,6 +48,21 @@ impl CountSummary {
     #[must_use]
     pub const fn canonical_objects(&self) -> u64 {
         self.canonical_objects
+    }
+
+    #[must_use]
+    pub const fn v3_sources(&self) -> u64 {
+        self.v3_sources
+    }
+
+    #[must_use]
+    pub const fn v3_logical_rows(&self) -> u64 {
+        self.v3_logical_rows
+    }
+
+    #[must_use]
+    pub const fn v3_logical_manifests(&self) -> u64 {
+        self.v3_logical_manifests
     }
 }
 
@@ -49,20 +76,77 @@ impl V3InspectSummary {
     pub fn sources(&self) -> &[RawV3SourceInspection] {
         &self.sources
     }
+
+    #[must_use]
+    pub fn logical_row_count(&self) -> u64 {
+        self.sources.iter().fold(0, |total, source| {
+            total.saturating_add(source.statistics().logical_row_count())
+        })
+    }
+
+    #[must_use]
+    pub fn logical_manifest_count(&self) -> u64 {
+        self.sources.iter().fold(0, |total, source| {
+            total.saturating_add(source.scrub().logical_manifest_count())
+        })
+    }
 }
 
 pub fn verify(root: impl AsRef<Path>) -> Result<VerificationSummary, InspectError> {
-    let archive = open(root.as_ref())?;
-    let inspection = archive.inspect()?;
-    require_objects(&inspection)?;
-    Ok(VerificationSummary { inspection })
+    let root = root.as_ref();
+    let inspection = open(root)?.inspect()?;
+    let v3 = optional_v3(root)?;
+    require_verified_dataset(&inspection, v3.as_ref())?;
+    Ok(VerificationSummary { inspection, v3 })
 }
 
 pub async fn count(root: impl AsRef<Path>) -> Result<CountSummary, InspectError> {
     let root = root.as_ref();
-    let archive = open(root)?;
-    let inspection = archive.inspect()?;
-    require_objects(&inspection)?;
+    let inspection = open(root)?.inspect()?;
+    let canonical = count_canonical(root, &inspection).await?;
+    let v3 = count_v3(root)?;
+    if inspection.objects().is_empty() && v3.v3_sources == 0 {
+        return Err(InspectError::EmptyArchive);
+    }
+    Ok(CountSummary {
+        canonical_events: canonical.canonical_events,
+        canonical_objects: canonical.canonical_objects,
+        v3_sources: v3.v3_sources,
+        v3_logical_rows: v3.v3_logical_rows,
+        v3_logical_manifests: v3.v3_logical_manifests,
+    })
+}
+
+pub fn scrub_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    inspect_v3(root)
+}
+
+pub fn stats_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    inspect_v3(root)
+}
+
+pub fn health_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    inspect_v3(root)
+}
+
+fn inspect_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    optional_v3(root.as_ref())?.ok_or(InspectError::EmptyArchive)
+}
+
+fn optional_v3(root: &Path) -> Result<Option<V3InspectSummary>, InspectError> {
+    let archive = open_v3(root)?;
+    let sources = archive.inspect_sources()?;
+    if sources.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(V3InspectSummary { sources }))
+    }
+}
+
+async fn count_canonical(
+    root: &Path,
+    inspection: &ArchiveInspection,
+) -> Result<CountSummary, InspectError> {
     let context = SessionContext::new();
     let mut actual_total = 0_u64;
     let mut object_count = 0_u64;
@@ -95,28 +179,68 @@ pub async fn count(root: impl AsRef<Path>) -> Result<CountSummary, InspectError>
     Ok(CountSummary {
         canonical_events: actual_total,
         canonical_objects: object_count,
+        v3_sources: 0,
+        v3_logical_rows: 0,
+        v3_logical_manifests: 0,
     })
 }
 
-pub fn scrub_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
-    inspect_v3(root)
-}
-
-pub fn stats_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
-    inspect_v3(root)
-}
-
-pub fn health_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
-    inspect_v3(root)
-}
-
-fn inspect_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
-    let archive = open_v3(root.as_ref())?;
+fn count_v3(root: &Path) -> Result<CountSummary, InspectError> {
+    let archive = open_v3(root)?;
     let sources = archive.inspect_sources()?;
     if sources.is_empty() {
-        return Err(InspectError::EmptyArchive);
+        return Ok(CountSummary {
+            canonical_events: 0,
+            canonical_objects: 0,
+            v3_sources: 0,
+            v3_logical_rows: 0,
+            v3_logical_manifests: 0,
+        });
     }
-    Ok(V3InspectSummary { sources })
+    let mut logical_rows = 0_u64;
+    let mut logical_manifests = 0_u64;
+    for source in &sources {
+        logical_rows = logical_rows
+            .checked_add(count_v3_source(&archive, source)?)
+            .ok_or(InspectError::CountOverflow)?;
+        logical_manifests = logical_manifests
+            .checked_add(source.scrub().logical_manifest_count())
+            .ok_or(InspectError::CountOverflow)?;
+    }
+    let source_count = u64::try_from(sources.len()).map_err(|_| InspectError::CountOverflow)?;
+    Ok(CountSummary {
+        canonical_events: 0,
+        canonical_objects: 0,
+        v3_sources: source_count,
+        v3_logical_rows: logical_rows,
+        v3_logical_manifests: logical_manifests,
+    })
+}
+
+fn count_v3_source(
+    archive: &RawV3Archive,
+    source: &RawV3SourceInspection,
+) -> Result<u64, InspectError> {
+    let expected_rows = source.statistics().logical_row_count();
+    if expected_rows == 0
+        || source.scrub().logical_manifest_count() != source.statistics().logical_manifest_count()
+    {
+        return Err(InspectError::RowCountMismatch);
+    }
+    let range = LocalRecordSequenceRange::try_new(
+        LocalRecordSequence::try_new(1)?,
+        LocalRecordSequence::try_new(expected_rows)?,
+    )?;
+    let replayed = archive
+        .read_observations_by_sequence(source.chain_id(), source.source_id(), range)?
+        .try_fold(0_u64, |total, item| {
+            item?;
+            total.checked_add(1).ok_or(InspectError::CountOverflow)
+        })?;
+    if replayed != expected_rows {
+        return Err(InspectError::RowCountMismatch);
+    }
+    Ok(expected_rows)
 }
 
 fn open(root: &Path) -> Result<LocalParquetArchive, InspectError> {
@@ -142,8 +266,11 @@ fn open_v3(root: &Path) -> Result<RawV3Archive, InspectError> {
     RawV3Archive::open(root, config, workload, budgets).map_err(InspectError::from)
 }
 
-fn require_objects(inspection: &ArchiveInspection) -> Result<(), InspectError> {
-    if inspection.objects().is_empty() {
+fn require_verified_dataset(
+    inspection: &ArchiveInspection,
+    v3: Option<&V3InspectSummary>,
+) -> Result<(), InspectError> {
+    if inspection.objects().is_empty() && v3.is_none() {
         return Err(InspectError::EmptyArchive);
     }
     Ok(())

@@ -33,21 +33,29 @@ async fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
             let summary = verify(root)?;
             let inspection = summary.inspection();
             println!(
-                "PASS chains={} raw_sources={} blocks={} canonical_events={} raw_observations={} objects={}",
+                "PASS chains={} raw_sources={} blocks={} canonical_events={} raw_observations={} objects={} v3_sources={} v3_logical_rows={} v3_logical_manifests={}",
                 inspection.canonical_chains(),
                 inspection.raw_sources(),
                 inspection.canonical_blocks(),
                 inspection.canonical_events(),
                 inspection.raw_observations(),
-                inspection.objects().len()
+                inspection.objects().len(),
+                summary.v3().map_or(0, |v3| v3.sources().len()),
+                summary.v3().map_or(0, V3InspectSummary::logical_row_count),
+                summary
+                    .v3()
+                    .map_or(0, V3InspectSummary::logical_manifest_count),
             );
         }
         Some("count") => {
             let summary = count(root).await?;
             println!(
-                "PASS canonical_events={} canonical_objects={}",
+                "PASS canonical_events={} canonical_objects={} v3_sources={} v3_logical_rows={} v3_logical_manifests={}",
                 summary.canonical_events(),
-                summary.canonical_objects()
+                summary.canonical_objects(),
+                summary.v3_sources(),
+                summary.v3_logical_rows(),
+                summary.v3_logical_manifests()
             );
         }
         Some("scrub") => {
@@ -68,18 +76,14 @@ async fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
 }
 
 fn print_v3_summary(command: &str, summary: &V3InspectSummary) {
-    let mut logical_manifests = 0_u64;
-    let mut packed_ranges = 0_u64;
-    let mut logical_rows = 0_u64;
-    for source in summary.sources() {
-        logical_manifests =
-            logical_manifests.saturating_add(source.scrub().logical_manifest_count());
-        packed_ranges = packed_ranges.saturating_add(source.scrub().packed_range_count());
-        logical_rows = logical_rows.saturating_add(source.statistics().logical_row_count());
-    }
     println!(
-        "PASS command={command} sources={} logical_manifests={logical_manifests} packed_ranges={packed_ranges} logical_rows={logical_rows}",
-        summary.sources().len()
+        "PASS command={command} sources={} logical_manifests={} packed_ranges={} logical_rows={}",
+        summary.sources().len(),
+        summary.logical_manifest_count(),
+        summary.sources().iter().fold(0_u64, |total, source| {
+            total.saturating_add(source.scrub().packed_range_count())
+        }),
+        summary.logical_row_count(),
     );
 }
 
