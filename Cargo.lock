@@ -2059,11 +2059,13 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "domain-types",
+ "ed25519-dalek",
  "execution-sim",
  "hex",
  "model-runtime",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
 ]

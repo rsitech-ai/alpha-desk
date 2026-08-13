@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use hl_research::{
     CorpusClass, ResearchError, ResearchStatus, load_corpus_path, refuse_corpus_path,
-    run_walk_forward_bytes,
+    run_synthetic_bytes, run_walk_forward_bytes,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -95,6 +95,48 @@ fn synthetic_walk_forward_fixture_still_loads() {
     let encoded = serde_json::to_value(&report).unwrap();
     assert_eq!(encoded["live_corpus"], false);
     assert_eq!(encoded["replica_cmds_used"], false);
+}
+
+#[test]
+fn live_bundle_dir_fails_closed_before_any_read() {
+    let path = Path::new("/tmp/live/signed-bundle");
+    assert_eq!(CorpusClass::from_path(path), CorpusClass::Live);
+    assert_eq!(
+        refuse_corpus_path(path).unwrap_err(),
+        ResearchError::LiveCorpusForbidden
+    );
+    assert_eq!(
+        run_synthetic_bytes(&synthetic_fixture_bytes(), Some(path), None).unwrap_err(),
+        ResearchError::LiveCorpusForbidden
+    );
+}
+
+#[test]
+fn locked_holdout_bundle_dir_fails_closed_before_any_read() {
+    let path = Path::new("/tmp/locked-holdout/signed-bundle");
+    assert_eq!(CorpusClass::from_path(path), CorpusClass::LockedHoldout);
+    assert_eq!(
+        refuse_corpus_path(path).unwrap_err(),
+        ResearchError::LockedCorpusForbidden
+    );
+    assert_eq!(
+        run_synthetic_bytes(&synthetic_fixture_bytes(), Some(path), None).unwrap_err(),
+        ResearchError::LockedCorpusForbidden
+    );
+}
+
+#[test]
+fn replica_command_bundle_dir_fails_closed_as_live_corpus() {
+    let path = Path::new("/var/lib/hyperliquid/hl/data/replica_cmds");
+    assert_eq!(CorpusClass::from_path(path), CorpusClass::Live);
+    assert_eq!(
+        run_synthetic_bytes(&synthetic_fixture_bytes(), Some(path), None).unwrap_err(),
+        ResearchError::LiveCorpusForbidden
+    );
+}
+
+fn synthetic_fixture_bytes() -> Vec<u8> {
+    load_corpus_path(fixture("synthetic-experiment-v1.json")).unwrap()
 }
 
 #[test]
