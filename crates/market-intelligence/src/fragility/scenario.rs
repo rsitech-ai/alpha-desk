@@ -136,7 +136,8 @@ pub struct FragilityResult {
 
 /// Fragility scores from a caller-supplied simulated book and accounts.
 /// Inputs are admitted only with [`ObservedBookAndFills`] issued after book
-/// and fills are observed.
+/// and fills are observed. The proof must match the simulated book's health
+/// and executable depth when that book would be scored.
 pub fn simulate_fragility(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -144,7 +145,6 @@ pub fn simulate_fragility(
     shock_bps: i64,
     evidence: ObservedBookAndFills<'_>,
 ) -> Result<FragilityResult, MarketError> {
-    let _ = evidence.health();
     let mut missing = Vec::new();
     if matches!(book.observation, ObservationStatus::Missing(_))
         || book.health.state == HealthState::Red
@@ -157,9 +157,9 @@ pub fn simulate_fragility(
     {
         missing.push("margin_model".to_owned());
     }
-    let low = simulate_path(scenario, accounts, book, shock_bps, -1)?;
-    let base = simulate_path(scenario, accounts, book, shock_bps, 0)?;
-    let high = simulate_path(scenario, accounts, book, shock_bps, 1)?;
+    let low = simulate_path(scenario, accounts, book, shock_bps, -1, evidence)?;
+    let base = simulate_path(scenario, accounts, book, shock_bps, 0, evidence)?;
+    let high = simulate_path(scenario, accounts, book, shock_bps, 1, evidence)?;
     let confidence = if missing.is_empty() {
         ProbabilityPpm::from_ppm(800_000)?
     } else {
@@ -191,35 +191,27 @@ pub fn simulate_fragility_from_snapshot(
     let evidence = snapshot.require_observed_book_and_fills()?;
     let book_key = market_feature_key("book")?;
     let executable_depth = match snapshot.values.get(&book_key) {
-        Some(FeatureValue::Decimal { raw, scale }) => {
-            let scale = u8::try_from(*scale).map_err(|_| MarketError::OutOfRange)?;
-            UsdAmount::from_raw(*raw, scale)?
-        }
-        Some(FeatureValue::Missing(_)) | None => {
-            return Err(MarketError::MissingInput { name: "book" });
-        }
-        Some(FeatureValue::SignedInteger(_))
-        | Some(FeatureValue::UnsignedInteger(_))
-        | Some(FeatureValue::ProbabilityPpm(_))
-        | Some(FeatureValue::Category(_))
-        | Some(FeatureValue::Boolean(_)) => {
-            return Err(MarketError::Malformed {
-                what: "book",
-                reason: "observed book must be decimal executable depth",
-            });
-        }
+        Some(value) => observed_executable_depth(value)?,
+        None => return Err(MarketError::MissingInput { name: "book" }),
     };
     let book = SimulatedBook::observed(executable_depth, snapshot.health.clone());
     simulate_fragility(scenario, accounts, &book, shock_bps, evidence)
 }
 
+/// Path scores from a caller-supplied simulated book and accounts.
+/// Inputs are admitted only with [`ObservedBookAndFills`] issued after book
+/// and fills are observed. The proof must match the simulated book being
+/// scored so an unrelated constructed book cannot ride another snapshot's
+/// token.
 pub fn simulate_path(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
     book: &SimulatedBook,
     shock_bps: i64,
     bound_sign: i32,
+    evidence: ObservedBookAndFills<'_>,
 ) -> Result<ScenarioPathResult, MarketError> {
+    require_proof_matches_book(evidence, book)?;
     match book.observation {
         ObservationStatus::Missing(_) => {
             if book.executable_depth.raw() != 0 {
@@ -322,6 +314,51 @@ pub fn simulate_path(
         iteration_limit_reached,
         health: book.health.clone(),
     })
+}
+
+fn require_proof_matches_book(
+    evidence: ObservedBookAndFills<'_>,
+    book: &SimulatedBook,
+) -> Result<(), MarketError> {
+    match book.observation {
+        ObservationStatus::Missing(_) => return Ok(()),
+        ObservationStatus::Observed => {}
+    }
+    if book.health.state == HealthState::Red {
+        return Ok(());
+    }
+    if evidence.health() != &book.health {
+        return Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match simulated book health",
+        });
+    }
+    let depth = observed_executable_depth(evidence.book_value())?;
+    if depth != book.executable_depth {
+        return Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match simulated book depth",
+        });
+    }
+    Ok(())
+}
+
+fn observed_executable_depth(value: &FeatureValue) -> Result<UsdAmount, MarketError> {
+    match value {
+        FeatureValue::Decimal { raw, scale } => {
+            let scale = u8::try_from(*scale).map_err(|_| MarketError::OutOfRange)?;
+            Ok(UsdAmount::from_raw(*raw, scale)?)
+        }
+        FeatureValue::Missing(_) => Err(MarketError::MissingInput { name: "book" }),
+        FeatureValue::SignedInteger(_)
+        | FeatureValue::UnsignedInteger(_)
+        | FeatureValue::ProbabilityPpm(_)
+        | FeatureValue::Category(_)
+        | FeatureValue::Boolean(_) => Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book must be decimal executable depth",
+        }),
+    }
 }
 
 fn wave_signed_impact(

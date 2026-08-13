@@ -43,18 +43,51 @@ fn observed_snapshot() -> MarketFeatureSnapshot {
     )
 }
 
+fn snapshot_admitting(book: &SimulatedBook) -> MarketFeatureSnapshot {
+    if book.observation == ObservationStatus::Observed && book.health.state != HealthState::Red {
+        market_snapshot_with_health(
+            FeatureValue::Decimal {
+                raw: book.executable_depth.raw(),
+                scale: u32::from(book.executable_depth.scale()),
+            },
+            FeatureValue::Boolean(true),
+            book.health.clone(),
+        )
+    } else {
+        observed_snapshot()
+    }
+}
+
 fn fragility_from_caller_book(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
     book: &SimulatedBook,
     shock_bps: i64,
 ) -> Result<market_intelligence::FragilityResult, MarketError> {
-    let snapshot = observed_snapshot();
+    let snapshot = snapshot_admitting(book);
     simulate_fragility(
         scenario,
         accounts,
         book,
         shock_bps,
+        snapshot.require_observed_book_and_fills()?,
+    )
+}
+
+fn simulate_bound_path(
+    scenario: &FragilityScenario,
+    accounts: &[SimulatedAccount],
+    book: &SimulatedBook,
+    shock_bps: i64,
+    bound_sign: i32,
+) -> Result<market_intelligence::ScenarioPathResult, MarketError> {
+    let snapshot = snapshot_admitting(book);
+    simulate_path(
+        scenario,
+        accounts,
+        book,
+        shock_bps,
+        bound_sign,
         snapshot.require_observed_book_and_fills()?,
     )
 }
@@ -73,8 +106,8 @@ fn long_cascade_is_deterministic_and_stops_after_second_wave() {
         account("c", Direction::Long, 20, 400),
     ];
     let book = book(20_000, HealthState::Green);
-    let first = simulate_path(&scenario, &accounts, &book, -100, 0).unwrap();
-    let second = simulate_path(&scenario, &accounts, &book, -100, 0).unwrap();
+    let first = simulate_bound_path(&scenario, &accounts, &book, -100, 0).unwrap();
+    let second = simulate_bound_path(&scenario, &accounts, &book, -100, 0).unwrap();
     assert_eq!(first.waves.len(), 2);
     assert_eq!(first.waves[0].liquidated_accounts[0].as_str(), "a");
     assert_eq!(first.waves[1].liquidated_accounts[0].as_str(), "b");
@@ -96,7 +129,7 @@ fn long_cascade_is_deterministic_and_stops_after_second_wave() {
 fn no_cascade_when_shock_is_inside_buffers() {
     let scenario = scenario();
     let accounts = vec![account("a", Direction::Long, 100, 400)];
-    let path = simulate_path(
+    let path = simulate_bound_path(
         &scenario,
         &accounts,
         &book(20_000, HealthState::Green),
@@ -111,7 +144,7 @@ fn no_cascade_when_shock_is_inside_buffers() {
 fn red_book_and_unsupported_margin_fail_closed() {
     let scenario = FragilityScenario::default_grid(ScenarioId::new("x").unwrap());
     let accounts = vec![account("a", Direction::Long, 100, 10)];
-    let red = simulate_path(
+    let red = simulate_bound_path(
         &scenario,
         &accounts,
         &book(20_000, HealthState::Red),
@@ -122,7 +155,7 @@ fn red_book_and_unsupported_margin_fail_closed() {
     assert_eq!(red.health.state, HealthState::Red);
     let mut unsupported = account("a", Direction::Long, 100, 10);
     unsupported.margin_mode = SimulatedMarginMode::Unsupported;
-    let path = simulate_path(
+    let path = simulate_bound_path(
         &scenario,
         &[unsupported],
         &book(20_000, HealthState::Green),
@@ -150,6 +183,14 @@ fn portfolio_uncertainty_separates_low_and_high_paths() {
 }
 
 fn market_snapshot(book: FeatureValue, fills: FeatureValue) -> MarketFeatureSnapshot {
+    market_snapshot_with_health(book, fills, health(HealthState::Amber))
+}
+
+fn market_snapshot_with_health(
+    book: FeatureValue,
+    fills: FeatureValue,
+    health: HealthAssessment,
+) -> MarketFeatureSnapshot {
     let mut values = std::collections::BTreeMap::new();
     values.insert(
         market_feature_key("registry").unwrap(),
@@ -165,7 +206,7 @@ fn market_snapshot(book: FeatureValue, fills: FeatureValue) -> MarketFeatureSnap
         KnownTime::from_unix_micros(1_000_000).unwrap(),
         BlockHeight::new(1),
         values,
-        health(HealthState::Amber),
+        health,
     )
     .unwrap()
 }
@@ -179,7 +220,7 @@ fn missing_book_does_not_invent_depth_or_emit_waves() {
         health: health(HealthState::Amber),
         observation: ObservationStatus::Missing(MissingReason::NotObserved),
     };
-    let error = simulate_path(&scenario, &accounts, &invented, -100, 0).unwrap_err();
+    let error = simulate_bound_path(&scenario, &accounts, &invented, -100, 0).unwrap_err();
     assert!(matches!(
         error,
         MarketError::Malformed {
@@ -189,7 +230,7 @@ fn missing_book_does_not_invent_depth_or_emit_waves() {
     ));
 
     let missing = SimulatedBook::missing(MissingReason::NotObserved).unwrap();
-    let path = simulate_path(&scenario, &accounts, &missing, -100, 0).unwrap();
+    let path = simulate_bound_path(&scenario, &accounts, &missing, -100, 0).unwrap();
     assert!(path.waves.is_empty());
     assert_eq!(path.total_forced_notional.raw(), 0);
     assert_eq!(path.health.state, HealthState::Red);
@@ -240,5 +281,59 @@ fn constructed_observed_book_without_fills_cannot_produce_fragility_scores() {
         simulate_fragility_from_snapshot(&missing_fills, &scenario, &accounts, -100),
         Err(MarketError::MissingInput { name: "fills" })
     ));
+    let unrelated = observed_snapshot();
+    let evidence = unrelated.require_observed_book_and_fills().unwrap();
+    assert!(matches!(
+        simulate_fragility(&scenario, &accounts, &book, -100, evidence),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match simulated book health",
+        })
+    ));
     assert_eq!(book.observation, ObservationStatus::Observed);
+}
+
+#[test]
+fn constructed_observed_book_without_fills_cannot_produce_path_scores() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let book = SimulatedBook::observed(usd(20_000), health(HealthState::Green));
+    let missing_fills = market_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    assert!(matches!(
+        missing_fills.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "fills" })
+    ));
+    let unrelated = observed_snapshot();
+    let evidence = unrelated.require_observed_book_and_fills().unwrap();
+    assert!(matches!(
+        simulate_path(&scenario, &accounts, &book, -100, 0, evidence),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match simulated book health",
+        })
+    ));
+    let matching_health = health(HealthState::Green);
+    let other_depth = market_snapshot_with_health(
+        FeatureValue::Decimal {
+            raw: 1_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        matching_health.clone(),
+    );
+    let stolen_depth = other_depth.require_observed_book_and_fills().unwrap();
+    let constructed = SimulatedBook::observed(usd(20_000), matching_health);
+    assert!(matches!(
+        simulate_path(&scenario, &accounts, &constructed, -100, 0, stolen_depth),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match simulated book depth",
+        })
+    ));
 }

@@ -255,8 +255,14 @@ impl MarketFeatureSnapshot {
                 return Err(MarketError::MissingInput { name: "fills" });
             }
         }
+        let book_key = market_feature_key("book")?;
+        let book = self
+            .values
+            .get(&book_key)
+            .ok_or(MarketError::MissingInput { name: "book" })?;
         Ok(ObservedBookAndFills {
             health: &self.health,
+            book,
         })
     }
 }
@@ -265,15 +271,23 @@ impl MarketFeatureSnapshot {
 ///
 /// Callers cannot construct this value; only
 /// [`MarketFeatureSnapshot::require_observed_book_and_fills`] issues it.
+/// The proof carries the issuing snapshot's health and book value so a
+/// constructed book cannot ride a token from another snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedBookAndFills<'a> {
     health: &'a HealthAssessment,
+    book: &'a FeatureValue,
 }
 
 impl ObservedBookAndFills<'_> {
     #[must_use]
     pub fn health(&self) -> &HealthAssessment {
         self.health
+    }
+
+    #[must_use]
+    pub(crate) fn book_value(&self) -> &FeatureValue {
+        self.book
     }
 }
 
