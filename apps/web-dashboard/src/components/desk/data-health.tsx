@@ -17,7 +17,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { FieldTable } from "@/components/desk/field-table"
 import { ToneBadge } from "@/components/desk/chips"
-import { healthStateTone } from "@/lib/tone"
+import { healthStateTone, toneWithoutLiveOnHttpError } from "@/lib/tone"
 import type { EndpointOutcome } from "@/lib/api"
 import {
   HEALTH_FIELD_ORDER,
@@ -162,7 +162,12 @@ function HealthBlock({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="font-mono text-xs text-muted-foreground">{title}</p>
             <div className="flex flex-wrap items-center gap-2">
-              <ToneBadge tone={healthStateTone(assessment.state)}>
+              <ToneBadge
+                tone={toneWithoutLiveOnHttpError(
+                  outcome.status,
+                  healthStateTone(assessment.state)
+                )}
+              >
                 {assessment.state}
               </ToneBadge>
               {outcome.status === 503 ? (

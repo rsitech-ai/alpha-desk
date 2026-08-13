@@ -2,7 +2,12 @@ import type { ReactNode } from "react"
 
 import { CapturePipelineCard } from "@/components/desk/capture-pipeline"
 import { LiveDot, ToneBadge } from "@/components/desk/chips"
-import { captureHealthTone, healthStateTone, readyTone } from "@/lib/tone"
+import {
+  captureHealthTone,
+  healthStateTone,
+  readyTone,
+  toneWithoutLiveOnHttpError,
+} from "@/lib/tone"
 import {
   ConnectionBanner,
   type ConnectionKind,
@@ -249,8 +254,15 @@ function HealthChip({
     }
     case "ok":
       return (
-        <ToneBadge tone={healthStateTone(outcome.data.state)}>
-          {outcome.data.scope}
+        <ToneBadge
+          tone={toneWithoutLiveOnHttpError(
+            outcome.status,
+            healthStateTone(outcome.data.state)
+          )}
+        >
+          {outcome.status === 503
+            ? `503 ${outcome.data.reason_code}`
+            : outcome.data.scope}
         </ToneBadge>
       )
     default: {
@@ -311,10 +323,22 @@ function CaptureChip({ outcome }: { outcome: EndpointOutcome<CaptureStatus> }) {
     case "ok":
       return (
         <span className="flex items-center gap-1">
-          <ToneBadge tone={captureHealthTone(outcome.data.health)}>
-            {outcome.data.health}
+          <ToneBadge
+            tone={toneWithoutLiveOnHttpError(
+              outcome.status,
+              captureHealthTone(outcome.data.health)
+            )}
+          >
+            {outcome.status === 503
+              ? `503 ${outcome.data.health}`
+              : outcome.data.health}
           </ToneBadge>
-          <ToneBadge tone={readyTone(outcome.data.ready)}>
+          <ToneBadge
+            tone={toneWithoutLiveOnHttpError(
+              outcome.status,
+              readyTone(outcome.data.ready)
+            )}
+          >
             ready={String(outcome.data.ready)}
           </ToneBadge>
         </span>

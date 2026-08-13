@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  lastHeartbeatThroughput,
   parseCaptureStatus,
   type ApiError,
   type CaptureStatus,
@@ -45,6 +46,7 @@ describe("mapApiError", () => {
     expect(view.tone).toBe("red")
     expect(view.detail).not.toMatch(/live-qualified/i)
     expect(view.detail).toMatch(/No invented fills/)
+    expect(view.tone).not.toBe("green")
   })
 
   it("maps 503 snapshot_invalid separately from missing", () => {
@@ -192,6 +194,89 @@ describe("parseCaptureStatus extras", () => {
     expect(aux?.qualification).toBe("unqualified")
     expect(aux?.restart_reconstruction).toBe("complete")
     expect(aux?.extra_fields.future_aux_flag).toBe(true)
+  })
+
+  it("maps last-heartbeat throughput extras when present without inventing missing rates", () => {
+    const present = parseCaptureStatus(
+      v4Status({
+        throughput_records_per_sec: 3,
+        throughput_blocks_per_sec: 1,
+      })
+    )
+    expect(present.ok).toBe(true)
+    if (!present.ok) {
+      return
+    }
+    expect(present.value.throughput_records_per_sec).toBe(3)
+    expect(present.value.throughput_blocks_per_sec).toBe(1)
+    expect(
+      present.value.extra_fields.throughput_records_per_sec
+    ).toBeUndefined()
+    expect(present.value.extra_fields.throughput_blocks_per_sec).toBeUndefined()
+
+    const idle = parseCaptureStatus(
+      v4Status({
+        throughput_records_per_sec: 0,
+        throughput_blocks_per_sec: 0,
+      })
+    )
+    expect(idle.ok).toBe(true)
+    if (!idle.ok) {
+      return
+    }
+    expect(idle.value.throughput_records_per_sec).toBe(0)
+    expect(idle.value.throughput_blocks_per_sec).toBe(0)
+
+    const missing = parseCaptureStatus(v4Status())
+    expect(missing.ok).toBe(true)
+    if (!missing.ok) {
+      return
+    }
+    expect(missing.value.throughput_records_per_sec).toBeUndefined()
+    expect(missing.value.throughput_blocks_per_sec).toBeUndefined()
+    expect("throughput_records_per_sec" in missing.value.extra_fields).toBe(
+      false
+    )
+    expect("throughput_blocks_per_sec" in missing.value.extra_fields).toBe(
+      false
+    )
+    expect(
+      lastHeartbeatThroughput(missing.value.extra_fields)
+        .throughput_records_per_sec
+    ).toBeUndefined()
+  })
+
+  it("keeps malformed throughput extras without rejecting or inventing rates", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        throughput_records_per_sec: -1,
+        throughput_blocks_per_sec: "fast",
+        later_unknown: "still-ignored",
+      })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.throughput_records_per_sec).toBeUndefined()
+    expect(parsed.value.throughput_blocks_per_sec).toBeUndefined()
+    expect(parsed.value.extra_fields.throughput_records_per_sec).toBe(-1)
+    expect(parsed.value.extra_fields.throughput_blocks_per_sec).toBe("fast")
+    expect(parsed.value.extra_fields.later_unknown).toBe("still-ignored")
+  })
+
+  it("maps a single present throughput field without inventing the other", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        throughput_records_per_sec: 7,
+      })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.throughput_records_per_sec).toBe(7)
+    expect(parsed.value.throughput_blocks_per_sec).toBeUndefined()
   })
 
   it("ignores malformed restart_reconstruction without rejecting the snapshot", () => {
