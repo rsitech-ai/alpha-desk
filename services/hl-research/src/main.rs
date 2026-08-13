@@ -5,10 +5,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use hl_research::{ResearchError, ResearchStatus, run_synthetic_bytes};
+use hl_research::{
+    ResearchError, ResearchStatus, run_holdout_isolation_bytes, run_shadow_capture_bytes,
+    run_synthetic_bytes, run_walk_forward_bytes,
+};
 use serde::Serialize;
 
-const USAGE: &str = "usage: hl-research <status|run-synthetic> [--fixture <path>] [--bundle <dir>] [--approved-key <hex>] [--output <path>]";
+const USAGE: &str = "usage: hl-research <status|run-synthetic|walk-forward|holdout-isolation|shadow-capture> [--fixture <path>] [--bundle <dir>] [--approved-key <hex>] [--output <path>]";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -40,9 +43,7 @@ async fn main() -> ExitCode {
 fn execute(arguments: Vec<OsString>) -> Result<String, ResearchError> {
     let command = Command::parse(arguments)?;
     match command {
-        Command::Status => serde_json::to_string(&ResearchStatus::current())
-            .map_err(|_| ResearchError::InvalidFixture)
-            .map(|encoded| encoded + "\n"),
+        Command::Status => write_json(ResearchStatus::current()),
         Command::RunSynthetic {
             fixture,
             bundle,
@@ -69,7 +70,26 @@ fn execute(arguments: Vec<OsString>) -> Result<String, ResearchError> {
             }
             Ok(encoded + "\n")
         }
+        Command::WalkForward { fixture } => {
+            write_json(run_walk_forward_bytes(&read_fixture(&fixture)?)?)
+        }
+        Command::HoldoutIsolation { fixture } => {
+            write_json(run_holdout_isolation_bytes(&read_fixture(&fixture)?)?)
+        }
+        Command::ShadowCapture { fixture } => {
+            write_json(run_shadow_capture_bytes(&read_fixture(&fixture)?)?)
+        }
     }
+}
+
+fn read_fixture(path: &std::path::Path) -> Result<Vec<u8>, ResearchError> {
+    fs::read(path).map_err(|_| ResearchError::InvalidFixture)
+}
+
+fn write_json<T: Serialize>(value: T) -> Result<String, ResearchError> {
+    serde_json::to_string(&value)
+        .map_err(|_| ResearchError::InvalidFixture)
+        .map(|encoded| encoded + "\n")
 }
 
 #[derive(Debug)]
@@ -80,6 +100,15 @@ enum Command {
         bundle: Option<PathBuf>,
         approved_key: Option<String>,
         output: Option<PathBuf>,
+    },
+    WalkForward {
+        fixture: PathBuf,
+    },
+    HoldoutIsolation {
+        fixture: PathBuf,
+    },
+    ShadowCapture {
+        fixture: PathBuf,
     },
 }
 
@@ -123,6 +152,28 @@ impl Command {
                     bundle,
                     approved_key,
                     output,
+                })
+            }
+            "walk-forward" | "holdout-isolation" | "shadow-capture" => {
+                let mut fixture = None;
+                while let Some(flag) = args.next() {
+                    let flag = flag.into_string().map_err(|_| ResearchError::Usage)?;
+                    let value = args
+                        .next()
+                        .ok_or(ResearchError::Usage)?
+                        .into_string()
+                        .map_err(|_| ResearchError::Usage)?;
+                    match flag.as_str() {
+                        "--fixture" => fixture = Some(PathBuf::from(value)),
+                        _ => return Err(ResearchError::Usage),
+                    }
+                }
+                let fixture = fixture.ok_or(ResearchError::Usage)?;
+                Ok(match verb.as_str() {
+                    "walk-forward" => Self::WalkForward { fixture },
+                    "holdout-isolation" => Self::HoldoutIsolation { fixture },
+                    "shadow-capture" => Self::ShadowCapture { fixture },
+                    _ => return Err(ResearchError::Usage),
                 })
             }
             _ => Err(ResearchError::Usage),

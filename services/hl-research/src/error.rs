@@ -12,6 +12,12 @@ pub enum ResearchError {
     HoldoutNotImplemented,
     #[error("shadow-live capture is not implemented")]
     ShadowLiveNotImplemented,
+    #[error("holdout partition leaked into {field}")]
+    HoldoutLeakage { field: &'static str },
+    #[error("validation split is invalid at {field}")]
+    SplitInvalid { field: &'static str },
+    #[error("shadow-live capture refused leaked or unordered evidence at {field}")]
+    ShadowLeakage { field: &'static str },
     #[error("research CLI usage is invalid")]
     Usage,
     #[error("synthetic fixture is invalid")]
@@ -34,6 +40,9 @@ impl ResearchError {
             Self::WalkForwardNotImplemented => "hl_research.walk_forward_not_implemented",
             Self::HoldoutNotImplemented => "hl_research.holdout_not_implemented",
             Self::ShadowLiveNotImplemented => "hl_research.shadow_live_not_implemented",
+            Self::HoldoutLeakage { .. } => "hl_research.holdout_leakage",
+            Self::SplitInvalid { .. } => "hl_research.split_invalid",
+            Self::ShadowLeakage { .. } => "hl_research.shadow_leakage",
             Self::Usage => "hl_research.usage",
             Self::InvalidFixture => "hl_research.invalid_fixture",
             Self::Simulation(_) => "hl_research.simulation",

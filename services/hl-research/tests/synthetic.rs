@@ -56,24 +56,12 @@ fn registered_manifest_is_immutable() {
 }
 
 #[test]
-fn holdout_walk_forward_and_shadow_live_are_unimplemented() {
+fn locked_holdout_pass_remains_unimplemented() {
     let mut registry = ExperimentRegistry::new();
     let record = registry.submit(complete_manifest()).unwrap();
     assert_eq!(
         registry.open_holdout(&record.experiment_id).unwrap_err(),
         ResearchError::HoldoutNotImplemented
-    );
-    assert_eq!(
-        registry
-            .run_walk_forward(&record.experiment_id)
-            .unwrap_err(),
-        ResearchError::WalkForwardNotImplemented
-    );
-    assert_eq!(
-        registry
-            .capture_shadow_live(&record.experiment_id)
-            .unwrap_err(),
-        ResearchError::ShadowLiveNotImplemented
     );
     let _ = ExperimentId::new("unused");
 }
