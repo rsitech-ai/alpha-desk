@@ -52,10 +52,17 @@ impl CoreRuntime {
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
         let mut dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
         let config = self.config.jetstream_config()?;
-        let mut source = self
+        let mut source = match self
             .session
             .connect_source(|| JetStreamPullSource::connect(config), &mut dead_letter)
-            .await?;
+            .await
+        {
+            Ok(source) => source,
+            Err(error) => {
+                self.status.fail_closed(error.reason_code());
+                return Err(error.into());
+            }
+        };
         self.run_source_with_dead_letter(&mut source, dead_letter, cancellation)
             .await
     }

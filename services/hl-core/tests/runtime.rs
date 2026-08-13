@@ -11,8 +11,8 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    CoreConfig, CoreRuntime, CoreStatusHandle, InMemoryCanonicalSource, committed_block_delivery,
-    committed_event_delivery,
+    CoreConfig, CoreRuntime, CoreStatusHandle, DEAD_LETTER_SCHEMA_V1, InMemoryCanonicalSource,
+    committed_block_delivery, committed_event_delivery,
 };
 use storage_ports::{ArchiveReceipt, AtomicStateStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -200,6 +200,45 @@ async fn applied_empty_block_publishes_watermark_and_stays_unqualified() {
     assert_eq!(report.last_height, Some(BlockHeight::new(200)));
     assert!(!report.live_qualified);
     assert!(!report.stage_2_qualified);
+}
+
+#[tokio::test]
+async fn connect_transport_failure_dlqs_then_latches_fail_closed_status() {
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let missing_password = root.path().join("missing-nats-password");
+    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200, None).replace(
+        "password_path = \"/run/secrets/alpha-desk-nats-core-password\"",
+        &format!("password_path = \"{}\"", missing_password.display()),
+    ))
+    .expect("config");
+    let runtime = CoreRuntime::open(config).expect("runtime");
+    let status = runtime.status().clone();
+
+    let error = runtime
+        .run_jetstream(CancellationToken::new())
+        .await
+        .expect_err("connect transport");
+    assert_eq!(error.reason_code(), "core.jetstream_transport");
+
+    let snapshot = status.snapshot();
+    assert!(!snapshot.ready());
+    assert_eq!(
+        snapshot.fail_closed_reason(),
+        Some("core.jetstream_transport")
+    );
+    assert!(snapshot.last_applied_watermark().is_none());
+    assert!(!snapshot.live_qualified());
+    assert!(!snapshot.stage_2_qualified());
+
+    let encoded = fs::read_to_string(root.path().join("dead-letter.jsonl")).expect("dlq");
+    let record: serde_json::Value = serde_json::from_str(encoded.trim()).expect("dlq json");
+    assert_eq!(record["schema_version"], DEAD_LETTER_SCHEMA_V1);
+    assert_eq!(record["reason_code"], "core.jetstream_transport");
+    assert_eq!(record["subject"], "hl.v1.connect.transport");
+    assert_eq!(record["message_id"], "connect");
+    assert!(record.get("live_qualified").is_none());
+    assert!(record.get("stage_2_qualified").is_none());
 }
 
 #[tokio::test]
