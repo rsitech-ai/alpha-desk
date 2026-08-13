@@ -53,5 +53,5 @@ pub use regime::{
 };
 pub use sentiment::{
     DimensionUnit, MarketFeatureSnapshot, MarketSentimentVector, ObservationStatus,
-    ScoredDimension, market_feature_key, missing_dimension,
+    ObservedBookAndFills, ScoredDimension, market_feature_key, missing_dimension,
 };
