@@ -179,8 +179,8 @@ jobs:
             --slurpfile lock infra/docker-compose/images.lock \
             --arg workspace "$GITHUB_WORKSPACE" \
             '
-              ([.services[].image] | sort) ==
-                ([$lock[0].images[].compose_ref] | sort) and
+              ([.services[].image] | unique | sort) ==
+                ([$lock[0].images[].compose_ref] | unique | sort) and
               all(.services[];
                 (.privileged // false) == false and
                 ((.volumes // []) | all(
@@ -192,8 +192,12 @@ jobs:
                       ($workspace + "/infra/docker-compose/minio/create-buckets.sh->/opt/alpha-desk/create-buckets.sh"),
                       ($workspace + "/infra/docker-compose/nats/nats.conf->/etc/nats/nats.conf"),
                       ($workspace + "/infra/docker-compose/nats/init-streams.sh->/opt/alpha-desk/init-streams.sh"),
+                      ($workspace + "/infra/docker-compose/nats/bootstrap.json->/opt/alpha-desk/bootstrap.json"),
+                      ($workspace + "/infra/docker-compose/nats/test-permissions.sh->/opt/alpha-desk/test-permissions.sh"),
                       ($workspace + "/infra/docker-compose/otel/collector.yaml->/etc/otelcol-contrib/config.yaml"),
                       ($workspace + "/infra/docker-compose/postgres/init.sql->/docker-entrypoint-initdb.d/001-alpha-desk.sql"),
+                      ($workspace + "/schemas/postgres/0001_capture_incidents.sql->/docker-entrypoint-initdb.d/010-capture-incidents.sql"),
+                      ($workspace + "/schemas/postgres/0002_capture_progress.sql->/docker-entrypoint-initdb.d/020-capture-progress.sql"),
                       ($workspace + "/infra/docker-compose/victoriametrics/prometheus.yml->/etc/victoriametrics/prometheus.yml")
                     )) and
                     (.source | contains("/var/run/docker.sock") | not) and

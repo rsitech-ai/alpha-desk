@@ -43,17 +43,21 @@ docker compose -f "$compose_file" config --format json >"$compose_json"
 jq -e '
   .schema_version == 1 and
   (.images | type == "array") and
-  (.images | length == 9) and
+  (.images | length == 8) and
   all(
     .images[];
     . as $image |
-    ($image.service | type == "string" and length > 0) and
-    ($image.version | type == "string" and length > 0) and
+    ($image.name | type == "string" and length > 0) and
+    ($image.tag | type == "string" and length > 0) and
+    ($image.services | type == "array" and length > 0) and
+    all($image.services[]; type == "string" and length > 0) and
     ($image.index_digest | test("^sha256:[0-9a-f]{64}$")) and
     ($image.linux_arm64_digest | test("^sha256:[0-9a-f]{64}$")) and
-    ($image.compose_ref | endswith("@" + $image.index_digest))
+    ($image.compose_ref == ($image.name + ":" + $image.tag + "@" + $image.index_digest)) and
+    ($image.compose_ref | test("@sha256:[0-9a-f]{64}$"))
   ) and
-  (([.images[].service] | unique | length) == 9)
+  (([.images[].compose_ref] | unique | length) == 8) and
+  (([.images[].services[]] | unique | length) == 9)
 ' "$lock_file" >/dev/null
 
 jq -e '.name == "alpha-desk-dev"' "$compose_json" >/dev/null
@@ -225,7 +229,7 @@ jq -e --slurpfile lock "$lock_file" '
   ==
   (
     $lock[0].images
-    | map({service: .service, image: .compose_ref})
+    | map(. as $image | $image.services[] | {service: ., image: $image.compose_ref})
     | sort_by(.service)
   )
 ' "$compose_json" >/dev/null
@@ -233,7 +237,7 @@ jq -e --slurpfile lock "$lock_file" '
 clickhouse_image="$(
   jq -er '
     .images[]
-    | select(.service == "clickhouse")
+    | select(.services | index("clickhouse"))
     | .compose_ref
   ' "$lock_file"
 )"

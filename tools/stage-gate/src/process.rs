@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    io::{self, Read},
+    io::{self, Read, Write as _},
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
     thread,
@@ -8,7 +8,12 @@ use std::{
 };
 
 #[cfg(unix)]
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use rustix::{
+    event::{PollFd, PollFlags, Timespec, poll},
+    fs::{OFlags, fcntl_getfl, fcntl_setfl},
+    io::Errno,
+    process::{Pid, Signal, kill_process_group},
+};
 #[cfg(unix)]
 use std::os::fd::AsFd;
 #[cfg(unix)]
@@ -176,32 +181,57 @@ where
         }
     };
     let deadline = started + spec.timeout;
-    if let Err(error) = set_nonblocking(&stdout).and_then(|()| set_nonblocking(&stderr)) {
+    let (mut deadline_signal, mut deadline_waker) = match io::pipe() {
+        Ok(pipe) => pipe,
+        Err(source) => {
+            terminate_process_group(&mut child, spec.termination_grace)?;
+            return Err(ProcessError::OutputReadFailed {
+                stream: "deadline",
+                source,
+            });
+        }
+    };
+    if let Err(error) = set_nonblocking(&stdout)
+        .and_then(|()| set_nonblocking(&stderr))
+        .and_then(|()| set_nonblocking(&deadline_signal))
+    {
         terminate_process_group(&mut child, spec.termination_grace)?;
         return Err(error);
     }
+    thread::spawn(move || {
+        thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        let _ = deadline_waker.write_all(&[1]);
+    });
     let mut stdout_output = RawOutput::new(output_policy.max_bytes_per_stream);
     let mut stderr_output = RawOutput::new(output_policy.max_bytes_per_stream);
     let mut stdout_eof = false;
     let mut stderr_eof = false;
+    let mut deadline_fired = false;
     let mut status = None;
     loop {
-        let stdout_progress =
-            match drain_once(&mut stdout, &mut stdout_output, "stdout", &mut stdout_eof) {
-                Ok(progress) => progress,
-                Err(error) => {
-                    terminate_process_group(&mut child, spec.termination_grace)?;
-                    return Err(error);
-                }
-            };
-        let stderr_progress =
-            match drain_once(&mut stderr, &mut stderr_output, "stderr", &mut stderr_eof) {
-                Ok(progress) => progress,
-                Err(error) => {
-                    terminate_process_group(&mut child, spec.termination_grace)?;
-                    return Err(error);
-                }
-            };
+        match poll_command_fds(
+            &stdout,
+            &stderr,
+            &deadline_signal,
+            stdout_eof,
+            stderr_eof,
+            deadline,
+        ) {
+            Ok(fired) => deadline_fired |= fired,
+            Err(error) => {
+                terminate_process_group(&mut child, spec.termination_grace)?;
+                return Err(error);
+            }
+        }
+        deadline_fired |= deadline_signal_ready(&mut deadline_signal);
+        if let Err(error) = drain_once(&mut stdout, &mut stdout_output, "stdout", &mut stdout_eof) {
+            terminate_process_group(&mut child, spec.termination_grace)?;
+            return Err(error);
+        }
+        if let Err(error) = drain_once(&mut stderr, &mut stderr_output, "stderr", &mut stderr_eof) {
+            terminate_process_group(&mut child, spec.termination_grace)?;
+            return Err(error);
+        }
         if status.is_none() {
             status = match child.try_wait() {
                 Ok(status) => status,
@@ -226,18 +256,14 @@ where
                 elapsed: started.elapsed(),
             });
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline || deadline_fired {
             observer(child.id(), ProcessObservation::TimeoutDetected);
-            terminate_process_group(&mut child, spec.termination_grace)?;
+            let _ = terminate_process_group(&mut child, spec.termination_grace);
             drop(stdout);
             drop(stderr);
             return Err(ProcessError::TimedOut {
                 timeout: spec.timeout,
             });
-        }
-        if !stdout_progress && !stderr_progress {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(WAIT_POLL_INTERVAL));
         }
     }
 }
@@ -288,22 +314,23 @@ fn terminate_process_group(
     child: &mut Child,
     termination_grace: Duration,
 ) -> Result<(), ProcessError> {
-    let _term_result = signal_process_group(child.id(), "TERM");
-    let grace_started = Instant::now();
+    let process_group = child.id();
+    let _ = signal_process_group(process_group, Signal::TERM);
     let leader_exited = wait_until(child, termination_grace)?.is_some();
-    thread::sleep(termination_grace.saturating_sub(grace_started.elapsed()));
-    let kill_result = signal_process_group(child.id(), "KILL");
-    if let Err(error) = kill_result
-        && !leader_exited
-    {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
+    let kill_result = signal_process_group(process_group, Signal::KILL);
+    if leader_exited {
+        return Ok(());
     }
-    if !leader_exited {
-        child.wait().map_err(ProcessError::WaitFailed)?;
+    let _ = child.kill();
+    if wait_until(child, termination_grace)?.is_some() {
+        return Ok(());
     }
-    Ok(())
+    match kill_result {
+        Ok(()) => Err(ProcessError::TerminationFailed(
+            "process group leader survived SIGKILL".to_owned(),
+        )),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(not(unix))]
@@ -315,22 +342,97 @@ fn terminate_process_group(
 }
 
 #[cfg(unix)]
-fn signal_process_group(process_group: u32, signal: &str) -> Result<(), ProcessError> {
-    let status = Command::new("/bin/kill")
-        .env_clear()
-        .args([format!("-{signal}"), format!("-{process_group}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| ProcessError::TerminationFailed(error.to_string()))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(ProcessError::TerminationFailed(format!(
-            "{signal} for process group {process_group} exited {status}"
-        )))
+fn signal_process_group(process_group: u32, signal: Signal) -> Result<(), ProcessError> {
+    let raw = i32::try_from(process_group).map_err(|_| {
+        ProcessError::TerminationFailed(format!(
+            "process group {process_group} is not a valid pid"
+        ))
+    })?;
+    let pid = Pid::from_raw(raw).ok_or_else(|| {
+        ProcessError::TerminationFailed(format!(
+            "process group {process_group} is not a valid pid"
+        ))
+    })?;
+    kill_process_group(pid, signal).map_err(|error| {
+        ProcessError::TerminationFailed(format!(
+            "{signal:?} for process group {process_group}: {error}"
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn poll_command_fds(
+    stdout: impl AsFd,
+    stderr: impl AsFd,
+    deadline_signal: impl AsFd,
+    stdout_eof: bool,
+    stderr_eof: bool,
+    deadline: Instant,
+) -> Result<bool, ProcessError> {
+    if Instant::now() >= deadline {
+        return Ok(true);
     }
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .min(WAIT_POLL_INTERVAL);
+    let Some(timeout) = Timespec::try_from(remaining).ok() else {
+        return Ok(true);
+    };
+    if stdout_eof && stderr_eof {
+        let mut fds = [PollFd::new(&deadline_signal, PollFlags::IN | PollFlags::HUP)];
+        return poll_deadline(&mut fds, Some(&timeout), deadline);
+    }
+    let mut fds = [
+        PollFd::new(&stdout, PollFlags::IN | PollFlags::HUP),
+        PollFd::new(&stderr, PollFlags::IN | PollFlags::HUP),
+        PollFd::new(&deadline_signal, PollFlags::IN | PollFlags::HUP),
+    ];
+    if stdout_eof {
+        fds[0] = PollFd::new(&deadline_signal, PollFlags::IN | PollFlags::HUP);
+    }
+    if stderr_eof {
+        fds[1] = PollFd::new(&deadline_signal, PollFlags::IN | PollFlags::HUP);
+    }
+    poll_deadline(&mut fds, Some(&timeout), deadline)
+}
+
+#[cfg(not(unix))]
+fn poll_command_fds(
+    _stdout: &impl Sized,
+    _stderr: &impl Sized,
+    _deadline_signal: &impl Sized,
+    _stdout_eof: bool,
+    _stderr_eof: bool,
+    _deadline: Instant,
+) -> Result<bool, ProcessError> {
+    Err(ProcessError::UnsupportedPlatform)
+}
+
+#[cfg(not(unix))]
+fn deadline_signal_ready(_deadline_signal: &mut impl Read) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn poll_deadline(
+    fds: &mut [PollFd<'_>],
+    timeout: Option<&Timespec>,
+    deadline: Instant,
+) -> Result<bool, ProcessError> {
+    match poll(fds, timeout) {
+        Ok(_) => Ok(Instant::now() >= deadline),
+        Err(error) if error == Errno::INTR => Ok(Instant::now() >= deadline),
+        Err(error) => Err(ProcessError::OutputReadFailed {
+            stream: "stdio",
+            source: io::Error::from_raw_os_error(error.raw_os_error()),
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn deadline_signal_ready(deadline_signal: &mut impl Read) -> bool {
+    let mut byte = [0_u8; 1];
+    matches!(deadline_signal.read(&mut byte), Ok(1..))
 }
 
 #[cfg(unix)]
