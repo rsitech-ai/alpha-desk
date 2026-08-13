@@ -24,7 +24,9 @@ pub use aggression::{
 pub use cohort::{CohortDefinition, CohortMember, CohortPredicate, select_members};
 pub use conviction::{ConvictionComponent, ConvictionSnapshot};
 pub use cross_asset::{CrossAssetFeatures, CrossAssetInputs, cross_asset_features};
-pub use crowding::{CrowdingComponents, CrowdingPosition, crowding_components};
+pub use crowding::{
+    CrowdingComponents, CrowdingPosition, crowding_components, crowding_components_from_snapshot,
+};
 pub use entry_map::{EntryBin, EntryHistogram, break_even_bps, entry_histogram};
 pub use errors::MarketError;
 pub use flow::{
@@ -33,7 +35,8 @@ pub use flow::{
 };
 pub use fragility::{
     DEFAULT_SHOCKS_BPS, FragilityResult, FragilityScenario, LiquidationWave, ScenarioPathResult,
-    SimulatedAccount, SimulatedBook, SimulatedMarginMode, simulate_fragility, simulate_path,
+    SimulatedAccount, SimulatedBook, SimulatedMarginMode, simulate_fragility,
+    simulate_fragility_from_snapshot, simulate_path,
 };
 pub use math::{COUNT_SCALE, PPM_ONE, RATIO_SCALE, USD_SCALE, robust_z_milli};
 pub use memory::{
@@ -49,6 +52,6 @@ pub use regime::{
     MarketRegime, RegimeAssessment, RegimeFeatureVector, RegimeModel, RegimeName, classify_regime,
 };
 pub use sentiment::{
-    DimensionUnit, MarketFeatureSnapshot, MarketSentimentVector, ScoredDimension,
-    market_feature_key, missing_dimension,
+    DimensionUnit, MarketFeatureSnapshot, MarketSentimentVector, ObservationStatus,
+    ScoredDimension, market_feature_key, missing_dimension,
 };

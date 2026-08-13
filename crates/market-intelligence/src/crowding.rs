@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     MarketError,
     math::{COUNT_SCALE, USD_SCALE},
-    sentiment::{DimensionUnit, ScoredDimension},
+    sentiment::{DimensionUnit, MarketFeatureSnapshot, ScoredDimension},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +30,15 @@ pub struct CrowdingComponents {
     pub funding_percentile: ScoredDimension,
     pub leverage_concentration: ScoredDimension,
     pub capacity_consumed: ScoredDimension,
+}
+
+pub fn crowding_components_from_snapshot(
+    snapshot: &MarketFeatureSnapshot,
+    positions: &[CrowdingPosition],
+    remaining_capacity: UsdAmount,
+) -> Result<CrowdingComponents, MarketError> {
+    snapshot.require_observed_book_and_fills()?;
+    crowding_components(positions, remaining_capacity, &snapshot.health)
 }
 
 pub fn crowding_components(

@@ -1,6 +1,6 @@
 use domain_types::{BlockHeight, EntityId, Horizon, ProbabilityPpm, SignalId, UsdAmount};
 use feature_core::EvidenceRef;
-use market_intelligence::{AnalogueSet, MarketFeatureSnapshot};
+use market_intelligence::{AnalogueSet, MarketFeatureSnapshot, ObservationStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::{SignalError, invalidation::InvalidationRule};
@@ -117,6 +117,17 @@ impl EvidenceBundle {
         if self.watermark.get() == 0 {
             missing.push("data_watermark".to_owned());
         }
+        for name in ["book", "fills"] {
+            if snapshot_lacks_observation(&self.feature_before, name)
+                || snapshot_lacks_observation(&self.feature_after, name)
+            {
+                missing.push(name.to_owned());
+            }
+        }
         missing
     }
+}
+
+fn snapshot_lacks_observation(snapshot: &MarketFeatureSnapshot, name: &'static str) -> bool {
+    !matches!(snapshot.observation(name), Ok(ObservationStatus::Observed))
 }

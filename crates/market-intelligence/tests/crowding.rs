@@ -1,8 +1,12 @@
-use domain_types::{Direction, EntityId, ProbabilityPpm, UsdAmount};
-use feature_core::{HealthAssessment, HealthState};
+use domain_types::{
+    BlockHeight, Direction, EntityId, FeatureSetVersion, Horizon, KnownTime, MarketId,
+    ProbabilityPpm, ProtocolTime, UsdAmount,
+};
+use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use market_intelligence::{
-    CrowdingPosition, PainObservation, PainState, PainThresholds, classify_pain,
-    crowding_components, entry_histogram,
+    CrowdingPosition, MarketError, MarketFeatureSnapshot, PainObservation, PainState,
+    PainThresholds, classify_pain, crowding_components, crowding_components_from_snapshot,
+    entry_histogram, market_feature_key,
 };
 
 fn usd(dollars: i128) -> UsdAmount {
@@ -105,4 +109,71 @@ fn unknown_margin_stays_unknown() {
         &thresholds,
     );
     assert_eq!(state, PainState::Unknown);
+}
+
+fn crowding_snapshot(book: FeatureValue, fills: FeatureValue) -> MarketFeatureSnapshot {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert(
+        market_feature_key("registry").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    values.insert(market_feature_key("book").unwrap(), book);
+    values.insert(market_feature_key("fills").unwrap(), fills);
+    MarketFeatureSnapshot::try_new(
+        MarketId::new("BTC").unwrap(),
+        Horizon::MINUTES_5,
+        FeatureSetVersion::new("market-v1").unwrap(),
+        ProtocolTime::from_unix_micros(1_000_000).unwrap(),
+        KnownTime::from_unix_micros(1_000_000).unwrap(),
+        BlockHeight::new(1),
+        values,
+        health(),
+    )
+    .unwrap()
+}
+
+fn invented_mark_position() -> CrowdingPosition {
+    CrowdingPosition {
+        entity_id: EntityId::new("invented").unwrap(),
+        independence_weight: ProbabilityPpm::ONE,
+        is_follower: false,
+        post_originator: false,
+        exposure: usd(100),
+        entry_bps_from_mark: 12,
+        funding_percentile: ppm(500_000),
+        leverage_milli: 200_000,
+    }
+}
+
+#[test]
+fn missing_book_or_fills_refuses_crowding_without_inventing_marks() {
+    let positions = vec![invented_mark_position()];
+    let missing_book = crowding_snapshot(
+        FeatureValue::Missing(MissingReason::NotObserved),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    assert!(matches!(
+        crowding_components_from_snapshot(&missing_book, &positions, usd(50)),
+        Err(MarketError::MissingInput { name: "book" })
+    ));
+    let missing_fills = crowding_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    assert!(matches!(
+        crowding_components_from_snapshot(&missing_fills, &positions, usd(50)),
+        Err(MarketError::MissingInput { name: "fills" })
+    ));
+    let observed = crowding_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+    );
+    let components = crowding_components_from_snapshot(&observed, &positions, usd(50)).unwrap();
+    assert!(components.capacity_consumed.raw_value.raw() > 0);
 }

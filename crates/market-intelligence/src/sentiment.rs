@@ -4,10 +4,40 @@ use domain_types::{
     BlockHeight, ClosedInterval, Decimal, FeatureSetVersion, Horizon, KnownTime, MarketId,
     ProbabilityPpm, ProtocolTime,
 };
-use feature_core::{EvidenceRef, FeatureKey, FeatureValue, HealthAssessment, HealthState};
+use feature_core::{
+    EvidenceRef, FeatureKey, FeatureValue, HealthAssessment, HealthState, MissingReason,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{MarketError, hash::digest, math::RATIO_SCALE, regime::RegimeAssessment};
+
+/// Presence of a required market input. Missing values must not be treated as zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ObservationStatus {
+    Observed,
+    Missing(MissingReason),
+}
+
+impl ObservationStatus {
+    #[must_use]
+    pub fn from_feature(value: Option<&FeatureValue>) -> Self {
+        match value {
+            Some(FeatureValue::Missing(reason)) => Self::Missing(*reason),
+            None => Self::Missing(MissingReason::NotObserved),
+            Some(FeatureValue::Decimal { .. })
+            | Some(FeatureValue::SignedInteger(_))
+            | Some(FeatureValue::UnsignedInteger(_))
+            | Some(FeatureValue::ProbabilityPpm(_))
+            | Some(FeatureValue::Category(_))
+            | Some(FeatureValue::Boolean(_)) => Self::Observed,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_observed(self) -> bool {
+        matches!(self, Self::Observed)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DimensionUnit {
@@ -205,6 +235,27 @@ impl MarketFeatureSnapshot {
                 reason: "unexpected feature value kind",
             }),
         }
+    }
+
+    pub fn observation(&self, name: &'static str) -> Result<ObservationStatus, MarketError> {
+        let key = market_feature_key(name)?;
+        Ok(ObservationStatus::from_feature(self.values.get(&key)))
+    }
+
+    pub fn require_observed_book_and_fills(&self) -> Result<(), MarketError> {
+        match self.observation("book")? {
+            ObservationStatus::Observed => {}
+            ObservationStatus::Missing(_) => {
+                return Err(MarketError::MissingInput { name: "book" });
+            }
+        }
+        match self.observation("fills")? {
+            ObservationStatus::Observed => {}
+            ObservationStatus::Missing(_) => {
+                return Err(MarketError::MissingInput { name: "fills" });
+            }
+        }
+        Ok(())
     }
 }
 

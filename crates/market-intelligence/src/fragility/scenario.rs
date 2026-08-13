@@ -1,11 +1,14 @@
 use domain_types::{AccountId, Direction, MarketId, ProbabilityPpm, ScenarioId, UsdAmount};
-use feature_core::{HealthAssessment, HealthState};
+use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MarketError,
+    MarketError, ObservationStatus,
     fragility::{apply_collateral_contagion, forced_impact_bps, liquidate_accounts, path_variant},
     hash::digest,
+    market_feature_key,
+    math::USD_SCALE,
+    sentiment::MarketFeatureSnapshot,
 };
 
 pub const DEFAULT_SHOCKS_BPS: [i64; 12] =
@@ -33,6 +36,26 @@ pub struct SimulatedAccount {
 pub struct SimulatedBook {
     pub executable_depth: UsdAmount,
     pub health: HealthAssessment,
+    pub observation: ObservationStatus,
+}
+
+impl SimulatedBook {
+    #[must_use]
+    pub fn observed(executable_depth: UsdAmount, health: HealthAssessment) -> Self {
+        Self {
+            executable_depth,
+            health,
+            observation: ObservationStatus::Observed,
+        }
+    }
+
+    pub fn missing(reason: MissingReason) -> Result<Self, MarketError> {
+        Ok(Self {
+            executable_depth: UsdAmount::from_raw(0, USD_SCALE)?,
+            health: HealthAssessment::try_new("book", HealthState::Amber, reason.as_wire_name())?,
+            observation: ObservationStatus::Missing(reason),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +141,9 @@ pub fn simulate_fragility(
     shock_bps: i64,
 ) -> Result<FragilityResult, MarketError> {
     let mut missing = Vec::new();
-    if book.health.state == HealthState::Red {
+    if matches!(book.observation, ObservationStatus::Missing(_))
+        || book.health.state == HealthState::Red
+    {
         missing.push("book".to_owned());
     }
     if accounts
@@ -152,6 +177,37 @@ pub fn simulate_fragility(
     })
 }
 
+pub fn simulate_fragility_from_snapshot(
+    snapshot: &MarketFeatureSnapshot,
+    scenario: &FragilityScenario,
+    accounts: &[SimulatedAccount],
+    shock_bps: i64,
+) -> Result<FragilityResult, MarketError> {
+    snapshot.require_observed_book_and_fills()?;
+    let book_key = market_feature_key("book")?;
+    let executable_depth = match snapshot.values.get(&book_key) {
+        Some(FeatureValue::Decimal { raw, scale }) => {
+            let scale = u8::try_from(*scale).map_err(|_| MarketError::OutOfRange)?;
+            UsdAmount::from_raw(*raw, scale)?
+        }
+        Some(FeatureValue::Missing(_)) | None => {
+            return Err(MarketError::MissingInput { name: "book" });
+        }
+        Some(FeatureValue::SignedInteger(_))
+        | Some(FeatureValue::UnsignedInteger(_))
+        | Some(FeatureValue::ProbabilityPpm(_))
+        | Some(FeatureValue::Category(_))
+        | Some(FeatureValue::Boolean(_)) => {
+            return Err(MarketError::Malformed {
+                what: "book",
+                reason: "observed book must be decimal executable depth",
+            });
+        }
+    };
+    let book = SimulatedBook::observed(executable_depth, snapshot.health.clone());
+    simulate_fragility(scenario, accounts, &book, shock_bps)
+}
+
 pub fn simulate_path(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -159,6 +215,18 @@ pub fn simulate_path(
     shock_bps: i64,
     bound_sign: i32,
 ) -> Result<ScenarioPathResult, MarketError> {
+    match book.observation {
+        ObservationStatus::Missing(_) => {
+            if book.executable_depth.raw() != 0 {
+                return Err(MarketError::Malformed {
+                    what: "book",
+                    reason: "missing book cannot carry executable depth",
+                });
+            }
+            return red_path(accounts, &book.health);
+        }
+        ObservationStatus::Observed => {}
+    }
     if book.health.state == HealthState::Red {
         return red_path(accounts, &book.health);
     }
