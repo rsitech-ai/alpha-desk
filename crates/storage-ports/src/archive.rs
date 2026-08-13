@@ -284,6 +284,21 @@ impl RawArchiveWorkloadEnvelope {
         Ok(())
     }
 
+    #[must_use]
+    pub const fn retention_horizon_seconds(&self) -> u64 {
+        self.retention_horizon_seconds
+    }
+
+    #[must_use]
+    pub const fn maximum_eligible_bytes(&self) -> u64 {
+        self.maximum_eligible_bytes
+    }
+
+    #[must_use]
+    pub const fn maximum_eligible_inodes(&self) -> u64 {
+        self.maximum_eligible_inodes
+    }
+
     /// Maintenance must call this before publishing capacity health as green.
     pub fn validate_backlog(
         self,

@@ -1,10 +1,10 @@
-use canonical_archive::{ArchiveConfig, RawV3Archive};
+use canonical_archive::{ArchiveConfig, RawArchiveCheckpoint, RawV3Archive};
 use domain_types::{ChainId, KnownTime, SourceId};
 use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
 use storage_ports::{
     ArchiveError, LocalRecordSequence, LocalRecordSequenceRange, RawArchiveCapacityBudgets,
-    RawArchiveCapacityRejection, RawArchiveWorkloadEnvelope, RawObservationArchive,
-    RawObservationBatch, RawObservationRange,
+    RawArchiveCapacityRejection, RawArchiveCheckpointEntriesV2, RawArchiveCheckpointEntryV2,
+    RawArchiveWorkloadEnvelope, RawObservationArchive, RawObservationBatch, RawObservationRange,
 };
 
 fn observation(offset: u64, payload: &[u8]) -> SourceObservation {
@@ -302,9 +302,7 @@ fn pack_logical_range_replays_exact_rows_and_keeps_receipts() {
             .unwrap(),
         )
         .expect("pack logical range");
-    let manifests = temporary
-        .path()
-        .join("_manifests/raw-byte-v3/packs");
+    let manifests = temporary.path().join("_manifests/raw-byte-v3/packs");
     let pack_manifests: Vec<_> = std::fs::read_dir(&manifests)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -488,4 +486,321 @@ fn sequence_read_holds_an_exact_root_lease() {
     let replayed = iterator.collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(replayed.len(), 1);
     assert!(leases[0].is_file());
+}
+
+const FIXTURE_TIME_MICROS: i64 = 1_722_000_000_000_000;
+
+fn open_retention_archive(path: &std::path::Path, micros: i64) -> RawV3Archive {
+    let workload =
+        RawArchiveWorkloadEnvelope::try_new(100, 1, 1_000, 1, 1_024, 1_000, 64 * 1024 * 1024, 64)
+            .unwrap();
+    let budgets =
+        RawArchiveCapacityBudgets::try_new(u64::MAX, u64::MAX, u64::MAX, u64::MAX, true).unwrap();
+    RawV3Archive::open(
+        path,
+        ArchiveConfig::deterministic_fixture(
+            "raw-v3-io-test",
+            KnownTime::from_unix_micros(micros).unwrap(),
+        )
+        .unwrap(),
+        workload,
+        budgets,
+    )
+    .unwrap()
+}
+
+fn collect_parquet(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_parquet(&path, found);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
+            found.push(path);
+        }
+    }
+}
+
+fn parent_named(path: &std::path::Path, name: &str) -> bool {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|value| value.to_str())
+        == Some(name)
+}
+
+#[test]
+fn checkpoint_v1_stays_current_until_atomic_switch_to_verified_v2() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let first = archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    let second = archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let v1 = archive
+        .publish_checkpoint_v1(
+            &chain,
+            &source,
+            &[first.manifest_id().clone(), second.manifest_id().clone()],
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(archive.load_checkpoint(&chain, &source).unwrap().is_none());
+    archive
+        .switch_checkpoint_current(&chain, &source, None, v1)
+        .unwrap();
+    match archive.load_checkpoint(&chain, &source).unwrap() {
+        Some(RawArchiveCheckpoint::V1(loaded)) => assert_eq!(loaded.sha256(), v1),
+        other => panic!("expected V1 current, got {other:?}"),
+    }
+
+    let v2_entries = RawArchiveCheckpointEntriesV2::try_new(vec![
+        RawArchiveCheckpointEntryV2::new(
+            first.manifest_id().clone(),
+            first.manifest_sha256(),
+            first.local_sequence_range().unwrap(),
+        ),
+        RawArchiveCheckpointEntryV2::new(
+            second.manifest_id().clone(),
+            second.manifest_sha256(),
+            second.local_sequence_range().unwrap(),
+        ),
+    ])
+    .unwrap();
+    let v2 = archive
+        .publish_checkpoint_v2(&chain, &source, v2_entries)
+        .unwrap();
+    match archive.load_checkpoint(&chain, &source).unwrap() {
+        Some(RawArchiveCheckpoint::V1(loaded)) => assert_eq!(loaded.sha256(), v1),
+        other => panic!("V1 must stay current until switch, got {other:?}"),
+    }
+    assert!(
+        archive
+            .switch_checkpoint_current(&chain, &source, Some([0x11; 32]), v2)
+            .is_err()
+    );
+    archive
+        .switch_checkpoint_current(&chain, &source, Some(v1), v2)
+        .unwrap();
+    match archive.load_checkpoint(&chain, &source).unwrap() {
+        Some(RawArchiveCheckpoint::V2(loaded)) => {
+            assert_eq!(loaded.sha256(), v2);
+            for entry in loaded.entries().entries() {
+                archive
+                    .verify_raw_manifest_at_sequence(
+                        entry.manifest_id(),
+                        entry.local_sequence_range(),
+                    )
+                    .unwrap();
+            }
+        }
+        other => panic!("expected V2 current, got {other:?}"),
+    }
+}
+
+#[test]
+fn packed_object_gc_unlinks_through_a_crash_recoverable_journal() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let backup = [0xAB; 32];
+    assert!(
+        archive
+            .plan_packed_object_gc(&chain, &source, backup)
+            .unwrap()
+            .is_empty()
+    );
+    drop(archive);
+
+    let too_early = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    assert!(
+        too_early
+            .plan_packed_object_gc(&chain, &source, backup)
+            .unwrap()
+            .is_empty()
+    );
+    drop(too_early);
+
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    assert!(matches!(
+        later.plan_packed_object_gc(&chain, &source, [0; 32]),
+        Err(ArchiveError::InvalidInput(_))
+    ));
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, backup)
+        .unwrap();
+    assert!(!plan.is_empty());
+    assert!(
+        later
+            .execute_packed_object_gc(&chain, &source, plan.digest(), [0xCD; 32])
+            .is_err()
+    );
+    let receipt = later
+        .execute_packed_object_gc(&chain, &source, plan.digest(), backup)
+        .unwrap();
+    assert_eq!(receipt.plan_digest(), plan.digest());
+    assert!(receipt.unlinked_files() > 0);
+    let replayed = later
+        .execute_packed_object_gc(&chain, &source, plan.digest(), backup)
+        .unwrap();
+    assert_eq!(replayed.unlinked_files(), receipt.unlinked_files());
+
+    let mut parquet = Vec::new();
+    collect_parquet(temporary.path(), &mut parquet);
+    assert!(parquet.iter().any(|path| parent_named(path, "packs")));
+    assert!(parquet.iter().all(|path| {
+        !path
+            .components()
+            .any(|component| component.as_os_str() == "objects")
+    }));
+    let rows = later
+        .read_observations_by_sequence(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn packed_object_gc_fails_closed_while_an_old_root_lease_is_held() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    let iterator = archive
+        .read_observations_by_sequence(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    assert!(matches!(
+        later.plan_packed_object_gc(&chain, &source, [0xAB; 32]),
+        Err(ArchiveError::WriterBusy)
+    ));
+    drop(iterator);
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .unwrap();
+    assert!(!plan.is_empty());
+}
+
+#[test]
+fn receipt_hint_rebuild_is_non_authoritative_and_reauthenticates() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let first = archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    archive.rebuild_receipt_hints(&chain, &source).unwrap();
+    let (first_seq, last_seq) = archive
+        .lookup_receipt_hint(&chain, &source, first.manifest_id())
+        .unwrap();
+    assert_eq!(first_seq, 1);
+    assert_eq!(last_seq, 1);
+    let missing =
+        domain_types::ManifestId::new(format!("archive-manifest-v1-{}", "11".repeat(32))).unwrap();
+    assert!(matches!(
+        archive.lookup_receipt_hint(&chain, &source, &missing),
+        Err(ArchiveError::ReceiptIndexRebuildRequired)
+    ));
+}
+
+#[test]
+fn gc_fails_closed_when_an_eligible_object_vanishes_before_unlink() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .unwrap();
+    let (path, _) = plan.files().next().expect("eligible file");
+    std::fs::remove_file(temporary.path().join(path)).unwrap();
+    assert!(matches!(
+        later.execute_packed_object_gc(&chain, &source, plan.digest(), [0xAB; 32]),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
 }
