@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use domain_types::{ChainId, ManifestId, SourceId};
 use serde::{Deserialize, Serialize};
@@ -291,6 +294,94 @@ fn collect_hint_entries(
         Ok(false)
     })?;
     Ok(entries)
+}
+
+pub(super) fn live_hint_protection(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<Option<LiveHintProtection>, ArchiveError> {
+    let dataset = dataset_relative(chain, source);
+    let current = hint_current_relative(&dataset);
+    if !fs::exists_regular(&archive.root, &current)? {
+        return Ok(None);
+    }
+    let index = load_hint_index(archive, chain, source)?;
+    let mut protected = BTreeSet::new();
+    protected.insert(current);
+    protected.insert(PathBuf::from(&index_pointer_path(archive, chain, source)?));
+    let mut pack_embedded = !index.pages.is_empty();
+    for page in &index.pages {
+        let relative = PathBuf::from(&page.relative_path);
+        fs::validate_relative(&relative)?;
+        if is_standalone_hint_page(&relative) {
+            pack_embedded = false;
+            protected.insert(relative);
+        }
+    }
+    if index.pages.is_empty() {
+        pack_embedded = false;
+    }
+    Ok(Some(LiveHintProtection {
+        protected,
+        pack_embedded,
+    }))
+}
+
+pub(super) struct LiveHintProtection {
+    pub protected: BTreeSet<PathBuf>,
+    pub pack_embedded: bool,
+}
+
+fn index_pointer_path(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<String, ArchiveError> {
+    let dataset = dataset_relative(chain, source);
+    let bytes = fs::read_regular(&archive.root, &hint_current_relative(&dataset), 64 * 1024)?;
+    let pointer: manifest::CurrentPointerV1 = serde_json::from_slice(&bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid receipt hint CURRENT JSON"))?;
+    Ok(pointer.manifest_relative_path)
+}
+
+fn is_standalone_hint_page(relative: &Path) -> bool {
+    relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("hint-") && name.ends_with(".json"))
+}
+
+pub(super) fn verify_live_hints(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<(), ArchiveError> {
+    let Some(_) = live_hint_protection(archive, chain, source)? else {
+        return Ok(());
+    };
+    let index = load_hint_index(archive, chain, source)?;
+    let (root, journal_bytes) = load_current_root(archive, chain, source)?.ok_or(
+        ArchiveError::ManifestVerification("receipt hint exists without a CURRENT root"),
+    )?;
+    let _lease = lease_root(archive, chain, source, &root)?;
+    for page_ref in &index.pages {
+        let page_bytes = load_hint_page_bytes(archive, page_ref)?;
+        let page = parse_receipt_hint_page(&page_bytes)?;
+        for entry in page.entries() {
+            verify_logical_at_sequence(
+                archive,
+                &root,
+                &journal_bytes,
+                entry.manifest_sha256()?,
+                storage_ports::LocalRecordSequenceRange::try_new(
+                    LocalRecordSequence::try_new(entry.first_local_sequence())?,
+                    LocalRecordSequence::try_new(entry.last_local_sequence())?,
+                )?,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn load_hint_index(

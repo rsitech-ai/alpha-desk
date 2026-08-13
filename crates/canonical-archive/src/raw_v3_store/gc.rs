@@ -132,6 +132,30 @@ impl RawArchiveGcReceipt {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawArchiveRestoreReceipt {
+    plan_digest: [u8; 32],
+    restored_files: u64,
+    restored_bytes: u64,
+}
+
+impl RawArchiveRestoreReceipt {
+    #[must_use]
+    pub const fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    #[must_use]
+    pub const fn restored_files(&self) -> u64 {
+        self.restored_files
+    }
+
+    #[must_use]
+    pub const fn restored_bytes(&self) -> u64 {
+        self.restored_bytes
+    }
+}
+
 pub fn plan_packed_object_gc(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -303,6 +327,94 @@ pub fn execute_packed_object_gc(
     })
 }
 
+pub fn restore_planned_files_from_backup(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    plan_digest: [u8; 32],
+    backup_receipt: [u8; 32],
+    backup_root: &Path,
+) -> Result<RawArchiveRestoreReceipt, ArchiveError> {
+    if backup_receipt == [0; 32] {
+        return Err(ArchiveError::InvalidInput(
+            "GC backup receipt must be a nonzero digest",
+        ));
+    }
+    let backup_root = canonicalize_backup_root(backup_root)?;
+    let dataset = dataset_relative(chain, source);
+    let plan = load_plan(archive, &dataset, plan_digest)?;
+    if manifest::parse_hash(&plan.backup_receipt_sha256)? != backup_receipt {
+        return Err(ArchiveError::ManifestVerification(
+            "GC backup receipt does not match the authorized plan",
+        ));
+    }
+    let (root, _) =
+        load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let current_hash = root_bundle_hash(&root)?;
+    if hex::encode(current_hash) != plan.root_sha256 {
+        return Err(ArchiveError::ManifestVerification(
+            "CURRENT moved after the GC plan was authorized",
+        ));
+    }
+    let _leases = exclusive_gc_leases(archive, chain, source, current_hash)?;
+    let states = load_deletion_states(archive, &deletion_journal_relative(&dataset, plan_digest))?;
+    let mut restored_files = 0_u64;
+    let mut restored_bytes = 0_u64;
+    for file in &plan.files {
+        let path = PathBuf::from(&file.relative_path);
+        fs::validate_relative(&path)?;
+        let hash = manifest::parse_hash(&file.object_sha256)?;
+        if fs::exists_regular(&archive.root, &path)? {
+            let (digest, length) = fs::regular_digest(&archive.root, &path, file.byte_len.max(1))?;
+            if digest != hash || length != file.byte_len {
+                return Err(ArchiveError::ManifestVerification(
+                    "archive object disagrees with the authorized restore plan",
+                ));
+            }
+            continue;
+        }
+        if !states.contains_key(&file.relative_path) {
+            return Err(ArchiveError::ManifestVerification(
+                "eligible object is missing before unlink; restore from backup",
+            ));
+        }
+        journal_matches_plan(file, hash, states.get(&file.relative_path).copied())?;
+        let bytes = fs::read_regular(&backup_root, &path, file.byte_len.max(1))?;
+        if u64::try_from(bytes.len()).ok() != Some(file.byte_len)
+            || manifest::sha256(&bytes) != hash
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "backup object digest or length does not match the authorized plan",
+            ));
+        }
+        fs::publish_immutable(&archive.root, &path, &bytes)?;
+        restored_files = restored_files
+            .checked_add(1)
+            .ok_or(ArchiveError::InvalidInput("restored file count overflows"))?;
+        restored_bytes = restored_bytes
+            .checked_add(file.byte_len)
+            .ok_or(ArchiveError::InvalidInput("restored byte count overflows"))?;
+    }
+    Ok(RawArchiveRestoreReceipt {
+        plan_digest,
+        restored_files,
+        restored_bytes,
+    })
+}
+
+fn canonicalize_backup_root(root: &Path) -> Result<PathBuf, ArchiveError> {
+    if root.as_os_str().is_empty() {
+        return Err(ArchiveError::UnsafePath);
+    }
+    let metadata =
+        std::fs::symlink_metadata(root).map_err(|_| ArchiveError::Io("inspecting backup root"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ArchiveError::UnsafePath);
+    }
+    root.canonicalize()
+        .map_err(|_| ArchiveError::Io("canonicalizing backup root"))
+}
+
 fn exclusive_gc_leases(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -428,6 +540,7 @@ fn eligible_files(
             &mut eligible,
         )?;
     }
+    collect_superseded_hints(archive, chain, source, &dataset, &protected, &mut eligible)?;
     eligible.retain(|path, _| !protected.contains(path));
     Ok(eligible.into_values().collect())
 }
@@ -536,6 +649,41 @@ fn protect_leaf(
                 protected.insert(PathBuf::from(commit.object().relative_path()));
             }
         }
+    }
+    Ok(())
+}
+
+fn collect_superseded_hints(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    dataset: &Path,
+    protected: &BTreeSet<PathBuf>,
+    eligible: &mut BTreeMap<PathBuf, GcPlanFileV3>,
+) -> Result<(), ArchiveError> {
+    let Some(live) = super::hint::live_hint_protection(archive, chain, source)? else {
+        return Ok(());
+    };
+    if !live.pack_embedded {
+        return Ok(());
+    }
+    let names = fs::list_regular_names(&archive.root, &dataset.join("hints"))?;
+    for name in names {
+        if name == "CURRENT" {
+            continue;
+        }
+        let standalone_hint = name.starts_with("hint-") && name.ends_with(".json");
+        let superseded_index = name.starts_with("index-") && name.ends_with(".json");
+        if !standalone_hint && !superseded_index {
+            return Err(ArchiveError::ManifestVerification(
+                "unexpected receipt hint artifact",
+            ));
+        }
+        let relative = dataset.join("hints").join(&name);
+        if live.protected.contains(&relative) {
+            continue;
+        }
+        insert_eligible(archive, relative, protected, eligible)?;
     }
     Ok(())
 }

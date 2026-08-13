@@ -29,7 +29,8 @@ use storage_ports::{
 pub use inspection::{ArchiveDataset, ArchiveInspection, InspectedObject};
 pub use raw_v3_store::{
     RawArchiveCheckpoint, RawArchiveCheckpointV1, RawArchiveCheckpointV2, RawArchiveGcPlan,
-    RawArchiveGcReceipt, RawV3Archive,
+    RawArchiveGcReceipt, RawArchiveRestoreReceipt, RawArchiveRetentionReport,
+    RawArchiveRetentionRequest, RawArchiveScrubReport, RawV3Archive,
 };
 use storage_ports::{
     LocalRecordSequenceRange, RawObservationArchive, RawObservationBatch, RawObservationIterator,
