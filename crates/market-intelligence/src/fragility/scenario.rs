@@ -8,7 +8,7 @@ use crate::{
     hash::digest,
     market_feature_key,
     math::USD_SCALE,
-    sentiment::MarketFeatureSnapshot,
+    sentiment::{MarketFeatureSnapshot, ObservedBookAndFills},
 };
 
 pub const DEFAULT_SHOCKS_BPS: [i64; 12] =
@@ -134,12 +134,17 @@ pub struct FragilityResult {
     pub provenance_hash: [u8; 32],
 }
 
+/// Fragility scores from a caller-supplied simulated book and accounts.
+/// Inputs are admitted only with [`ObservedBookAndFills`] issued after book
+/// and fills are observed.
 pub fn simulate_fragility(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
     book: &SimulatedBook,
     shock_bps: i64,
+    evidence: ObservedBookAndFills<'_>,
 ) -> Result<FragilityResult, MarketError> {
+    let _ = evidence.health();
     let mut missing = Vec::new();
     if matches!(book.observation, ObservationStatus::Missing(_))
         || book.health.state == HealthState::Red
@@ -183,7 +188,7 @@ pub fn simulate_fragility_from_snapshot(
     accounts: &[SimulatedAccount],
     shock_bps: i64,
 ) -> Result<FragilityResult, MarketError> {
-    snapshot.require_observed_book_and_fills()?;
+    let evidence = snapshot.require_observed_book_and_fills()?;
     let book_key = market_feature_key("book")?;
     let executable_depth = match snapshot.values.get(&book_key) {
         Some(FeatureValue::Decimal { raw, scale }) => {
@@ -205,7 +210,7 @@ pub fn simulate_fragility_from_snapshot(
         }
     };
     let book = SimulatedBook::observed(executable_depth, snapshot.health.clone());
-    simulate_fragility(scenario, accounts, &book, shock_bps)
+    simulate_fragility(scenario, accounts, &book, shock_bps, evidence)
 }
 
 pub fn simulate_path(

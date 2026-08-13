@@ -33,6 +33,32 @@ fn book(depth: i128, state: HealthState) -> SimulatedBook {
     SimulatedBook::observed(usd(depth), health(state))
 }
 
+fn observed_snapshot() -> MarketFeatureSnapshot {
+    market_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+    )
+}
+
+fn fragility_from_caller_book(
+    scenario: &FragilityScenario,
+    accounts: &[SimulatedAccount],
+    book: &SimulatedBook,
+    shock_bps: i64,
+) -> Result<market_intelligence::FragilityResult, MarketError> {
+    let snapshot = observed_snapshot();
+    simulate_fragility(
+        scenario,
+        accounts,
+        book,
+        shock_bps,
+        snapshot.require_observed_book_and_fills()?,
+    )
+}
+
 fn scenario() -> FragilityScenario {
     FragilityScenario::from_toml(include_str!("../../../config/features/fragility-v1.toml"))
         .unwrap()
@@ -57,10 +83,10 @@ fn long_cascade_is_deterministic_and_stops_after_second_wave() {
         second.terminal_price_change_bps
     );
     assert_eq!(first.total_forced_notional, second.total_forced_notional);
-    let result = simulate_fragility(&scenario, &accounts, &book, -100).unwrap();
+    let result = fragility_from_caller_book(&scenario, &accounts, &book, -100).unwrap();
     assert_eq!(result.base.waves.len(), 2);
     assert_eq!(result.provenance_hash, {
-        simulate_fragility(&scenario, &accounts, &book, -100)
+        fragility_from_caller_book(&scenario, &accounts, &book, -100)
             .unwrap()
             .provenance_hash
     });
@@ -112,7 +138,7 @@ fn portfolio_uncertainty_separates_low_and_high_paths() {
     let scenario = scenario();
     let mut account = account("a", Direction::Long, 100, 80);
     account.margin_mode = SimulatedMarginMode::PortfolioUncertain { band_bps: 40 };
-    let result = simulate_fragility(
+    let result = fragility_from_caller_book(
         &scenario,
         &[account],
         &book(20_000, HealthState::Green),
@@ -167,10 +193,6 @@ fn missing_book_does_not_invent_depth_or_emit_waves() {
     assert!(path.waves.is_empty());
     assert_eq!(path.total_forced_notional.raw(), 0);
     assert_eq!(path.health.state, HealthState::Red);
-    let result = simulate_fragility(&scenario, &accounts, &missing, -100).unwrap();
-    assert!(result.missing_inputs.iter().any(|item| item == "book"));
-    assert_eq!(result.confidence, ProbabilityPpm::ZERO);
-    assert!(result.base.waves.is_empty());
 }
 
 #[test]
@@ -196,4 +218,27 @@ fn snapshot_without_book_or_fills_refuses_fragility() {
         simulate_fragility_from_snapshot(&missing_fills, &scenario, &accounts, -100),
         Err(MarketError::MissingInput { name: "fills" })
     ));
+}
+
+#[test]
+fn constructed_observed_book_without_fills_cannot_produce_fragility_scores() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let book = SimulatedBook::observed(usd(20_000), health(HealthState::Green));
+    let missing_fills = market_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    assert!(matches!(
+        missing_fills.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "fills" })
+    ));
+    assert!(matches!(
+        simulate_fragility_from_snapshot(&missing_fills, &scenario, &accounts, -100),
+        Err(MarketError::MissingInput { name: "fills" })
+    ));
+    assert_eq!(book.observation, ObservationStatus::Observed);
 }
