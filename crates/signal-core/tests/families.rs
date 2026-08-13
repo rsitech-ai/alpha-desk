@@ -126,18 +126,39 @@ fn fragility(red_book: bool, unsupported: bool) -> FragilityResult {
     if unsupported {
         account.margin_mode = SimulatedMarginMode::Unsupported;
     }
-    let book = SimulatedBook::observed(
-        usd(10),
-        health(
-            "book",
-            if red_book {
-                HealthState::Red
-            } else {
-                HealthState::Green
-            },
-        ),
+    let book_health = health(
+        "book",
+        if red_book {
+            HealthState::Red
+        } else {
+            HealthState::Green
+        },
     );
-    let snapshot = snapshot(HealthState::Green, green_values(&[]));
+    let depth = usd(10);
+    let book = SimulatedBook::observed(depth, book_health.clone());
+    let snapshot = if red_book {
+        snapshot(HealthState::Green, green_values(&[]))
+    } else {
+        let mut values = green_values(&[]);
+        values.insert(
+            market_feature_key("book").unwrap(),
+            FeatureValue::Decimal {
+                raw: depth.raw(),
+                scale: u32::from(depth.scale()),
+            },
+        );
+        MarketFeatureSnapshot::try_new(
+            MarketId::new("BTC").unwrap(),
+            Horizon::MINUTES_5,
+            FeatureSetVersion::new("market-v1").unwrap(),
+            time(1_000_000),
+            known(1_000_000),
+            BlockHeight::new(20),
+            values,
+            book_health,
+        )
+        .unwrap()
+    };
     simulate_fragility(
         &scenario,
         &[account],
