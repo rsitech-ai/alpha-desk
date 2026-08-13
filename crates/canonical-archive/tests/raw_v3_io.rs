@@ -282,3 +282,171 @@ fn pack_index_is_noop_when_the_active_journal_has_one_record() {
             .exists()
     );
 }
+
+#[test]
+fn pack_logical_range_replays_exact_rows_and_keeps_receipts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let first = archive.append_batch(&batch(1, &[10, 11], b"ab")).unwrap();
+    let second = archive.append_batch(&batch(3, &[20], b"cd")).unwrap();
+    let packed_root = archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .expect("pack logical range");
+    let manifests = temporary
+        .path()
+        .join("_manifests/raw-byte-v3/packs");
+    let pack_manifests: Vec<_> = std::fs::read_dir(&manifests)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(pack_manifests.len(), 1);
+    let replayed = archive
+        .read_observations_by_sequence(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(replayed.len(), 3);
+    assert_eq!(replayed[0].observation().payload().as_ref(), b"ab");
+    assert_eq!(replayed[2].observation().payload().as_ref(), b"cd");
+    let verified = archive
+        .verify_raw_manifest_at_sequence(
+            &first.manifest_id().clone(),
+            first.local_sequence_range().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(verified.manifest_sha256(), first.manifest_sha256());
+    let verified_second = archive
+        .verify_raw_manifest_at_sequence(
+            &second.manifest_id().clone(),
+            second.local_sequence_range().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(verified_second.manifest_sha256(), second.manifest_sha256());
+    let retry = archive
+        .append_batch(&batch(1, &[10, 11], b"ab"))
+        .expect("idempotent retry after packing");
+    assert_eq!(retry.manifest_sha256(), first.manifest_sha256());
+    let packed_again = archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(packed_root, packed_again);
+    archive.append_batch(&batch(4, &[30], b"ef")).unwrap();
+    let mixed = archive
+        .read_observations_by_sequence(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(4).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(mixed.len(), 4);
+    assert_eq!(mixed[3].observation().payload().as_ref(), b"ef");
+    let after_tail = archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_ne!(after_tail, packed_root);
+    assert_eq!(
+        std::fs::read_dir(&manifests).unwrap().count(),
+        1,
+        "repacking an already packed span must not publish another pack"
+    );
+}
+
+#[test]
+fn packed_object_mutation_fails_closed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let dataset = dataset_dir(temporary.path());
+    let mut parquet = None;
+    fn find_pack_parquet(dir: &std::path::Path, found: &mut Option<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                find_pack_parquet(&path, found);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet")
+                && path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some("packs")
+            {
+                *found = Some(path);
+            }
+        }
+    }
+    find_pack_parquet(&dataset, &mut parquet);
+    let parquet = parquet.expect("packed parquet");
+    let mut bytes = std::fs::read(&parquet).unwrap();
+    bytes[0] ^= 1;
+    std::fs::write(&parquet, bytes).unwrap();
+    let error = match archive.read_observations_by_sequence(
+        &chain,
+        &source,
+        LocalRecordSequenceRange::try_new(
+            LocalRecordSequence::try_new(1).unwrap(),
+            LocalRecordSequence::try_new(2).unwrap(),
+        )
+        .unwrap(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("mutated pack must fail closed"),
+    };
+    assert!(matches!(
+        error,
+        ArchiveError::CorruptObject(_) | ArchiveError::ManifestVerification(_)
+    ));
+}
