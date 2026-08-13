@@ -1,6 +1,7 @@
 /// Checked-in OpenAPI document generated from the health proto JSON fields,
-/// capture-status v4 required keys, and the fail-closed HTTP router. This is
-/// not a production authentication, availability, or SLO contract.
+/// capture-status v4 required keys, fail-closed query budgets, and the HTTP
+/// router. This is not a production authentication, availability, or SLO
+/// contract.
 pub fn openapi_yaml() -> &'static str {
     include_str!("../../../schemas/openapi/v1/openapi.yaml")
 }

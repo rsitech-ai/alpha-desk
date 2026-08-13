@@ -19,6 +19,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::auth::credentials_match;
+use crate::budget::{BudgetError, QueryBudgets};
 use crate::config::{ApiConfig, AuthMode};
 use crate::error::ErrorBody;
 use crate::openapi::openapi_yaml;
@@ -138,30 +139,63 @@ impl AppState {
                 ErrorBody::new("data_unavailable", "request_body"),
             );
         }
-        self.dispatch(&Request::from_parts(parts, collected))
+        let request = Request::from_parts(parts, collected);
+        if let Some(response) = self.ungated_response(&request) {
+            return response;
+        }
+        match self
+            .inner
+            .query_budgets()
+            .execute(request.uri().query(), async { self.route(&request) })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => budget_response(error),
+        }
     }
 
     fn dispatch(&self, request: &Request<Bytes>) -> Response<Full<Bytes>> {
+        if let Some(response) = self.ungated_response(request) {
+            return response;
+        }
+        let _permit = match self
+            .inner
+            .query_budgets()
+            .check_and_acquire(request.uri().query())
+        {
+            Ok(permit) => permit,
+            Err(error) => return budget_response(error),
+        };
+        self.route(request)
+    }
+
+    fn ungated_response(&self, request: &Request<Bytes>) -> Option<Response<Full<Bytes>>> {
         if wants_websocket(request) {
-            return error_response(
+            return Some(error_response(
                 StatusCode::NOT_IMPLEMENTED,
                 ErrorBody::new("not_implemented", "stream.websocket_unspecified"),
-            );
+            ));
         }
         if request.method() != Method::GET {
-            return error_response(
+            return Some(error_response(
                 StatusCode::METHOD_NOT_ALLOWED,
                 ErrorBody::new("method_not_allowed", "http.method"),
-            );
+            ));
         }
         if request.uri().path() == "/healthz" {
-            return self.healthz();
+            return Some(self.healthz());
         }
         if let Err(error) = self.authorize(request) {
-            return error_response(StatusCode::UNAUTHORIZED, error);
+            return Some(error_response(StatusCode::UNAUTHORIZED, error));
         }
+        if request.uri().path() == "/readyz" {
+            return Some(self.readyz());
+        }
+        None
+    }
+
+    fn route(&self, request: &Request<Bytes>) -> Response<Full<Bytes>> {
         match request.uri().path() {
-            "/readyz" => self.readyz(),
             "/v1/health" => self.canonical_health(),
             "/v1/capture/status" => self.capture_status(),
             "/v1/stream" | "/v1/stream/canonical-events" => error_response(
@@ -174,6 +208,11 @@ impl AppState {
                 ErrorBody::new("not_found", "http.path"),
             ),
         }
+    }
+
+    #[must_use]
+    pub fn query_budgets(&self) -> &QueryBudgets {
+        self.inner.query_budgets()
     }
 
     fn authorize(&self, request: &Request<Bytes>) -> Result<(), ErrorBody> {
@@ -350,6 +389,10 @@ fn snapshot_unavailable(error: SnapshotError) -> Response<Full<Bytes>> {
         StatusCode::SERVICE_UNAVAILABLE,
         ErrorBody::new("data_unavailable", error.reason_code()),
     )
+}
+
+fn budget_response(error: BudgetError) -> Response<Full<Bytes>> {
+    error_response(error.status(), error.error_body())
 }
 
 fn health_response(status: StatusCode, assessment: &WireHealthAssessment) -> Response<Full<Bytes>> {

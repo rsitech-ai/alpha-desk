@@ -12,3 +12,6 @@ mode = "loopback-dev"
 [snapshots]
 canonical_health = "../fixtures/api/canonical-health.json"
 capture_status = "../fixtures/api/capture-status.json"
+
+[query_budgets]
+file = "api-query-budgets.toml"

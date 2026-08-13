@@ -5,6 +5,8 @@ info:
   description: >
     Read-only local REST surface generated from hl.health.v1,
     hl.capture.status.v4, and the fail-closed HTTP router.
+    Query row, timeout, and concurrency budgets are loaded from
+    api-query-budgets.toml and reject oversized queries with typed 400/429.
     hl.stream.v1 defines CanonicalEventBatch with next_cursor but does not
     specify a WebSocket resume protocol, so stream paths return typed 501.
     This document is not a production authentication, availability, or SLO
@@ -46,6 +48,8 @@ paths:
     get:
       operationId: getCanonicalHealth
       summary: Canonical health snapshot
+      parameters:
+        - $ref: "#/components/parameters/Limit"
       responses:
         "200":
           description: Validated hl.health.v1 snapshot
@@ -53,14 +57,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthAssessment"
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
         "503":
           $ref: "#/components/responses/Unavailable"
   /v1/capture/status:
     get:
       operationId: getCaptureStatus
       summary: Capture status snapshot
+      parameters:
+        - $ref: "#/components/parameters/Limit"
       responses:
         "200":
           description: Validated hl.capture.status.v4 snapshot
@@ -68,32 +78,50 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CaptureStatus"
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
         "503":
           $ref: "#/components/responses/Unavailable"
   /v1/stream:
     get:
       operationId: getStream
       summary: Reserved stream path
+      parameters:
+        - $ref: "#/components/parameters/Limit"
       responses:
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
         "501":
           $ref: "#/components/responses/NotImplemented"
   /v1/stream/canonical-events:
     get:
       operationId: getCanonicalEventStream
       summary: Reserved canonical event stream path
+      parameters:
+        - $ref: "#/components/parameters/Limit"
       responses:
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
         "501":
           $ref: "#/components/responses/NotImplemented"
   /v1/openapi.yaml:
     get:
       operationId: getOpenapi
       summary: OpenAPI document for this surface
+      parameters:
+        - $ref: "#/components/parameters/Limit"
       responses:
         "200":
           description: OpenAPI 3.1 document
@@ -101,8 +129,12 @@ paths:
             application/yaml:
               schema:
                 type: string
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
 components:
   securitySchemes:
     bearerAuth:
@@ -111,6 +143,18 @@ components:
       description: >
         Required when auth.mode = credential. loopback-dev binds loopback and
         skips the bearer. This is not production OIDC or mTLS.
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: >
+        Requested row count. Values above the configured max_rows budget
+        fail closed with 400 query_budget_exceeded. Offset pagination is
+        rejected. This is not a production SLO.
+      schema:
+        type: integer
+        minimum: 1
   schemas:
     HealthAssessment:
       type: object
@@ -211,6 +255,20 @@ components:
             $ref: "#/components/schemas/ApiError"
     NotImplemented:
       description: Stream transport is unspecified by proto and fail-closes
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    InvalidQuery:
+      description: Query string is invalid or uses forbidden offset pagination
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    QueryBudgetExceeded:
+      description: >
+        Requested rows exceed max_rows (400) or timeout/concurrency budget
+        is exhausted (429). Fail-closed; this is not a production SLO.
       content:
         application/json:
           schema:

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::auth::{CredentialError, load_credential};
+use crate::budget::{BudgetLoadError, QueryBudgets};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
@@ -27,6 +28,7 @@ pub struct ApiConfig {
     credential: Option<Vec<u8>>,
     canonical_health_path: Option<PathBuf>,
     capture_status_path: Option<PathBuf>,
+    query_budgets: QueryBudgets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +38,8 @@ struct RawConfig {
     auth: RawAuthConfig,
     #[serde(default)]
     snapshots: RawSnapshotConfig,
+    #[serde(default)]
+    query_budgets: Option<RawQueryBudgetsRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +65,12 @@ struct RawSnapshotConfig {
     capture_status: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawQueryBudgetsRef {
+    file: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
     #[error("api_config.unreadable")]
@@ -81,6 +91,10 @@ pub enum ConfigError {
     InvalidCredentials,
     #[error("api_config.empty_path")]
     EmptyPath,
+    #[error("api_config.missing_query_budgets")]
+    MissingQueryBudgets,
+    #[error("api_config.invalid_query_budgets")]
+    InvalidQueryBudgets,
 }
 
 impl ConfigError {
@@ -96,6 +110,8 @@ impl ConfigError {
             Self::MissingCredentials => "api_config.missing_credentials",
             Self::InvalidCredentials => "api_config.invalid_credentials",
             Self::EmptyPath => "api_config.empty_path",
+            Self::MissingQueryBudgets => "api_config.missing_query_budgets",
+            Self::InvalidQueryBudgets => "api_config.invalid_query_budgets",
         }
     }
 }
@@ -148,12 +164,20 @@ impl ApiConfig {
                 })?)
             }
         };
+        let query_budgets_ref = raw.query_budgets.ok_or(ConfigError::MissingQueryBudgets)?;
+        let query_budgets_path = resolve_path(base_directory, &query_budgets_ref.file)?;
+        let query_budgets =
+            QueryBudgets::from_path(&query_budgets_path).map_err(|error| match error {
+                BudgetLoadError::Missing => ConfigError::MissingQueryBudgets,
+                BudgetLoadError::Invalid => ConfigError::InvalidQueryBudgets,
+            })?;
         Ok(Self {
             bind,
             auth_mode: raw.auth.mode,
             credential,
             canonical_health_path: optional_path(base_directory, raw.snapshots.canonical_health)?,
             capture_status_path: optional_path(base_directory, raw.snapshots.capture_status)?,
+            query_budgets,
         })
     }
 
@@ -180,6 +204,11 @@ impl ApiConfig {
     #[must_use]
     pub fn capture_status_path(&self) -> Option<&Path> {
         self.capture_status_path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn query_budgets(&self) -> &QueryBudgets {
+        &self.query_budgets
     }
 }
 
