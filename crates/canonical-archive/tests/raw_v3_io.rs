@@ -450,3 +450,42 @@ fn packed_object_mutation_fails_closed() {
         ArchiveError::CorruptObject(_) | ArchiveError::ManifestVerification(_)
     ));
 }
+
+#[test]
+fn sequence_read_holds_an_exact_root_lease() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    let iterator = archive
+        .read_observations_by_sequence(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let leases: Vec<_> = std::fs::read_dir(dataset_dir(temporary.path()).join("leases"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(leases.len(), 1);
+    assert!(
+        leases[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("root-")
+    );
+    assert_eq!(
+        leases[0].extension().and_then(|ext| ext.to_str()),
+        Some("lease")
+    );
+    let replayed = iterator.collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert!(leases[0].is_file());
+}

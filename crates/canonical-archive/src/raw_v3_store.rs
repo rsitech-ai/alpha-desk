@@ -1,4 +1,5 @@
 use std::{
+    fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -23,9 +24,9 @@ use storage_ports::{
     ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
     RAW_ARCHIVE_MAXIMUM_DATA_PACK_BYTES, RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
     RawArchiveCapacityBudgets, RawArchiveDurableFormatEnvelope, RawArchiveObject,
-    RawArchiveProductionCapacityAdmission, RawArchiveWorkloadEnvelope, RawObservationArchive,
-    RawObservationBatch, RawObservationIterator, RawObservationRange, RawObservationReceipt,
-    SequencedRawObservationIterator, VerifiedRawManifest,
+    RawArchiveProductionCapacityAdmission, RawArchiveRootLeaseIdentity, RawArchiveWorkloadEnvelope,
+    RawObservationArchive, RawObservationBatch, RawObservationIterator, RawObservationRange,
+    RawObservationReceipt, SequencedRawObservationIterator, VerifiedRawManifest,
 };
 
 use super::{
@@ -1311,6 +1312,7 @@ fn verify_raw_manifest(
     let source = loaded.commit().source_id()?;
     let (root, journal_bytes) = load_current_root(archive, &chain, &source)?
         .ok_or(ArchiveError::ReceiptIndexRebuildRequired)?;
+    let _lease = lease_root(archive, &chain, &source, &root)?;
     let packs = load_packs_for_tree(
         archive,
         &chain,
@@ -1546,6 +1548,7 @@ fn read_observations_by_sequence(
     }
     let (root, journal_bytes) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let lease = lease_root(archive, chain, source, &root)?;
     let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
     let mut leaves = Vec::new();
     collect_overlapping_leaves(
@@ -1623,7 +1626,10 @@ fn read_observations_by_sequence(
             return Err(ArchiveError::RangeUnavailable);
         }
     }
-    Ok(Box::new(replayed.into_iter().map(Ok)))
+    Ok(Box::new(HoldingLease {
+        _lease: lease,
+        inner: replayed.into_iter().map(Ok),
+    }))
 }
 
 fn read_observations(
@@ -1642,6 +1648,7 @@ fn read_observations(
     }
     let (root, _) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let lease = lease_root(archive, chain, source, &root)?;
     let full = LocalRecordSequenceRange::try_new(
         LocalRecordSequence::try_new(1)?,
         LocalRecordSequence::try_new(root.head_local_sequence())?,
@@ -1661,7 +1668,10 @@ fn read_observations(
     if matched.is_empty() {
         return Err(ArchiveError::RangeUnavailable);
     }
-    Ok(Box::new(matched.into_iter().map(Ok)))
+    Ok(Box::new(HoldingLease {
+        _lease: lease,
+        inner: matched.into_iter().map(Ok),
+    }))
 }
 
 fn contains_raw_cursor_epoch(
@@ -1683,6 +1693,7 @@ fn contains_raw_cursor_epoch(
     let Some((root, journal_bytes)) = load_current_root(archive, chain, source)? else {
         return Ok(false);
     };
+    let _lease = lease_root(archive, chain, source, &root)?;
     let mut found = false;
     let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
     walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
@@ -1726,6 +1737,39 @@ fn receipt(
 
 fn dataset_relative(chain: &ChainId, source: &SourceId) -> PathBuf {
     raw_policy::dataset_relative(chain, source, raw_policy::RawPolicy::MonotonicByteV3)
+}
+
+struct HoldingLease<I> {
+    _lease: File,
+    inner: I,
+}
+
+impl<I: Iterator> Iterator for HoldingLease<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+fn lease_root(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root: &RootBundleV3,
+) -> Result<File, ArchiveError> {
+    let hash = root_bundle_hash(root)?;
+    let dataset = dataset_relative(chain, source);
+    let relative = dataset.join(RawArchiveRootLeaseIdentity::new(hash).relative_path());
+    let lease = fs::open_shared_lease(&archive.root, &relative)?;
+    let reread = fs::read_manifest(&archive.root, &root_relative(&dataset, hash))?;
+    let verified = parse_root_bundle(&reread)?;
+    if root_bundle_hash(&verified)? != hash {
+        return Err(ArchiveError::ManifestVerification(
+            "leased root bytes do not match the selected root",
+        ));
+    }
+    Ok(lease)
 }
 
 fn pack_manifest_relative(hash: [u8; 32]) -> PathBuf {
