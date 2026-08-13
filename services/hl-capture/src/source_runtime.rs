@@ -617,13 +617,16 @@ where
 {
     let spool_path = prepare_source_spool_path(&config.spool_path, &config.source_id)?;
     let archive_identity = archive_lineage_identity(&config.archive_path)?;
-    let mut checkpoint = AuxiliaryArchiveCheckpoint::load(
+    let mut checkpoint = bind_auxiliary_checkpoint(
         &spool_path,
         &config.source_id,
         &config.source_version,
         &archive_identity,
+        config.raw_archive_format,
+        raw_archive.as_ref(),
+        &config.chain_id,
     )
-    .map_err(SourceRuntimeError::Spool)?;
+    .await?;
     if let Some(recovered) = &checkpoint {
         let spool_evidence = RawSpoolArchiveEvidence::try_new(
             recovered
@@ -1977,6 +1980,49 @@ fn publish_auxiliary_checkpoint(
     }
 }
 
+async fn bind_auxiliary_checkpoint(
+    directory: &Path,
+    source_id: &SourceId,
+    source_version: &str,
+    archive_identity: &str,
+    format: RawArchiveFormat,
+    raw_archive: &dyn RawSegmentArchive,
+    chain_id: &ChainId,
+) -> Result<Option<AuxiliaryArchiveCheckpoint>, SourceRuntimeError> {
+    match format {
+        RawArchiveFormat::V2 => {
+            let loaded = AuxiliaryArchiveCheckpoint::load(
+                directory,
+                source_id,
+                source_version,
+                archive_identity,
+            )
+            .map_err(SourceRuntimeError::Spool)?;
+            if loaded
+                .as_ref()
+                .is_some_and(AuxiliaryArchiveCheckpoint::is_v2)
+            {
+                return Err(SourceRuntimeError::Spool(SpoolError::InvalidManifest));
+            }
+            Ok(loaded)
+        }
+        RawArchiveFormat::V3 => {
+            let archive_entries = raw_archive
+                .load_checkpoint_entries(chain_id, source_id)
+                .await
+                .map_err(SourceRuntimeError::RawArchive)?;
+            AuxiliaryArchiveCheckpoint::bind_v3(
+                directory,
+                source_id,
+                source_version,
+                archive_identity,
+                archive_entries,
+            )
+            .map_err(SourceRuntimeError::Spool)
+        }
+    }
+}
+
 fn anticipated_write_bytes(payload_bytes: usize) -> Result<u64, SourceRuntimeError> {
     u64::try_from(payload_bytes)
         .map_err(|_| SourceRuntimeError::Disk(DiskReserveError::SizeOverflow))?
@@ -2065,7 +2111,7 @@ mod tests {
 
     use async_trait::async_trait;
     use bytes::Bytes;
-    use canonical_archive::{ArchiveConfig, LocalParquetArchive};
+    use canonical_archive::{ArchiveConfig, LocalParquetArchive, RawV3Archive};
     use domain_types::{BlockHeight, ChainId, KnownTime, SourceId};
     use hl_protocol::{
         ObservationClass, ReceiveTimestamps, SourceAdmission, SourceCursor, SourceObservation,
@@ -2147,6 +2193,19 @@ mod tests {
         ) -> Result<bool, crate::RawSegmentArchiveError> {
             self.inner
                 .contains_archived_epoch(chain_id, source_id, cursor_epoch)
+                .await
+        }
+
+        async fn load_checkpoint_entries(
+            &self,
+            chain_id: &ChainId,
+            source_id: &SourceId,
+        ) -> Result<
+            Option<storage_ports::RawArchiveCheckpointEntriesV2>,
+            crate::RawSegmentArchiveError,
+        > {
+            self.inner
+                .load_checkpoint_entries(chain_id, source_id)
                 .await
         }
     }
@@ -2308,6 +2367,17 @@ mod tests {
         ) -> Result<bool, crate::RawSegmentArchiveError> {
             Ok(false)
         }
+
+        async fn load_checkpoint_entries(
+            &self,
+            _chain_id: &ChainId,
+            _source_id: &SourceId,
+        ) -> Result<
+            Option<storage_ports::RawArchiveCheckpointEntriesV2>,
+            crate::RawSegmentArchiveError,
+        > {
+            Ok(None)
+        }
     }
 
     impl DiskSpaceProbe for TestDiskSpaceProbe {
@@ -2347,6 +2417,17 @@ mod tests {
             _cursor_epoch: &str,
         ) -> Result<bool, crate::RawSegmentArchiveError> {
             Ok(false)
+        }
+
+        async fn load_checkpoint_entries(
+            &self,
+            _chain_id: &ChainId,
+            _source_id: &SourceId,
+        ) -> Result<
+            Option<storage_ports::RawArchiveCheckpointEntriesV2>,
+            crate::RawSegmentArchiveError,
+        > {
+            Ok(None)
         }
     }
 
@@ -2889,8 +2970,26 @@ mod tests {
             replayed[1].observation().cursor().offset()
                 > replayed[0].observation().cursor().offset()
         );
-        assert_eq!(inspect_spool(config.spool_path).unwrap().records(), 0);
+        assert_eq!(inspect_spool(&config.spool_path).unwrap().records(), 0);
         assert_eq!(archive.inspect().unwrap().objects().len(), 2);
+        assert!(
+            config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v1.json")
+                .is_file()
+        );
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v2.json")
+                .exists()
+        );
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-current.json")
+                .exists()
+        );
         let source_status = restarted_health
             .auxiliary_source_status("node-fills")
             .unwrap();
@@ -3985,6 +4084,397 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
                 .is_file()
         );
         assert_eq!(inspect_spool(&config.spool_path).unwrap().records(), 1);
+    }
+
+    #[tokio::test]
+    async fn v3_auxiliary_persists_checkpoint_v2_and_resumes_without_mutating_v2() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("node-fills");
+        let mut fill = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source/node-v1/fill.json"),
+        )
+        .unwrap();
+        if fill.last() != Some(&b'\n') {
+            fill.push(b'\n');
+        }
+        fs::write(&source_path, &fill).unwrap();
+        let archive_path = root.path().join("archive");
+        fs::create_dir_all(&archive_path).unwrap();
+        let v3 = open_runtime_v3(&archive_path);
+        let raw_archive: Arc<dyn RawSegmentArchive> =
+            Arc::new(BlockingRawSegmentArchive::from_v3(v3.clone()));
+        let config = AuxiliaryNodeSourceTaskConfig {
+            chain_id: ChainId::new("mainnet").unwrap(),
+            source_id: SourceId::new("node-fills").unwrap(),
+            source_version: "hyperliquid-node-v1".to_owned(),
+            parser_version: "parser-v1".to_owned(),
+            source_path,
+            stream_name: "node-fills".to_owned(),
+            stream: hl_protocol::node::v1::NodeStreamKind::Fills,
+            poll_interval: Duration::from_millis(5),
+            max_payload_bytes: 1024 * 1024,
+            spool_path: root.path().join("spool/node-fills"),
+            archive_path,
+            segment_target_bytes: 1024 * 1024,
+            rotation_interval: Duration::from_secs(60),
+            backpressure_timeout: Duration::from_millis(100),
+            archive_commit_max_records: 1,
+            archive_commit_max_delay: Duration::from_millis(50),
+            disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V3,
+        };
+        let health = Arc::new(CaptureRuntimeHealth::new());
+        health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let first_cancellation = CancellationToken::new();
+        let first = tokio::spawn(run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::clone(&raw_archive),
+            Arc::clone(&health),
+            first_cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
+        ));
+        wait_for_checkpoint_v2(&config.spool_path)
+            .await
+            .expect("v3 capture publishes auxiliary checkpoint v2");
+        first_cancellation.cancel();
+        first.await.unwrap().unwrap();
+
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v1.json")
+                .exists()
+        );
+        assert!(
+            config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v2.json")
+                .is_file()
+        );
+        let before = v3
+            .load_checkpoint(&config.chain_id, &config.source_id)
+            .unwrap()
+            .expect("archive-side V2 CURRENT after first V3 ACK")
+            .sha256();
+        let restarted_health = Arc::new(CaptureRuntimeHealth::new());
+        restarted_health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let second_cancellation = CancellationToken::new();
+        let second = tokio::spawn(run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::clone(&raw_archive),
+            Arc::clone(&restarted_health),
+            second_cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = restarted_health
+                    .auxiliary_source_status("node-fills")
+                    .unwrap();
+                if status.health() == AuxiliarySourceHealth::Healthy
+                    && status.local_sequence() == Some(1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("v3 restart resumes from auxiliary checkpoint v2");
+        second_cancellation.cancel();
+        second.await.unwrap().unwrap();
+        let after = v3
+            .load_checkpoint(&config.chain_id, &config.source_id)
+            .unwrap()
+            .expect("idle v3 restart must not move archive CURRENT")
+            .sha256();
+        assert_eq!(before, after);
+        assert!(
+            !config.archive_path.join(
+                "chain=mainnet/dataset=raw_source_observations_byte_v2/source=node-fills/CURRENT"
+            ).exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_cutover_promotes_v1_spool_checkpoint_without_moving_archive_current() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("node-fills");
+        let mut fill = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source/node-v1/fill.json"),
+        )
+        .unwrap();
+        if fill.last() != Some(&b'\n') {
+            fill.push(b'\n');
+        }
+        fs::write(&source_path, &fill).unwrap();
+        let archive_path = root.path().join("archive");
+        fs::create_dir_all(&archive_path).unwrap();
+        let v3 = open_runtime_v3(&archive_path);
+        let raw_archive: Arc<dyn RawSegmentArchive> =
+            Arc::new(BlockingRawSegmentArchive::from_v3(v3.clone()));
+        let config = AuxiliaryNodeSourceTaskConfig {
+            chain_id: ChainId::new("mainnet").unwrap(),
+            source_id: SourceId::new("node-fills").unwrap(),
+            source_version: "hyperliquid-node-v1".to_owned(),
+            parser_version: "parser-v1".to_owned(),
+            source_path,
+            stream_name: "node-fills".to_owned(),
+            stream: hl_protocol::node::v1::NodeStreamKind::Fills,
+            poll_interval: Duration::from_millis(5),
+            max_payload_bytes: 1024 * 1024,
+            spool_path: root.path().join("spool/node-fills"),
+            archive_path,
+            segment_target_bytes: 1024 * 1024,
+            rotation_interval: Duration::from_secs(60),
+            backpressure_timeout: Duration::from_millis(100),
+            archive_commit_max_records: 1,
+            archive_commit_max_delay: Duration::from_millis(50),
+            disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V3,
+        };
+        let health = Arc::new(CaptureRuntimeHealth::new());
+        health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let first_cancellation = CancellationToken::new();
+        let first = tokio::spawn(run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::clone(&raw_archive),
+            Arc::clone(&health),
+            first_cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
+        ));
+        wait_for_checkpoint_v2(&config.spool_path)
+            .await
+            .expect("seed v3 archive and spool checkpoint");
+        first_cancellation.cancel();
+        first.await.unwrap().unwrap();
+        let before = v3
+            .load_checkpoint(&config.chain_id, &config.source_id)
+            .unwrap()
+            .unwrap()
+            .sha256();
+        demote_v2_spool_checkpoint_to_v1(&config.spool_path);
+
+        let restarted_health = Arc::new(CaptureRuntimeHealth::new());
+        restarted_health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let second_cancellation = CancellationToken::new();
+        let second = tokio::spawn(run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::clone(&raw_archive),
+            Arc::clone(&restarted_health),
+            second_cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if config
+                    .spool_path
+                    .join("auxiliary-archive-checkpoint-current.json")
+                    .is_file()
+                    && restarted_health
+                        .auxiliary_source_status("node-fills")
+                        .unwrap()
+                        .health()
+                        == AuxiliarySourceHealth::Healthy
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("operator-approved archive checkpoint promotes spool v2");
+        second_cancellation.cancel();
+        second.await.unwrap().unwrap();
+        let after = v3
+            .load_checkpoint(&config.chain_id, &config.source_id)
+            .unwrap()
+            .unwrap()
+            .sha256();
+        assert_eq!(before, after);
+        assert!(
+            config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v1.json")
+                .is_file()
+        );
+        assert!(
+            config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v2.json")
+                .is_file()
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_current_does_not_move_when_spool_v1_does_not_match_archive_cutover() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("node-fills");
+        let mut fill = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source/node-v1/fill.json"),
+        )
+        .unwrap();
+        if fill.last() != Some(&b'\n') {
+            fill.push(b'\n');
+        }
+        fs::write(&source_path, &fill).unwrap();
+        let archive_path = root.path().join("archive");
+        fs::create_dir_all(&archive_path).unwrap();
+        let v3 = open_runtime_v3(&archive_path);
+        let raw_archive: Arc<dyn RawSegmentArchive> =
+            Arc::new(BlockingRawSegmentArchive::from_v3(v3.clone()));
+        let config = AuxiliaryNodeSourceTaskConfig {
+            chain_id: ChainId::new("mainnet").unwrap(),
+            source_id: SourceId::new("node-fills").unwrap(),
+            source_version: "hyperliquid-node-v1".to_owned(),
+            parser_version: "parser-v1".to_owned(),
+            source_path,
+            stream_name: "node-fills".to_owned(),
+            stream: hl_protocol::node::v1::NodeStreamKind::Fills,
+            poll_interval: Duration::from_millis(5),
+            max_payload_bytes: 1024 * 1024,
+            spool_path: root.path().join("spool/node-fills"),
+            archive_path,
+            segment_target_bytes: 1024 * 1024,
+            rotation_interval: Duration::from_secs(60),
+            backpressure_timeout: Duration::from_millis(100),
+            archive_commit_max_records: 1,
+            archive_commit_max_delay: Duration::from_millis(50),
+            disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V3,
+        };
+        let health = Arc::new(CaptureRuntimeHealth::new());
+        health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let first_cancellation = CancellationToken::new();
+        let first = tokio::spawn(run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::clone(&raw_archive),
+            Arc::clone(&health),
+            first_cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
+        ));
+        wait_for_checkpoint_v2(&config.spool_path)
+            .await
+            .expect("seed v3 archive CURRENT");
+        first_cancellation.cancel();
+        first.await.unwrap().unwrap();
+        let before = v3
+            .load_checkpoint(&config.chain_id, &config.source_id)
+            .unwrap()
+            .unwrap()
+            .sha256();
+        demote_v2_spool_checkpoint_to_v1(&config.spool_path);
+        let v1_path = config
+            .spool_path
+            .join("auxiliary-archive-checkpoint-v1.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&v1_path).unwrap()).unwrap();
+        value["raw_manifest_ids"] = serde_json::json!(["not-the-archived-manifest"]);
+        let mut encoded = serde_json::to_vec_pretty(&value).unwrap();
+        encoded.push(b'\n');
+        fs::write(&v1_path, encoded).unwrap();
+
+        let error = run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::clone(&raw_archive),
+            Arc::new(CaptureRuntimeHealth::new()),
+            CancellationToken::new(),
+            |_| Ok(TestDiskSpaceProbe),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.reason_code(), "spool.invalid_manifest");
+        let after = v3
+            .load_checkpoint(&config.chain_id, &config.source_id)
+            .unwrap()
+            .unwrap()
+            .sha256();
+        assert_eq!(before, after);
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v2.json")
+                .exists()
+        );
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-current.json")
+                .exists()
+        );
+    }
+
+    fn open_runtime_v3(path: &Path) -> Arc<RawV3Archive> {
+        let workload = storage_ports::RawArchiveWorkloadEnvelope::try_new(
+            100,
+            1,
+            1_000,
+            3_600,
+            1_024,
+            1_000,
+            64 * 1024 * 1024,
+            64,
+        )
+        .unwrap();
+        let budgets = storage_ports::RawArchiveCapacityBudgets::try_new(
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            true,
+        )
+        .unwrap();
+        Arc::new(
+            RawV3Archive::open(
+                path,
+                ArchiveConfig::deterministic_fixture(
+                    "auxiliary-v3-checkpoint-test",
+                    KnownTime::from_unix_micros(1_000).unwrap(),
+                )
+                .unwrap(),
+                workload,
+                budgets,
+            )
+            .unwrap(),
+        )
+    }
+
+    async fn wait_for_checkpoint_v2(spool_path: &Path) -> Result<(), tokio::time::error::Elapsed> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if spool_path
+                    .join("auxiliary-archive-checkpoint-v2.json")
+                    .is_file()
+                    && spool_path
+                        .join("auxiliary-archive-checkpoint-current.json")
+                        .is_file()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+    }
+
+    fn demote_v2_spool_checkpoint_to_v1(spool_path: &Path) {
+        let v2_path = spool_path.join("auxiliary-archive-checkpoint-v2.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&v2_path).unwrap()).unwrap();
+        value["schema_version"] = "hl.auxiliary-archive-checkpoint.v1".into();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("raw_manifest_entries");
+        }
+        let mut encoded = serde_json::to_vec_pretty(&value).unwrap();
+        encoded.push(b'\n');
+        fs::write(
+            spool_path.join("auxiliary-archive-checkpoint-v1.json"),
+            encoded,
+        )
+        .unwrap();
+        fs::remove_file(v2_path).unwrap();
+        fs::remove_file(spool_path.join("auxiliary-archive-checkpoint-current.json")).unwrap();
     }
 
     async fn wait_for_raw_observations(
