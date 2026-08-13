@@ -38,6 +38,8 @@ const MAX_SECRET_BYTES: u64 = 16_384;
 const DEFAULT_DURABLE_NAME: &str = "hl-core-file-replay";
 const FETCH_UNDECODEABLE_SUBJECT: &str = "hl.v1.fetch.undecodable";
 const FETCH_UNDECODEABLE_MESSAGE_ID: &str = "undecodable";
+const FETCH_TRANSPORT_SUBJECT: &str = "hl.v1.fetch.transport";
+const FETCH_TRANSPORT_MESSAGE_ID: &str = "transport";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JetStreamReplayReport {
@@ -134,6 +136,7 @@ enum FetchPoisonKind {
     Decode(crate::publication::BlockMarkerError),
     HashMismatch,
     PendingLimit,
+    Transport,
 }
 
 impl FetchPoisonKind {
@@ -142,6 +145,7 @@ impl FetchPoisonKind {
             Self::Decode(error) => error.reason_code(),
             Self::HashMismatch => "core.jetstream_hash_mismatch",
             Self::PendingLimit => "core.jetstream_pending_limit",
+            Self::Transport => "core.jetstream_transport",
         }
     }
 }
@@ -216,6 +220,19 @@ impl FetchPoison {
             self.delivery_count,
             failed_at_unix_micros,
         )
+    }
+
+    fn transport_sentinel() -> Self {
+        Self {
+            kind: FetchPoisonKind::Transport,
+            subject: FETCH_TRANSPORT_SUBJECT.to_owned(),
+            message_id: FETCH_TRANSPORT_MESSAGE_ID.to_owned(),
+            payload_sha256: [0; 32],
+            block_hash: [0; 32],
+            stream_sequence: None,
+            consumer_sequence: None,
+            delivery_count: 0,
+        }
     }
 }
 
@@ -874,7 +891,7 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
                 Ok(batch) => batch,
                 Err(error) => {
                     return Err(self
-                        .persist_fetch_decode_fail_closed(source, dead_letter, error)
+                        .persist_fetch_fail_closed(source, dead_letter, error)
                         .await);
                 }
             };
@@ -948,7 +965,7 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
         }
     }
 
-    async fn persist_fetch_decode_fail_closed<Src, Dlq>(
+    async fn persist_fetch_fail_closed<Src, Dlq>(
         &self,
         source: &mut Src,
         dead_letter: &mut Dlq,
@@ -958,10 +975,22 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
         Src: CanonicalPullSource,
         Dlq: DeadLetterSink,
     {
-        let JetStreamReplayError::FetchDecode(poison) = &error else {
-            return error;
+        let record = match &error {
+            JetStreamReplayError::FetchDecode(poison) => {
+                poison.to_record(&self.dead_letter_consumer, failed_at_unix_micros())
+            }
+            JetStreamReplayError::Transport => FetchPoison::transport_sentinel()
+                .to_record(&self.dead_letter_consumer, failed_at_unix_micros()),
+            JetStreamReplayError::Config(_)
+            | JetStreamReplayError::Decode(_)
+            | JetStreamReplayError::HashMismatch
+            | JetStreamReplayError::IncompleteBlock
+            | JetStreamReplayError::PendingLimit
+            | JetStreamReplayError::Replay(_)
+            | JetStreamReplayError::DeadLetter(_)
+            | JetStreamReplayError::Overflow => return error,
         };
-        match poison.to_record(&self.dead_letter_consumer, failed_at_unix_micros()) {
+        match record {
             Ok(record) => match dead_letter.persist(&record) {
                 Ok(()) => {
                     let _ = source.term_poison().await;
@@ -1289,7 +1318,7 @@ fn wrap_fetch_error(
         JetStreamReplayError::Config(error) => JetStreamReplayError::Config(error),
         JetStreamReplayError::IncompleteBlock => JetStreamReplayError::IncompleteBlock,
         JetStreamReplayError::PendingLimit => poison.fail(FetchPoisonKind::PendingLimit),
-        JetStreamReplayError::Transport => JetStreamReplayError::Transport,
+        JetStreamReplayError::Transport => poison.fail(FetchPoisonKind::Transport),
         JetStreamReplayError::FetchDecode(existing) => JetStreamReplayError::FetchDecode(existing),
         JetStreamReplayError::Replay(error) => JetStreamReplayError::Replay(error),
         JetStreamReplayError::DeadLetter(error) => JetStreamReplayError::DeadLetter(error),

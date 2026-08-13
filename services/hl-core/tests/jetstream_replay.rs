@@ -371,14 +371,14 @@ async fn valid_fetch_frame_applies_without_dlq_or_term() {
 }
 
 #[tokio::test]
-async fn fetch_transport_error_does_not_record_dlq() {
+async fn fetch_transport_error_records_sentinel_dlq_without_ack_or_state_advance() {
     let root = private_root();
     let store =
         SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
             .expect("store");
     let mut session = open_session(store);
     let before = session.ledger().state_image().canonical_bytes();
-    let mut source = TransportFailSource;
+    let mut source = TransportFailSource::default();
     let mut dead_letter = InMemoryDeadLetterSink::default();
 
     let error = session
@@ -387,7 +387,19 @@ async fn fetch_transport_error_does_not_record_dlq() {
         .expect_err("transport");
     assert_eq!(error.reason_code(), "core.jetstream_transport");
     assert_eq!(session.ledger().state_image().canonical_bytes(), before);
-    assert!(dead_letter.records().is_empty());
+    assert!(session.ledger().checkpoint().is_none());
+    assert!(!source.acked);
+    assert_fetch_dead_letter(
+        &dead_letter,
+        "core.jetstream_transport",
+        "hl.v1.fetch.transport",
+        "transport",
+        [0; 32],
+        [0; 32],
+        None,
+        None,
+        0,
+    );
 }
 
 #[tokio::test]
@@ -518,6 +530,81 @@ async fn file_dead_letter_sink_records_fetch_pending_limit_with_stream_sequence(
     assert_eq!(value["retry_count"], 6);
     assert!(value.get("live_qualified").is_none());
     assert!(value.get("stage_2_qualified").is_none());
+}
+
+#[tokio::test]
+async fn file_dead_letter_sink_records_fetch_transport_sentinel() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let path = root.path().join("dead-letter.jsonl");
+    let mut dead_letter = FileDeadLetterSink::open(&path).expect("file dlq");
+    let mut source = TransportFailSource::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("transport");
+    assert_eq!(error.reason_code(), "core.jetstream_transport");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(session.ledger().checkpoint().is_none());
+    assert!(!source.acked);
+    drop(dead_letter);
+
+    let encoded = fs::read_to_string(&path).expect("dlq file");
+    let value: serde_json::Value = serde_json::from_str(encoded.trim()).expect("json");
+    assert_eq!(value["schema_version"], DEAD_LETTER_SCHEMA_V1);
+    assert_eq!(value["reason_code"], "core.jetstream_transport");
+    assert_eq!(value["subject"], "hl.v1.fetch.transport");
+    assert_eq!(value["message_id"], "transport");
+    assert_eq!(value["payload_sha256"], hex::encode([0u8; 32]));
+    assert_eq!(value["block_hash"], hex::encode([0u8; 32]));
+    assert!(value.get("stream_sequence").is_none());
+    assert!(value.get("consumer_sequence").is_none());
+    assert_eq!(value["retry_count"], 0);
+    assert!(value.get("live_qualified").is_none());
+    assert!(value.get("stage_2_qualified").is_none());
+}
+
+#[tokio::test]
+async fn assembler_pending_block_cap_records_dlq_without_ack_or_state_advance() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let deliveries: Vec<_> = (200..265)
+        .map(|height| {
+            let block = trade_block(height);
+            committed_event_delivery(&block.events()[0], &block, &archive_receipt(&block))
+                .expect("event")
+        })
+        .collect();
+    let poison = deliveries[64].clone();
+    let payload_hash: [u8; 32] = Sha256::digest(&poison.payload).into();
+    let poison_id = poison.message_id.clone();
+    let mut source = InMemoryCanonicalSource::new(deliveries);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("pending-block cap");
+    assert_eq!(error.reason_code(), "core.jetstream_pending_limit");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(session.ledger().checkpoint().is_none());
+    assert!(source.acked().is_empty());
+    assert_one_dead_letter(
+        &dead_letter,
+        "core.jetstream_pending_limit",
+        &poison_id,
+        payload_hash,
+        poison.block_hash,
+    );
 }
 
 #[test]
@@ -712,7 +799,10 @@ fn assert_fetch_dead_letter(
     assert!(record.failed_at_unix_micros() >= 0);
 }
 
-struct TransportFailSource;
+#[derive(Default)]
+struct TransportFailSource {
+    acked: bool,
+}
 
 impl CanonicalPullSource for TransportFailSource {
     async fn fetch(
@@ -723,6 +813,7 @@ impl CanonicalPullSource for TransportFailSource {
     }
 
     async fn ack(&mut self, _message_ids: &[String]) -> Result<(), JetStreamReplayError> {
+        self.acked = true;
         Ok(())
     }
 }
