@@ -442,6 +442,9 @@ fn emit_links(
             None,
         )?)?;
     }
+    if let Some((&_, &effective_at)) = block_times.iter().next_back() {
+        graph.known_administrative_groups(effective_at, to_known(effective_at)?)?;
+    }
     Ok(graph)
 }
 

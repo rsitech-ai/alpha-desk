@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use canonical_events::{
     AssetContextUpdated, BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput,
     CommittedNodeV1MappingContext, ConfirmationClass, DepositCredited, DexCreated, EventPayload,
-    MarketCreated, SourceEvidence, SubaccountTransfer, VaultDeposit,
+    MarketCreated, SourceEvidence, SpotTransfer, SubaccountTransfer, VaultDeposit,
 };
 use domain_types::{
     AccountId, Address, AssetId, BlockHeight, ChainId, ClosedInterval, DexId, Direction,
@@ -14,8 +14,8 @@ use domain_types::{
 use feature_core::{FeatureValue, HealthState, MissingReason};
 use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
 use intelligence_replay::{
-    IntelligenceReplayError, MaterializeRequest, QualificationClaim, materialize_committed_node,
-    materialize_synthetic_replay,
+    IntelligenceReplayError, IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
+    materialize_committed_node, materialize_synthetic_replay,
 };
 use signal_core::{Signal, SignalConfirmationClass, SignalError, SignalLifecycleState, SignalType};
 
@@ -219,6 +219,118 @@ fn synthetic_blocks() -> Vec<BlockEnvelope> {
     vec![market_prerequisite_block(), account_relation_block()]
 }
 
+fn usdc() -> AssetId {
+    AssetId::new("USDC").unwrap()
+}
+
+fn deposit_event(height: u64, index: u32, account: Address) -> CanonicalEventEnvelope {
+    event(
+        height,
+        index,
+        EventPayload::DepositCredited(DepositCredited {
+            account_id: account,
+            asset_id: usdc(),
+            amount: Quantity::from_str("10").unwrap(),
+            deposit_reference: format!("deposit-{index}"),
+        }),
+        vec![],
+        vec![account],
+    )
+}
+
+fn independent_deposit_blocks() -> Vec<BlockEnvelope> {
+    let height = START_HEIGHT + 1;
+    vec![
+        market_prerequisite_block(),
+        block(
+            height,
+            vec![
+                deposit_event(height, 0, BUYER),
+                deposit_event(height, 1, SELLER),
+            ],
+        ),
+    ]
+}
+
+fn spot_transfer_blocks() -> Vec<BlockEnvelope> {
+    let height = START_HEIGHT + 1;
+    vec![
+        market_prerequisite_block(),
+        block(
+            height,
+            vec![
+                deposit_event(height, 0, BUYER),
+                deposit_event(height, 1, SELLER),
+                event(
+                    height,
+                    2,
+                    EventPayload::SpotTransfer(SpotTransfer {
+                        from_account_id: BUYER,
+                        to_account_id: SELLER,
+                        asset_id: usdc(),
+                        amount: Quantity::from_str("1.5").unwrap(),
+                    }),
+                    vec![],
+                    vec![BUYER, SELLER],
+                ),
+            ],
+        ),
+    ]
+}
+
+fn shared_vault_depositor_blocks() -> Vec<BlockEnvelope> {
+    let height = START_HEIGHT + 1;
+    let vault = VaultId::new("intelligence-replay-vault").unwrap();
+    vec![
+        market_prerequisite_block(),
+        block(
+            height,
+            vec![
+                deposit_event(height, 0, BUYER),
+                deposit_event(height, 1, SELLER),
+                event(
+                    height,
+                    2,
+                    EventPayload::VaultDeposit(VaultDeposit {
+                        vault_id: vault.clone(),
+                        account_id: BUYER,
+                        amount: QuoteAmount::from_str("4").unwrap(),
+                        shares_issued: Quantity::from_str("4").unwrap(),
+                    }),
+                    vec![],
+                    vec![BUYER],
+                ),
+                event(
+                    height,
+                    3,
+                    EventPayload::VaultDeposit(VaultDeposit {
+                        vault_id: vault,
+                        account_id: SELLER,
+                        amount: QuoteAmount::from_str("3").unwrap(),
+                        shares_issued: Quantity::from_str("3").unwrap(),
+                    }),
+                    vec![],
+                    vec![SELLER],
+                ),
+            ],
+        ),
+    ]
+}
+
+fn assert_synthetic_unassessed(report: &IntelligenceReplayReport) {
+    assert_eq!(report.source_qualification, "synthetic_unassessed");
+    assert!(!report.stage_3_pass);
+    assert!(!report.live_qualified);
+    assert!(!report.alpha_qualified);
+    assert!(!report.fills_invented);
+    assert!(!report.replica_cmds_used);
+    assert_eq!(report.live_signal_count, 0);
+    assert_eq!(
+        report.signal_confirmation,
+        SignalConfirmationClass::SyntheticUnqualified
+    );
+}
+
 fn committed_context(height: u64) -> CommittedNodeV1MappingContext {
     CommittedNodeV1MappingContext {
         chain_id: ChainId::new("hyperliquid-mainnet").unwrap(),
@@ -245,17 +357,7 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
     let second = materialize_synthetic_replay(&blocks, &request()).unwrap();
 
     assert_eq!(first.state_hash, second.state_hash);
-    assert_eq!(first.source_qualification, "synthetic_unassessed");
-    assert!(!first.stage_3_pass);
-    assert!(!first.live_qualified);
-    assert!(!first.alpha_qualified);
-    assert!(!first.fills_invented);
-    assert!(!first.replica_cmds_used);
-    assert_eq!(first.live_signal_count, 0);
-    assert_eq!(
-        first.signal_confirmation,
-        SignalConfirmationClass::SyntheticUnqualified
-    );
+    assert_synthetic_unassessed(&first);
     assert!(first.wallet_performance_withheld);
     assert!(matches!(
         first.require_wallet_performance(),
@@ -307,12 +409,18 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
             .iter()
             .any(|link| link.kind == entity_graph::LinkKind::ProtocolVaultMembership)
     );
-    assert!(
-        !first
-            .entity_graph
-            .known_administrative_groups(time(2), known(2))
-            .unwrap()
-            .is_empty()
+    let groups = first
+        .entity_graph
+        .known_administrative_groups(time(2), known(2))
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    let members: BTreeSet<_> = groups.into_iter().next().unwrap().into_iter().collect();
+    assert_eq!(
+        members,
+        BTreeSet::from([
+            entity_graph::GraphNodeId::Account(account_id(BUYER)),
+            entity_graph::GraphNodeId::Account(account_id(SELLER)),
+        ])
     );
 
     assert_eq!(first.market_snapshots.len(), 1);
@@ -332,6 +440,62 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
             .get(&market_intelligence::market_feature_key("book").unwrap()),
         Some(&FeatureValue::Missing(MissingReason::NotObserved))
     );
+}
+
+fn assert_accounts_unmerged(report: &IntelligenceReplayReport) {
+    assert_synthetic_unassessed(report);
+    assert!(
+        report
+            .entity_graph
+            .links_as_of(time(1), known(1))
+            .is_empty()
+    );
+    let groups = report
+        .entity_graph
+        .known_administrative_groups(time(2), known(2))
+        .unwrap();
+    assert!(
+        groups.is_empty(),
+        "distinct wallets must not collapse without an explicit protocol identity link: {groups:?}"
+    );
+}
+
+#[test]
+fn distinct_deposit_addresses_do_not_merge() {
+    let report = materialize_synthetic_replay(&independent_deposit_blocks(), &request()).unwrap();
+    assert!(
+        report
+            .entity_graph
+            .links_as_of(time(2), known(2))
+            .is_empty()
+    );
+    assert_accounts_unmerged(&report);
+}
+
+#[test]
+fn spot_transfer_without_protocol_subaccount_does_not_merge() {
+    let report = materialize_synthetic_replay(&spot_transfer_blocks(), &request()).unwrap();
+    assert!(
+        report
+            .entity_graph
+            .links_as_of(time(2), known(2))
+            .is_empty()
+    );
+    assert_accounts_unmerged(&report);
+}
+
+#[test]
+fn shared_vault_depositors_do_not_merge() {
+    let report =
+        materialize_synthetic_replay(&shared_vault_depositor_blocks(), &request()).unwrap();
+    let links = report.entity_graph.links_as_of(time(2), known(2));
+    assert_eq!(links.len(), 2);
+    assert!(
+        links
+            .iter()
+            .all(|link| link.kind == entity_graph::LinkKind::ProtocolVaultMembership)
+    );
+    assert_accounts_unmerged(&report);
 }
 
 #[test]

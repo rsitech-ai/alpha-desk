@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use domain_types::{
     AccountId, ClusterVersionId, EntityId, KnownTime, ProbabilityPpm, ProtocolTime,
 };
@@ -78,9 +80,13 @@ impl EntityGraph {
             });
         }
         if let Some(previous) = self.memberships.iter_mut().rev().find(|existing| {
-            existing.entity_id == membership.entity_id && existing.member == membership.member
-        }) && previous.superseded_at.is_none()
-        {
+            existing.member == membership.member && existing.superseded_at.is_none()
+        }) {
+            if previous.entity_id != membership.entity_id {
+                return Err(GraphError::ConflictingLink {
+                    reason: "account already belongs to another entity",
+                });
+            }
             if membership.known_at <= previous.known_at {
                 return Err(GraphError::Malformed {
                     what: "cluster_membership",
@@ -125,16 +131,16 @@ impl EntityGraph {
         effective_at: ProtocolTime,
         known_at: KnownTime,
     ) -> Result<Vec<Vec<GraphNodeId>>, GraphError> {
-        let mut parent: std::collections::BTreeMap<GraphNodeId, GraphNodeId> =
-            std::collections::BTreeMap::new();
-        for link in self.links_as_of(effective_at, known_at) {
-            if !link.kind.is_hard() {
+        let links = self.links_as_of(effective_at, known_at);
+        reject_conflicting_identity_links(&links)?;
+        let mut parent: BTreeMap<GraphNodeId, GraphNodeId> = BTreeMap::new();
+        for link in links {
+            if !link.kind.forms_administrative_group() {
                 continue;
             }
             union(&mut parent, link.left.clone(), link.right.clone());
         }
-        let mut groups: std::collections::BTreeMap<GraphNodeId, Vec<GraphNodeId>> =
-            std::collections::BTreeMap::new();
+        let mut groups: BTreeMap<GraphNodeId, Vec<GraphNodeId>> = BTreeMap::new();
         let nodes: Vec<GraphNodeId> = parent.keys().cloned().collect();
         for node in nodes {
             let root = find(&mut parent, node.clone());
@@ -162,10 +168,52 @@ impl Default for EntityGraph {
     }
 }
 
-fn find(
-    parent: &mut std::collections::BTreeMap<GraphNodeId, GraphNodeId>,
-    node: GraphNodeId,
-) -> GraphNodeId {
+fn reject_conflicting_identity_links(links: &[&LinkEvidence]) -> Result<(), GraphError> {
+    let mut sub_masters: BTreeMap<&GraphNodeId, &GraphNodeId> = BTreeMap::new();
+    let mut vault_managers: BTreeMap<&GraphNodeId, &GraphNodeId> = BTreeMap::new();
+    for link in links {
+        match link.kind {
+            LinkKind::ProtocolSubaccount => {
+                if let Some(existing) = sub_masters.get(&link.right)
+                    && *existing != &link.left
+                {
+                    return Err(GraphError::ConflictingLink {
+                        reason: "subaccount bound to multiple masters",
+                    });
+                }
+                sub_masters.insert(&link.right, &link.left);
+            }
+            LinkKind::ProtocolVaultManager => {
+                if let Some(existing) = vault_managers.get(&link.right)
+                    && *existing != &link.left
+                {
+                    return Err(GraphError::ConflictingLink {
+                        reason: "vault bound to multiple managers",
+                    });
+                }
+                vault_managers.insert(&link.right, &link.left);
+            }
+            LinkKind::ProtocolVaultMembership
+            | LinkKind::ApprovedOperatorAnnotation
+            | LinkKind::FundingPath
+            | LinkKind::CoordinatedExecution
+            | LinkKind::SizePriceFingerprint
+            | LinkKind::LeaderFollower
+            | LinkKind::CounterpartyInventoryHandoff
+            | LinkKind::StrategyMigration => {}
+        }
+    }
+    for master in sub_masters.values() {
+        if sub_masters.contains_key(*master) {
+            return Err(GraphError::ConflictingLink {
+                reason: "ambiguous subaccount hierarchy",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn find(parent: &mut BTreeMap<GraphNodeId, GraphNodeId>, node: GraphNodeId) -> GraphNodeId {
     if !parent.contains_key(&node) {
         parent.insert(node.clone(), node.clone());
         return node;
@@ -183,11 +231,7 @@ fn find(
     }
 }
 
-fn union(
-    parent: &mut std::collections::BTreeMap<GraphNodeId, GraphNodeId>,
-    left: GraphNodeId,
-    right: GraphNodeId,
-) {
+fn union(parent: &mut BTreeMap<GraphNodeId, GraphNodeId>, left: GraphNodeId, right: GraphNodeId) {
     let left_root = find(parent, left);
     let right_root = find(parent, right);
     if left_root != right_root {

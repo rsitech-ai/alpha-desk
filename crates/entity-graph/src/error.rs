@@ -13,6 +13,8 @@ pub enum GraphError {
     },
     #[error("insufficient evidence families for merge")]
     InsufficientEvidenceFamilies,
+    #[error("conflicting entity link refused: {reason}")]
+    ConflictingLink { reason: &'static str },
     #[error("temporal inversion")]
     TemporalInversion,
     #[error("overflow")]
