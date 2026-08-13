@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +17,7 @@ use crate::{
 };
 
 const TASK_NAME: &str = "raw-v3-maintenance";
+const RESTORE_TASK: &str = "raw-v3-restore";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaintenanceCycleReport {
@@ -214,6 +215,71 @@ pub fn run_maintenance_cycle<P: DiskSpaceProbe>(
     MaintenanceCycleReport { status }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedRestoreRequest {
+    dest: PathBuf,
+    backup_root: PathBuf,
+    chain: ChainId,
+    source: SourceId,
+    plan_digest: [u8; 32],
+    backup_receipt: [u8; 32],
+}
+
+impl AuthorizedRestoreRequest {
+    pub fn try_new(
+        dest: impl Into<PathBuf>,
+        backup_root: impl Into<PathBuf>,
+        chain: ChainId,
+        source: SourceId,
+        plan_digest: [u8; 32],
+        backup_receipt: [u8; 32],
+    ) -> Result<Self, AppError> {
+        let dest = dest.into();
+        let backup_root = backup_root.into();
+        require_operator_directory(
+            &dest,
+            "capture_restore.dest_missing",
+            "capture_restore.dest_unsafe",
+        )?;
+        require_operator_directory(
+            &backup_root,
+            "capture_restore.backup_missing",
+            "capture_restore.backup_unsafe",
+        )?;
+        if same_path(&dest, &backup_root) {
+            return Err(restore_failed("capture_restore.backup_is_dest"));
+        }
+        Ok(Self {
+            dest,
+            backup_root,
+            chain,
+            source,
+            plan_digest,
+            backup_receipt,
+        })
+    }
+
+    #[must_use]
+    pub fn dest(&self) -> &Path {
+        &self.dest
+    }
+
+    #[must_use]
+    pub fn backup_root(&self) -> &Path {
+        &self.backup_root
+    }
+
+    #[must_use]
+    pub const fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    #[must_use]
+    pub const fn backup_receipt(&self) -> [u8; 32] {
+        self.backup_receipt
+    }
+}
+
 pub fn restore_authorized(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -234,6 +300,41 @@ pub fn restore_authorized(
         backup_receipt,
         backup_root,
     )
+}
+
+pub fn run_configured_restore(
+    capture: &crate::CaptureConfig,
+    request: &AuthorizedRestoreRequest,
+) -> Result<canonical_archive::RawArchiveRestoreReceipt, AppError> {
+    let runtime = capture.runtime();
+    if runtime.raw_archive_format() != crate::RawArchiveFormat::V3 {
+        return Err(restore_failed("capture_restore.v2_has_no_restore"));
+    }
+    if same_path(request.dest(), runtime.archive_path()) {
+        return Err(restore_failed("capture_restore.live_current_refused"));
+    }
+    let raw_v3 = runtime
+        .raw_v3()
+        .ok_or(restore_failed("capture_config.missing_raw_v3_capacity"))?;
+    let archive_config = canonical_archive::ArchiveConfig::production("hl-capture/restore")
+        .map_err(|_| restore_failed("capture_connect.archive"))?;
+    let workload = raw_v3
+        .workload()
+        .map_err(|_| restore_failed("capture_config.invalid_raw_v3_capacity"))?;
+    let budgets = raw_v3
+        .budgets()
+        .map_err(|_| restore_failed("capture_config.invalid_raw_v3_capacity"))?;
+    let archive = RawV3Archive::open(request.dest(), archive_config, workload, budgets)
+        .map_err(|error| restore_failed(error.reason_code()))?;
+    restore_authorized(
+        &archive,
+        &request.chain,
+        &request.source,
+        request.plan_digest,
+        request.backup_receipt,
+        request.backup_root(),
+    )
+    .map_err(|error| restore_failed(error.reason_code()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -477,6 +578,46 @@ fn maintenance_archive_reason(error: &ArchiveError) -> &'static str {
         ArchiveError::WriterBusy => "capture_maintenance.writer_busy",
         ArchiveError::Capacity(_) => error.reason_code(),
         _ => error.reason_code(),
+    }
+}
+
+fn restore_failed(reason_code: &'static str) -> AppError {
+    AppError::TaskFailed {
+        task: RESTORE_TASK,
+        reason_code,
+    }
+}
+
+fn require_operator_directory(
+    path: &Path,
+    missing: &'static str,
+    unsafe_code: &'static str,
+) -> Result<(), AppError> {
+    if path.as_os_str().is_empty()
+        || path == Path::new("/")
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(restore_failed(unsafe_code));
+    }
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(restore_failed(missing)),
+        Err(_) => Err(restore_failed(unsafe_code)),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(restore_failed(unsafe_code))
+        }
+        Ok(_) => Ok(()),
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 

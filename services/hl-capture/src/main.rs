@@ -6,12 +6,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use hl_capture::{CaptureConfig, connect_capture, read_status, run_configured_maintenance_cycle};
+use domain_types::{ChainId, SourceId};
+use hl_capture::{
+    AuthorizedRestoreRequest, CaptureConfig, connect_capture, read_status,
+    run_configured_maintenance_cycle, run_configured_restore,
+};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-const USAGE: &str = "usage: hl-capture <check-config|status|run|maintain> --config <path> [--json]\n       hl-capture fixture-replay --config <path> --blocks <count> [--block-delay-millis <ms>]";
+const USAGE: &str = "usage: hl-capture <check-config|status|run|maintain> --config <path> [--json]\n       hl-capture fixture-replay --config <path> --blocks <count> [--block-delay-millis <ms>]\n       hl-capture restore --config <path> --dest <path> --backup-root <path> --chain <id> --source <id> --plan-digest <hex> --backup-receipt <hex> --i-approve-restore";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -82,6 +86,43 @@ async fn execute(arguments: Vec<OsString>) -> Result<(), CliError> {
             let config = load_config(&config_path)?;
             run_fixture(&config, block_count, block_delay).await
         }
+        Command::Restore {
+            config_path,
+            dest,
+            backup_root,
+            chain,
+            source,
+            plan_digest,
+            backup_receipt,
+        } => {
+            let backup_receipt =
+                backup_receipt.ok_or(CliError::Stable("capture_restore.receipt_required"))?;
+            let config = load_config(&config_path)?;
+            let chain = ChainId::new(chain)
+                .map_err(|_| CliError::Stable("capture_restore.invalid_identity"))?;
+            let source = SourceId::new(source)
+                .map_err(|_| CliError::Stable("capture_restore.invalid_identity"))?;
+            let request = AuthorizedRestoreRequest::try_new(
+                dest,
+                backup_root,
+                chain,
+                source,
+                plan_digest,
+                backup_receipt,
+            )
+            .map_err(|error| CliError::Stable(error.reason_code()))?;
+            let receipt = run_configured_restore(&config, &request)
+                .map_err(|error| CliError::Stable(error.reason_code()))?;
+            let encoded = serde_json::to_string(&RestoreOutput {
+                schema_version: "hl.capture.restore.v1",
+                plan_digest: hex::encode(receipt.plan_digest()),
+                restored_files: receipt.restored_files(),
+                restored_bytes: receipt.restored_bytes(),
+            })
+            .map_err(|_| CliError::Stable("capture_cli.serialization"))?;
+            println!("{encoded}");
+            Ok(())
+        }
     }
 }
 
@@ -105,6 +146,15 @@ enum Command {
         block_count: u64,
         block_delay: Duration,
     },
+    Restore {
+        config_path: PathBuf,
+        dest: PathBuf,
+        backup_root: PathBuf,
+        chain: String,
+        source: String,
+        plan_digest: [u8; 32],
+        backup_receipt: Option<[u8; 32]>,
+    },
 }
 
 impl Command {
@@ -112,6 +162,9 @@ impl Command {
         let mut arguments = arguments.into_iter();
         let command = arguments.next().ok_or(CliError::Usage)?;
         let command = command.to_str().ok_or(CliError::Usage)?;
+        if command == "restore" {
+            return Self::parse_restore(arguments);
+        }
         let mut config_path = None;
         let mut json = false;
         let mut block_count = None;
@@ -162,6 +215,56 @@ impl Command {
             _ => Err(CliError::Usage),
         }
     }
+
+    fn parse_restore(mut arguments: impl Iterator<Item = OsString>) -> Result<Self, CliError> {
+        let mut config_path = None;
+        let mut dest = None;
+        let mut backup_root = None;
+        let mut chain = None;
+        let mut source = None;
+        let mut plan_digest = None;
+        let mut backup_receipt = None;
+        let mut approved = false;
+        while let Some(argument) = arguments.next() {
+            match argument.to_str() {
+                Some("--config") if config_path.is_none() => {
+                    config_path = Some(PathBuf::from(arguments.next().ok_or(CliError::Usage)?));
+                }
+                Some("--dest") if dest.is_none() => {
+                    dest = Some(PathBuf::from(arguments.next().ok_or(CliError::Usage)?));
+                }
+                Some("--backup-root") if backup_root.is_none() => {
+                    backup_root = Some(PathBuf::from(arguments.next().ok_or(CliError::Usage)?));
+                }
+                Some("--chain") if chain.is_none() => {
+                    chain = Some(parse_identity(arguments.next().ok_or(CliError::Usage)?)?);
+                }
+                Some("--source") if source.is_none() => {
+                    source = Some(parse_identity(arguments.next().ok_or(CliError::Usage)?)?);
+                }
+                Some("--plan-digest") if plan_digest.is_none() => {
+                    plan_digest = Some(parse_digest(arguments.next().ok_or(CliError::Usage)?)?);
+                }
+                Some("--backup-receipt") if backup_receipt.is_none() => {
+                    backup_receipt = Some(parse_digest(arguments.next().ok_or(CliError::Usage)?)?);
+                }
+                Some("--i-approve-restore") if !approved => approved = true,
+                _ => return Err(CliError::Usage),
+            }
+        }
+        if !approved {
+            return Err(CliError::Usage);
+        }
+        Ok(Self::Restore {
+            config_path: config_path.ok_or(CliError::Usage)?,
+            dest: dest.ok_or(CliError::Usage)?,
+            backup_root: backup_root.ok_or(CliError::Usage)?,
+            chain: chain.ok_or(CliError::Usage)?,
+            source: source.ok_or(CliError::Usage)?,
+            plan_digest: plan_digest.ok_or(CliError::Usage)?,
+            backup_receipt,
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +272,14 @@ struct MaintainOutput {
     schema_version: &'static str,
     #[serde(flatten)]
     status: hl_capture::CaptureMaintenanceStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct RestoreOutput {
+    schema_version: &'static str,
+    plan_digest: String,
+    restored_files: u64,
+    restored_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,6 +308,25 @@ fn parse_u64(value: OsString) -> Result<u64, CliError> {
         .to_str()
         .and_then(|value| value.parse().ok())
         .ok_or(CliError::Usage)
+}
+
+fn parse_identity(value: OsString) -> Result<String, CliError> {
+    let value = value.into_string().map_err(|_| CliError::Usage)?;
+    if value.is_empty() {
+        return Err(CliError::Usage);
+    }
+    Ok(value)
+}
+
+fn parse_digest(value: OsString) -> Result<[u8; 32], CliError> {
+    let value = value
+        .to_str()
+        .ok_or(CliError::Stable("capture_restore.invalid_digest"))?;
+    let decoded =
+        hex::decode(value).map_err(|_| CliError::Stable("capture_restore.invalid_digest"))?;
+    decoded
+        .try_into()
+        .map_err(|_| CliError::Stable("capture_restore.invalid_digest"))
 }
 
 async fn run_fixture(
