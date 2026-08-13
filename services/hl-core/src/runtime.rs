@@ -50,16 +50,36 @@ impl CoreRuntime {
         self,
         cancellation: CancellationToken,
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
-        let mut source = JetStreamPullSource::connect(self.config.jetstream_config()?).await?;
-        self.run_source(&mut source, cancellation).await
+        let mut dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
+        let config = self.config.jetstream_config()?;
+        let mut source = self
+            .session
+            .connect_source(|| JetStreamPullSource::connect(config), &mut dead_letter)
+            .await?;
+        self.run_source_with_dead_letter(&mut source, dead_letter, cancellation)
+            .await
     }
 
     pub async fn run_source<Src: CanonicalPullSource>(
-        mut self,
+        self,
         source: &mut Src,
         cancellation: CancellationToken,
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
-        let mut dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
+        let dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
+        self.run_source_with_dead_letter(source, dead_letter, cancellation)
+            .await
+    }
+
+    async fn run_source_with_dead_letter<Src, Dlq>(
+        mut self,
+        source: &mut Src,
+        mut dead_letter: Dlq,
+        cancellation: CancellationToken,
+    ) -> Result<JetStreamReplayReport, CoreRuntimeError>
+    where
+        Src: CanonicalPullSource,
+        Dlq: DeadLetterSink,
+    {
         let status_cancellation = cancellation.child_token();
         let status_task = match self.config.status_listen() {
             Some(listen) => {

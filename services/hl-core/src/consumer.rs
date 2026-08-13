@@ -40,6 +40,8 @@ const FETCH_UNDECODEABLE_SUBJECT: &str = "hl.v1.fetch.undecodable";
 const FETCH_UNDECODEABLE_MESSAGE_ID: &str = "undecodable";
 const FETCH_TRANSPORT_SUBJECT: &str = "hl.v1.fetch.transport";
 const FETCH_TRANSPORT_MESSAGE_ID: &str = "transport";
+const CONNECT_TRANSPORT_SUBJECT: &str = "hl.v1.connect.transport";
+const CONNECT_TRANSPORT_MESSAGE_ID: &str = "connect";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JetStreamReplayReport {
@@ -222,17 +224,25 @@ impl FetchPoison {
         )
     }
 
-    fn transport_sentinel() -> Self {
+    fn transport_sentinel(subject: &'static str, message_id: &'static str) -> Self {
         Self {
             kind: FetchPoisonKind::Transport,
-            subject: FETCH_TRANSPORT_SUBJECT.to_owned(),
-            message_id: FETCH_TRANSPORT_MESSAGE_ID.to_owned(),
+            subject: subject.to_owned(),
+            message_id: message_id.to_owned(),
             payload_sha256: [0; 32],
             block_hash: [0; 32],
             stream_sequence: None,
             consumer_sequence: None,
             delivery_count: 0,
         }
+    }
+
+    fn fetch_transport_sentinel() -> Self {
+        Self::transport_sentinel(FETCH_TRANSPORT_SUBJECT, FETCH_TRANSPORT_MESSAGE_ID)
+    }
+
+    fn connect_transport_sentinel() -> Self {
+        Self::transport_sentinel(CONNECT_TRANSPORT_SUBJECT, CONNECT_TRANSPORT_MESSAGE_ID)
     }
 }
 
@@ -870,6 +880,21 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
         self.replay.ledger()
     }
 
+    pub async fn connect_source<Src, Dlq, Fut>(
+        &self,
+        connect: impl FnOnce() -> Fut,
+        dead_letter: &mut Dlq,
+    ) -> Result<Src, JetStreamReplayError>
+    where
+        Dlq: DeadLetterSink,
+        Fut: Future<Output = Result<Src, JetStreamReplayError>>,
+    {
+        match connect().await {
+            Ok(source) => Ok(source),
+            Err(error) => Err(self.persist_connect_fail_closed(dead_letter, error)),
+        }
+    }
+
     pub async fn consume_available<Src, Dlq>(
         &mut self,
         source: &mut Src,
@@ -919,13 +944,17 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
                                 .ok_or(JetStreamReplayError::Overflow)?;
                             report.last_height = Some(assembled.block.block_height());
                             report.state_hash = self.replay.ledger().state_hash();
-                            source.ack(&assembled.message_ids).await?;
+                            if let Err(error) = source.ack(&assembled.message_ids).await {
+                                return Err(self.persist_fail_closed(dead_letter, delivery, error));
+                            }
                         }
                         Ok(DurableApplyOutcome::AlreadyApplied(_)) => {
                             report.already_applied = report.already_applied.saturating_add(1);
                             report.last_height = Some(assembled.block.block_height());
                             report.state_hash = self.replay.ledger().state_hash();
-                            source.ack(&assembled.message_ids).await?;
+                            if let Err(error) = source.ack(&assembled.message_ids).await {
+                                return Err(self.persist_fail_closed(dead_letter, delivery, error));
+                            }
                         }
                         Err(error) => {
                             return Err(self.persist_fail_closed(
@@ -979,7 +1008,7 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
             JetStreamReplayError::FetchDecode(poison) => {
                 poison.to_record(&self.dead_letter_consumer, failed_at_unix_micros())
             }
-            JetStreamReplayError::Transport => FetchPoison::transport_sentinel()
+            JetStreamReplayError::Transport => FetchPoison::fetch_transport_sentinel()
                 .to_record(&self.dead_letter_consumer, failed_at_unix_micros()),
             JetStreamReplayError::Config(_)
             | JetStreamReplayError::Decode(_)
@@ -996,6 +1025,33 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
                     let _ = source.term_poison().await;
                     error
                 }
+                Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+            },
+            Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+        }
+    }
+
+    fn persist_connect_fail_closed<Dlq: DeadLetterSink>(
+        &self,
+        dead_letter: &mut Dlq,
+        error: JetStreamReplayError,
+    ) -> JetStreamReplayError {
+        let record = match &error {
+            JetStreamReplayError::Transport => FetchPoison::connect_transport_sentinel()
+                .to_record(&self.dead_letter_consumer, failed_at_unix_micros()),
+            JetStreamReplayError::Config(_)
+            | JetStreamReplayError::Decode(_)
+            | JetStreamReplayError::HashMismatch
+            | JetStreamReplayError::IncompleteBlock
+            | JetStreamReplayError::PendingLimit
+            | JetStreamReplayError::FetchDecode(_)
+            | JetStreamReplayError::Replay(_)
+            | JetStreamReplayError::DeadLetter(_)
+            | JetStreamReplayError::Overflow => return error,
+        };
+        match record {
+            Ok(record) => match dead_letter.persist(&record) {
+                Ok(()) => error,
                 Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
             },
             Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
