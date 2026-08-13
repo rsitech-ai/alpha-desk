@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod fixture;
 mod hip3;
 mod isolated;
 mod model;
@@ -8,6 +9,10 @@ mod portfolio;
 mod standard;
 mod unified;
 
+pub use fixture::{
+    MARGIN_FIXTURE_SCHEMA, MarginFixture, MarginFixtureError, assert_margin_fixture,
+    parse_margin_fixture,
+};
 pub use hip3::Hip3MarginModel;
 pub use isolated::IsolatedMarginModel;
 pub use model::{

@@ -5,12 +5,14 @@ use domain_types::{
     PositionQuantity, Price, Quantity, UsdAmount, ValueError,
 };
 use num_bigint::BigInt;
+use serde::{Deserialize, Serialize};
 
 pub const HIP3_RULES_V1: &str = "hip3-margin@1.0.0";
 pub const PORTFOLIO_RULES_UNSUPPORTED_EXACT: &str =
     "portfolio margin is not exactly reconstructible from V1 canonical inputs";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", deny_unknown_fields)]
 pub enum AccountModeMetadata {
     StandardCross,
     StandardIsolated {
@@ -29,7 +31,8 @@ pub enum AccountModeMetadata {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PositionState {
     pub market_id: MarketId,
     pub quantity: PositionQuantity,
@@ -37,7 +40,8 @@ pub struct PositionState {
     pub maintenance_margin_rate: FeeRate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarginInput {
     pub account_id: Address,
     pub mode: AccountModeMetadata,
@@ -47,7 +51,8 @@ pub struct MarginInput {
     pub metadata_block: BlockHeight,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
 pub enum LiquidationEstimate {
     Exact {
         trigger_price: Price,
@@ -60,14 +65,15 @@ pub enum LiquidationEstimate {
     NotApplicable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CalculationConfidence {
     Exact,
     Bounded,
     Unsupported,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarginAssessment {
     pub initial_margin: UsdAmount,
     pub maintenance_margin: UsdAmount,
