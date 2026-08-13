@@ -21,7 +21,7 @@ use crate::{
         self, IndexPackBytes, JournalGenerationBuilderV3, MAX_JOURNAL_BYTES, PackedLogicalInputV3,
         RAW_BYTE_DATASET_V3, RawPackManifestV3, RootBundleV3, SequenceLeafEntryV3,
         SequenceNodeRefV3, SequenceStorageRefV3, append_logical_entry, journal_file_identity,
-        journal_needs_rotation, root_bundle_hash,
+        journal_needs_rotation, pack_journal_leaves, root_bundle_hash, seed_rotated_journal_root,
     },
 };
 
@@ -656,15 +656,27 @@ fn publish_import_root(
     durable_at: domain_types::KnownTime,
 ) -> Result<(RootBundleV3, Vec<u8>), ArchiveError> {
     let dataset = dataset_relative(chain, source);
-    let generation = 1_u64;
     let mut journal = JournalGenerationBuilderV3::try_new(
-        generation,
-        journal_file_identity(generation)?,
-        journal_relative(&dataset, generation),
+        1_u64,
+        journal_file_identity(1)?,
+        journal_relative(&dataset, 1),
     )?;
-    let packs = IndexPackBytes::new();
+    let mut packs = IndexPackBytes::new();
     let mut sequence_root: Option<SequenceNodeRefV3> = None;
     for entry in packed_entries {
+        if let Some(root) = sequence_root.as_mut()
+            && import_journal_needs_rotation(&journal, root)?
+        {
+            rotate_import_journal(
+                archive,
+                chain,
+                source,
+                &dataset,
+                &mut journal,
+                &mut packs,
+                root,
+            )?;
+        }
         sequence_root = Some(append_logical_entry(
             &mut journal,
             &packs,
@@ -673,20 +685,6 @@ fn publish_import_root(
             source.clone(),
             entry,
         )?);
-        let root = sequence_root.as_ref().ok_or(ArchiveError::InvalidInput(
-            "imported sequence root is missing",
-        ))?;
-        let committed_bytes = u64::try_from(journal.committed_bytes())
-            .map_err(|_| ArchiveError::InvalidInput("journal prefix exceeds u64"))?;
-        if journal_needs_rotation(
-            journal.committed_record_count(),
-            committed_bytes,
-            root.depth(),
-        ) {
-            return Err(ArchiveError::InvalidInput(
-                "raw V2 import cannot rotate the journal before CURRENT exists",
-            ));
-        }
     }
     let sequence_root = sequence_root.ok_or(ArchiveError::InvalidInput(
         "raw V2 import requires at least one packed leaf",
@@ -702,7 +700,7 @@ fn publish_import_root(
     let bundle = RootBundleV3::try_new(
         chain.clone(),
         source.clone(),
-        generation,
+        1,
         None,
         &journal_commit,
         durable_at,
@@ -725,6 +723,77 @@ fn publish_import_root(
         ));
     }
     Ok((readback, journal_bytes))
+}
+
+fn import_journal_needs_rotation(
+    journal: &JournalGenerationBuilderV3,
+    root: &SequenceNodeRefV3,
+) -> Result<bool, ArchiveError> {
+    let committed_bytes = u64::try_from(journal.committed_bytes())
+        .map_err(|_| ArchiveError::InvalidInput("journal prefix exceeds u64"))?;
+    Ok(journal_needs_rotation(
+        journal.committed_record_count(),
+        committed_bytes,
+        root.depth(),
+    ))
+}
+
+fn rotate_import_journal(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    dataset: &Path,
+    journal: &mut JournalGenerationBuilderV3,
+    packs: &mut IndexPackBytes,
+    sequence_root: &mut SequenceNodeRefV3,
+) -> Result<(), ArchiveError> {
+    if journal.committed_record_count() <= 1 {
+        return Err(ArchiveError::ImportJournalRotationBeforeCurrent(
+            "active import journal cannot rotate a single remaining record",
+        ));
+    }
+    let journal_commit = journal.commit_prefix(sequence_root)?;
+    fs::extend_append_only(
+        archive.root(),
+        Path::new(journal_commit.prefix().relative_path()),
+        &[],
+        journal_commit.bytes(),
+        MAX_JOURNAL_BYTES,
+    )?;
+    let (pack, packed_leaves) = pack_journal_leaves(
+        chain.clone(),
+        source.clone(),
+        journal.generation(),
+        sequence_root,
+        journal_commit.bytes(),
+        packs,
+        &[],
+    )?;
+    let pack_hash = super::publish_index_pack(archive, dataset, &pack)?;
+    packs.insert(pack_hash, pack.bytes().to_vec());
+    let next_generation = journal.generation().checked_add(1).ok_or(
+        ArchiveError::ImportJournalRotationBeforeCurrent("import journal generation overflows"),
+    )?;
+    let mut rotated = JournalGenerationBuilderV3::try_new(
+        next_generation,
+        journal_file_identity(next_generation)?,
+        journal_relative(dataset, next_generation),
+    )?;
+    let rotated_root = seed_rotated_journal_root(
+        &mut rotated,
+        packs,
+        &packed_leaves,
+        journal_commit.bytes(),
+        sequence_root,
+    )?;
+    if import_journal_needs_rotation(&rotated, &rotated_root)? {
+        return Err(ArchiveError::ImportJournalRotationBeforeCurrent(
+            "rotated import journal still requires index rotation",
+        ));
+    }
+    *journal = rotated;
+    *sequence_root = rotated_root;
+    Ok(())
 }
 
 fn publish_v3_current(
@@ -944,4 +1013,231 @@ fn report_relative(hash: [u8; 32]) -> PathBuf {
         .join("raw-byte-v3")
         .join("imports")
         .join(format!("report-{}.json", hex::encode(hash)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ArchiveConfig, RawV3Archive,
+        raw_v3::{SequencePageLocatorV3, load_sequence_internal},
+    };
+    use domain_types::KnownTime;
+    use storage_ports::{RawArchiveCapacityBudgets, RawArchiveWorkloadEnvelope};
+
+    fn durable_at() -> KnownTime {
+        KnownTime::from_unix_micros(1_722_000_000_000_000).unwrap()
+    }
+
+    fn open_v3(path: &Path) -> RawV3Archive {
+        let workload = RawArchiveWorkloadEnvelope::try_new(
+            100,
+            1,
+            1_000,
+            3_600,
+            1_024,
+            1_000,
+            64 * 1024 * 1024,
+            64,
+        )
+        .unwrap();
+        let budgets =
+            RawArchiveCapacityBudgets::try_new(u64::MAX, u64::MAX, u64::MAX, u64::MAX, true)
+                .unwrap();
+        RawV3Archive::open(
+            path,
+            ArchiveConfig::deterministic_fixture("raw-v2-import-journal-rotate-test", durable_at())
+                .unwrap(),
+            workload,
+            budgets,
+        )
+        .unwrap()
+    }
+
+    fn chain() -> ChainId {
+        ChainId::new("mainnet").unwrap()
+    }
+
+    fn source() -> SourceId {
+        SourceId::new("node-fills").unwrap()
+    }
+
+    fn packed_entry(sequence: u64) -> SequenceLeafEntryV3 {
+        let mut hash = [0_u8; 32];
+        hash[..8].copy_from_slice(&sequence.to_be_bytes());
+        SequenceLeafEntryV3::try_new_packed(
+            sequence,
+            sequence,
+            raw::path_string(&pack_manifest_relative(hash)).unwrap(),
+            hash,
+            1,
+            1,
+            1,
+            "date=2024-08-03/hour=00",
+        )
+        .unwrap()
+    }
+
+    fn packed_entries_requiring_import_journal_rotation() -> Vec<SequenceLeafEntryV3> {
+        let mut journal = JournalGenerationBuilderV3::try_new(
+            1,
+            journal_file_identity(1).unwrap(),
+            PathBuf::from("journals/generation-1.log"),
+        )
+        .unwrap();
+        let packs = IndexPackBytes::new();
+        let mut root = None;
+        let mut entries = Vec::new();
+        let limit = raw_v3::MAX_JOURNAL_RECORDS.saturating_add(64);
+        for sequence in 1..=limit {
+            let entry = packed_entry(sequence);
+            entries.push(entry.clone());
+            root = Some(
+                append_logical_entry(
+                    &mut journal,
+                    &packs,
+                    root.as_ref(),
+                    chain(),
+                    source(),
+                    entry,
+                )
+                .unwrap(),
+            );
+            let current = root.as_ref().expect("import journal root");
+            if import_journal_needs_rotation(&journal, current).unwrap() {
+                break;
+            }
+        }
+        assert!(
+            import_journal_needs_rotation(&journal, root.as_ref().expect("import journal root"))
+                .unwrap(),
+            "synthetic import must fill the active journal"
+        );
+        let next = u64::try_from(entries.len()).expect("packed entry count") + 1;
+        entries.push(packed_entry(next));
+        entries
+    }
+
+    #[test]
+    fn import_root_rotates_journal_before_current_exists() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = open_v3(temporary.path());
+        let entries = packed_entries_requiring_import_journal_rotation();
+        let expected_last = u64::try_from(entries.len()).unwrap();
+        let (root, journal_bytes) =
+            publish_import_root(&archive, &chain(), &source(), entries, durable_at())
+                .expect("import root with journal rotation");
+
+        assert_eq!(root.generation(), 1);
+        assert!(root.journal_prefix().generation() >= 2);
+        assert_eq!(root.head_local_sequence(), expected_last);
+        assert_eq!(root.logical_manifest_count(), expected_last);
+        assert!(matches!(
+            root.sequence_root().locator(),
+            SequencePageLocatorV3::Journal { generation, .. } if *generation >= 2
+        ));
+
+        let dataset = dataset_relative(&chain(), &source());
+        assert!(temporary.path().join(&dataset).join("IMPORT").is_file());
+        assert!(!temporary.path().join(&dataset).join("CURRENT").exists());
+        assert!(
+            temporary
+                .path()
+                .join(&dataset)
+                .join("journals/generation-1.log")
+                .is_file()
+        );
+        assert!(
+            temporary
+                .path()
+                .join(&dataset)
+                .join("journals/generation-2.log")
+                .is_file()
+        );
+        let index_packs: Vec<_> =
+            std::fs::read_dir(temporary.path().join(&dataset).join("index-packs"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("pack"))
+                .collect();
+        assert!(
+            !index_packs.is_empty(),
+            "import rotation must publish at least one index pack"
+        );
+
+        let packs = load_packs_for_tree(
+            &archive,
+            &chain(),
+            &source(),
+            root.sequence_root(),
+            &journal_bytes,
+        )
+        .unwrap();
+        if root.sequence_root().depth() > 0 {
+            let internals =
+                load_sequence_internal(&journal_bytes, &packs, root.sequence_root()).unwrap();
+            assert!(
+                internals.children().iter().any(|child| matches!(
+                    child.locator(),
+                    SequencePageLocatorV3::IndexPack { .. }
+                )),
+                "rotated import tree must keep packed leaves in an index pack"
+            );
+        }
+        let mut walked = 0_u64;
+        walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
+            walked += 1;
+            assert!(matches!(
+                entry.storage(),
+                SequenceStorageRefV3::Packed { .. }
+            ));
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(walked, expected_last);
+    }
+
+    #[test]
+    fn import_journal_rotation_fails_closed_without_publishing_current() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = open_v3(temporary.path());
+        let dataset = dataset_relative(&chain(), &source());
+        let mut journal = JournalGenerationBuilderV3::try_new(
+            1,
+            journal_file_identity(1).unwrap(),
+            journal_relative(&dataset, 1),
+        )
+        .unwrap();
+        let mut packs = IndexPackBytes::new();
+        let mut sequence_root = append_logical_entry(
+            &mut journal,
+            &packs,
+            None,
+            chain(),
+            source(),
+            packed_entry(1),
+        )
+        .unwrap();
+
+        let error = rotate_import_journal(
+            &archive,
+            &chain(),
+            &source(),
+            &dataset,
+            &mut journal,
+            &mut packs,
+            &mut sequence_root,
+        )
+        .expect_err("single-record import journal must not skip rotation");
+        assert!(matches!(
+            error,
+            ArchiveError::ImportJournalRotationBeforeCurrent(_)
+        ));
+        assert_eq!(
+            error.reason_code(),
+            "archive.import_journal_rotation_before_current"
+        );
+        assert!(!temporary.path().join(&dataset).join("CURRENT").exists());
+        assert!(!temporary.path().join(&dataset).join("IMPORT").exists());
+    }
 }
