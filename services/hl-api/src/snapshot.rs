@@ -246,8 +246,20 @@ mod tests {
         CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, MAINTENANCE_FIELDS, SnapshotError,
         parse_capture_status_bytes,
     };
-    use crate::openapi::openapi_yaml;
+    use crate::openapi::{LAST_HEARTBEAT_THROUGHPUT_FIELDS, openapi_yaml};
     use std::path::Path;
+
+    fn assert_openapi_does_not_claim_live_qualified(document: &str) {
+        assert!(
+            document.contains("not live-qualified"),
+            "OpenAPI must name last-heartbeat throughput as not live-qualified"
+        );
+        assert_eq!(
+            document.matches("live-qualified").count(),
+            document.matches("not live-qualified").count(),
+            "OpenAPI must not claim live-qualified sources"
+        );
+    }
 
     #[test]
     fn openapi_document_describes_v4_v5_maintenance_and_503() {
@@ -263,7 +275,23 @@ mod tests {
                 "OpenAPI missing maintenance field {field}"
             );
         }
-        assert!(!document.contains("live-qualified"));
+        assert_openapi_does_not_claim_live_qualified(document);
+    }
+
+    #[test]
+    fn openapi_document_describes_last_heartbeat_throughput() {
+        let document = openapi_yaml();
+        assert!(document.contains("last-heartbeat"));
+        for field in LAST_HEARTBEAT_THROUGHPUT_FIELDS {
+            assert!(
+                document.contains(field),
+                "OpenAPI missing last-heartbeat field {field}"
+            );
+        }
+        assert!(document.contains("501"));
+        assert_openapi_does_not_claim_live_qualified(document);
+        assert!(document.contains("not invent fills"));
+        assert!(document.contains("not a fills feed"));
     }
 
     fn fixture(name: &str) -> Vec<u8> {
@@ -282,6 +310,23 @@ mod tests {
         assert!(value.get("maintenance").is_none());
         assert!(value.get("fills").is_none());
         assert!(value.get("qualification").is_none());
+        assert!(value.get("throughput_records_per_sec").is_none());
+        assert!(value.get("throughput_blocks_per_sec").is_none());
+    }
+
+    #[test]
+    fn last_heartbeat_throughput_fields_pass_through_as_read() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        value["throughput_records_per_sec"] = serde_json::json!(3);
+        value["throughput_blocks_per_sec"] = serde_json::json!(1);
+        let bytes = serde_json::to_vec(&value).expect("encode");
+        let parsed = parse_capture_status_bytes(&bytes).expect("as-read extras");
+        assert_eq!(parsed["throughput_records_per_sec"], 3);
+        assert_eq!(parsed["throughput_blocks_per_sec"], 1);
+        assert!(parsed.get("fills").is_none());
+        assert!(parsed.get("qualification").is_none());
     }
 
     #[test]

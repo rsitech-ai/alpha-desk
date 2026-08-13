@@ -1,8 +1,9 @@
 /// Checked-in OpenAPI document generated from the health proto JSON fields,
-/// capture-status v4 (inactive) / v5 (maintenance) required keys, fail-closed
-/// query budgets, and the HTTP router. This is not a production
-/// authentication, availability, or SLO contract, and it does not invent
-/// fills or mark sources live or qualified.
+/// capture-status v4 (inactive) / v5 (maintenance) required keys, optional
+/// last-heartbeat throughput integers, fail-closed query budgets, and the
+/// HTTP router. This is not a production authentication, availability, or
+/// SLO contract, and it does not invent fills or mark sources live or
+/// qualified.
 pub fn openapi_yaml() -> &'static str {
     include_str!("../../../schemas/openapi/v1/openapi.yaml")
 }
@@ -25,6 +26,9 @@ pub const SNAPSHOT_UNAVAILABLE_REASON_CODES: &[&str] = &[
     crate::snapshot::SnapshotError::Missing.reason_code(),
     crate::snapshot::SnapshotError::Invalid.reason_code(),
 ];
+
+pub const LAST_HEARTBEAT_THROUGHPUT_FIELDS: &[&str] =
+    &["throughput_records_per_sec", "throughput_blocks_per_sec"];
 
 pub const ROUTER_PATHS: &[&str] = &[
     "/healthz",

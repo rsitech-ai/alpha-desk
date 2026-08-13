@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hl_api::{
-    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, HEALTH_JSON_FIELDS, ROUTER_PATHS,
-    SNAPSHOT_UNAVAILABLE_REASON_CODES, openapi_yaml, spawn_local,
+    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, HEALTH_JSON_FIELDS,
+    LAST_HEARTBEAT_THROUGHPUT_FIELDS, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
+    openapi_yaml, spawn_local,
 };
 use http::Request;
 use serde_json::Value;
@@ -326,10 +327,24 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     assert!(document.contains("query_budget_exceeded"));
     assert!(document.contains("429"));
     assert!(document.contains("max_rows"));
+    assert!(document.contains("last-heartbeat"));
+    for field in LAST_HEARTBEAT_THROUGHPUT_FIELDS {
+        assert!(
+            document.contains(field),
+            "missing last-heartbeat field {field}"
+        );
+    }
     assert!(
-        !document.contains("live-qualified"),
+        document.contains("not live-qualified"),
+        "OpenAPI must name last-heartbeat throughput as not live-qualified"
+    );
+    assert_eq!(
+        document.matches("live-qualified").count(),
+        document.matches("not live-qualified").count(),
         "OpenAPI must not claim live-qualified sources"
     );
+    assert!(document.contains("not invent fills"));
+    assert!(document.contains("not a fills feed"));
 }
 
 #[tokio::test]
@@ -353,6 +368,15 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
             "served OpenAPI missing {reason_code}"
         );
     }
+    assert!(document.contains("last-heartbeat"));
+    for field in LAST_HEARTBEAT_THROUGHPUT_FIELDS {
+        assert!(
+            document.contains(field),
+            "served OpenAPI missing last-heartbeat field {field}"
+        );
+    }
+    assert!(document.contains("not live-qualified"));
+    assert!(document.contains("501"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
