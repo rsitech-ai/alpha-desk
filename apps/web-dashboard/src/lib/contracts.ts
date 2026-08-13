@@ -1,0 +1,580 @@
+export const HEALTH_SCHEMA_VERSION = "hl.health.v1" as const
+export const CAPTURE_STATUS_SCHEMA_VERSION = "hl.capture.status.v4" as const
+export const API_ERROR_SCHEMA_VERSION = "hl.api.error.v1" as const
+
+export type HealthState =
+  "HEALTH_STATE_GREEN" | "HEALTH_STATE_AMBER" | "HEALTH_STATE_RED"
+
+export type CaptureHealth = "green" | "yellow" | "red"
+
+export type CaptureSourceHealth = "starting" | "healthy" | "range-unavailable"
+
+export type AuxiliarySourceHealth =
+  "starting" | "healthy" | "quarantined" | "latched"
+
+export type AuxiliaryQualification = "unqualified" | "qualified"
+
+export interface HealthAssessment {
+  schema_version: typeof HEALTH_SCHEMA_VERSION
+  scope: string
+  state: HealthState
+  reason_code: string
+  observed_at_micros: number
+  suppresses: string[]
+}
+
+export interface ApiError {
+  schema_version: typeof API_ERROR_SCHEMA_VERSION
+  code: string
+  reason_code: string
+}
+
+export interface AuxiliarySourceStatus {
+  source_id: string
+  health: AuxiliarySourceHealth
+  qualification: AuxiliaryQualification
+  cursor_epoch?: string
+  tail_cursor_epoch?: string
+  durable_offset?: number
+  local_sequence?: number
+  spool_records: number
+  unarchived_records: number
+  unread_bytes?: number
+  partial_line: boolean
+  last_durable_wall_micros?: number
+  quarantine_reason?: string
+  last_error_reason?: string
+}
+
+export interface CaptureStatus {
+  schema_version: typeof CAPTURE_STATUS_SCHEMA_VERSION
+  snapshot_at_micros: number
+  build_id: string
+  chain_id: string
+  health: CaptureHealth
+  ready: boolean
+  last_error_reason?: string
+  active_committed_source: string
+  primary_source_health: string
+  independent_source_health?: string
+  failover_height?: number
+  failover_reason?: string
+  durable_height?: number
+  pending_blocks: number
+  capture_backlog_records?: number
+  oldest_pending_capture_height?: number
+  disk_free_basis_points?: number
+  archive_manifest_id?: string
+  auxiliary_sources?: AuxiliarySourceStatus[]
+}
+
+export const CAPTURE_STATUS_FIELD_ORDER = [
+  "schema_version",
+  "snapshot_at_micros",
+  "build_id",
+  "chain_id",
+  "health",
+  "ready",
+  "last_error_reason",
+  "active_committed_source",
+  "primary_source_health",
+  "independent_source_health",
+  "failover_height",
+  "failover_reason",
+  "durable_height",
+  "pending_blocks",
+  "capture_backlog_records",
+  "oldest_pending_capture_height",
+  "disk_free_basis_points",
+  "archive_manifest_id",
+  "auxiliary_sources",
+] as const
+
+export const HEALTH_FIELD_ORDER = [
+  "schema_version",
+  "scope",
+  "state",
+  "reason_code",
+  "observed_at_micros",
+  "suppresses",
+] as const
+
+export const AUXILIARY_SOURCE_FIELD_ORDER = [
+  "source_id",
+  "health",
+  "qualification",
+  "cursor_epoch",
+  "tail_cursor_epoch",
+  "durable_offset",
+  "local_sequence",
+  "spool_records",
+  "unarchived_records",
+  "unread_bytes",
+  "partial_line",
+  "last_durable_wall_micros",
+  "quarantine_reason",
+  "last_error_reason",
+] as const
+
+export type ParseResult<T> =
+  { ok: true; value: T } | { ok: false; detail: string }
+
+export function parseHealthAssessment(
+  value: unknown
+): ParseResult<HealthAssessment> {
+  if (!isRecord(value)) {
+    return { ok: false, detail: "health body is not an object" }
+  }
+  const schema_version = requireConst(
+    value,
+    "schema_version",
+    HEALTH_SCHEMA_VERSION
+  )
+  if (!schema_version.ok) {
+    return schema_version
+  }
+  const scope = requireNonEmptyString(value, "scope")
+  if (!scope.ok) {
+    return scope
+  }
+  const state = requireEnum(value, "state", HEALTH_STATES)
+  if (!state.ok) {
+    return state
+  }
+  const reason_code = requireNonEmptyString(value, "reason_code")
+  if (!reason_code.ok) {
+    return reason_code
+  }
+  const observed_at_micros = requireNonNegativeInt(value, "observed_at_micros")
+  if (!observed_at_micros.ok) {
+    return observed_at_micros
+  }
+  const suppresses = requireStringArray(value, "suppresses")
+  if (!suppresses.ok) {
+    return suppresses
+  }
+  return {
+    ok: true,
+    value: {
+      schema_version: schema_version.value,
+      scope: scope.value,
+      state: state.value,
+      reason_code: reason_code.value,
+      observed_at_micros: observed_at_micros.value,
+      suppresses: suppresses.value,
+    },
+  }
+}
+
+export function parseApiError(value: unknown): ParseResult<ApiError> {
+  if (!isRecord(value)) {
+    return { ok: false, detail: "error body is not an object" }
+  }
+  const schema_version = requireConst(
+    value,
+    "schema_version",
+    API_ERROR_SCHEMA_VERSION
+  )
+  if (!schema_version.ok) {
+    return schema_version
+  }
+  const code = requireNonEmptyString(value, "code")
+  if (!code.ok) {
+    return code
+  }
+  const reason_code = requireNonEmptyString(value, "reason_code")
+  if (!reason_code.ok) {
+    return reason_code
+  }
+  return {
+    ok: true,
+    value: {
+      schema_version: schema_version.value,
+      code: code.value,
+      reason_code: reason_code.value,
+    },
+  }
+}
+
+export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
+  if (!isRecord(value)) {
+    return { ok: false, detail: "capture status body is not an object" }
+  }
+  const schema_version = requireConst(
+    value,
+    "schema_version",
+    CAPTURE_STATUS_SCHEMA_VERSION
+  )
+  if (!schema_version.ok) {
+    return schema_version
+  }
+  const snapshot_at_micros = requireNonNegativeInt(value, "snapshot_at_micros")
+  if (!snapshot_at_micros.ok) {
+    return snapshot_at_micros
+  }
+  const build_id = requireNonEmptyString(value, "build_id")
+  if (!build_id.ok) {
+    return build_id
+  }
+  const chain_id = requireNonEmptyString(value, "chain_id")
+  if (!chain_id.ok) {
+    return chain_id
+  }
+  const health = requireEnum(value, "health", CAPTURE_HEALTH)
+  if (!health.ok) {
+    return health
+  }
+  const ready = requireBool(value, "ready")
+  if (!ready.ok) {
+    return ready
+  }
+  const active_committed_source = requireNonEmptyString(
+    value,
+    "active_committed_source"
+  )
+  if (!active_committed_source.ok) {
+    return active_committed_source
+  }
+  const primary_source_health = requireNonEmptyString(
+    value,
+    "primary_source_health"
+  )
+  if (!primary_source_health.ok) {
+    return primary_source_health
+  }
+  const pending_blocks = requireNonNegativeInt(value, "pending_blocks")
+  if (!pending_blocks.ok) {
+    return pending_blocks
+  }
+
+  const last_error_reason = optionalNonEmptyString(value, "last_error_reason")
+  if (!last_error_reason.ok) {
+    return last_error_reason
+  }
+  const independent_source_health = optionalNonEmptyString(
+    value,
+    "independent_source_health"
+  )
+  if (!independent_source_health.ok) {
+    return independent_source_health
+  }
+  const failover_height = optionalNonNegativeInt(value, "failover_height")
+  if (!failover_height.ok) {
+    return failover_height
+  }
+  const failover_reason = optionalNonEmptyString(value, "failover_reason")
+  if (!failover_reason.ok) {
+    return failover_reason
+  }
+  const durable_height = optionalNonNegativeInt(value, "durable_height")
+  if (!durable_height.ok) {
+    return durable_height
+  }
+  const capture_backlog_records = optionalNonNegativeInt(
+    value,
+    "capture_backlog_records"
+  )
+  if (!capture_backlog_records.ok) {
+    return capture_backlog_records
+  }
+  const oldest_pending_capture_height = optionalNonNegativeInt(
+    value,
+    "oldest_pending_capture_height"
+  )
+  if (!oldest_pending_capture_height.ok) {
+    return oldest_pending_capture_height
+  }
+  const disk_free_basis_points = optionalNonNegativeInt(
+    value,
+    "disk_free_basis_points"
+  )
+  if (!disk_free_basis_points.ok) {
+    return disk_free_basis_points
+  }
+  const archive_manifest_id = optionalNonEmptyString(
+    value,
+    "archive_manifest_id"
+  )
+  if (!archive_manifest_id.ok) {
+    return archive_manifest_id
+  }
+  const auxiliary_sources = optionalAuxiliarySources(value)
+  if (!auxiliary_sources.ok) {
+    return auxiliary_sources
+  }
+
+  return {
+    ok: true,
+    value: {
+      schema_version: schema_version.value,
+      snapshot_at_micros: snapshot_at_micros.value,
+      build_id: build_id.value,
+      chain_id: chain_id.value,
+      health: health.value,
+      ready: ready.value,
+      last_error_reason: last_error_reason.value,
+      active_committed_source: active_committed_source.value,
+      primary_source_health: primary_source_health.value,
+      independent_source_health: independent_source_health.value,
+      failover_height: failover_height.value,
+      failover_reason: failover_reason.value,
+      durable_height: durable_height.value,
+      pending_blocks: pending_blocks.value,
+      capture_backlog_records: capture_backlog_records.value,
+      oldest_pending_capture_height: oldest_pending_capture_height.value,
+      disk_free_basis_points: disk_free_basis_points.value,
+      archive_manifest_id: archive_manifest_id.value,
+      auxiliary_sources: auxiliary_sources.value,
+    },
+  }
+}
+
+export function assertNever(value: never): never {
+  throw new Error(`unhandled variant: ${String(value)}`)
+}
+
+const HEALTH_STATES = [
+  "HEALTH_STATE_GREEN",
+  "HEALTH_STATE_AMBER",
+  "HEALTH_STATE_RED",
+] as const satisfies readonly HealthState[]
+
+const CAPTURE_HEALTH = [
+  "green",
+  "yellow",
+  "red",
+] as const satisfies readonly CaptureHealth[]
+
+const AUXILIARY_HEALTH = [
+  "starting",
+  "healthy",
+  "quarantined",
+  "latched",
+] as const satisfies readonly AuxiliarySourceHealth[]
+
+const AUXILIARY_QUALIFICATION = [
+  "unqualified",
+  "qualified",
+] as const satisfies readonly AuxiliaryQualification[]
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function requireConst<T extends string>(
+  object: Record<string, unknown>,
+  field: string,
+  expected: T
+): ParseResult<T> {
+  const value = object[field]
+  if (value !== expected) {
+    return {
+      ok: false,
+      detail: `${field} must be ${expected}`,
+    }
+  }
+  return { ok: true, value: expected }
+}
+
+function requireNonEmptyString(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<string> {
+  const value = object[field]
+  if (typeof value !== "string" || value.length === 0) {
+    return { ok: false, detail: `${field} must be a non-empty string` }
+  }
+  return { ok: true, value }
+}
+
+function optionalNonEmptyString(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<string | undefined> {
+  if (!(field in object) || object[field] === null) {
+    return { ok: true, value: undefined }
+  }
+  return requireNonEmptyString(object, field)
+}
+
+function requireBool(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<boolean> {
+  const value = object[field]
+  if (typeof value !== "boolean") {
+    return { ok: false, detail: `${field} must be a boolean` }
+  }
+  return { ok: true, value }
+}
+
+function requireNonNegativeInt(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<number> {
+  const value = object[field]
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    return {
+      ok: false,
+      detail: `${field} must be a non-negative integer`,
+    }
+  }
+  return { ok: true, value }
+}
+
+function optionalNonNegativeInt(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<number | undefined> {
+  if (!(field in object) || object[field] === null) {
+    return { ok: true, value: undefined }
+  }
+  return requireNonNegativeInt(object, field)
+}
+
+function requireEnum<T extends string>(
+  object: Record<string, unknown>,
+  field: string,
+  allowed: readonly T[]
+): ParseResult<T> {
+  const value = object[field]
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    return {
+      ok: false,
+      detail: `${field} must be one of ${allowed.join(", ")}`,
+    }
+  }
+  return { ok: true, value: value as T }
+}
+
+function requireStringArray(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<string[]> {
+  const value = object[field]
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    return { ok: false, detail: `${field} must be a string array` }
+  }
+  return { ok: true, value }
+}
+
+function optionalAuxiliarySources(
+  object: Record<string, unknown>
+): ParseResult<AuxiliarySourceStatus[] | undefined> {
+  if (!("auxiliary_sources" in object) || object.auxiliary_sources === null) {
+    return { ok: true, value: undefined }
+  }
+  const value = object.auxiliary_sources
+  if (!Array.isArray(value)) {
+    return { ok: false, detail: "auxiliary_sources must be an array" }
+  }
+  const parsed: AuxiliarySourceStatus[] = []
+  for (const [index, item] of value.entries()) {
+    const result = parseAuxiliarySource(item, index)
+    if (!result.ok) {
+      return result
+    }
+    parsed.push(result.value)
+  }
+  return { ok: true, value: parsed }
+}
+
+function parseAuxiliarySource(
+  value: unknown,
+  index: number
+): ParseResult<AuxiliarySourceStatus> {
+  if (!isRecord(value)) {
+    return {
+      ok: false,
+      detail: `auxiliary_sources[${index}] is not an object`,
+    }
+  }
+  const prefix = `auxiliary_sources[${index}]`
+  const source_id = requireNonEmptyString(value, "source_id")
+  if (!source_id.ok) {
+    return { ok: false, detail: `${prefix}.${source_id.detail}` }
+  }
+  const health = requireEnum(value, "health", AUXILIARY_HEALTH)
+  if (!health.ok) {
+    return { ok: false, detail: `${prefix}.${health.detail}` }
+  }
+  const qualification = requireEnum(
+    value,
+    "qualification",
+    AUXILIARY_QUALIFICATION
+  )
+  if (!qualification.ok) {
+    return { ok: false, detail: `${prefix}.${qualification.detail}` }
+  }
+  const spool_records = requireNonNegativeInt(value, "spool_records")
+  if (!spool_records.ok) {
+    return { ok: false, detail: `${prefix}.${spool_records.detail}` }
+  }
+  const unarchived_records = requireNonNegativeInt(value, "unarchived_records")
+  if (!unarchived_records.ok) {
+    return { ok: false, detail: `${prefix}.${unarchived_records.detail}` }
+  }
+  const partial_line = requireBool(value, "partial_line")
+  if (!partial_line.ok) {
+    return { ok: false, detail: `${prefix}.${partial_line.detail}` }
+  }
+  const cursor_epoch = optionalNonEmptyString(value, "cursor_epoch")
+  if (!cursor_epoch.ok) {
+    return { ok: false, detail: `${prefix}.${cursor_epoch.detail}` }
+  }
+  const tail_cursor_epoch = optionalNonEmptyString(value, "tail_cursor_epoch")
+  if (!tail_cursor_epoch.ok) {
+    return { ok: false, detail: `${prefix}.${tail_cursor_epoch.detail}` }
+  }
+  const durable_offset = optionalNonNegativeInt(value, "durable_offset")
+  if (!durable_offset.ok) {
+    return { ok: false, detail: `${prefix}.${durable_offset.detail}` }
+  }
+  const local_sequence = optionalNonNegativeInt(value, "local_sequence")
+  if (!local_sequence.ok) {
+    return { ok: false, detail: `${prefix}.${local_sequence.detail}` }
+  }
+  const unread_bytes = optionalNonNegativeInt(value, "unread_bytes")
+  if (!unread_bytes.ok) {
+    return { ok: false, detail: `${prefix}.${unread_bytes.detail}` }
+  }
+  const last_durable_wall_micros = optionalNonNegativeInt(
+    value,
+    "last_durable_wall_micros"
+  )
+  if (!last_durable_wall_micros.ok) {
+    return { ok: false, detail: `${prefix}.${last_durable_wall_micros.detail}` }
+  }
+  const quarantine_reason = optionalNonEmptyString(value, "quarantine_reason")
+  if (!quarantine_reason.ok) {
+    return { ok: false, detail: `${prefix}.${quarantine_reason.detail}` }
+  }
+  const last_error_reason = optionalNonEmptyString(value, "last_error_reason")
+  if (!last_error_reason.ok) {
+    return { ok: false, detail: `${prefix}.${last_error_reason.detail}` }
+  }
+  return {
+    ok: true,
+    value: {
+      source_id: source_id.value,
+      health: health.value,
+      qualification: qualification.value,
+      cursor_epoch: cursor_epoch.value,
+      tail_cursor_epoch: tail_cursor_epoch.value,
+      durable_offset: durable_offset.value,
+      local_sequence: local_sequence.value,
+      spool_records: spool_records.value,
+      unarchived_records: unarchived_records.value,
+      unread_bytes: unread_bytes.value,
+      partial_line: partial_line.value,
+      last_durable_wall_micros: last_durable_wall_micros.value,
+      quarantine_reason: quarantine_reason.value,
+      last_error_reason: last_error_reason.value,
+    },
+  }
+}
