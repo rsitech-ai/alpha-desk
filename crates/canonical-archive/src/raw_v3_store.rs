@@ -21,23 +21,24 @@ use parquet::{
 use sha2::{Digest, Sha256};
 use storage_ports::{
     ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
-    RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES, RawArchiveCapacityBudgets,
-    RawArchiveDurableFormatEnvelope, RawArchiveObject, RawArchiveProductionCapacityAdmission,
-    RawArchiveWorkloadEnvelope, RawObservationArchive, RawObservationBatch, RawObservationIterator,
-    RawObservationRange, RawObservationReceipt, SequencedRawObservationIterator,
-    VerifiedRawManifest,
+    RAW_ARCHIVE_MAXIMUM_DATA_PACK_BYTES, RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
+    RawArchiveCapacityBudgets, RawArchiveDurableFormatEnvelope, RawArchiveObject,
+    RawArchiveProductionCapacityAdmission, RawArchiveWorkloadEnvelope, RawObservationArchive,
+    RawObservationBatch, RawObservationIterator, RawObservationRange, RawObservationReceipt,
+    SequencedRawObservationIterator, VerifiedRawManifest,
 };
 
 use super::{
     ArchiveConfig, fs, manifest, raw, raw_policy,
     raw_v3::{
         self, IndexPackBytes, JournalGenerationBuilderV3, LogicalCommitDescriptorV3,
-        LogicalCommitManifestV3, LogicalObjectDescriptorV3, MAX_JOURNAL_BYTES, RAW_BYTE_DATASET_V3,
+        LogicalCommitManifestV3, LogicalObjectDescriptorV3, MAX_JOURNAL_BYTES,
+        PackedLogicalInputV3, PackedObjectDescriptorV3, RAW_BYTE_DATASET_V3, RawPackManifestV3,
         RootBundleV3, SequenceLeafEntryV3, SequenceNodeRefV3, SequenceStorageRefV3,
         append_logical_entry, journal_file_identity, journal_needs_rotation,
         load_sequence_internal, load_sequence_leaf, logical_object_relative_path,
-        pack_journal_leaves, parse_logical_commit_manifest, parse_root_bundle, root_bundle_hash,
-        seed_rotated_journal_root,
+        pack_journal_leaves, parse_logical_commit_manifest, parse_pack_manifest, parse_root_bundle,
+        replace_range_with_packed_entry, root_bundle_hash, seed_rotated_journal_root,
     },
     schema,
 };
@@ -108,6 +109,24 @@ impl RawV3Archive {
             raw_policy::RawPolicy::MonotonicByteV3,
         )?;
         pack_index_locked(self, chain, source, self.now()?)
+    }
+
+    pub fn pack_logical_range(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        range: LocalRecordSequenceRange,
+    ) -> Result<[u8; 32], ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        pack_logical_range_locked(self, chain, source, range, self.now()?)
     }
 }
 
@@ -554,6 +573,84 @@ fn write_object(
     )
 }
 
+fn write_packed_object(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    partition: &str,
+    observations: &[SourceObservation],
+) -> Result<PackedObjectDescriptorV3, ArchiveError> {
+    if observations.is_empty() {
+        return Err(ArchiveError::InvalidInput("packed object has no rows"));
+    }
+    let schema_fingerprint = schema::raw_schema_fingerprint()?;
+    let dataset = dataset_relative(chain, source);
+    let relative_dir = dataset.join(partition).join("packs");
+    let mut staged = fs::create_parquet_staging_file(&archive.root, &relative_dir)?;
+    let record_batch = raw::raw_record_batch_from_observations(chain, observations)?;
+    let compression = ZstdLevel::try_new(3)
+        .map_err(|_| ArchiveError::InvalidInput("invalid Parquet compression level"))?;
+    let properties = WriterProperties::builder()
+        .set_created_by("hyperliquid-alpha-desk/raw-archive-writer-v3".to_owned())
+        .set_compression(Compression::ZSTD(compression))
+        .set_statistics_enabled(EnabledStatistics::Page)
+        .set_key_value_metadata(Some(vec![
+            KeyValue::new(
+                "alpha_desk.dataset".to_owned(),
+                RAW_BYTE_DATASET_V3.to_owned(),
+            ),
+            KeyValue::new(
+                "alpha_desk.cursor_policy".to_owned(),
+                "monotonic-byte-offset".to_owned(),
+            ),
+            KeyValue::new(
+                "alpha_desk.schema_fingerprint_sha256".to_owned(),
+                hex::encode(schema_fingerprint),
+            ),
+        ]))
+        .build();
+    {
+        let mut writer =
+            ArrowWriter::try_new(staged.as_file_mut(), schema::raw_schema(), Some(properties))
+                .map_err(|error| ArchiveError::Codec(error.to_string()))?;
+        writer
+            .write(&record_batch)
+            .map_err(|error| ArchiveError::Codec(error.to_string()))?;
+        writer
+            .close()
+            .map_err(|error| ArchiveError::Codec(error.to_string()))?;
+    }
+    staged
+        .as_file_mut()
+        .sync_all()
+        .map_err(|_| ArchiveError::Io("syncing packed V3 Parquet object"))?;
+    let (hash, size_bytes) = hash_file(staged.as_file_mut())?;
+    if size_bytes > RAW_ARCHIVE_MAXIMUM_DATA_PACK_BYTES {
+        return Err(ArchiveError::InvalidInput(
+            "packed object exceeds the global data-pack bound",
+        ));
+    }
+    let descriptor_relative =
+        PathBuf::from(partition).join("packs").join(format!("pack-{}.parquet", hex::encode(hash)));
+    let published_relative = dataset.join(&descriptor_relative);
+    fs::publish_staged_immutable(&archive.root, &published_relative, staged)?;
+    let published = fs::read_regular(&archive.root, &published_relative, size_bytes)?;
+    if u64::try_from(published.len()).ok() != Some(size_bytes)
+        || <[u8; 32]>::from(Sha256::digest(&published)) != hash
+    {
+        return Err(ArchiveError::CorruptObject(raw::path_string(
+            &published_relative,
+        )?));
+    }
+    PackedObjectDescriptorV3::try_new(
+        descriptor_relative,
+        hash,
+        size_bytes,
+        u64::try_from(observations.len())
+            .map_err(|_| ArchiveError::InvalidInput("packed row count exceeds u64"))?,
+    )
+}
+
 fn hash_file(file: &mut std::fs::File) -> Result<([u8; 32], u64), ArchiveError> {
     file.seek(SeekFrom::Start(0))
         .map_err(|_| ArchiveError::Io("seeking raw Parquet object"))?;
@@ -749,6 +846,203 @@ fn pack_index_locked(
     Ok(bundle_hash)
 }
 
+fn pack_logical_range_locked(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    range: LocalRecordSequenceRange,
+    durable_at: KnownTime,
+) -> Result<[u8; 32], ArchiveError> {
+    let mut current =
+        load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    if journal_needs_rotation(
+        current.0.journal_prefix().committed_record_count(),
+        current.0.journal_prefix().committed_prefix_length(),
+        current.0.sequence_root().depth(),
+    ) {
+        pack_index_locked(archive, chain, source, durable_at)?;
+        current = load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    }
+    let (root, journal_bytes) = current;
+    let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
+    let mut leaves = Vec::new();
+    collect_overlapping_leaves(
+        root.sequence_root(),
+        &journal_bytes,
+        &packs,
+        range,
+        &mut leaves,
+    )?;
+    leaves.sort_by_key(SequenceLeafEntryV3::first_local_sequence);
+    if leaves.len() == 1
+        && matches!(leaves[0].storage(), SequenceStorageRefV3::Packed { .. })
+        && leaves[0].first_local_sequence() == range.start().get()
+        && leaves[0].last_local_sequence() == range.end().get()
+    {
+        return root_bundle_hash(&root);
+    }
+    if leaves.len() < 2 {
+        return Err(ArchiveError::InvalidInput(
+            "data packing requires at least two uncompacted logical leaves",
+        ));
+    }
+    if leaves[0].first_local_sequence() != range.start().get()
+        || leaves
+            .last()
+            .ok_or(ArchiveError::InvalidInput("packed leaf selection is empty"))?
+            .last_local_sequence()
+            != range.end().get()
+    {
+        return Err(ArchiveError::InvalidInput(
+            "data packing range must cover exact consecutive leaf entries",
+        ));
+    }
+    let partition = leaves[0].partition().to_owned();
+    let mut expected = range.start().get();
+    for entry in &leaves {
+        if entry.first_local_sequence() != expected
+            || entry.partition() != partition
+            || entry.storage().logical_manifest_sha256()?.is_none()
+        {
+            return Err(ArchiveError::InvalidInput(
+                "data packing requires contiguous uncompacted logical leaves in one partition",
+            ));
+        }
+        expected = entry
+            .last_local_sequence()
+            .checked_add(1)
+            .ok_or(ArchiveError::InvalidInput("packed local sequence overflows"))?;
+    }
+    if expected
+        != range
+            .end()
+            .get()
+            .checked_add(1)
+            .ok_or(ArchiveError::InvalidInput("packed local sequence overflows"))?
+    {
+        return Err(ArchiveError::InvalidInput(
+            "data packing range must cover exact consecutive leaf entries",
+        ));
+    }
+
+    let mut observations = Vec::new();
+    let mut inputs = Vec::new();
+    let mut row_start = 0_u64;
+    for entry in &leaves {
+        let hash = entry.storage().logical_manifest_sha256()?.ok_or(
+            ArchiveError::InvalidInput("data packing requires uncompacted logical leaves"),
+        )?;
+        let relative = entry.storage().logical_manifest_relative_path().ok_or(
+            ArchiveError::InvalidInput("logical sequence entry is missing a manifest path"),
+        )?;
+        let bytes = fs::read_manifest(&archive.root, Path::new(relative))?;
+        if manifest::sha256(&bytes) != hash {
+            return Err(ArchiveError::ManifestVerification(
+                "logical commit path does not bind exact bytes",
+            ));
+        }
+        let commit = parse_logical_commit_manifest(&bytes)?;
+        let (decoded, _) = verify_and_decode(archive, &commit)?;
+        let row_count = u64::try_from(decoded.len())
+            .map_err(|_| ArchiveError::InvalidInput("packed row count exceeds u64"))?;
+        inputs.push(PackedLogicalInputV3::try_new_v3(bytes, hash, row_start)?);
+        row_start = row_start
+            .checked_add(row_count)
+            .ok_or(ArchiveError::InvalidInput("packed row slice overflows"))?;
+        observations.extend(decoded);
+    }
+    let object = write_packed_object(archive, chain, source, &partition, &observations)?;
+    let pack = RawPackManifestV3::try_new(inputs, object, durable_at)?;
+    let pack_bytes = manifest::canonical_json(&pack)?;
+    let pack_hash = manifest::sha256(&pack_bytes);
+    let pack_relative = pack_manifest_relative(pack_hash);
+    fs::publish_immutable(&archive.root, &pack_relative, &pack_bytes)?;
+    let packed_entry = SequenceLeafEntryV3::try_new_packed(
+        pack.first_local_sequence(),
+        pack.last_local_sequence(),
+        raw::path_string(&pack_relative)?,
+        pack_hash,
+        pack.object().size_bytes(),
+        pack.object().row_count(),
+        pack.logical_manifest_count(),
+        pack.partition(),
+    )?;
+
+    let dataset = dataset_relative(chain, source);
+    let prefix = root.journal_prefix();
+    let committed_len = usize::try_from(prefix.committed_prefix_length())
+        .map_err(|_| ArchiveError::ManifestVerification("journal prefix exceeds address space"))?;
+    let committed =
+        journal_bytes
+            .get(..committed_len)
+            .ok_or(ArchiveError::ManifestVerification(
+                "journal file is shorter than the committed prefix",
+            ))?;
+    let mut journal = JournalGenerationBuilderV3::try_resume(
+        prefix.generation(),
+        prefix.file_identity(),
+        PathBuf::from(prefix.relative_path()),
+        committed.to_vec(),
+        prefix,
+        chain.as_str(),
+        source.as_str(),
+    )?;
+    let sequence_root = replace_range_with_packed_entry(
+        &mut journal,
+        &packs,
+        root.sequence_root(),
+        packed_entry,
+    )?;
+    let journal_commit = journal.commit_prefix(&sequence_root)?;
+    fs::extend_append_only(
+        &archive.root,
+        Path::new(journal_commit.prefix().relative_path()),
+        committed,
+        journal_commit.bytes(),
+        MAX_JOURNAL_BYTES,
+    )?;
+    let previous_pointer = fs::read_regular(&archive.root, &dataset.join("CURRENT"), 64 * 1024)?;
+    let next_generation = root
+        .generation()
+        .checked_add(1)
+        .ok_or(ArchiveError::InvalidInput(
+            "raw V3 root generation overflows",
+        ))?;
+    let previous_root_hash = root_bundle_hash(&root)?;
+    let bundle = RootBundleV3::try_new(
+        chain.clone(),
+        source.clone(),
+        next_generation,
+        Some(previous_root_hash),
+        &journal_commit,
+        durable_at,
+    )?;
+    let bundle_bytes = raw_v3::canonical_root_bytes(&bundle)?;
+    let bundle_hash = root_bundle_hash(&bundle)?;
+    let bundle_relative = root_relative(&dataset, bundle_hash);
+    fs::publish_immutable(&archive.root, &bundle_relative, &bundle_bytes)?;
+    let pointer = manifest::CurrentPointerV1 {
+        schema: manifest::CURRENT_POINTER_SCHEMA_V1.to_owned(),
+        manifest_relative_path: raw::path_string(&bundle_relative)?,
+        manifest_sha256: hex::encode(bundle_hash),
+    };
+    fs::publish_current_cas(
+        &archive.root,
+        &dataset.join("CURRENT"),
+        Some(&previous_pointer),
+        &manifest::canonical_json(&pointer)?,
+    )?;
+    let readback = load_current_root(archive, chain, source)?.ok_or(
+        ArchiveError::ManifestVerification("raw V3 packed-slice CURRENT readback is missing"),
+    )?;
+    if root_bundle_hash(&readback.0)? != bundle_hash {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 packed-slice CURRENT readback does not bind the published root",
+        ));
+    }
+    Ok(bundle_hash)
+}
+
 fn load_packs_for_tree(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -832,9 +1126,13 @@ fn find_exact_logical(
         return Ok(None);
     };
     let Some(manifest_sha256) = entry.storage().logical_manifest_sha256()? else {
-        return Err(ArchiveError::ManifestVerification(
-            "packed V3 slice lookup is not implemented for uncompacted append retry",
-        ));
+        return find_exact_packed(
+            archive,
+            &root.chain_id()?,
+            &root.source_id()?,
+            &entry,
+            descriptor,
+        );
     };
     let relative = entry.storage().logical_manifest_relative_path().ok_or(
         ArchiveError::ManifestVerification("logical sequence entry is missing a manifest path"),
@@ -875,7 +1173,7 @@ fn lookup_leaf_covering(
             .entries()
             .iter()
             .find(|entry| {
-                entry.first_local_sequence() == first && entry.last_local_sequence() == last
+                entry.first_local_sequence() <= first && entry.last_local_sequence() >= last
             })
             .cloned());
     }
@@ -981,9 +1279,14 @@ fn verify_logical_at_sequence(
         "sequence tree does not contain the expected logical range",
     ))?;
     let Some(entry_hash) = entry.storage().logical_manifest_sha256()? else {
-        return Err(ArchiveError::ManifestVerification(
-            "packed V3 slice verification is not implemented",
-        ));
+        return verify_packed_at_sequence(
+            archive,
+            &root.chain_id()?,
+            &root.source_id()?,
+            &entry,
+            manifest_sha256,
+            expected_range,
+        );
     };
     if entry_hash != manifest_sha256 {
         return Err(ArchiveError::ManifestVerification(
@@ -1015,19 +1318,24 @@ fn verify_raw_manifest(
         root.sequence_root(),
         &journal_bytes,
     )?;
-    let mut found = false;
+    let mut found = None;
     walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
-        if entry.storage().logical_manifest_sha256()? == Some(hash) {
-            found = true;
+        if leaf_contains_manifest(archive, &chain, &source, entry, hash)? {
+            found = Some(entry.clone());
             Ok(true)
         } else {
             Ok(false)
         }
     })?;
-    if !found {
+    let Some(entry) = found else {
         return Err(ArchiveError::ReceiptIndexRebuildRequired);
+    };
+    match entry.storage() {
+        SequenceStorageRefV3::Logical { .. } => verify_loaded_commit(archive, &loaded, hash),
+        SequenceStorageRefV3::Packed { .. } => {
+            verify_packed_manifest(archive, &chain, &source, &entry, &loaded, hash)
+        }
     }
-    verify_loaded_commit(archive, &loaded, hash)
 }
 
 fn verify_loaded_commit(
@@ -1097,6 +1405,14 @@ fn verify_and_decode(
             "raw V3 Parquet row count does not match manifest",
         ));
     }
+    let object = bind_observations_to_commit(commit, &observations)?;
+    Ok((observations, object))
+}
+
+fn bind_observations_to_commit(
+    commit: &LogicalCommitManifestV3,
+    observations: &[SourceObservation],
+) -> Result<RawArchiveObject, ArchiveError> {
     let first_observation = observations
         .first()
         .ok_or(ArchiveError::ManifestVerification(
@@ -1120,7 +1436,7 @@ fn verify_and_decode(
     let first_sequence = LocalRecordSequence::try_new(commit.commit().first_local_sequence())?;
     let reconstructed = RawObservationBatch::try_new_byte_offsets(
         commit.commit().chain_id()?,
-        observations.clone(),
+        observations.to_vec(),
         commit.commit().spool_manifest_blake3()?,
         commit.commit().spool_segment_blake3()?,
         first_sequence,
@@ -1135,9 +1451,9 @@ fn verify_and_decode(
         commit.commit().start_offset(),
         commit.commit().end_offset(),
     )?;
-    let object = RawArchiveObject::try_new_byte_offsets(
+    RawArchiveObject::try_new_byte_offsets(
         PathBuf::from(commit.object().relative_path()),
-        object_hash,
+        commit.object().sha256()?,
         commit.object().size_bytes(),
         commit.object().row_count(),
         commit.commit().chain_id()?,
@@ -1147,8 +1463,7 @@ fn verify_and_decode(
             LocalRecordSequence::try_new(commit.commit().first_local_sequence())?,
             LocalRecordSequence::try_new(commit.commit().last_local_sequence())?,
         )?,
-    )?;
-    Ok((observations, object))
+    )
 }
 
 fn decode_raw_batch(
@@ -1246,9 +1561,24 @@ fn read_observations_by_sequence(
     for entry in leaves {
         match entry.storage() {
             SequenceStorageRefV3::Packed { .. } => {
-                return Err(ArchiveError::ManifestVerification(
-                    "packed V3 read is not implemented",
-                ));
+                let (pack, observations) =
+                    load_verified_pack_rows(archive, chain, source, &entry)?;
+                total_bytes = total_bytes
+                    .checked_add(pack.object().size_bytes())
+                    .ok_or(ArchiveError::InvalidInput(
+                        "raw observation byte count overflows",
+                    ))?;
+                if total_bytes > archive.config.max_read_bytes() {
+                    return Err(ArchiveError::InvalidInput(
+                        "raw observation sequence range exceeds configured byte limit",
+                    ));
+                }
+                push_replayed_rows(
+                    pack.first_local_sequence(),
+                    observations,
+                    range,
+                    &mut replayed,
+                )?;
             }
             SequenceStorageRefV3::Logical {
                 manifest_relative_path,
@@ -1356,14 +1686,7 @@ fn contains_raw_cursor_epoch(
     let mut found = false;
     let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
     walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
-        let Some(hash) = entry.storage().logical_manifest_sha256()? else {
-            return Ok(false);
-        };
-        let relative = entry.storage().logical_manifest_relative_path().ok_or(
-            ArchiveError::ManifestVerification("logical sequence entry is missing a manifest path"),
-        )?;
-        let loaded = load_logical_commit(archive, Path::new(relative), hash)?;
-        if loaded.commit().cursor_epoch() == cursor_epoch {
+        if leaf_contains_cursor_epoch(archive, chain, source, entry, cursor_epoch)? {
             found = true;
             Ok(true)
         } else {
@@ -1403,6 +1726,360 @@ fn receipt(
 
 fn dataset_relative(chain: &ChainId, source: &SourceId) -> PathBuf {
     raw_policy::dataset_relative(chain, source, raw_policy::RawPolicy::MonotonicByteV3)
+}
+
+fn pack_manifest_relative(hash: [u8; 32]) -> PathBuf {
+    PathBuf::from("_manifests")
+        .join("raw-byte-v3")
+        .join("packs")
+        .join(format!("pack-{}.json", hex::encode(hash)))
+}
+
+fn push_replayed_rows(
+    first_local_sequence: u64,
+    observations: Vec<SourceObservation>,
+    range: LocalRecordSequenceRange,
+    replayed: &mut Vec<storage_ports::OwnedSequencedSourceObservation>,
+) -> Result<(), ArchiveError> {
+    for (index, observation) in observations.into_iter().enumerate() {
+        let advance_by =
+            u64::try_from(index).map_err(|_| ArchiveError::InvalidInput("local record sequence overflows"))?;
+        let sequence =
+            LocalRecordSequence::try_new(first_local_sequence)?.checked_advance_by(advance_by)?;
+        if range.contains(sequence) {
+            replayed.push(storage_ports::OwnedSequencedSourceObservation::new(
+                observation,
+                sequence,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn leaf_contains_manifest(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+    hash: [u8; 32],
+) -> Result<bool, ArchiveError> {
+    if entry.storage().logical_manifest_sha256()? == Some(hash) {
+        return Ok(true);
+    }
+    let Some(_) = entry.storage().pack_manifest_sha256()? else {
+        return Ok(false);
+    };
+    let pack = load_pack_manifest(archive, chain, source, entry)?;
+    for input in pack.inputs() {
+        if input.manifest_sha256()? == hash {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn leaf_contains_cursor_epoch(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+    cursor_epoch: &str,
+) -> Result<bool, ArchiveError> {
+    if let Some(hash) = entry.storage().logical_manifest_sha256()? {
+        let relative = entry.storage().logical_manifest_relative_path().ok_or(
+            ArchiveError::ManifestVerification("logical sequence entry is missing a manifest path"),
+        )?;
+        let loaded = load_logical_commit(archive, Path::new(relative), hash)?;
+        return Ok(loaded.commit().cursor_epoch() == cursor_epoch);
+    }
+    let pack = load_pack_manifest(archive, chain, source, entry)?;
+    Ok(pack
+        .inputs()
+        .iter()
+        .any(|input| input.cursor_epoch() == cursor_epoch))
+}
+
+fn load_pack_manifest(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+) -> Result<RawPackManifestV3, ArchiveError> {
+    let hash = entry.storage().pack_manifest_sha256()?.ok_or(
+        ArchiveError::ManifestVerification("packed sequence entry is missing a manifest hash"),
+    )?;
+    let relative = entry.storage().pack_manifest_relative_path().ok_or(
+        ArchiveError::ManifestVerification("packed sequence entry is missing a manifest path"),
+    )?;
+    let bytes = fs::read_manifest(&archive.root, Path::new(relative))?;
+    if manifest::sha256(&bytes) != hash {
+        return Err(ArchiveError::ManifestVerification(
+            "pack manifest path does not bind exact bytes",
+        ));
+    }
+    let pack = parse_pack_manifest(&bytes)?;
+    if pack.chain_id()?.as_str() != chain.as_str() || pack.source_id()?.as_str() != source.as_str()
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "pack manifest chain or source mismatch",
+        ));
+    }
+    if pack.first_local_sequence() != entry.first_local_sequence()
+        || pack.last_local_sequence() != entry.last_local_sequence()
+        || pack.logical_manifest_count() != entry.logical_manifest_count()
+        || pack.object().size_bytes() != entry.object_size_bytes()
+        || pack.object().row_count() != entry.row_count()
+        || pack.partition() != entry.partition()
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "pack manifest does not match the sequence leaf",
+        ));
+    }
+    Ok(pack)
+}
+
+fn load_verified_pack_rows(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+) -> Result<(RawPackManifestV3, Vec<SourceObservation>), ArchiveError> {
+    let pack = load_pack_manifest(archive, chain, source, entry)?;
+    let object_relative = dataset_relative(chain, source).join(pack.object().relative_path());
+    let object_path = raw::path_string(&object_relative)?;
+    let object_hash = pack.object().sha256()?;
+    let bytes = fs::read_regular(
+        &archive.root,
+        &object_relative,
+        archive
+            .config
+            .max_read_bytes()
+            .min(RAW_ARCHIVE_MAXIMUM_DATA_PACK_BYTES),
+    )
+    .map_err(|error| match error {
+        ArchiveError::Io(_) => ArchiveError::CorruptObject(object_path.clone()),
+        other => other,
+    })?;
+    if u64::try_from(bytes.len()).ok() != Some(pack.object().size_bytes())
+        || <[u8; 32]>::from(Sha256::digest(&bytes)) != object_hash
+    {
+        return Err(ArchiveError::CorruptObject(object_path));
+    }
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+        .map_err(|_| ArchiveError::CorruptObject(object_path.clone()))?;
+    if builder.schema().fields() != schema::raw_schema().fields() {
+        return Err(ArchiveError::SchemaMismatch);
+    }
+    let reader = builder
+        .build()
+        .map_err(|_| ArchiveError::CorruptObject(object_path.clone()))?;
+    let mut observations = Vec::new();
+    for batch in reader {
+        decode_packed_batch(
+            &batch.map_err(|_| ArchiveError::CorruptObject(object_path.clone()))?,
+            &pack,
+            archive.config.max_read_bytes(),
+            &mut observations,
+        )?;
+    }
+    if u64::try_from(observations.len()).ok() != Some(pack.object().row_count()) {
+        return Err(ArchiveError::ManifestVerification(
+            "packed Parquet row count does not match the pack manifest",
+        ));
+    }
+    for input in pack.inputs() {
+        let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+        let start = usize::try_from(input.row_slice_start())
+            .map_err(|_| ArchiveError::ManifestVerification("packed row slice exceeds address space"))?;
+        let count = usize::try_from(input.row_count())
+            .map_err(|_| ArchiveError::ManifestVerification("packed row count exceeds address space"))?;
+        let end = start
+            .checked_add(count)
+            .ok_or(ArchiveError::ManifestVerification("packed row slice overflows"))?;
+        let slice = observations
+            .get(start..end)
+            .ok_or(ArchiveError::ManifestVerification(
+                "packed row slice is outside the packed object",
+            ))?;
+        bind_observations_to_commit(&commit, slice)?;
+    }
+    Ok((pack, observations))
+}
+
+fn decode_packed_batch(
+    batch: &RecordBatch,
+    pack: &RawPackManifestV3,
+    max_payload_bytes: u64,
+    output: &mut Vec<SourceObservation>,
+) -> Result<(), ArchiveError> {
+    let chains = raw::column::<StringArray>(batch, 0)?;
+    let sources = raw::column::<StringArray>(batch, 1)?;
+    let versions = raw::column::<StringArray>(batch, 2)?;
+    let classes = raw::column::<StringArray>(batch, 3)?;
+    let epochs = raw::column::<StringArray>(batch, 4)?;
+    let offsets = raw::column::<UInt64Array>(batch, 5)?;
+    let walls = raw::column::<Int64Array>(batch, 6)?;
+    let monotonic = raw::column::<UInt64Array>(batch, 7)?;
+    let parsers = raw::column::<StringArray>(batch, 8)?;
+    let hashes = raw::column::<FixedSizeBinaryArray>(batch, 9)?;
+    let warnings = raw::column::<StringArray>(batch, 10)?;
+    let payloads = raw::column::<BinaryArray>(batch, 11)?;
+    let payload_limit = usize::try_from(max_payload_bytes)
+        .map_err(|_| ArchiveError::InvalidInput("raw payload limit exceeds address space"))?;
+    let partition = pack.partition();
+    for row in 0..batch.num_rows() {
+        let warning_values: Vec<ParseWarning> = serde_json::from_str(warnings.value(row))
+            .map_err(|_| ArchiveError::ManifestVerification("invalid raw warning JSON"))?;
+        let source = SourceId::new(sources.value(row).to_owned())
+            .map_err(|_| ArchiveError::ManifestVerification("raw source ID is invalid"))?;
+        let observation = SourceObservation::new(
+            source,
+            versions.value(row),
+            raw::parse_observation_class(classes.value(row))?,
+            SourceCursor::new(epochs.value(row), offsets.value(row))
+                .map_err(|error| ArchiveError::Codec(error.to_string()))?,
+            ReceiveTimestamps::new(walls.value(row), monotonic.value(row))
+                .map_err(|error| ArchiveError::Codec(error.to_string()))?,
+            parsers.value(row),
+            bytes::Bytes::copy_from_slice(payloads.value(row)),
+            warning_values,
+            payload_limit,
+        )
+        .map_err(|error| ArchiveError::Codec(error.to_string()))?;
+        if chains.value(row) != pack.chain_id()?.as_str()
+            || observation.source_id().as_str() != pack.source_id()?.as_str()
+            || hashes.value(row) != observation.content_hash().as_bytes()
+            || manifest::partition_for(observation.received().wall_micros())? != partition
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "packed Parquet query columns disagree with the pack manifest",
+            ));
+        }
+        output.push(observation);
+    }
+    Ok(())
+}
+
+fn find_exact_packed(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+    descriptor: &LogicalCommitDescriptorV3,
+) -> Result<Option<RawObservationReceipt>, ArchiveError> {
+    let (pack, rows) = load_verified_pack_rows(archive, chain, source, entry)?;
+    let Some(input) = pack.inputs().iter().find(|input| {
+        input.first_local_sequence() == descriptor.first_local_sequence()
+            && input.last_local_sequence() == descriptor.last_local_sequence()
+    }) else {
+        if entry.first_local_sequence() <= descriptor.first_local_sequence()
+            && entry.last_local_sequence() >= descriptor.last_local_sequence()
+        {
+            return Err(ArchiveError::ConflictingRawRange {
+                source_id: descriptor.source_id()?,
+                epoch: descriptor.cursor_epoch().to_owned(),
+                start: descriptor.start_offset(),
+                end: descriptor.end_offset(),
+            });
+        }
+        return Ok(None);
+    };
+    let hash = input.manifest_sha256()?;
+    let loaded = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+    if loaded.commit() != descriptor {
+        return Err(ArchiveError::ConflictingRawRange {
+            source_id: descriptor.source_id()?,
+            epoch: descriptor.cursor_epoch().to_owned(),
+            start: descriptor.start_offset(),
+            end: descriptor.end_offset(),
+        });
+    }
+    let verified = verified_from_packed_input(&loaded, input, &rows, hash)?;
+    let durable_at = KnownTime::from_unix_micros(loaded.created_at_micros())
+        .map_err(|_| ArchiveError::InvalidInput("logical commit time"))?;
+    Ok(Some(receipt(&loaded, hash, &verified, durable_at)?))
+}
+
+fn verify_packed_at_sequence(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+    manifest_sha256: [u8; 32],
+    expected_range: LocalRecordSequenceRange,
+) -> Result<VerifiedRawManifest, ArchiveError> {
+    let (pack, rows) = load_verified_pack_rows(archive, chain, source, entry)?;
+    let input = pack
+        .inputs()
+        .iter()
+        .find(|input| input.manifest_sha256().ok() == Some(manifest_sha256))
+        .ok_or(ArchiveError::ManifestVerification(
+            "packed slice does not contain the expected logical commit",
+        ))?;
+    if input.first_local_sequence() != expected_range.start().get()
+        || input.last_local_sequence() != expected_range.end().get()
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "packed slice sequence evidence does not match the expected range",
+        ));
+    }
+    let loaded = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+    verified_from_packed_input(&loaded, input, &rows, manifest_sha256)
+}
+
+fn verify_packed_manifest(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    entry: &SequenceLeafEntryV3,
+    loaded: &LogicalCommitManifestV3,
+    hash: [u8; 32],
+) -> Result<VerifiedRawManifest, ArchiveError> {
+    let (pack, rows) = load_verified_pack_rows(archive, chain, source, entry)?;
+    let input = pack
+        .inputs()
+        .iter()
+        .find(|input| input.manifest_sha256().ok() == Some(hash))
+        .ok_or(ArchiveError::ManifestVerification(
+            "packed slice does not contain the expected logical commit",
+        ))?;
+    let embedded = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+    if embedded.commit() != loaded.commit() {
+        return Err(ArchiveError::ManifestVerification(
+            "packed embedded logical commit disagrees with the original manifest",
+        ));
+    }
+    verified_from_packed_input(&embedded, input, &rows, hash)
+}
+
+fn verified_from_packed_input(
+    commit: &LogicalCommitManifestV3,
+    input: &PackedLogicalInputV3,
+    rows: &[SourceObservation],
+    manifest_hash: [u8; 32],
+) -> Result<VerifiedRawManifest, ArchiveError> {
+    let start = usize::try_from(input.row_slice_start()).map_err(|_| {
+        ArchiveError::ManifestVerification("packed row slice exceeds address space")
+    })?;
+    let count = usize::try_from(input.row_count()).map_err(|_| {
+        ArchiveError::ManifestVerification("packed row count exceeds address space")
+    })?;
+    let end = start
+        .checked_add(count)
+        .ok_or(ArchiveError::ManifestVerification("packed row slice overflows"))?;
+    let slice = rows.get(start..end).ok_or(ArchiveError::ManifestVerification(
+        "packed row slice is outside the packed object",
+    ))?;
+    let object = bind_observations_to_commit(commit, slice)?;
+    Ok(VerifiedRawManifest::new(
+        manifest::manifest_id(manifest_hash)?,
+        manifest_hash,
+        schema::raw_schema_fingerprint()?,
+        commit.commit().rolling_content_sha256()?,
+        commit.commit().spool_manifest_blake3()?,
+        commit.commit().spool_segment_blake3()?,
+        object,
+    ))
 }
 
 fn logical_manifest_relative(hash: [u8; 32]) -> PathBuf {

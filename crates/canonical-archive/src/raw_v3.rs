@@ -140,6 +140,27 @@ impl SequenceStorageRefV3 {
             Self::Packed { .. } => None,
         }
     }
+
+    pub fn pack_manifest_sha256(&self) -> Result<Option<[u8; 32]>, ArchiveError> {
+        match self {
+            Self::Packed {
+                pack_manifest_sha256,
+                ..
+            } => manifest::parse_hash(pack_manifest_sha256).map(Some),
+            Self::Logical { .. } => Ok(None),
+        }
+    }
+
+    #[must_use]
+    pub fn pack_manifest_relative_path(&self) -> Option<&str> {
+        match self {
+            Self::Packed {
+                pack_manifest_relative_path,
+                ..
+            } => Some(pack_manifest_relative_path),
+            Self::Logical { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1249,6 +1270,40 @@ impl PackedLogicalInputV3 {
                 "packed logical row slice overflows",
             ))
     }
+
+    pub fn manifest_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.manifest_sha256)
+    }
+
+    #[must_use]
+    pub const fn first_local_sequence(&self) -> u64 {
+        self.first_local_sequence
+    }
+
+    #[must_use]
+    pub const fn last_local_sequence(&self) -> u64 {
+        self.last_local_sequence
+    }
+
+    #[must_use]
+    pub const fn row_slice_start(&self) -> u64 {
+        self.row_slice_start
+    }
+
+    #[must_use]
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    #[must_use]
+    pub fn cursor_epoch(&self) -> &str {
+        &self.cursor_epoch
+    }
+
+    #[must_use]
+    pub fn canonical_manifest_json(&self) -> &str {
+        &self.canonical_manifest_json
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1280,6 +1335,25 @@ impl PackedObjectDescriptorV3 {
             row_count,
             schema_fingerprint_sha256: hex::encode(schema::raw_schema_fingerprint()?),
         })
+    }
+
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    pub fn sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.sha256)
+    }
+
+    #[must_use]
+    pub const fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    #[must_use]
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
     }
 }
 
@@ -1420,6 +1494,31 @@ impl RawPackManifestV3 {
     #[must_use]
     pub const fn logical_manifest_count(&self) -> u64 {
         self.logical_manifest_count
+    }
+
+    #[must_use]
+    pub fn inputs(&self) -> &[PackedLogicalInputV3] {
+        &self.inputs
+    }
+
+    #[must_use]
+    pub const fn object(&self) -> &PackedObjectDescriptorV3 {
+        &self.object
+    }
+
+    #[must_use]
+    pub fn partition(&self) -> &str {
+        &self.partition
+    }
+
+    pub fn chain_id(&self) -> Result<ChainId, ArchiveError> {
+        ChainId::new(self.chain_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid raw pack chain"))
+    }
+
+    pub fn source_id(&self) -> Result<SourceId, ArchiveError> {
+        SourceId::new(self.source_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid raw pack source"))
     }
 }
 
@@ -3337,6 +3436,120 @@ pub(crate) fn seed_rotated_journal_root(
     rewrite_tree_into_journal(journal, packs, packed_leaves, previous_journal, node)
 }
 
+pub(crate) fn collect_leaf_entries(
+    node: &SequenceNodeRefV3,
+    journal: &[u8],
+    packs: &IndexPackBytes,
+) -> Result<Vec<SequenceLeafEntryV3>, ArchiveError> {
+    let mut entries = Vec::new();
+    collect_leaf_entries_walk(node, journal, packs, &mut entries)?;
+    Ok(entries)
+}
+
+fn collect_leaf_entries_walk(
+    node: &SequenceNodeRefV3,
+    journal: &[u8],
+    packs: &IndexPackBytes,
+    output: &mut Vec<SequenceLeafEntryV3>,
+) -> Result<(), ArchiveError> {
+    if node.depth == 0 {
+        let page = load_sequence_leaf(journal, packs, node)?;
+        output.extend(page.entries.iter().cloned());
+        return Ok(());
+    }
+    let page = load_sequence_internal(journal, packs, node)?;
+    for child in page.children() {
+        collect_leaf_entries_walk(child, journal, packs, output)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn replace_range_with_packed_entry(
+    journal: &mut JournalGenerationBuilderV3,
+    packs: &IndexPackBytes,
+    previous_root: &SequenceNodeRefV3,
+    packed: SequenceLeafEntryV3,
+) -> Result<SequenceNodeRefV3, ArchiveError> {
+    let previous_bytes = journal.bytes.clone();
+    let entries = collect_leaf_entries(previous_root, &previous_bytes, packs)?;
+    let chain_id = previous_root.chain_id()?;
+    let source_id = previous_root.source_id()?;
+    let replaced = splice_packed_entry(entries, packed)?;
+    let mut root = None;
+    for entry in replaced {
+        root = Some(append_logical_entry(
+            journal,
+            packs,
+            root.as_ref(),
+            chain_id.clone(),
+            source_id.clone(),
+            entry,
+        )?);
+    }
+    root.ok_or(ArchiveError::InvalidInput(
+        "packed sequence rewrite produced an empty tree",
+    ))
+}
+
+fn splice_packed_entry(
+    entries: Vec<SequenceLeafEntryV3>,
+    packed: SequenceLeafEntryV3,
+) -> Result<Vec<SequenceLeafEntryV3>, ArchiveError> {
+    let first = packed.first_local_sequence;
+    let last = packed.last_local_sequence;
+    let mut replaced = Vec::new();
+    let mut index = 0_usize;
+    let mut inserted = false;
+    while index < entries.len() {
+        let entry = &entries[index];
+        if entry.last_local_sequence < first || entry.first_local_sequence > last {
+            replaced.push(entry.clone());
+            index += 1;
+            continue;
+        }
+        if entry.first_local_sequence < first || entry.last_local_sequence > last {
+            return Err(ArchiveError::InvalidInput(
+                "packed range must replace whole leaf entries",
+            ));
+        }
+        if inserted {
+            return Err(ArchiveError::InvalidInput(
+                "packed range overlaps multiple disjoint leaf spans",
+            ));
+        }
+        let mut covered_first = None;
+        let mut covered_last = None;
+        while index < entries.len()
+            && entries[index].first_local_sequence >= first
+            && entries[index].last_local_sequence <= last
+        {
+            if matches!(entries[index].storage, SequenceStorageRefV3::Packed { .. }) {
+                return Err(ArchiveError::InvalidInput(
+                    "packed range must select uncompacted logical leaves",
+                ));
+            }
+            if covered_first.is_none() {
+                covered_first = Some(entries[index].first_local_sequence);
+            }
+            covered_last = Some(entries[index].last_local_sequence);
+            index += 1;
+        }
+        if covered_first != Some(first) || covered_last != Some(last) {
+            return Err(ArchiveError::InvalidInput(
+                "packed range must cover an exact contiguous logical span",
+            ));
+        }
+        replaced.push(packed.clone());
+        inserted = true;
+    }
+    if !inserted {
+        return Err(ArchiveError::InvalidInput(
+            "packed range does not match any sequence leaf entries",
+        ));
+    }
+    Ok(replaced)
+}
+
 fn count_journal_frames(bytes: &[u8]) -> Result<u64, ArchiveError> {
     let header_len = usize::try_from(JOURNAL_FRAME_HEADER_BYTES).map_err(|_| {
         ArchiveError::ManifestVerification("journal frame header exceeds address space")
@@ -3495,9 +3708,23 @@ mod tests {
         load_sequence_leaf, logical_commit_domain_hash, pack_journal_leaves,
         parse_logical_commit_manifest, parse_pack_manifest, parse_receipt_hint_page,
         parse_root_bundle, parse_sequence_internal_page, parse_sequence_leaf_page,
-        root_bundle_hash, seed_rotated_journal_root, sequence_internal_page_hash,
-        sequence_page_hash,
+        replace_range_with_packed_entry, root_bundle_hash, seed_rotated_journal_root,
+        sequence_internal_page_hash, sequence_page_hash,
     };
+
+    fn packed(first: u64, last: u64, marker: u8, logical_count: u64) -> SequenceLeafEntryV3 {
+        SequenceLeafEntryV3::try_new_packed(
+            first,
+            last,
+            format!("packs/pack-{marker}.json"),
+            [marker; 32],
+            (last - first + 1) * 100,
+            last - first + 1,
+            logical_count,
+            "date=2026-08-03/hour=12",
+        )
+        .unwrap()
+    }
 
     fn logical(first: u64, last: u64, marker: u8) -> SequenceLeafEntryV3 {
         SequenceLeafEntryV3::try_new_logical(
@@ -4400,5 +4627,77 @@ mod tests {
         assert!(!journal_needs_rotation(1, 128, 0));
         assert!(journal_needs_rotation(MAX_JOURNAL_RECORDS, 128, 0));
         assert!(journal_needs_rotation(1, super::MAX_JOURNAL_BYTES, 0));
+    }
+
+    #[test]
+    fn packed_leaf_replaces_exact_logical_span_and_keeps_old_prefix() {
+        let chain = ChainId::new("mainnet").unwrap();
+        let source = SourceId::new("node-fills").unwrap();
+        let empty = IndexPackBytes::new();
+        let mut journal = JournalGenerationBuilderV3::try_new(
+            1,
+            super::journal_file_identity(1).unwrap(),
+            PathBuf::from("journals/generation-1.log"),
+        )
+        .unwrap();
+        let mut root = append_logical_entry(
+            &mut journal,
+            &empty,
+            None,
+            chain.clone(),
+            source.clone(),
+            logical(1, 1, 1),
+        )
+        .unwrap();
+        root = append_logical_entry(
+            &mut journal,
+            &empty,
+            Some(&root),
+            chain.clone(),
+            source.clone(),
+            logical(2, 2, 2),
+        )
+        .unwrap();
+        root = append_logical_entry(
+            &mut journal,
+            &empty,
+            Some(&root),
+            chain.clone(),
+            source.clone(),
+            logical(3, 3, 3),
+        )
+        .unwrap();
+        let old = journal.commit_prefix(&root).unwrap();
+        let packed_root = replace_range_with_packed_entry(
+            &mut journal,
+            &empty,
+            &root,
+            packed(1, 2, 9, 2),
+        )
+        .unwrap();
+        let rewritten = journal.commit_prefix(&packed_root).unwrap();
+        assert!(rewritten.bytes().starts_with(old.bytes()));
+        let page = load_sequence_leaf(rewritten.bytes(), &empty, &packed_root).unwrap();
+        assert_eq!(page.entries().len(), 2);
+        assert!(matches!(
+            page.entries()[0].storage(),
+            super::SequenceStorageRefV3::Packed { .. }
+        ));
+        assert_eq!(page.entries()[0].first_local_sequence(), 1);
+        assert_eq!(page.entries()[0].last_local_sequence(), 2);
+        assert!(matches!(
+            page.entries()[1].storage(),
+            super::SequenceStorageRefV3::Logical { .. }
+        ));
+        assert_eq!(page.entries()[1].first_local_sequence(), 3);
+        assert!(
+            replace_range_with_packed_entry(
+                &mut journal,
+                &empty,
+                &packed_root,
+                packed(1, 2, 9, 2),
+            )
+            .is_err()
+        );
     }
 }
