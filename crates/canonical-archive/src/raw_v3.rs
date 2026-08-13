@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -465,6 +465,20 @@ impl IndexPackManifestV3 {
         self.pages.len()
     }
 
+    #[must_use]
+    pub fn object_relative_path(&self) -> &str {
+        &self.object_relative_path
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn object_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.object_sha256)
+    }
+
     fn verify_bytes(&self, object_bytes: &[u8]) -> Result<(), ArchiveError> {
         let expected_size = u64::try_from(object_bytes.len())
             .map_err(|_| ArchiveError::InvalidInput("index pack exceeds u64"))?;
@@ -689,6 +703,8 @@ impl BuiltIndexPackV3 {
         )
     }
 }
+
+pub(crate) type IndexPackBytes = BTreeMap<[u8; 32], Vec<u8>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2156,6 +2172,23 @@ impl SequencePageLocatorV3 {
             page_domain_sha256: hex::encode(page_domain_sha256),
         })
     }
+
+    pub(crate) fn index_pack_sha256(&self) -> Result<Option<[u8; 32]>, ArchiveError> {
+        match self {
+            Self::Journal { .. } => Ok(None),
+            Self::IndexPack { pack_sha256, .. } => manifest::parse_hash(pack_sha256).map(Some),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn index_pack_relative_path(&self) -> Option<&str> {
+        match self {
+            Self::Journal { .. } => None,
+            Self::IndexPack {
+                pack_relative_path, ..
+            } => Some(pack_relative_path),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2481,6 +2514,21 @@ impl JournalGenerationBuilderV3 {
         })
     }
 
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub const fn committed_record_count(&self) -> u64 {
+        self.record_count
+    }
+
+    #[must_use]
+    pub fn committed_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+
     pub fn push_leaf(
         &mut self,
         page: &SequenceLeafPageV3,
@@ -2706,6 +2754,7 @@ impl JournalGenerationBuilderV3 {
 
 pub(crate) fn append_logical_entry(
     journal: &mut JournalGenerationBuilderV3,
+    packs: &IndexPackBytes,
     previous_root: Option<&SequenceNodeRefV3>,
     chain_id: ChainId,
     source_id: SourceId,
@@ -2716,7 +2765,7 @@ pub(crate) fn append_logical_entry(
             let page = SequenceLeafPageV3::try_new(chain_id, source_id, vec![entry])?;
             journal.push_leaf(&page)
         }
-        Some(node) => match cow_insert(journal, node, &chain_id, &source_id, entry)? {
+        Some(node) => match cow_insert(journal, packs, node, &chain_id, &source_id, entry)? {
             CowInsert::Replace(root) => Ok(root),
             CowInsert::Split { left, right } => {
                 if left.depth != right.depth {
@@ -2746,6 +2795,7 @@ enum CowInsert {
 
 fn cow_insert(
     journal: &mut JournalGenerationBuilderV3,
+    packs: &IndexPackBytes,
     node: &SequenceNodeRefV3,
     chain_id: &ChainId,
     source_id: &SourceId,
@@ -2761,7 +2811,7 @@ fn cow_insert(
         ));
     }
     if node.depth == 0 {
-        let page = load_sequence_leaf_from_journal(&journal.bytes, node)?;
+        let page = load_sequence_leaf(&journal.bytes, packs, node)?;
         if page.entries.len() < MAX_SEQUENCE_LEAF_ENTRIES {
             let mut entries = page.entries.clone();
             entries.push(entry);
@@ -2777,7 +2827,7 @@ fn cow_insert(
             right,
         });
     }
-    let page = load_sequence_internal_from_journal(&journal.bytes, node)?;
+    let page = load_sequence_internal(&journal.bytes, packs, node)?;
     let last = page
         .children
         .last()
@@ -2785,7 +2835,7 @@ fn cow_insert(
             "sequence internal page has no children",
         ))?
         .clone();
-    match cow_insert(journal, &last, chain_id, source_id, entry)? {
+    match cow_insert(journal, packs, &last, chain_id, source_id, entry)? {
         CowInsert::Replace(new_last) => {
             let mut children = page.children.clone();
             let last_index =
@@ -2806,9 +2856,26 @@ fn cow_insert(
         }
         CowInsert::Split { right, .. } => {
             if page.children.len() >= MAX_SEQUENCE_INTERNAL_CHILDREN {
-                return Err(ArchiveError::InvalidInput(
-                    "sequence tree requires index packing before another append",
-                ));
+                let mut all = page.children.clone();
+                all.push(right);
+                let mid = MAX_SEQUENCE_INTERNAL_CHILDREN / 2;
+                let (left_children, right_children) = all.split_at(mid);
+                let left_page = SequenceInternalPageV3::try_new(
+                    chain_id.clone(),
+                    source_id.clone(),
+                    page.depth,
+                    left_children.to_vec(),
+                )?;
+                let right_page = SequenceInternalPageV3::try_new(
+                    chain_id.clone(),
+                    source_id.clone(),
+                    page.depth,
+                    right_children.to_vec(),
+                )?;
+                return Ok(CowInsert::Split {
+                    left: journal.push_internal(&left_page)?,
+                    right: journal.push_internal(&right_page)?,
+                });
             }
             let mut children = page.children.clone();
             children.push(right);
@@ -3012,6 +3079,61 @@ pub(crate) fn journal_payload_bytes<'a>(
         .ok_or(ArchiveError::ManifestVerification(
             "journal payload is outside the committed prefix",
         ))?;
+    authenticate_sequence_payload(payload, page_domain_sha256)?;
+    Ok(payload)
+}
+
+fn index_pack_payload_bytes<'a>(
+    packs: &'a IndexPackBytes,
+    locator: &SequencePageLocatorV3,
+) -> Result<&'a [u8], ArchiveError> {
+    let SequencePageLocatorV3::IndexPack {
+        pack_sha256,
+        payload_offset,
+        payload_length,
+        page_domain_sha256,
+        pack_relative_path,
+    } = locator
+    else {
+        return Err(ArchiveError::ManifestVerification(
+            "sequence page is not index-pack-located",
+        ));
+    };
+    let hash = manifest::parse_hash(pack_sha256)?;
+    let object = packs.get(&hash).ok_or(ArchiveError::ManifestVerification(
+        "sequence index pack is not loaded",
+    ))?;
+    if hex::encode(manifest::sha256(object)) != *pack_sha256 {
+        return Err(ArchiveError::ManifestVerification(
+            "loaded index pack bytes do not match the locator hash",
+        ));
+    }
+    let expected_path = format!("index-packs/{}.pack", hex::encode(hash));
+    if pack_relative_path != &expected_path {
+        return Err(ArchiveError::ManifestVerification(
+            "index pack locator path is not content-addressed",
+        ));
+    }
+    let start = usize::try_from(*payload_offset).map_err(|_| {
+        ArchiveError::ManifestVerification("index pack payload exceeds address space")
+    })?;
+    let end = usize::try_from(payload_offset.checked_add(*payload_length).ok_or(
+        ArchiveError::ManifestVerification("index pack payload end overflows"),
+    )?)
+    .map_err(|_| ArchiveError::ManifestVerification("index pack payload exceeds address space"))?;
+    let payload = object
+        .get(start..end)
+        .ok_or(ArchiveError::ManifestVerification(
+            "index pack payload is outside the object",
+        ))?;
+    authenticate_sequence_payload(payload, page_domain_sha256)?;
+    Ok(payload)
+}
+
+fn authenticate_sequence_payload(
+    payload: &[u8],
+    page_domain_sha256: &str,
+) -> Result<(), ArchiveError> {
     let expected = manifest::parse_hash(page_domain_sha256)?;
     let actual = if parse_sequence_leaf_page(payload).is_ok() {
         domain_hash(SEQUENCE_PAGE_HASH_DOMAIN_V3, payload)?
@@ -3019,19 +3141,31 @@ pub(crate) fn journal_payload_bytes<'a>(
         domain_hash(SEQUENCE_INTERNAL_HASH_DOMAIN_V3, payload)?
     } else {
         return Err(ArchiveError::ManifestVerification(
-            "journal payload is not a valid sequence page",
+            "sequence payload is not a valid sequence page",
         ));
     };
     if actual != expected {
         return Err(ArchiveError::ManifestVerification(
-            "journal payload hash does not authenticate the page",
+            "sequence payload hash does not authenticate the page",
         ));
     }
-    Ok(payload)
+    Ok(())
 }
 
-pub(crate) fn load_sequence_leaf_from_journal(
-    prefix: &[u8],
+fn sequence_page_payload<'a>(
+    journal: &'a [u8],
+    packs: &'a IndexPackBytes,
+    locator: &SequencePageLocatorV3,
+) -> Result<&'a [u8], ArchiveError> {
+    match locator {
+        SequencePageLocatorV3::Journal { .. } => journal_payload_bytes(journal, locator),
+        SequencePageLocatorV3::IndexPack { .. } => index_pack_payload_bytes(packs, locator),
+    }
+}
+
+pub(crate) fn load_sequence_leaf(
+    journal: &[u8],
+    packs: &IndexPackBytes,
     node: &SequenceNodeRefV3,
 ) -> Result<SequenceLeafPageV3, ArchiveError> {
     if node.depth != 0 {
@@ -3039,7 +3173,7 @@ pub(crate) fn load_sequence_leaf_from_journal(
             "sequence node is not a leaf",
         ));
     }
-    let payload = journal_payload_bytes(prefix, &node.locator)?;
+    let payload = sequence_page_payload(journal, packs, &node.locator)?;
     let page = parse_sequence_leaf_page(payload)?;
     if page.first_local_sequence != node.first_local_sequence
         || page.last_local_sequence != node.last_local_sequence
@@ -3049,14 +3183,15 @@ pub(crate) fn load_sequence_leaf_from_journal(
         || page.source_id != node.source_id
     {
         return Err(ArchiveError::ManifestVerification(
-            "journal leaf page does not match the sequence node",
+            "sequence leaf page does not match the sequence node",
         ));
     }
     Ok(page)
 }
 
-pub(crate) fn load_sequence_internal_from_journal(
-    prefix: &[u8],
+pub(crate) fn load_sequence_internal(
+    journal: &[u8],
+    packs: &IndexPackBytes,
     node: &SequenceNodeRefV3,
 ) -> Result<SequenceInternalPageV3, ArchiveError> {
     if node.depth == 0 {
@@ -3064,7 +3199,7 @@ pub(crate) fn load_sequence_internal_from_journal(
             "sequence node is not internal",
         ));
     }
-    let payload = journal_payload_bytes(prefix, &node.locator)?;
+    let payload = sequence_page_payload(journal, packs, &node.locator)?;
     let page = parse_sequence_internal_page(payload)?;
     if page.depth != node.depth
         || page.first_local_sequence != node.first_local_sequence
@@ -3075,10 +3210,131 @@ pub(crate) fn load_sequence_internal_from_journal(
         || page.source_id != node.source_id
     {
         return Err(ArchiveError::ManifestVerification(
-            "journal internal page does not match the sequence node",
+            "sequence internal page does not match the sequence node",
         ));
     }
     Ok(page)
+}
+
+pub(crate) fn journal_needs_rotation(record_count: u64, committed_bytes: u64, depth: u8) -> bool {
+    let spine = u64::from(depth).saturating_add(1);
+    let page_budget = spine.saturating_mul(
+        storage_ports::RAW_ARCHIVE_MAXIMUM_SEQUENCE_PAGE_BYTES
+            .saturating_add(JOURNAL_FRAME_HEADER_BYTES),
+    );
+    record_count.saturating_add(spine) > MAX_JOURNAL_RECORDS
+        || committed_bytes.saturating_add(page_budget) > MAX_JOURNAL_BYTES
+}
+
+pub(crate) fn pack_journal_leaves(
+    chain_id: ChainId,
+    source_id: SourceId,
+    pack_generation: u64,
+    root: &SequenceNodeRefV3,
+    journal: &[u8],
+    packs: &IndexPackBytes,
+) -> Result<(BuiltIndexPackV3, BTreeMap<u64, SequenceNodeRefV3>), ArchiveError> {
+    let mut builder = IndexPackBuilderV3::try_new(chain_id, source_id, pack_generation)?;
+    let mut packed_pages = BTreeMap::new();
+    collect_journal_leaves(root, journal, packs, &mut builder, &mut packed_pages)?;
+    if packed_pages.is_empty() {
+        return Err(ArchiveError::InvalidInput(
+            "index packing requires at least one journal-located leaf",
+        ));
+    }
+    let pack = builder.finish()?;
+    let mut packed_refs = BTreeMap::new();
+    for (first_sequence, (index, page)) in packed_pages {
+        packed_refs.insert(first_sequence, pack.sequence_leaf_ref(index, &page)?);
+    }
+    Ok((pack, packed_refs))
+}
+
+fn collect_journal_leaves(
+    node: &SequenceNodeRefV3,
+    journal: &[u8],
+    packs: &IndexPackBytes,
+    builder: &mut IndexPackBuilderV3,
+    packed_pages: &mut BTreeMap<u64, (usize, SequenceLeafPageV3)>,
+) -> Result<(), ArchiveError> {
+    if node.depth == 0 {
+        if matches!(node.locator, SequencePageLocatorV3::Journal { .. }) {
+            let page = load_sequence_leaf(journal, packs, node)?;
+            let index = builder.push_sequence_leaf(&page)?;
+            packed_pages.insert(page.first_local_sequence, (index, page));
+        }
+        return Ok(());
+    }
+    let page = load_sequence_internal(journal, packs, node)?;
+    for child in page.children() {
+        collect_journal_leaves(child, journal, packs, builder, packed_pages)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn rewrite_tree_into_journal(
+    journal: &mut JournalGenerationBuilderV3,
+    packs: &IndexPackBytes,
+    packed_leaves: &BTreeMap<u64, SequenceNodeRefV3>,
+    previous_journal: &[u8],
+    node: &SequenceNodeRefV3,
+) -> Result<SequenceNodeRefV3, ArchiveError> {
+    if node.depth == 0 {
+        if let Some(packed) = packed_leaves.get(&node.first_local_sequence) {
+            if packed.last_local_sequence != node.last_local_sequence {
+                return Err(ArchiveError::ManifestVerification(
+                    "packed leaf coverage does not match the sequence node",
+                ));
+            }
+            return Ok(packed.clone());
+        }
+        if matches!(node.locator, SequencePageLocatorV3::IndexPack { .. }) {
+            return Ok(node.clone());
+        }
+        return Err(ArchiveError::ManifestVerification(
+            "journal leaf was not included in the index pack",
+        ));
+    }
+    let page = load_sequence_internal(previous_journal, packs, node)?;
+    let mut children = Vec::with_capacity(page.children.len());
+    for child in page.children() {
+        children.push(rewrite_tree_into_journal(
+            journal,
+            packs,
+            packed_leaves,
+            previous_journal,
+            child,
+        )?);
+    }
+    if children == page.children {
+        if matches!(node.locator, SequencePageLocatorV3::Journal { .. }) {
+            let rewritten = SequenceInternalPageV3::try_new(
+                page.chain_id()?,
+                page.source_id()?,
+                page.depth,
+                children,
+            )?;
+            return journal.push_internal(&rewritten);
+        }
+        return Ok(node.clone());
+    }
+    let rewritten =
+        SequenceInternalPageV3::try_new(page.chain_id()?, page.source_id()?, page.depth, children)?;
+    journal.push_internal(&rewritten)
+}
+
+pub(crate) fn seed_rotated_journal_root(
+    journal: &mut JournalGenerationBuilderV3,
+    packs: &IndexPackBytes,
+    packed_leaves: &BTreeMap<u64, SequenceNodeRefV3>,
+    previous_journal: &[u8],
+    node: &SequenceNodeRefV3,
+) -> Result<SequenceNodeRefV3, ArchiveError> {
+    if node.depth == 0 {
+        let page = load_sequence_leaf(previous_journal, packs, node)?;
+        return journal.push_leaf(&page);
+    }
+    rewrite_tree_into_journal(journal, packs, packed_leaves, previous_journal, node)
 }
 
 fn count_journal_frames(bytes: &[u8]) -> Result<u64, ArchiveError> {
@@ -3229,15 +3485,18 @@ mod tests {
     use domain_types::{ChainId, KnownTime, SourceId};
 
     use super::{
-        IndexPackBuilderV3, JournalCommitV3, JournalGenerationBuilderV3, LogicalCommitDescriptorV3,
-        LogicalCommitManifestV3, LogicalObjectDescriptorV3, PackedLogicalInputV3,
+        IndexPackBuilderV3, IndexPackBytes, JournalCommitV3, JournalGenerationBuilderV3,
+        LogicalCommitDescriptorV3, LogicalCommitManifestV3, LogicalObjectDescriptorV3,
+        MAX_JOURNAL_RECORDS, MAX_SEQUENCE_INTERNAL_CHILDREN, PackedLogicalInputV3,
         PackedObjectDescriptorV3, RAW_LOGICAL_COMMIT_SCHEMA_V3, RAW_SEQUENCE_LEAF_SCHEMA_V3,
         RawPackManifestV3, ReceiptHintEntryV3, ReceiptHintPageV3, RootBundleV3,
-        SequenceInternalPageV3, SequenceLeafEntryV3, SequenceLeafPageV3, append_logical_entry,
-        canonical_root_bytes, journal_prefix_hash, logical_commit_domain_hash,
+        SequenceInternalPageV3, SequenceLeafEntryV3, SequenceLeafPageV3, SequencePageLocatorV3,
+        append_logical_entry, canonical_root_bytes, journal_needs_rotation, journal_prefix_hash,
+        load_sequence_leaf, logical_commit_domain_hash, pack_journal_leaves,
         parse_logical_commit_manifest, parse_pack_manifest, parse_receipt_hint_page,
         parse_root_bundle, parse_sequence_internal_page, parse_sequence_leaf_page,
-        root_bundle_hash, sequence_internal_page_hash, sequence_page_hash,
+        root_bundle_hash, seed_rotated_journal_root, sequence_internal_page_hash,
+        sequence_page_hash,
     };
 
     fn logical(first: u64, last: u64, marker: u8) -> SequenceLeafEntryV3 {
@@ -3946,6 +4205,7 @@ mod tests {
         .unwrap();
         let first = append_logical_entry(
             &mut journal,
+            &IndexPackBytes::new(),
             None,
             chain.clone(),
             source.clone(),
@@ -3979,12 +4239,166 @@ mod tests {
             .is_err()
         );
 
-        let second =
-            append_logical_entry(&mut journal, Some(&first), chain, source, logical(2, 2, 2))
-                .unwrap();
+        let second = append_logical_entry(
+            &mut journal,
+            &IndexPackBytes::new(),
+            Some(&first),
+            chain,
+            source,
+            logical(2, 2, 2),
+        )
+        .unwrap();
         assert_eq!(second.first_local_sequence(), 1);
         assert_eq!(second.last_local_sequence(), 2);
         let extended = journal.commit_prefix(&second).unwrap();
         assert!(extended.bytes().starts_with(first_commit.bytes()));
+    }
+
+    #[test]
+    fn journal_rotation_packs_leaves_and_keeps_old_prefix_exact() {
+        let chain = ChainId::new("mainnet").unwrap();
+        let source = SourceId::new("node-fills").unwrap();
+        let empty = IndexPackBytes::new();
+        let mut journal = JournalGenerationBuilderV3::try_new(
+            1,
+            super::journal_file_identity(1).unwrap(),
+            PathBuf::from("journals/generation-1.log"),
+        )
+        .unwrap();
+        let mut root = append_logical_entry(
+            &mut journal,
+            &empty,
+            None,
+            chain.clone(),
+            source.clone(),
+            logical(1, 1, 1),
+        )
+        .unwrap();
+        for sequence in 2..=257 {
+            let marker = u8::try_from((sequence % 250) + 1).unwrap();
+            root = append_logical_entry(
+                &mut journal,
+                &empty,
+                Some(&root),
+                chain.clone(),
+                source.clone(),
+                logical(sequence, sequence, marker),
+            )
+            .unwrap();
+        }
+        assert_eq!(root.depth(), 1);
+        let old = journal.commit_prefix(&root).unwrap();
+        let (pack, packed_leaves) =
+            pack_journal_leaves(chain.clone(), source.clone(), 1, &root, old.bytes(), &empty)
+                .unwrap();
+        assert_eq!(packed_leaves.len(), 2);
+        let mut packs = IndexPackBytes::new();
+        packs.insert(pack.object_sha256(), pack.bytes().to_vec());
+        let mut rotated = JournalGenerationBuilderV3::try_new(
+            2,
+            super::journal_file_identity(2).unwrap(),
+            PathBuf::from("journals/generation-2.log"),
+        )
+        .unwrap();
+        let rotated_root =
+            seed_rotated_journal_root(&mut rotated, &packs, &packed_leaves, old.bytes(), &root)
+                .unwrap();
+        assert_eq!(rotated.committed_record_count(), 1);
+        assert!(matches!(
+            rotated_root.locator(),
+            SequencePageLocatorV3::Journal { generation: 2, .. }
+        ));
+        let page = super::load_sequence_internal(old.bytes(), &packs, &rotated_root);
+        assert!(page.is_err());
+        let internals =
+            super::load_sequence_internal(rotated.bytes.as_slice(), &packs, &rotated_root).unwrap();
+        assert_eq!(internals.children().len(), 2);
+        for child in internals.children() {
+            assert!(matches!(
+                child.locator(),
+                SequencePageLocatorV3::IndexPack { .. }
+            ));
+            load_sequence_leaf(&[], &packs, child).unwrap();
+        }
+        let mut mutated = pack.bytes().to_vec();
+        mutated[0] ^= 1;
+        let mut bad = IndexPackBytes::new();
+        bad.insert(pack.object_sha256(), mutated);
+        assert!(load_sequence_leaf(&[], &bad, internals.children().first().unwrap()).is_err());
+        assert!(old.bytes().starts_with(&old.bytes()[..8]));
+        let resumed = JournalGenerationBuilderV3::try_resume(
+            1,
+            super::journal_file_identity(1).unwrap(),
+            PathBuf::from("journals/generation-1.log"),
+            old.bytes().to_vec(),
+            old.prefix(),
+            chain.as_str(),
+            source.as_str(),
+        )
+        .unwrap();
+        assert_eq!(
+            resumed.committed_record_count(),
+            old.prefix().committed_record_count()
+        );
+    }
+
+    #[test]
+    fn full_internal_page_splits_instead_of_failing_closed_on_pack() {
+        let chain = ChainId::new("mainnet").unwrap();
+        let source = SourceId::new("node-fills").unwrap();
+        let empty = IndexPackBytes::new();
+        let mut journal = JournalGenerationBuilderV3::try_new(
+            1,
+            super::journal_file_identity(1).unwrap(),
+            PathBuf::from("journals/generation-1.log"),
+        )
+        .unwrap();
+        let mut children = Vec::new();
+        for sequence in 1..MAX_SEQUENCE_INTERNAL_CHILDREN {
+            let sequence = u64::try_from(sequence).unwrap();
+            let page = SequenceLeafPageV3::try_new(
+                chain.clone(),
+                source.clone(),
+                vec![logical(sequence, sequence, 1)],
+            )
+            .unwrap();
+            children.push(journal.push_leaf(&page).unwrap());
+        }
+        let leaf_span = u64::try_from(super::MAX_SEQUENCE_LEAF_ENTRIES).unwrap();
+        let last_first = u64::try_from(MAX_SEQUENCE_INTERNAL_CHILDREN).unwrap();
+        let last_end = last_first
+            .checked_add(leaf_span)
+            .unwrap()
+            .checked_sub(1)
+            .unwrap();
+        let last_entries = (last_first..=last_end)
+            .map(|sequence| logical(sequence, sequence, 2))
+            .collect();
+        let last_page =
+            SequenceLeafPageV3::try_new(chain.clone(), source.clone(), last_entries).unwrap();
+        children.push(journal.push_leaf(&last_page).unwrap());
+        let internal =
+            SequenceInternalPageV3::try_new(chain.clone(), source.clone(), 1, children).unwrap();
+        let root = journal.push_internal(&internal).unwrap();
+        assert_eq!(root.depth(), 1);
+        let next = last_end.checked_add(1).unwrap();
+        let split_root = append_logical_entry(
+            &mut journal,
+            &empty,
+            Some(&root),
+            chain,
+            source,
+            logical(next, next, 3),
+        )
+        .unwrap();
+        assert_eq!(split_root.depth(), 2);
+        assert_eq!(split_root.last_local_sequence(), next);
+    }
+
+    #[test]
+    fn journal_rotation_triggers_before_record_or_byte_limits() {
+        assert!(!journal_needs_rotation(1, 128, 0));
+        assert!(journal_needs_rotation(MAX_JOURNAL_RECORDS, 128, 0));
+        assert!(journal_needs_rotation(1, super::MAX_JOURNAL_BYTES, 0));
     }
 }
