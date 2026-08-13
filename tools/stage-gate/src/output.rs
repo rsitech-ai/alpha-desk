@@ -200,8 +200,8 @@ impl OutputRoot {
     fn target_identity(&self, target: &str) -> Result<Option<TargetIdentity>, OutputError> {
         match statat(&self.directory, target, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => Ok(Some(TargetIdentity {
-                device: stat.st_dev as u64,
-                inode: stat.st_ino,
+                device: u64_file_id(stat.st_dev),
+                inode: u64_file_id(stat.st_ino),
                 file_type: FileType::from_raw_mode(stat.st_mode),
             })),
             Err(Errno::NOENT) => Ok(None),
@@ -243,6 +243,16 @@ struct TargetIdentity {
     device: u64,
     inode: u64,
     file_type: FileType,
+}
+
+fn u64_file_id<T>(value: T) -> u64
+where
+    T: TryInto<u64>,
+    T::Error: std::fmt::Debug,
+{
+    value
+        .try_into()
+        .expect("filesystem identifier must fit in u64")
 }
 
 fn direct_child(path: &Path) -> Result<&str, OutputError> {
