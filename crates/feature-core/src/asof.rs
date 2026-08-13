@@ -49,3 +49,12 @@ pub fn asof<T: Bitemporal>(
         })
         .max_by_key(|row| (row.effective_at(), row.known_at(), row.revision()))
 }
+
+/// Fails closed when no reconstructed row is visible at the requested as-of.
+pub fn require_asof<T: Bitemporal>(
+    rows: &[T],
+    effective_at: ProtocolTime,
+    known_at: KnownTime,
+) -> Result<&T, crate::FeatureError> {
+    asof(rows, effective_at, known_at).ok_or(crate::FeatureError::MissingState)
+}

@@ -1,13 +1,15 @@
 #![forbid(unsafe_code)]
 
 mod asof;
+mod calculator;
 mod errors;
 mod feature;
 mod health;
 mod snapshot;
 mod window;
 
-pub use asof::{Bitemporal, asof};
+pub use asof::{Bitemporal, asof, require_asof};
+pub use calculator::{FeatureCalculator, FeatureContext, FeatureDelta, PitSnapshotCalculator};
 pub use errors::FeatureError;
 pub use feature::{
     EvidenceKind, EvidenceRef, FeatureKey, FeatureManifest, FeatureSubject, FeatureValue,

@@ -57,6 +57,21 @@ fn asof_join_respects_effective_and_known_time() {
 }
 
 #[test]
+fn require_asof_fails_closed_when_reconstructed_state_is_missing() {
+    let rows = fixture_rows();
+    assert!(matches!(
+        feature_core::require_asof(&rows, time("t2"), known("t2")),
+        Err(FeatureError::MissingState)
+    ));
+    assert_eq!(
+        feature_core::require_asof(&rows, time("t2"), known("t3"))
+            .unwrap()
+            .revision,
+        1
+    );
+}
+
+#[test]
 fn evidence_ref_rejects_empty_id_and_zero_hash() {
     let effective = time("t1");
     let known_at = known("t1");

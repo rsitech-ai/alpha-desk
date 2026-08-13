@@ -31,4 +31,6 @@ pub enum FeatureError {
     TemporalInversion,
     #[error("superseded_at does not follow known_at")]
     InvalidSupersession,
+    #[error("reconstructed state is missing for the requested as-of query")]
+    MissingState,
 }
