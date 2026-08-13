@@ -140,6 +140,107 @@ pub fn publish_immutable(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(
     sync_directory(&parent)
 }
 
+pub fn try_read_regular(
+    root: &Path,
+    relative: &Path,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, ArchiveError> {
+    validate_relative(relative)?;
+    let path = root.join(relative);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => read_regular(root, relative, max_bytes).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(ArchiveError::Io("inspecting archive file")),
+    }
+}
+
+pub fn extend_append_only(
+    root: &Path,
+    relative: &Path,
+    committed_prefix: &[u8],
+    full_bytes: &[u8],
+    max_bytes: u64,
+) -> Result<(), ArchiveError> {
+    let full_size = u64::try_from(full_bytes.len())
+        .map_err(|_| ArchiveError::InvalidInput("append-only object exceeds u64"))?;
+    if full_bytes.is_empty()
+        || full_size > max_bytes
+        || !full_bytes.starts_with(committed_prefix)
+        || full_bytes.len() < committed_prefix.len()
+    {
+        return Err(ArchiveError::InvalidInput(
+            "append-only object does not extend the committed prefix",
+        ));
+    }
+    match try_read_regular(root, relative, max_bytes)? {
+        None => publish_immutable(root, relative, full_bytes),
+        Some(existing) => {
+            if existing == full_bytes {
+                return Ok(());
+            }
+            if !existing.starts_with(committed_prefix) {
+                return Err(ArchiveError::ManifestVerification(
+                    "append-only object does not authenticate its committed prefix",
+                ));
+            }
+            if existing.len() == committed_prefix.len() {
+                append_suffix(root, relative, &full_bytes[committed_prefix.len()..])
+            } else if full_bytes.starts_with(&existing) {
+                append_suffix(root, relative, &full_bytes[existing.len()..])
+            } else {
+                Err(ArchiveError::ManifestVerification(
+                    "append-only object has a divergent uncommitted suffix",
+                ))
+            }
+        }
+    }
+}
+
+fn append_suffix(root: &Path, relative: &Path, suffix: &[u8]) -> Result<(), ArchiveError> {
+    if suffix.is_empty() {
+        return Ok(());
+    }
+    validate_relative(relative)?;
+    let parent_relative = relative.parent().ok_or(ArchiveError::UnsafePath)?;
+    let parent = ensure_directory(root, parent_relative)?;
+    let path = root.join(relative);
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .map_err(|_| ArchiveError::Io("opening append-only archive file"))?;
+    file.write_all(suffix)
+        .map_err(|_| ArchiveError::Io("appending archive file"))?;
+    file.sync_all()
+        .map_err(|_| ArchiveError::Io("syncing append-only archive file"))?;
+    sync_directory(&parent)
+}
+
+pub fn publish_current_cas(
+    root: &Path,
+    relative: &Path,
+    expected_existing: Option<&[u8]>,
+    new_bytes: &[u8],
+) -> Result<(), ArchiveError> {
+    let existing = try_read_regular(root, relative, MAX_MANIFEST_BYTES)?;
+    match (expected_existing, existing.as_deref()) {
+        (None, None) => {}
+        (Some(expected), Some(actual)) if expected == actual => {}
+        _ => {
+            return Err(ArchiveError::ManifestVerification(
+                "CURRENT pointer does not match the expected exact root",
+            ));
+        }
+    }
+    publish_current(root, relative, new_bytes)?;
+    let readback = read_regular(root, relative, MAX_MANIFEST_BYTES)?;
+    if readback != new_bytes {
+        return Err(ArchiveError::ManifestVerification(
+            "CURRENT pointer readback does not match the published exact root",
+        ));
+    }
+    Ok(())
+}
+
 pub fn publish_current(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), ArchiveError> {
     validate_relative(relative)?;
     let parent_relative = relative.parent().ok_or(ArchiveError::UnsafePath)?;
@@ -245,4 +346,46 @@ fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.len() == right.len()
         && left.is_file() == right.is_file()
         && left.modified().ok() == right.modified().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn current_cas_rejects_stale_expected_root_and_readback_matches() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = PathBuf::from("dataset/CURRENT");
+        let first = b"{\"root\":1}";
+        let second = b"{\"root\":2}";
+        assert!(publish_current_cas(root.path(), &relative, None, first).is_ok());
+        assert!(publish_current_cas(root.path(), &relative, Some(b"stale"), second).is_err());
+        assert!(publish_current_cas(root.path(), &relative, Some(first), second).is_ok());
+        assert_eq!(read_regular(root.path(), &relative, 1024).unwrap(), second);
+    }
+
+    #[test]
+    fn append_only_extension_keeps_committed_prefix_and_rejects_divergence() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = PathBuf::from("journals/generation-1.log");
+        let first = b"prefix-bytes";
+        let extended = b"prefix-bytes-and-suffix";
+        extend_append_only(root.path(), &relative, &[], first, 1024).unwrap();
+        extend_append_only(root.path(), &relative, first, extended, 1024).unwrap();
+        assert_eq!(
+            read_regular(root.path(), &relative, 1024).unwrap(),
+            extended
+        );
+        assert!(
+            extend_append_only(
+                root.path(),
+                &relative,
+                first,
+                b"prefix-bytes-DIFFERENT",
+                1024
+            )
+            .is_err()
+        );
+    }
 }

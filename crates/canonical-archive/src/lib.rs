@@ -8,6 +8,7 @@ mod raw;
 mod raw_policy;
 mod raw_v2;
 pub mod raw_v3;
+mod raw_v3_store;
 mod reader;
 mod schema;
 mod writer;
@@ -26,6 +27,7 @@ use storage_ports::{
 };
 
 pub use inspection::{ArchiveDataset, ArchiveInspection, InspectedObject};
+pub use raw_v3_store::RawV3Archive;
 use storage_ports::{
     LocalRecordSequenceRange, RawObservationArchive, RawObservationBatch, RawObservationIterator,
     RawObservationRange, RawObservationReceipt, SequencedRawObservationIterator,
@@ -107,7 +109,7 @@ impl ArchiveConfig {
         Ok(self)
     }
 
-    fn now(&self) -> Result<KnownTime, ArchiveError> {
+    pub(crate) fn now(&self) -> Result<KnownTime, ArchiveError> {
         if let Some(fixed) = self.fixed_time {
             return Ok(fixed);
         }
