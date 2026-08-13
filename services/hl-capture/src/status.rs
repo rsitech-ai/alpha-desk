@@ -315,7 +315,10 @@ impl AuxiliarySourceStatus {
         {
             return Err(StatusError::InvalidField);
         }
-        Ok(())
+        match self.qualification {
+            AuxiliaryQualificationState::Unqualified => Ok(()),
+            AuxiliaryQualificationState::Qualified => Err(StatusError::InvalidField),
+        }
     }
 }
 
@@ -671,12 +674,12 @@ pub(crate) fn validate_reason_code(value: &str) -> Result<(), StatusError> {
 mod tests {
     use std::fs;
 
-    use domain_types::{ChainId, KnownTime};
+    use domain_types::{BlockHeight, ChainId, KnownTime};
     use tempfile::TempDir;
 
     use super::{
         AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
-        CaptureStatus, StatusError, read_status,
+        CaptureSourceHealth, CaptureStatus, CommittedSourceClass, StatusError, read_status,
     };
 
     #[test]
@@ -816,5 +819,76 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
         assert_eq!(read_status(&path), Err(StatusError::InvalidField));
+    }
+
+    #[test]
+    fn auxiliary_status_rejects_qualified_claims_even_when_durable() {
+        let mut auxiliary = AuxiliarySourceStatus::starting("node-fills");
+        auxiliary.record_durable(
+            "node-file-v1:epoch",
+            "node-file-v1:epoch",
+            47,
+            1,
+            0,
+            false,
+            1_000,
+            None,
+        );
+        assert_eq!(
+            auxiliary.qualification(),
+            AuxiliaryQualificationState::Unqualified
+        );
+        auxiliary.qualification = AuxiliaryQualificationState::Qualified;
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_auxiliary_sources(vec![auxiliary]);
+        assert_eq!(status.validate(), Err(StatusError::InvalidField));
+    }
+
+    #[test]
+    fn independent_committed_status_is_yellow_ready_at_most_and_never_green() {
+        let yellow_ready = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_readiness(true)
+        .with_source_state(
+            CommittedSourceClass::IndependentCommitted,
+            CaptureSourceHealth::Healthy,
+            Some(CaptureSourceHealth::Healthy),
+            Some(BlockHeight::new(42)),
+            Some(crate::FailoverReason::PrimaryRangeUnavailable),
+        );
+        yellow_ready.validate().unwrap();
+        let encoded = serde_json::to_value(&yellow_ready).unwrap();
+        assert_eq!(encoded["health"], "yellow");
+        assert_eq!(encoded["ready"], true);
+        assert_eq!(encoded["active_committed_source"], "independent-committed");
+        assert!(encoded.get("qualification").is_none());
+        assert!(encoded.get("stage_1_qualified").is_none());
+        assert!(encoded.get("live_source_qualified").is_none());
+        assert!(encoded.get("independent_source_qualified").is_none());
+
+        let green_independent = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Green,
+        )
+        .with_readiness(true)
+        .with_source_state(
+            CommittedSourceClass::IndependentCommitted,
+            CaptureSourceHealth::Healthy,
+            Some(CaptureSourceHealth::Healthy),
+            Some(BlockHeight::new(42)),
+            Some(crate::FailoverReason::PrimaryRangeUnavailable),
+        );
+        assert_eq!(green_independent.validate(), Err(StatusError::InvalidField));
     }
 }

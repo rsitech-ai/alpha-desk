@@ -880,5 +880,88 @@ mod tests {
             snapshot.independent_source_health,
             Some(crate::CaptureSourceHealth::Healthy)
         );
+
+        health.record_source_healthy(CommittedSourceClass::LocallyVerifiedCommitted);
+        health.record_disk_capacity(10_000);
+        health.record_capture(
+            CommittedSourceClass::IndependentCommitted,
+            BlockHeight::new(42),
+            10_000,
+        );
+        health.record_capture(
+            CommittedSourceClass::LocallyVerifiedCommitted,
+            BlockHeight::new(41),
+            10_000,
+        );
+        health.set_ready();
+
+        let after_primary_repair = health.snapshot();
+        assert_eq!(after_primary_repair.health, super::CaptureHealth::Yellow);
+        assert_ne!(after_primary_repair.health, super::CaptureHealth::Green);
+        assert!(after_primary_repair.ready);
+        assert_eq!(
+            after_primary_repair.active_committed_source,
+            CommittedSourceClass::IndependentCommitted
+        );
+        assert_eq!(
+            after_primary_repair.reason_code,
+            Some("capture_failover.independent_source_active")
+        );
+        assert_eq!(
+            after_primary_repair.primary_source_health,
+            crate::CaptureSourceHealth::Healthy
+        );
+    }
+
+    #[test]
+    fn activate_independent_stays_yellow_ready_with_healthy_disk_and_primary() {
+        let health = CaptureRuntimeHealth::new();
+        let decision = FailoverDecision::try_new(
+            ChainId::new("mainnet").unwrap(),
+            SourceId::new("primary-node").unwrap(),
+            SourceId::new("independent-node").unwrap(),
+            BlockHeight::new(42),
+            FailoverReason::PrimaryRangeUnavailable,
+        )
+        .unwrap();
+        health.configure_committed_sources(true, None);
+        health.activate_independent(&decision);
+        health.record_source_healthy(CommittedSourceClass::LocallyVerifiedCommitted);
+        health.record_disk_capacity(10_000);
+        health.set_ready();
+
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.health, super::CaptureHealth::Yellow);
+        assert_ne!(snapshot.health, super::CaptureHealth::Green);
+        assert!(snapshot.ready);
+        assert_eq!(
+            snapshot.reason_code,
+            Some("capture_failover.independent_source_active")
+        );
+    }
+
+    #[test]
+    fn independent_range_unavailable_is_red_not_ready_and_never_green() {
+        let health = CaptureRuntimeHealth::new();
+        let decision = FailoverDecision::try_new(
+            ChainId::new("mainnet").unwrap(),
+            SourceId::new("primary-node").unwrap(),
+            SourceId::new("independent-node").unwrap(),
+            BlockHeight::new(42),
+            FailoverReason::PrimaryRangeUnavailable,
+        )
+        .unwrap();
+        health.configure_committed_sources(true, Some(&decision));
+        health.record_source_gap(CommittedSourceClass::IndependentCommitted);
+        health.set_ready();
+
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.health, super::CaptureHealth::Red);
+        assert_ne!(snapshot.health, super::CaptureHealth::Green);
+        assert!(!snapshot.ready);
+        assert_eq!(
+            snapshot.reason_code,
+            Some("capture_failover.independent_range_unavailable")
+        );
     }
 }
