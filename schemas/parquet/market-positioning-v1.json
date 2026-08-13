@@ -1,0 +1,19 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "market_positioning",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "cohort_id",
+    "entity_id",
+    "exposure_usd",
+    "entry_bps_from_mark"
+  ],
+  "fields": [
+    {"name": "cohort_id", "type": "utf8", "nullable": false},
+    {"name": "entity_id", "type": "utf8", "nullable": false},
+    {"name": "exposure_usd", "type": "utf8", "nullable": false},
+    {"name": "entry_bps_from_mark", "type": "int64", "nullable": false},
+    {"name": "independence_ppm", "type": "uint32", "nullable": false},
+    {"name": "pain_state", "type": "utf8", "nullable": false}
+  ]
+}

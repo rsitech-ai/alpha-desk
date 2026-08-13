@@ -1,0 +1,6 @@
+scenario_id = "fragility-v1-base"
+shocks_bps = [-25, -50, -100, -200, -300, -500, 25, 50, 100, 200, 300, 500]
+max_iterations = 8
+max_total_impact_bps = 1500
+liquidation_participation_ppm = 1000000
+book_stress_multiplier_ppm = 1000000
