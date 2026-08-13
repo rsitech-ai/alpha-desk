@@ -11,17 +11,19 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    CoreConfig, CoreRuntime, InMemoryCanonicalSource, committed_block_delivery,
+    CoreConfig, CoreRuntime, CoreStatusHandle, InMemoryCanonicalSource, committed_block_delivery,
     committed_event_delivery,
 };
 use storage_ports::{ArchiveReceipt, AtomicStateStore};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn missing_store_parent_fails_closed_without_opening_nats() {
     let root = private_root();
     let missing = root.path().join("absent").join("state");
-    let config = CoreConfig::from_toml(&valid_toml(&missing, 200)).expect("config");
+    let config = CoreConfig::from_toml(&valid_toml(&missing, 200, None)).expect("config");
     let error = match CoreRuntime::open(config) {
         Ok(_) => panic!("missing store must fail closed"),
         Err(error) => error,
@@ -33,8 +35,9 @@ async fn missing_store_parent_fails_closed_without_opening_nats() {
 async fn action_bearing_source_still_fails_closed_without_ack_or_state_advance() {
     let root = private_root();
     let store_path = root.path().join("state");
-    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200)).expect("config");
+    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200, None)).expect("config");
     let runtime = CoreRuntime::open(config).expect("runtime");
+    let status = runtime.status().clone();
     let block = trade_block(200);
     let receipt = archive_receipt(&block);
     let marker = committed_block_delivery(&block, &receipt).expect("marker");
@@ -51,6 +54,15 @@ async fn action_bearing_source_still_fails_closed_without_ack_or_state_advance()
     assert_eq!(error.reason_code(), "ledger.unsupported_event");
     assert!(!source.acked().contains(&event_id));
     assert!(!source.acked().contains(&marker_id));
+    let snapshot = status.snapshot();
+    assert!(!snapshot.ready());
+    assert_eq!(
+        snapshot.fail_closed_reason(),
+        Some("ledger.unsupported_event")
+    );
+    assert!(snapshot.last_applied_watermark().is_none());
+    assert!(!snapshot.live_qualified());
+    assert!(!snapshot.stage_2_qualified());
 
     let store =
         SyncedWriteBatchStore::open(&store_path, StateImageLimits::production()).expect("reopen");
@@ -66,7 +78,7 @@ async fn action_bearing_source_still_fails_closed_without_ack_or_state_advance()
 async fn empty_source_shuts_down_cleanly_without_qualification_claims() {
     let root = private_root();
     let store_path = root.path().join("state");
-    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200)).expect("config");
+    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200, None)).expect("config");
     let runtime = CoreRuntime::open(config).expect("runtime");
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -85,7 +97,7 @@ async fn empty_source_shuts_down_cleanly_without_qualification_claims() {
 async fn idle_loop_observes_cancellation_without_connecting_to_nats() {
     let root = private_root();
     let store_path = root.path().join("state");
-    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200)).expect("config");
+    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200, None)).expect("config");
     let runtime = CoreRuntime::open(config).expect("runtime");
     let cancellation = CancellationToken::new();
     let mut source = InMemoryCanonicalSource::new([]);
@@ -100,7 +112,107 @@ async fn idle_loop_observes_cancellation_without_connecting_to_nats() {
     assert!(!report.stage_2_qualified);
 }
 
-fn valid_toml(store_path: &std::path::Path, first_height: u64) -> String {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_runtime_serves_ready_loopback_status_without_qualification() {
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let config =
+        CoreConfig::from_toml(&valid_toml(&store_path, 200, Some("127.0.0.1:0"))).expect("config");
+    let runtime = CoreRuntime::open(config).expect("runtime");
+    let status = runtime.status().clone();
+    let cancellation = CancellationToken::new();
+    let mut source = InMemoryCanonicalSource::new([]);
+    let run = runtime.run_source(&mut source, cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.snapshot().ready() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("ready");
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 200);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ready"], true);
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], true);
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        assert!(value.get("fail_closed_reason").is_none());
+        cancellation.cancel();
+    };
+    let (report, ()) = tokio::join!(run, probe);
+    let report = report.expect("cancelled ready loop");
+    assert!(!report.live_qualified);
+    assert!(!report.stage_2_qualified);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_empty_block_publishes_watermark_and_stays_unqualified() {
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let config =
+        CoreConfig::from_toml(&valid_toml(&store_path, 200, Some("127.0.0.1:0"))).expect("config");
+    let runtime = CoreRuntime::open(config).expect("runtime");
+    let status = runtime.status().clone();
+    let block = empty_block(200);
+    let delivery = committed_block_delivery(&block, &archive_receipt(&block)).expect("delivery");
+    let mut source = InMemoryCanonicalSource::new([delivery]);
+    let cancellation = CancellationToken::new();
+    let run = runtime.run_source(&mut source, cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.snapshot().last_applied_watermark() == Some(200) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("watermark");
+        let (_, status_body) = http_get(addr, "/status").await;
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], true);
+        assert_eq!(value["last_applied_watermark"], 200);
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        cancellation.cancel();
+    };
+    let (report, ()) = tokio::join!(run, probe);
+    let report = report.expect("cancelled after apply");
+    assert_eq!(report.last_height, Some(BlockHeight::new(200)));
+    assert!(!report.live_qualified);
+    assert!(!report.stage_2_qualified);
+}
+
+#[tokio::test]
+async fn missing_store_fails_closed_before_status_listen_bind() {
+    let root = private_root();
+    let missing = root.path().join("absent").join("state");
+    let config =
+        CoreConfig::from_toml(&valid_toml(&missing, 200, Some("127.0.0.1:0"))).expect("config");
+    let error = match CoreRuntime::open(config) {
+        Ok(_) => panic!("missing store"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "core_runtime.store");
+}
+
+fn valid_toml(store_path: &std::path::Path, first_height: u64, listen: Option<&str>) -> String {
+    let status = listen
+        .map(|listen| format!("\n[status]\nlisten = \"{listen}\"\n"))
+        .unwrap_or_default();
     format!(
         r#"
 chain_id = "mainnet"
@@ -110,7 +222,7 @@ idle_poll_millis = 50
 
 [store]
 path = "{path}"
-
+{status}
 [nats]
 server_url = "nats://127.0.0.1:4222"
 stream = "HL_CANONICAL"
@@ -188,6 +300,69 @@ fn trade_event(height: u64) -> CanonicalEventEnvelope {
         payload,
     })
     .expect("event")
+}
+
+fn empty_block(height: u64) -> BlockEnvelope {
+    BlockEnvelope::try_new(
+        ChainId::new("mainnet").expect("chain"),
+        BlockHeight::new(height),
+        ProtocolTime::from_unix_micros(height as i64).expect("time"),
+        ConfirmationClass::CommittedPrimary,
+        Vec::new(),
+        BTreeMap::from([(SourceId::new("jetstream-replay").expect("source"), [1; 32])]),
+    )
+    .expect("empty block")
+}
+
+async fn wait_for_listen_addr(status: &CoreStatusHandle) -> std::net::SocketAddr {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(addr) = status.listen_addr() {
+                return addr;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("listen addr")
+}
+
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match TcpStream::connect(addr).await {
+                Ok(mut stream) => {
+                    stream
+                        .write_all(
+                            format!(
+                                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("write request");
+                    stream.flush().await.expect("flush request");
+                    let mut body = Vec::new();
+                    stream.read_to_end(&mut body).await.expect("read response");
+                    let body = String::from_utf8(body).expect("UTF-8 response");
+                    let status = body
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|value| value.parse().ok())
+                        .expect("HTTP status");
+                    return (status, body);
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("http response")
+}
+
+fn json_from_http(body: &str) -> serde_json::Value {
+    let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
+    serde_json::from_str(&body[json_start..]).expect("JSON body")
 }
 
 fn archive_receipt(block: &BlockEnvelope) -> ArchiveReceipt {

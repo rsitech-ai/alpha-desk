@@ -6,6 +6,7 @@ mod publication;
 mod replay;
 mod runtime;
 mod source;
+mod status;
 
 use canonical_events::BlockEnvelope;
 use canonical_ledger::{
@@ -31,6 +32,7 @@ pub use source::{
     BlockSourceError, CanonicalBlockSource, DirectoryBlockSource, InMemoryBlockSource,
     LOCAL_REPLAY_BLOCK_SCHEMA, decode_local_replay_block,
 };
+pub use status::{CoreStatus, CoreStatusHandle, StatusError, accept_status, serve_status};
 
 #[derive(Debug)]
 pub enum DurableApplyOutcome {

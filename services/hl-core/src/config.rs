@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -24,12 +25,20 @@ pub struct CoreConfig {
     store: Option<StoreConfig>,
     #[serde(default)]
     nats: Option<NatsConfig>,
+    #[serde(default)]
+    status: Option<StatusConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoreConfig {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatusConfig {
+    listen: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +79,9 @@ impl CoreConfig {
         }
         validate_identity(&nats.username).map_err(|_| CoreConfigError::InvalidNatsIdentity)?;
         validate_credential_path(&nats.password_path)?;
+        if let Some(status) = &self.status {
+            validate_status_listen(&status.listen)?;
+        }
         self.jetstream_config().map(|_| ())?;
         Ok(())
     }
@@ -119,6 +131,14 @@ impl CoreConfig {
     pub const fn idle_poll(&self) -> Duration {
         Duration::from_millis(self.idle_poll_millis)
     }
+
+    #[must_use]
+    pub fn status_listen(&self) -> Option<SocketAddr> {
+        self.status.as_ref().map(|status| {
+            validate_status_listen(&status.listen)
+                .expect("CoreConfig is constructed only through validated deserialization")
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +163,8 @@ pub enum CoreConfigError {
     InvalidCredentialPath,
     #[error("hl-core runtime limit is outside the supported bound")]
     InvalidRuntimeLimit,
+    #[error("hl-core status listen address is invalid or not loopback")]
+    InvalidStatusListen,
     #[error("hl-core JetStream consumer configuration is invalid")]
     InvalidJetStream,
 }
@@ -161,6 +183,7 @@ impl CoreConfigError {
             Self::InvalidNatsIdentity => "core_config.invalid_nats_identity",
             Self::InvalidCredentialPath => "core_config.invalid_credential_path",
             Self::InvalidRuntimeLimit => "core_config.invalid_runtime_limit",
+            Self::InvalidStatusListen => "core_config.invalid_status_listen",
             Self::InvalidJetStream => "core_config.invalid_jetstream",
         }
     }
@@ -192,6 +215,20 @@ fn validate_runtime_path(path: &Path) -> Result<(), CoreConfigError> {
         Err(CoreConfigError::InvalidStorePath)
     } else {
         Ok(())
+    }
+}
+
+fn validate_status_listen(value: &str) -> Result<SocketAddr, CoreConfigError> {
+    if value.trim() != value || value.chars().any(char::is_control) {
+        return Err(CoreConfigError::InvalidStatusListen);
+    }
+    let address: SocketAddr = value
+        .parse()
+        .map_err(|_| CoreConfigError::InvalidStatusListen)?;
+    if address.ip().is_loopback() {
+        Ok(address)
+    } else {
+        Err(CoreConfigError::InvalidStatusListen)
     }
 }
 
