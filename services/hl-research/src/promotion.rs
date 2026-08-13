@@ -1,6 +1,9 @@
+use std::path::Path;
+
 use serde::Serialize;
 
 use crate::baselines::UNMODELED_BASELINES;
+use crate::claims::serialize_unclaimed;
 use crate::error::ResearchError;
 use crate::metrics::{BootstrapReport, CalibrationReport, PerformanceMetrics};
 
@@ -48,10 +51,52 @@ impl PromotionPolicy {
     }
 }
 
+/// External locked-holdout evidence.
+///
+/// This type has no public constructor. `open` and `from_bytes` fail closed,
+/// including for any path inside this repository, so in-repo fixtures cannot
+/// mint a lock or stamp `HOLDOUT_PASSED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoldoutLock {
+    _private: (),
+}
+
+impl HoldoutLock {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ResearchError> {
+        let _in_repo = lock_path_is_in_repo(path.as_ref());
+        let _ = path.as_ref().exists();
+        Err(ResearchError::HoldoutNotImplemented)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ResearchError> {
+        let _ = bytes;
+        Err(ResearchError::HoldoutNotImplemented)
+    }
+}
+
+/// Returns true when `path` resolves inside this workspace or a research fixture
+/// tree. Those locations cannot mint a holdout lock.
+#[must_use]
+pub fn lock_path_is_in_repo(path: &Path) -> bool {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
+    let mut candidates = vec![path.to_path_buf()];
+    if let Ok(canonical) = path.canonicalize() {
+        candidates.push(canonical);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(path));
+    }
+    candidates.into_iter().any(|candidate| {
+        candidate.starts_with(&workspace)
+            || candidate.to_string_lossy().contains("fixtures/research")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotionEvidence<'a> {
     pub outcome_count: usize,
-    pub holdout_locked: bool,
+    pub holdout_lock: Option<&'a HoldoutLock>,
     pub holdout_outcome_count: usize,
     pub calendar_days: Option<u64>,
     pub bootstrap: &'a BootstrapReport,
@@ -61,13 +106,28 @@ pub struct PromotionEvidence<'a> {
     pub episode_shares_ppm: &'a [u32],
 }
 
+impl PromotionEvidence<'_> {
+    #[must_use]
+    pub const fn holdout_locked(&self) -> bool {
+        self.holdout_lock.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PromotionReport {
     pub schema_version: &'static str,
     pub decision: &'static str,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub promoted: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub holdout_passed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub alpha_quality_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub alpha_qualified: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub significance_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
     pub unmodeled_baselines: &'static [&'static str],
     pub gates: Vec<GateResult>,
@@ -159,7 +219,7 @@ pub fn evaluate_promotion(evidence: &PromotionEvidence<'_>) -> PromotionReport {
         GateDecision::Withheld,
         "two_builder_reproduction_unmodeled",
     ));
-    gates.push(if evidence.holdout_locked {
+    gates.push(if evidence.holdout_locked() {
         gate(
             "locked_holdout",
             GateDecision::Fail,
@@ -183,6 +243,8 @@ pub fn evaluate_promotion(evidence: &PromotionEvidence<'_>) -> PromotionReport {
         promoted: false,
         holdout_passed: false,
         alpha_quality_claimed: false,
+        alpha_qualified: false,
+        significance_claimed: false,
         stage_pass_claimed: false,
         unmodeled_baselines: &UNMODELED_BASELINES,
         gates,

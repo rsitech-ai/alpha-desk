@@ -2,6 +2,7 @@ use domain_types::{Decimal, RoundingMode};
 use serde::Serialize;
 
 use crate::baselines::FOLD_ESTIMATOR_CLASSES;
+use crate::claims::serialize_unclaimed;
 use crate::error::ResearchError;
 use crate::estimator::{EstimatorClass, FittedEstimator, LinearModel, METRIC_SCALE, fit, zero};
 use crate::ledger::VariantLedger;
@@ -31,7 +32,13 @@ pub struct FoldEstimatorReport {
     pub experiment_id: String,
     pub fold_hash: String,
     pub significance: &'static str,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub alpha_quality_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub alpha_qualified: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub significance_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
     pub evaluations: Vec<FoldFit>,
     pub ledger: VariantLedger,
@@ -111,7 +118,7 @@ pub fn evaluate_folds(dataset: &ResearchDataset) -> Result<FoldEstimatorReport, 
     )?;
     let promotion = evaluate_promotion(&PromotionEvidence {
         outcome_count: pooled_outcomes.len(),
-        holdout_locked: false,
+        holdout_lock: None,
         holdout_outcome_count: 0,
         calendar_days: None,
         bootstrap: &bootstrap,
@@ -128,6 +135,8 @@ pub fn evaluate_folds(dataset: &ResearchDataset) -> Result<FoldEstimatorReport, 
         fold_hash: walk.fold_hash,
         significance: "not_claimed",
         alpha_quality_claimed: false,
+        alpha_qualified: false,
+        significance_claimed: false,
         stage_pass_claimed: false,
         evaluations,
         ledger,

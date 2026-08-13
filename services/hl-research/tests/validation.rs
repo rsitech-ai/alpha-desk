@@ -45,6 +45,8 @@ fn overlapping_labels_are_purged_and_embargo_excludes_adjacent_rows() {
     assert_eq!(report.fold_count, 2);
     assert_eq!(report.walk_forward, "synthetic_folds");
     assert!(!report.alpha_quality_claimed);
+    assert!(!report.alpha_qualified);
+    assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
 
     let fold0 = &report.folds[0];
@@ -139,9 +141,21 @@ fn holdout_isolation_cannot_see_training_rows_and_does_not_pass() {
     assert!(!report.locked);
     assert!(!report.holdout_passed);
     assert!(!report.alpha_quality_claimed);
+    assert!(!report.alpha_qualified);
+    assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
     assert_eq!(report.training_rows_visible, 0);
     assert_eq!(report.holdout_rows, 1);
+    let mut claimed = report.clone();
+    claimed.locked = true;
+    claimed.holdout_passed = true;
+    claimed.alpha_qualified = true;
+    claimed.significance_claimed = true;
+    let encoded = serde_json::to_value(&claimed).unwrap();
+    assert_eq!(encoded["locked"], false);
+    assert_eq!(encoded["holdout_passed"], false);
+    assert_eq!(encoded["alpha_qualified"], false);
+    assert_eq!(encoded["significance_claimed"], false);
 }
 
 #[test]
@@ -288,6 +302,8 @@ fn status_does_not_claim_locked_holdout_or_stage_pass() {
     assert!(status.promotion_withhold_only);
     assert!(!status.significance_claimed);
     assert!(!status.alpha_quality_claimed);
+    assert!(!status.alpha_qualified);
     assert!(!status.stage_pass_claimed);
+    assert!(!status.locked_corpus);
     assert!(!status.trading_signer);
 }
