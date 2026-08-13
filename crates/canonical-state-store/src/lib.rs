@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod atomic;
+
 use std::{
     fs::{self, File},
     io::{Read, Write},
@@ -18,6 +20,8 @@ use rustix::fs::{
 use storage_ports::{
     CheckpointPublishDisposition, CheckpointReceipt, CheckpointStoreError, StateCheckpointStore,
 };
+
+pub use atomic::SyncedWriteBatchStore;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const STATE_FILE: &str = "state.bin";
