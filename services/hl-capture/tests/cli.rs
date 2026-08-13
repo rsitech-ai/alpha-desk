@@ -171,3 +171,26 @@ fn fixture_replay_requires_an_explicit_bounded_block_count() {
             .contains("usage: hl-capture")
     );
 }
+
+#[test]
+fn maintain_on_default_v2_config_fail_closes_without_touching_replica_cmds() {
+    let directory = tempdir().expect("temporary directory");
+    let config_path = directory.path().join("capture.toml");
+    fs::write(
+        &config_path,
+        include_bytes!("../../../config/capture.example.toml"),
+    )
+    .expect("write config");
+
+    let output = binary()
+        .args(["maintain", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("run maintain");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    assert!(stderr.contains("\"reason_code\":\"capture_maintenance.v2_has_no_maintenance\""));
+    assert!(!stderr.contains("replica_cmds"));
+}

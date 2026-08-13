@@ -15,6 +15,7 @@ use crate::coordinator::{
 use crate::progress::ReconnectingPostgresProgressStore;
 use crate::secret::read_protected_secret;
 use crate::source_runtime::{auxiliary_node_task, committed_node_tasks};
+use crate::maintenance::filesystem_maintenance_task;
 use crate::{
     AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRawObservationArchive,
     CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError, OwnedTask, RawArchiveFormat,
@@ -33,6 +34,7 @@ pub struct ConnectedCapture {
     progress: Arc<dyn CaptureProgressStore>,
     raw_archive: Arc<dyn RawSegmentArchive>,
     failover_store: Arc<crate::FailoverStore>,
+    v3: Option<Arc<RawV3Archive>>,
     infrastructure_tasks: Vec<OwnedTask>,
 }
 
@@ -72,6 +74,7 @@ impl ConnectedCapture {
         {
             self.infrastructure_tasks.push(auxiliary_task);
         }
+        self.push_maintenance_task(&cancellation)?;
         self.runtime
             .run(cancellation, self.infrastructure_tasks)
             .await
@@ -134,9 +137,40 @@ impl ConnectedCapture {
                 fixture_cancellation.cancelled().await;
                 Ok(())
             }));
+        self.push_maintenance_task(&cancellation)?;
         self.runtime
             .run(cancellation, self.infrastructure_tasks)
             .await
+    }
+
+    fn push_maintenance_task(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), CaptureRuntimeError> {
+        let Some(v3) = self.v3.clone() else {
+            return Ok(());
+        };
+        let raw_v3 = self
+            .config
+            .runtime()
+            .raw_v3()
+            .ok_or(CaptureRuntimeError::InvalidConfig)?;
+        let maintenance = raw_v3.maintenance();
+        if !maintenance.enabled() {
+            return Ok(());
+        }
+        self.infrastructure_tasks.push(
+            filesystem_maintenance_task(
+                v3,
+                maintenance.clone(),
+                self.config.runtime().archive_path().to_path_buf(),
+                self.config.runtime().disk_reserve_bytes(),
+                self.runtime.health(),
+                cancellation.child_token(),
+            )
+            .map_err(|_| CaptureRuntimeError::InvalidConfig)?,
+        );
+        Ok(())
     }
 }
 
@@ -186,7 +220,7 @@ pub async fn connect_capture(
     };
     let raw_observation_archive: Arc<dyn RawObservationArchive> =
         Arc::new(CaptureRawObservationArchive::new(archive, v3_raw.clone()));
-    let raw_archive: Arc<dyn RawSegmentArchive> = Arc::new(match v3_raw {
+    let raw_archive: Arc<dyn RawSegmentArchive> = Arc::new(match v3_raw.clone() {
         Some(v3) => BlockingRawSegmentArchive::with_v3(raw_observation_archive, v3),
         None => BlockingRawSegmentArchive::new(raw_observation_archive),
     });
@@ -243,6 +277,7 @@ pub async fn connect_capture(
         progress,
         raw_archive,
         failover_store,
+        v3: v3_raw,
         infrastructure_tasks: Vec::new(),
     })
 }

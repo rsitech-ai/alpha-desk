@@ -321,6 +321,176 @@ impl AuxiliarySourceStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CaptureMaintenanceStatus {
+    enabled: bool,
+    kill_switch: bool,
+    health: CaptureHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_code: Option<String>,
+    pending_pack_manifest_count: u64,
+    packed_range_count: u64,
+    logical_manifest_count: u64,
+    physical_data_object_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_scrub_at_micros: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_pack_index_at_micros: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_pack_data_at_micros: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_retention_at_micros: Option<i64>,
+    retention_authorized: bool,
+}
+
+impl CaptureMaintenanceStatus {
+    #[must_use]
+    pub fn idle(enabled: bool, kill_switch: bool) -> Self {
+        Self {
+            enabled,
+            kill_switch,
+            health: CaptureHealth::Green,
+            reason_code: None,
+            pending_pack_manifest_count: 0,
+            packed_range_count: 0,
+            logical_manifest_count: 0,
+            physical_data_object_count: 0,
+            last_scrub_at_micros: None,
+            last_pack_index_at_micros: None,
+            last_pack_data_at_micros: None,
+            last_retention_at_micros: None,
+            retention_authorized: false,
+        }
+    }
+
+    pub(crate) fn set_counts(
+        &mut self,
+        pending_pack_manifest_count: u64,
+        packed_range_count: u64,
+        logical_manifest_count: u64,
+        physical_data_object_count: u64,
+    ) {
+        self.pending_pack_manifest_count = pending_pack_manifest_count;
+        self.packed_range_count = packed_range_count;
+        self.logical_manifest_count = logical_manifest_count;
+        self.physical_data_object_count = physical_data_object_count;
+    }
+
+    pub(crate) fn set_retention_authorized(&mut self, authorized: bool) {
+        self.retention_authorized = authorized;
+    }
+
+    pub(crate) fn set_last_scrub_at_micros(&mut self, value: i64) {
+        self.last_scrub_at_micros = Some(value);
+    }
+
+    pub(crate) fn set_last_pack_index_at_micros(&mut self, value: i64) {
+        self.last_pack_index_at_micros = Some(value);
+    }
+
+    pub(crate) fn set_last_pack_data_at_micros(&mut self, value: i64) {
+        self.last_pack_data_at_micros = Some(value);
+    }
+
+    pub(crate) fn set_last_retention_at_micros(&mut self, value: i64) {
+        self.last_retention_at_micros = Some(value);
+    }
+
+    pub(crate) fn degrade(&mut self, health: CaptureHealth, reason_code: &'static str) {
+        let next = worse_health(self.health, health);
+        if next != self.health || self.reason_code.is_none() {
+            self.health = next;
+            if next != CaptureHealth::Green {
+                self.reason_code = Some(reason_code.to_owned());
+            }
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), StatusError> {
+        if let Some(reason) = &self.reason_code {
+            validate_reason_code(reason)?;
+        }
+        if (self.health == CaptureHealth::Green) != self.reason_code.is_none() {
+            return Err(StatusError::InvalidField);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub const fn kill_switch(&self) -> bool {
+        self.kill_switch
+    }
+
+    #[must_use]
+    pub const fn health(&self) -> CaptureHealth {
+        self.health
+    }
+
+    #[must_use]
+    pub fn reason_code(&self) -> Option<&str> {
+        self.reason_code.as_deref()
+    }
+
+    #[must_use]
+    pub const fn pending_pack_manifest_count(&self) -> u64 {
+        self.pending_pack_manifest_count
+    }
+
+    #[must_use]
+    pub const fn packed_range_count(&self) -> u64 {
+        self.packed_range_count
+    }
+
+    #[must_use]
+    pub const fn logical_manifest_count(&self) -> u64 {
+        self.logical_manifest_count
+    }
+
+    #[must_use]
+    pub const fn physical_data_object_count(&self) -> u64 {
+        self.physical_data_object_count
+    }
+
+    #[must_use]
+    pub const fn last_scrub_at_micros(&self) -> Option<i64> {
+        self.last_scrub_at_micros
+    }
+
+    #[must_use]
+    pub const fn last_pack_index_at_micros(&self) -> Option<i64> {
+        self.last_pack_index_at_micros
+    }
+
+    #[must_use]
+    pub const fn last_pack_data_at_micros(&self) -> Option<i64> {
+        self.last_pack_data_at_micros
+    }
+
+    #[must_use]
+    pub const fn last_retention_at_micros(&self) -> Option<i64> {
+        self.last_retention_at_micros
+    }
+
+    #[must_use]
+    pub const fn retention_authorized(&self) -> bool {
+        self.retention_authorized
+    }
+}
+
+const fn worse_health(left: CaptureHealth, right: CaptureHealth) -> CaptureHealth {
+    match (left, right) {
+        (CaptureHealth::Red, _) | (_, CaptureHealth::Red) => CaptureHealth::Red,
+        (CaptureHealth::Yellow, _) | (_, CaptureHealth::Yellow) => CaptureHealth::Yellow,
+        (CaptureHealth::Green, CaptureHealth::Green) => CaptureHealth::Green,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureStatus {
     schema_version: String,
     snapshot_at_micros: i64,
@@ -351,6 +521,8 @@ pub struct CaptureStatus {
     last_error_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     auxiliary_sources: Vec<AuxiliarySourceStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maintenance: Option<CaptureMaintenanceStatus>,
 }
 
 impl CaptureStatus {
@@ -381,6 +553,7 @@ impl CaptureStatus {
             archive_manifest_id: None,
             last_error_reason: None,
             auxiliary_sources: Vec::new(),
+            maintenance: None,
         }
     }
 
@@ -451,6 +624,17 @@ impl CaptureStatus {
     }
 
     #[must_use]
+    pub fn with_maintenance(mut self, maintenance: Option<CaptureMaintenanceStatus>) -> Self {
+        self.maintenance = maintenance;
+        self
+    }
+
+    #[must_use]
+    pub const fn maintenance(&self) -> Option<&CaptureMaintenanceStatus> {
+        self.maintenance.as_ref()
+    }
+
+    #[must_use]
     pub fn into_terminal(
         mut self,
         snapshot_at: KnownTime,
@@ -490,6 +674,9 @@ impl CaptureStatus {
                 return Err(StatusError::InvalidField);
             }
             previous = Some(source.source_id());
+        }
+        if let Some(maintenance) = &self.maintenance {
+            maintenance.validate()?;
         }
         if self
             .disk_free_basis_points

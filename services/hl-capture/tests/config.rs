@@ -651,4 +651,70 @@ digest_confirmed_purge_workflow_configured = true
         hl_capture::RawArchiveFormat::V3
     );
     assert!(config.runtime().raw_v3().is_some());
+    assert!(config.runtime().raw_v3().unwrap().maintenance().enabled());
+}
+
+#[test]
+fn raw_v3_maintenance_rejects_zero_backup_receipt_and_invalid_limits() {
+    let valid_v3 = replace_once(
+        &valid_config(),
+        "disk_reserve_bytes = 10737418240",
+        "disk_reserve_bytes = 10737418240\nraw_archive_format = \"v3\"",
+    ) + r#"
+
+[runtime.raw_v3]
+maximum_records_per_second = 100
+minimum_group_records = 1
+maximum_group_delay_millis = 1000
+retention_horizon_seconds = 3600
+maximum_encoded_record_bytes = 1024
+maximum_uncompacted_commits = 1000
+maximum_eligible_bytes = 67108864
+maximum_eligible_inodes = 64
+raw_data_budget_bytes = 18446744073709551615
+metadata_budget_bytes = 18446744073709551615
+total_storage_budget_bytes = 18446744073709551615
+inode_budget = 18446744073709551615
+digest_confirmed_purge_workflow_configured = true
+
+[runtime.raw_v3.maintenance]
+backup_receipt_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+"#;
+    assert_eq!(
+        CaptureConfig::from_toml(&valid_v3)
+            .expect_err("zero backup receipt")
+            .reason_code(),
+        "capture_config.invalid_raw_v3_maintenance"
+    );
+
+    let invalid_interval = replace_once(
+        &valid_config(),
+        "disk_reserve_bytes = 10737418240",
+        "disk_reserve_bytes = 10737418240\nraw_archive_format = \"v3\"",
+    ) + r#"
+
+[runtime.raw_v3]
+maximum_records_per_second = 100
+minimum_group_records = 1
+maximum_group_delay_millis = 1000
+retention_horizon_seconds = 3600
+maximum_encoded_record_bytes = 1024
+maximum_uncompacted_commits = 1000
+maximum_eligible_bytes = 67108864
+maximum_eligible_inodes = 64
+raw_data_budget_bytes = 18446744073709551615
+metadata_budget_bytes = 18446744073709551615
+total_storage_budget_bytes = 18446744073709551615
+inode_budget = 18446744073709551615
+digest_confirmed_purge_workflow_configured = true
+
+[runtime.raw_v3.maintenance]
+interval_millis = 0
+"#;
+    assert_eq!(
+        CaptureConfig::from_toml(&invalid_interval)
+            .expect_err("zero interval")
+            .reason_code(),
+        "capture_config.invalid_raw_v3_maintenance"
+    );
 }

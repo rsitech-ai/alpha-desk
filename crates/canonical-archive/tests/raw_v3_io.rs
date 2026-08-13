@@ -286,6 +286,40 @@ fn pack_index_is_noop_when_the_active_journal_has_one_record() {
 }
 
 #[test]
+fn pending_uncompacted_leaves_exclude_packed_ranges() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_archive(temporary.path());
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive.append_batch(&batch(3, &[30], b"ef")).unwrap();
+    let pending = archive
+        .pending_uncompacted_logical_leaves(&chain, &source)
+        .unwrap();
+    assert_eq!(pending.len(), 3);
+    assert_eq!(pending[0].range().start().get(), 1);
+    assert_eq!(pending[2].range().end().get(), 3);
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let remaining = archive
+        .pending_uncompacted_logical_leaves(&chain, &source)
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].range().start().get(), 3);
+    assert_eq!(remaining[0].range().end().get(), 3);
+}
+
+#[test]
 fn pack_logical_range_replays_exact_rows_and_keeps_receipts() {
     let temporary = tempfile::tempdir().unwrap();
     let archive = open_archive(temporary.path());

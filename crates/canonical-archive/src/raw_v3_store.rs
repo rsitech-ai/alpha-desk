@@ -64,6 +64,24 @@ pub struct RawV3SourceInspection {
     statistics: storage_ports::RawArchiveMaintenanceStatistics,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncompactedLogicalLeafV3 {
+    range: LocalRecordSequenceRange,
+    partition: String,
+}
+
+impl UncompactedLogicalLeafV3 {
+    #[must_use]
+    pub const fn range(&self) -> LocalRecordSequenceRange {
+        self.range
+    }
+
+    #[must_use]
+    pub fn partition(&self) -> &str {
+        &self.partition
+    }
+}
+
 impl RawV3SourceInspection {
     #[must_use]
     pub const fn chain_id(&self) -> &ChainId {
@@ -147,9 +165,45 @@ impl RawV3Archive {
         Ok(inspections)
     }
 
+    pub fn list_sources(&self) -> Result<Vec<(ChainId, SourceId)>, ArchiveError> {
+        discover_v3_sources(self)
+    }
+
+    pub fn pending_uncompacted_logical_leaves(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+    ) -> Result<Vec<UncompactedLogicalLeafV3>, ArchiveError> {
+        let Some((root, journal_bytes)) = load_current_root(self, chain, source)? else {
+            return Ok(Vec::new());
+        };
+        let _lease = lease_root(self, chain, source, &root)?;
+        let packs = load_packs_for_tree(self, chain, source, root.sequence_root(), &journal_bytes)?;
+        let mut leaves = Vec::new();
+        walk_logical_leaves(root.sequence_root(), &journal_bytes, &packs, &mut |entry| {
+            if entry.storage().logical_manifest_sha256()?.is_none() {
+                return Ok(false);
+            }
+            leaves.push(UncompactedLogicalLeafV3 {
+                range: LocalRecordSequenceRange::try_new(
+                    LocalRecordSequence::try_new(entry.first_local_sequence())?,
+                    LocalRecordSequence::try_new(entry.last_local_sequence())?,
+                )?,
+                partition: entry.partition().to_owned(),
+            });
+            Ok(false)
+        })?;
+        Ok(leaves)
+    }
+
     #[must_use]
     pub const fn admission(&self) -> RawArchiveProductionCapacityAdmission {
         self.admission
+    }
+
+    #[must_use]
+    pub const fn workload(&self) -> RawArchiveWorkloadEnvelope {
+        self.workload
     }
 
     fn now(&self) -> Result<KnownTime, ArchiveError> {

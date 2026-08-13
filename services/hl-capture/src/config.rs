@@ -22,6 +22,13 @@ const MAX_RUNTIME_PATH_BYTES: usize = 4_096;
 const MAX_DISK_RESERVE_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 const MAX_NATS_SERVER_BYTES: usize = 2_048;
 const MAX_NATS_ACK_INFLIGHT: usize = 100_000;
+const MAX_MAINTENANCE_CYCLE_ITEMS: u64 = 1_024;
+const MAX_MAINTENANCE_TAIL_LEAVES: u64 = 1_000_000;
+const DEFAULT_MAINTENANCE_INTERVAL_MILLIS: u64 = 5_000;
+const DEFAULT_MAINTENANCE_PACK_RANGES: u64 = 4;
+const DEFAULT_MAINTENANCE_INDEX_PACKS: u64 = 16;
+const DEFAULT_MAINTENANCE_SCRUB_EVERY: u64 = 1;
+const DEFAULT_MAINTENANCE_TAIL_LEAVES: u64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -326,6 +333,8 @@ pub struct RawV3RuntimeConfig {
     total_storage_budget_bytes: u64,
     inode_budget: u64,
     digest_confirmed_purge_workflow_configured: bool,
+    #[serde(default)]
+    maintenance: RawV3MaintenanceConfig,
 }
 
 impl RawV3RuntimeConfig {
@@ -335,6 +344,7 @@ impl RawV3RuntimeConfig {
         if !self.digest_confirmed_purge_workflow_configured {
             return Err(ConfigError::InvalidRawV3Capacity);
         }
+        self.maintenance.validate()?;
         Ok(())
     }
 
@@ -362,6 +372,141 @@ impl RawV3RuntimeConfig {
         )
         .map_err(|_| ConfigError::InvalidRawV3Capacity)
     }
+
+    #[must_use]
+    pub const fn maintenance(&self) -> &RawV3MaintenanceConfig {
+        &self.maintenance
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RawV3MaintenanceConfig {
+    enabled: bool,
+    interval_millis: u64,
+    max_pack_ranges_per_cycle: u64,
+    max_index_packs_per_cycle: u64,
+    scrub_every_cycles: u64,
+    keep_uncompacted_tail_leaves: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kill_switch_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_receipt_sha256: Option<String>,
+}
+
+impl Default for RawV3MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_millis: DEFAULT_MAINTENANCE_INTERVAL_MILLIS,
+            max_pack_ranges_per_cycle: DEFAULT_MAINTENANCE_PACK_RANGES,
+            max_index_packs_per_cycle: DEFAULT_MAINTENANCE_INDEX_PACKS,
+            scrub_every_cycles: DEFAULT_MAINTENANCE_SCRUB_EVERY,
+            keep_uncompacted_tail_leaves: DEFAULT_MAINTENANCE_TAIL_LEAVES,
+            kill_switch_path: None,
+            backup_receipt_sha256: None,
+        }
+    }
+}
+
+impl RawV3MaintenanceConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(&self.interval_millis)
+            || !(1..=MAX_MAINTENANCE_CYCLE_ITEMS).contains(&self.max_pack_ranges_per_cycle)
+            || !(1..=MAX_MAINTENANCE_CYCLE_ITEMS).contains(&self.max_index_packs_per_cycle)
+            || !(1..=MAX_MAINTENANCE_CYCLE_ITEMS).contains(&self.scrub_every_cycles)
+            || self.keep_uncompacted_tail_leaves > MAX_MAINTENANCE_TAIL_LEAVES
+        {
+            return Err(ConfigError::InvalidRawV3Maintenance);
+        }
+        if let Some(path) = &self.kill_switch_path {
+            validate_runtime_path(path)?;
+        }
+        if self.backup_receipt().is_err() {
+            return Err(ConfigError::InvalidRawV3Maintenance);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub const fn interval_millis(&self) -> u64 {
+        self.interval_millis
+    }
+
+    #[must_use]
+    pub const fn max_pack_ranges_per_cycle(&self) -> u64 {
+        self.max_pack_ranges_per_cycle
+    }
+
+    #[must_use]
+    pub const fn max_index_packs_per_cycle(&self) -> u64 {
+        self.max_index_packs_per_cycle
+    }
+
+    #[must_use]
+    pub const fn scrub_every_cycles(&self) -> u64 {
+        self.scrub_every_cycles
+    }
+
+    #[must_use]
+    pub const fn keep_uncompacted_tail_leaves(&self) -> u64 {
+        self.keep_uncompacted_tail_leaves
+    }
+
+    #[must_use]
+    pub fn kill_switch_path(&self) -> Option<&Path> {
+        self.kill_switch_path.as_deref()
+    }
+
+    pub fn backup_receipt(&self) -> Result<Option<[u8; 32]>, ConfigError> {
+        parse_backup_receipt(self.backup_receipt_sha256.as_deref())
+    }
+
+    pub fn with_keep_uncompacted_tail_leaves(mut self, value: u64) -> Result<Self, ConfigError> {
+        self.keep_uncompacted_tail_leaves = value;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_kill_switch_path(mut self, path: Option<PathBuf>) -> Result<Self, ConfigError> {
+        self.kill_switch_path = path;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_backup_receipt_sha256(
+        mut self,
+        value: Option<String>,
+    ) -> Result<Self, ConfigError> {
+        self.backup_receipt_sha256 = value;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_interval_millis(mut self, value: u64) -> Result<Self, ConfigError> {
+        self.interval_millis = value;
+        self.validate()?;
+        Ok(self)
+    }
+}
+
+fn parse_backup_receipt(value: Option<&str>) -> Result<Option<[u8; 32]>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let decoded = hex::decode(value).map_err(|_| ConfigError::InvalidRawV3Maintenance)?;
+    let receipt: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| ConfigError::InvalidRawV3Maintenance)?;
+    if receipt == [0; 32] {
+        return Err(ConfigError::InvalidRawV3Maintenance);
+    }
+    Ok(Some(receipt))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -674,6 +819,8 @@ pub enum ConfigError {
     UnexpectedRawV3Capacity,
     #[error("raw V3 capture capacity admission is invalid")]
     InvalidRawV3Capacity,
+    #[error("raw V3 capture maintenance configuration is invalid")]
+    InvalidRawV3Maintenance,
     #[error("validated capture configuration could not be serialized")]
     Serialization,
 }
@@ -718,6 +865,7 @@ impl ConfigError {
             Self::MissingRawV3Capacity => "capture_config.missing_raw_v3_capacity",
             Self::UnexpectedRawV3Capacity => "capture_config.unexpected_raw_v3_capacity",
             Self::InvalidRawV3Capacity => "capture_config.invalid_raw_v3_capacity",
+            Self::InvalidRawV3Maintenance => "capture_config.invalid_raw_v3_maintenance",
             Self::Serialization => "capture_config.serialization",
         }
     }
