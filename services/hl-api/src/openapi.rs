@@ -1,5 +1,5 @@
 /// Checked-in OpenAPI document generated from the health proto JSON fields,
-/// capture-status v4 required keys, fail-closed query budgets, and the HTTP
+/// capture-status v4/v5 required keys, fail-closed query budgets, and the HTTP
 /// router. This is not a production authentication, availability, or SLO
 /// contract.
 pub fn openapi_yaml() -> &'static str {

@@ -148,7 +148,9 @@ async fn versioned_reads_serve_validated_fixtures_and_reject_invalid_snapshots()
     assert_eq!(body["schema_version"], "hl.capture.status.v4");
     assert_eq!(body["health"], "green");
     assert_eq!(body["pending_blocks"], 0);
+    assert!(body.get("maintenance").is_none());
     assert!(body.get("fills").is_none());
+    assert!(body.get("qualification").is_none());
 
     let (status, body) = call(&state, "/readyz", &[]).await;
     assert_eq!(status, 200);
@@ -168,6 +170,54 @@ async fn versioned_reads_serve_validated_fixtures_and_reject_invalid_snapshots()
 
     let (status, body) = call(&state, "/v1/capture/status", &[]).await;
     assert_eq!(status, 503);
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+fn copy_api_fixture(directory: &Path, name: &str) -> std::path::PathBuf {
+    let destination = directory.join(name);
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/api")
+            .join(name),
+        &destination,
+    )
+    .unwrap_or_else(|error| panic!("copy fixture {name}: {error}"));
+    destination
+}
+
+#[tokio::test]
+async fn capture_status_serves_v5_maintenance_and_rejects_v4_smuggled_maintenance() {
+    let directory = tempdir().expect("temporary directory");
+    let v5_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let state = state_from(directory.path(), "loopback-dev", None, None, Some(&v5_path));
+
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+    assert_eq!(body["maintenance"]["enabled"], true);
+    assert_eq!(body["maintenance"]["retention_authorized"], false);
+    assert_eq!(
+        body["auxiliary_sources"][0]["restart_reconstruction"],
+        "complete"
+    );
+    assert_eq!(body["auxiliary_sources"][0]["qualification"], "unqualified");
+    assert!(body.get("fills").is_none());
+
+    let smuggled = copy_api_fixture(
+        directory.path(),
+        "capture-status-v4-smuggled-maintenance.json",
+    );
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&smuggled),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
     assert_eq!(body["reason_code"], "snapshot_invalid");
 }
 
@@ -259,6 +309,7 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     }
     assert!(document.contains("HEALTH_STATE_GREEN"));
     assert!(document.contains("hl.capture.status.v4"));
+    assert!(document.contains("hl.capture.status.v5"));
     assert!(document.contains("501"));
     assert!(document.contains("query_budget_exceeded"));
     assert!(document.contains("429"));

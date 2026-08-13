@@ -7,8 +7,25 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 pub const HEALTH_SCHEMA_VERSION: &str = "hl.health.v1";
-pub const CAPTURE_STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v4";
+pub const CAPTURE_STATUS_SCHEMA_V4: &str = "hl.capture.status.v4";
+pub const CAPTURE_STATUS_SCHEMA_V5: &str = "hl.capture.status.v5";
 const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024;
+
+const MAINTENANCE_FIELDS: &[&str] = &[
+    "enabled",
+    "kill_switch",
+    "health",
+    "reason_code",
+    "pending_pack_manifest_count",
+    "packed_range_count",
+    "logical_manifest_count",
+    "physical_data_object_count",
+    "last_scrub_at_micros",
+    "last_pack_index_at_micros",
+    "last_pack_data_at_micros",
+    "last_retention_at_micros",
+    "retention_authorized",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SnapshotError {
@@ -24,6 +41,22 @@ impl SnapshotError {
         match self {
             Self::Missing => "snapshot_missing",
             Self::Invalid => "snapshot_invalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStatusSchema {
+    V4,
+    V5,
+}
+
+impl CaptureStatusSchema {
+    fn parse(value: &str) -> Result<Self, SnapshotError> {
+        match value {
+            CAPTURE_STATUS_SCHEMA_V4 => Ok(Self::V4),
+            CAPTURE_STATUS_SCHEMA_V5 => Ok(Self::V5),
+            _ => Err(SnapshotError::Invalid),
         }
     }
 }
@@ -66,14 +99,19 @@ pub fn load_capture_status(path: Option<&Path>) -> Result<Value, SnapshotError> 
         return Err(SnapshotError::Missing);
     };
     let bytes = read_bounded(path)?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| SnapshotError::Invalid)?;
+    parse_capture_status_bytes(&bytes)
+}
+
+fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| SnapshotError::Invalid)?;
     reject_lossy_numbers(&value)?;
     let object = value.as_object().ok_or(SnapshotError::Invalid)?;
-    require_string(
-        object,
-        "schema_version",
-        Some(CAPTURE_STATUS_SCHEMA_VERSION),
-    )?;
+    require_string(object, "schema_version", None)?;
+    let schema = object
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or(SnapshotError::Invalid)
+        .and_then(CaptureStatusSchema::parse)?;
     require_non_negative_int(object, "snapshot_at_micros")?;
     require_string(object, "build_id", None)?;
     require_string(object, "chain_id", None)?;
@@ -82,6 +120,14 @@ pub fn load_capture_status(path: Option<&Path>) -> Result<Value, SnapshotError> 
     require_string(object, "active_committed_source", None)?;
     require_string(object, "primary_source_health", None)?;
     require_non_negative_int(object, "pending_blocks")?;
+    match schema {
+        CaptureStatusSchema::V4 => {
+            if object.contains_key("maintenance") {
+                return Err(SnapshotError::Invalid);
+            }
+        }
+        CaptureStatusSchema::V5 => require_maintenance(object)?,
+    }
     Ok(value)
 }
 
@@ -102,6 +148,49 @@ fn reject_lossy_numbers(value: &Value) -> Result<(), SnapshotError> {
         Value::Object(fields) => fields.values().try_for_each(reject_lossy_numbers),
         _ => Ok(()),
     }
+}
+
+fn require_maintenance(object: &Map<String, Value>) -> Result<(), SnapshotError> {
+    let Some(Value::Object(maintenance)) = object.get("maintenance") else {
+        return Err(SnapshotError::Invalid);
+    };
+    if maintenance
+        .keys()
+        .any(|key| !MAINTENANCE_FIELDS.contains(&key.as_str()))
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    require_bool(maintenance, "enabled")?;
+    require_bool(maintenance, "kill_switch")?;
+    require_enum(maintenance, "health", &["green", "yellow", "red"])?;
+    require_non_negative_int(maintenance, "pending_pack_manifest_count")?;
+    require_non_negative_int(maintenance, "packed_range_count")?;
+    require_non_negative_int(maintenance, "logical_manifest_count")?;
+    require_non_negative_int(maintenance, "physical_data_object_count")?;
+    require_bool(maintenance, "retention_authorized")?;
+    for field in [
+        "last_scrub_at_micros",
+        "last_pack_index_at_micros",
+        "last_pack_data_at_micros",
+        "last_retention_at_micros",
+    ] {
+        if maintenance.contains_key(field) {
+            require_non_negative_int(maintenance, field)?;
+        }
+    }
+    let health = maintenance
+        .get("health")
+        .and_then(Value::as_str)
+        .ok_or(SnapshotError::Invalid)?;
+    let reason = match maintenance.get("reason_code") {
+        None => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.as_str()),
+        _ => return Err(SnapshotError::Invalid),
+    };
+    if (health == "green") != reason.is_none() {
+        return Err(SnapshotError::Invalid);
+    }
+    Ok(())
 }
 
 fn require_string(
@@ -148,5 +237,70 @@ fn require_non_negative_int(object: &Map<String, Value>, field: &str) -> Result<
             Ok(())
         }
         _ => Err(SnapshotError::Invalid),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SnapshotError, parse_capture_status_bytes};
+    use std::path::Path;
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/api")
+                .join(name),
+        )
+        .unwrap_or_else(|error| panic!("read fixture {name}: {error}"))
+    }
+
+    #[test]
+    fn v4_inactive_fixture_is_accepted_without_maintenance() {
+        let value = parse_capture_status_bytes(&fixture("capture-status.json")).expect("v4");
+        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert!(value.get("maintenance").is_none());
+        assert!(value.get("fills").is_none());
+        assert!(value.get("qualification").is_none());
+    }
+
+    #[test]
+    fn v5_fixture_returns_maintenance_without_inventing_fills() {
+        let value = parse_capture_status_bytes(&fixture("capture-status-v5.json")).expect("v5");
+        assert_eq!(value["schema_version"], "hl.capture.status.v5");
+        assert_eq!(value["maintenance"]["enabled"], true);
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+        assert_eq!(
+            value["auxiliary_sources"][0]["restart_reconstruction"],
+            "complete"
+        );
+        assert!(value.get("fills").is_none());
+        assert!(value.get("qualification").is_none());
+    }
+
+    #[test]
+    fn v4_fixture_that_smuggles_maintenance_is_rejected() {
+        let error =
+            parse_capture_status_bytes(&fixture("capture-status-v4-smuggled-maintenance.json"))
+                .expect_err("v4 must reject smuggled maintenance");
+        assert_eq!(error, SnapshotError::Invalid);
+    }
+
+    #[test]
+    fn v5_without_maintenance_and_unknown_schema_are_rejected() {
+        let mut v5 = serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+            .expect("v4 json");
+        v5["schema_version"] = serde_json::json!("hl.capture.status.v5");
+        let bytes = serde_json::to_vec(&v5).expect("encode");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes).expect_err("v5 requires maintenance"),
+            SnapshotError::Invalid
+        );
+
+        v5["schema_version"] = serde_json::json!("hl.capture.status.v6");
+        let bytes = serde_json::to_vec(&v5).expect("encode");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes).expect_err("unknown schema"),
+            SnapshotError::Invalid
+        );
     }
 }

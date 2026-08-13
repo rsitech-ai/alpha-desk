@@ -4,7 +4,7 @@ info:
   version: "0.1.0"
   description: >
     Read-only local REST surface generated from hl.health.v1,
-    hl.capture.status.v4, and the fail-closed HTTP router.
+    hl.capture.status.v4, hl.capture.status.v5, and the fail-closed HTTP router.
     Query row, timeout, and concurrency budgets are loaded from
     api-query-budgets.toml and reject oversized queries with typed 400/429.
     hl.stream.v1 defines CanonicalEventBatch with next_cursor but does not
@@ -73,7 +73,7 @@ paths:
         - $ref: "#/components/parameters/Limit"
       responses:
         "200":
-          description: Validated hl.capture.status.v4 snapshot
+          description: Validated hl.capture.status.v4 or hl.capture.status.v5 snapshot
           content:
             application/json:
               schema:
@@ -202,7 +202,9 @@ components:
       properties:
         schema_version:
           type: string
-          const: hl.capture.status.v4
+          enum:
+            - hl.capture.status.v4
+            - hl.capture.status.v5
         snapshot_at_micros:
           type: integer
           minimum: 0
@@ -225,6 +227,11 @@ components:
         pending_blocks:
           type: integer
           minimum: 0
+        maintenance:
+          type: object
+          description: >
+            Required on hl.capture.status.v5 and omitted on v4.
+            V4 documents that smuggle this field are rejected.
     ApiError:
       type: object
       additionalProperties: false

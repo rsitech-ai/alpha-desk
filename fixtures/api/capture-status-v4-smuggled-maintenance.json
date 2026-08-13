@@ -1,0 +1,21 @@
+{
+  "schema_version": "hl.capture.status.v4",
+  "snapshot_at_micros": 1,
+  "build_id": "synthetic-api-fixture",
+  "chain_id": "mainnet",
+  "health": "green",
+  "ready": true,
+  "active_committed_source": "locally-verified-committed",
+  "primary_source_health": "healthy",
+  "pending_blocks": 0,
+  "maintenance": {
+    "enabled": true,
+    "kill_switch": false,
+    "health": "green",
+    "pending_pack_manifest_count": 0,
+    "packed_range_count": 0,
+    "logical_manifest_count": 0,
+    "physical_data_object_count": 0,
+    "retention_authorized": false
+  }
+}
