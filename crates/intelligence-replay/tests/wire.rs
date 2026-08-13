@@ -450,6 +450,12 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
             .get(&market_intelligence::market_feature_key("book").unwrap()),
         Some(&FeatureValue::Missing(MissingReason::NotObserved))
     );
+    assert_eq!(
+        first.market_snapshots[0]
+            .values
+            .get(&market_intelligence::market_feature_key("inventory").unwrap()),
+        Some(&FeatureValue::Missing(MissingReason::NotObserved))
+    );
 }
 
 fn assert_accounts_unmerged(report: &IntelligenceReplayReport) {

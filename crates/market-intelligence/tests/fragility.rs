@@ -43,7 +43,11 @@ fn observed_snapshot() -> MarketFeatureSnapshot {
     )
 }
 
-fn snapshot_admitting(book: &SimulatedBook) -> MarketFeatureSnapshot {
+fn snapshot_admitting(
+    book: &SimulatedBook,
+    accounts: &[SimulatedAccount],
+) -> MarketFeatureSnapshot {
+    let inventory = account_inventory_value(accounts);
     if book.observation == ObservationStatus::Observed && book.health.state != HealthState::Red {
         market_snapshot_with_health(
             FeatureValue::Decimal {
@@ -51,11 +55,29 @@ fn snapshot_admitting(book: &SimulatedBook) -> MarketFeatureSnapshot {
                 scale: u32::from(book.executable_depth.scale()),
             },
             FeatureValue::Boolean(true),
+            inventory,
             book.health.clone(),
         )
     } else {
-        observed_snapshot()
+        market_snapshot_with_health(
+            FeatureValue::Decimal {
+                raw: 20_000 * 100_000_000,
+                scale: 8,
+            },
+            FeatureValue::Boolean(true),
+            inventory,
+            health(HealthState::Amber),
+        )
     }
+}
+
+fn account_inventory_value(accounts: &[SimulatedAccount]) -> FeatureValue {
+    if accounts.is_empty() {
+        return FeatureValue::Decimal { raw: 0, scale: 8 };
+    }
+    let scale = u32::from(accounts[0].notional.scale());
+    let raw: i128 = accounts.iter().map(|account| account.notional.raw()).sum();
+    FeatureValue::Decimal { raw, scale }
 }
 
 fn fragility_from_caller_book(
@@ -64,7 +86,7 @@ fn fragility_from_caller_book(
     book: &SimulatedBook,
     shock_bps: i64,
 ) -> Result<market_intelligence::FragilityResult, MarketError> {
-    let snapshot = snapshot_admitting(book);
+    let snapshot = snapshot_admitting(book, accounts);
     simulate_fragility(
         scenario,
         accounts,
@@ -81,7 +103,7 @@ fn simulate_bound_path(
     shock_bps: i64,
     bound_sign: i32,
 ) -> Result<market_intelligence::ScenarioPathResult, MarketError> {
-    let snapshot = snapshot_admitting(book);
+    let snapshot = snapshot_admitting(book, accounts);
     simulate_path(
         scenario,
         accounts,
@@ -183,12 +205,18 @@ fn portfolio_uncertainty_separates_low_and_high_paths() {
 }
 
 fn market_snapshot(book: FeatureValue, fills: FeatureValue) -> MarketFeatureSnapshot {
-    market_snapshot_with_health(book, fills, health(HealthState::Amber))
+    market_snapshot_with_health(
+        book,
+        fills,
+        FeatureValue::Boolean(true),
+        health(HealthState::Amber),
+    )
 }
 
 fn market_snapshot_with_health(
     book: FeatureValue,
     fills: FeatureValue,
+    inventory: FeatureValue,
     health: HealthAssessment,
 ) -> MarketFeatureSnapshot {
     let mut values = std::collections::BTreeMap::new();
@@ -198,6 +226,7 @@ fn market_snapshot_with_health(
     );
     values.insert(market_feature_key("book").unwrap(), book);
     values.insert(market_feature_key("fills").unwrap(), fills);
+    values.insert(market_feature_key("inventory").unwrap(), inventory);
     MarketFeatureSnapshot::try_new(
         MarketId::new("BTC").unwrap(),
         Horizon::MINUTES_5,
@@ -325,6 +354,10 @@ fn constructed_observed_book_without_fills_cannot_produce_path_scores() {
             scale: 8,
         },
         FeatureValue::Boolean(true),
+        FeatureValue::Decimal {
+            raw: 100 * 100_000_000,
+            scale: 8,
+        },
         matching_health.clone(),
     );
     let stolen_depth = other_depth.require_observed_book_and_fills().unwrap();
@@ -334,6 +367,90 @@ fn constructed_observed_book_without_fills_cannot_produce_path_scores() {
         Err(MarketError::Malformed {
             what: "book",
             reason: "observed book proof does not match simulated book depth",
+        })
+    ));
+}
+
+#[test]
+fn constructed_accounts_with_invented_inventory_cannot_produce_path_scores() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let book = book(20_000, HealthState::Green);
+    let missing_inventory = market_snapshot_with_health(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        FeatureValue::Missing(MissingReason::NotObserved),
+        health(HealthState::Green),
+    );
+    assert!(matches!(
+        missing_inventory.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "inventory" })
+    ));
+    assert!(matches!(
+        simulate_fragility_from_snapshot(&missing_inventory, &scenario, &accounts, -100),
+        Err(MarketError::MissingInput { name: "inventory" })
+    ));
+    let mismatched = market_snapshot_with_health(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        FeatureValue::Decimal {
+            raw: 100_000_000,
+            scale: 8,
+        },
+        health(HealthState::Green),
+    );
+    let stolen_inventory = mismatched.require_observed_book_and_fills().unwrap();
+    assert!(matches!(
+        simulate_path(&scenario, &accounts, &book, -100, 0, stolen_inventory),
+        Err(MarketError::Malformed {
+            what: "inventory",
+            reason: "observed inventory proof does not match caller inventory",
+        })
+    ));
+}
+
+#[test]
+fn constructed_accounts_with_invented_inventory_cannot_produce_fragility_scores() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let book = book(20_000, HealthState::Green);
+    let missing_inventory = market_snapshot_with_health(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        FeatureValue::Missing(MissingReason::NotObserved),
+        health(HealthState::Green),
+    );
+    assert!(matches!(
+        simulate_fragility_from_snapshot(&missing_inventory, &scenario, &accounts, -100),
+        Err(MarketError::MissingInput { name: "inventory" })
+    ));
+    let mismatched = market_snapshot_with_health(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        FeatureValue::Decimal {
+            raw: 9_999 * 100_000_000,
+            scale: 8,
+        },
+        health(HealthState::Green),
+    );
+    let stolen_inventory = mismatched.require_observed_book_and_fills().unwrap();
+    assert!(matches!(
+        simulate_fragility(&scenario, &accounts, &book, -100, stolen_inventory),
+        Err(MarketError::Malformed {
+            what: "inventory",
+            reason: "observed inventory proof does not match caller inventory",
         })
     ));
 }

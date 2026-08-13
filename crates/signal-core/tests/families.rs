@@ -64,6 +64,10 @@ fn green_values(
         market_feature_key("fills").unwrap(),
         FeatureValue::Boolean(true),
     );
+    values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Boolean(true),
+    );
     values
 }
 
@@ -145,6 +149,13 @@ fn fragility(red_book: bool, unsupported: bool) -> FragilityResult {
             FeatureValue::Decimal {
                 raw: depth.raw(),
                 scale: u32::from(depth.scale()),
+            },
+        );
+        values.insert(
+            market_feature_key("inventory").unwrap(),
+            FeatureValue::Decimal {
+                raw: account.notional.raw(),
+                scale: u32::from(account.notional.scale()),
             },
         );
         MarketFeatureSnapshot::try_new(

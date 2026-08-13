@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use domain_types::{
     BlockHeight, ClosedInterval, Decimal, FeatureSetVersion, Horizon, KnownTime, MarketId,
-    ProbabilityPpm, ProtocolTime,
+    ProbabilityPpm, ProtocolTime, UsdAmount,
 };
 use feature_core::{
     EvidenceRef, FeatureKey, FeatureValue, HealthAssessment, HealthState, MissingReason,
@@ -255,28 +255,42 @@ impl MarketFeatureSnapshot {
                 return Err(MarketError::MissingInput { name: "fills" });
             }
         }
+        match self.observation("inventory")? {
+            ObservationStatus::Observed => {}
+            ObservationStatus::Missing(_) => {
+                return Err(MarketError::MissingInput { name: "inventory" });
+            }
+        }
         let book_key = market_feature_key("book")?;
         let book = self
             .values
             .get(&book_key)
             .ok_or(MarketError::MissingInput { name: "book" })?;
+        let inventory_key = market_feature_key("inventory")?;
+        let inventory = self
+            .values
+            .get(&inventory_key)
+            .ok_or(MarketError::MissingInput { name: "inventory" })?;
         Ok(ObservedBookAndFills {
             health: &self.health,
             book,
+            inventory,
         })
     }
 }
 
-/// Proof that book and fills were observed on a market snapshot.
+/// Proof that book, fills, and inventory were observed on a market snapshot.
 ///
 /// Callers cannot construct this value; only
 /// [`MarketFeatureSnapshot::require_observed_book_and_fills`] issues it.
-/// The proof carries the issuing snapshot's health and book value so a
-/// constructed book cannot ride a token from another snapshot.
+/// The proof carries the issuing snapshot's health, book value, and inventory
+/// so a constructed book or caller-invented account inventory cannot ride a
+/// token from another snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedBookAndFills<'a> {
     health: &'a HealthAssessment,
     book: &'a FeatureValue,
+    inventory: &'a FeatureValue,
 }
 
 impl ObservedBookAndFills<'_> {
@@ -288,6 +302,43 @@ impl ObservedBookAndFills<'_> {
     #[must_use]
     pub(crate) fn book_value(&self) -> &FeatureValue {
         self.book
+    }
+
+    pub(crate) fn require_matches_inventory(
+        &self,
+        inventory: UsdAmount,
+    ) -> Result<(), MarketError> {
+        let observed = observed_usd_amount(
+            self.inventory,
+            "inventory",
+            "observed inventory must be decimal",
+        )?;
+        if observed != inventory {
+            return Err(MarketError::Malformed {
+                what: "inventory",
+                reason: "observed inventory proof does not match caller inventory",
+            });
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn observed_usd_amount(
+    value: &FeatureValue,
+    name: &'static str,
+    reason: &'static str,
+) -> Result<UsdAmount, MarketError> {
+    match value {
+        FeatureValue::Decimal { raw, scale } => {
+            let scale = u8::try_from(*scale).map_err(|_| MarketError::OutOfRange)?;
+            Ok(UsdAmount::from_raw(*raw, scale)?)
+        }
+        FeatureValue::Missing(_) => Err(MarketError::MissingInput { name }),
+        FeatureValue::SignedInteger(_)
+        | FeatureValue::UnsignedInteger(_)
+        | FeatureValue::ProbabilityPpm(_)
+        | FeatureValue::Category(_)
+        | FeatureValue::Boolean(_) => Err(MarketError::Malformed { what: name, reason }),
     }
 }
 

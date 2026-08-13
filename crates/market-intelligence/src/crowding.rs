@@ -45,7 +45,8 @@ pub fn crowding_components_from_snapshot(
 }
 
 /// Crowding components from caller marks. Marks are admitted only with
-/// [`ObservedBookAndFills`] issued after book and fills are observed.
+/// [`ObservedBookAndFills`] issued after book, fills, and inventory are
+/// observed. Caller exposure must match the observed inventory proof.
 pub fn crowding_components(
     positions: &[CrowdingPosition],
     remaining_capacity: UsdAmount,
@@ -61,6 +62,7 @@ pub fn crowding_components(
             reason: "capacity must be non-negative",
         });
     }
+    evidence.require_matches_inventory(caller_mark_inventory(positions)?)?;
     let mut independent = 0_u64;
     let mut follower = 0_u64;
     let mut post = 0_u64;
@@ -201,6 +203,24 @@ pub fn crowding_components(
             health,
         )?,
     })
+}
+
+fn caller_mark_inventory(positions: &[CrowdingPosition]) -> Result<UsdAmount, MarketError> {
+    let scale = positions[0].exposure.scale();
+    positions
+        .iter()
+        .try_fold(UsdAmount::from_raw(0, scale)?, |acc, position| {
+            if position.exposure.scale() != scale {
+                Err(MarketError::ScaleMismatch)
+            } else if position.exposure.raw() < 0 {
+                Err(MarketError::Malformed {
+                    what: "crowding",
+                    reason: "exposure must be non-negative",
+                })
+            } else {
+                acc.checked_add(position.exposure).map_err(Into::into)
+            }
+        })
 }
 
 fn herfindahl(positions: &[CrowdingPosition]) -> Result<u32, MarketError> {
