@@ -2,9 +2,11 @@
 
 use std::{ffi::OsString, path::Path, process::ExitCode};
 
-use archive_inspect::{InspectError, count, verify};
+use archive_inspect::{
+    InspectError, V3InspectSummary, count, health_v3, scrub_v3, stats_v3, verify,
+};
 
-const USAGE: &str = "usage: archive-inspect <verify|count> <archive-root>";
+const USAGE: &str = "usage: archive-inspect <verify|count|scrub|stats|health> <archive-root>";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -48,9 +50,37 @@ async fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
                 summary.canonical_objects()
             );
         }
+        Some("scrub") => {
+            let summary = scrub_v3(root)?;
+            print_v3_summary("scrub", &summary);
+        }
+        Some("stats") => {
+            let summary = stats_v3(root)?;
+            print_v3_summary("stats", &summary);
+        }
+        Some("health") => {
+            let summary = health_v3(root)?;
+            print_v3_summary("health", &summary);
+        }
         _ => return Err(CliError::Usage),
     }
     Ok(())
+}
+
+fn print_v3_summary(command: &str, summary: &V3InspectSummary) {
+    let mut logical_manifests = 0_u64;
+    let mut packed_ranges = 0_u64;
+    let mut logical_rows = 0_u64;
+    for source in summary.sources() {
+        logical_manifests =
+            logical_manifests.saturating_add(source.scrub().logical_manifest_count());
+        packed_ranges = packed_ranges.saturating_add(source.scrub().packed_range_count());
+        logical_rows = logical_rows.saturating_add(source.statistics().logical_row_count());
+    }
+    println!(
+        "PASS command={command} sources={} logical_manifests={logical_manifests} packed_ranges={packed_ranges} logical_rows={logical_rows}",
+        summary.sources().len()
+    );
 }
 
 #[derive(Debug, thiserror::Error)]

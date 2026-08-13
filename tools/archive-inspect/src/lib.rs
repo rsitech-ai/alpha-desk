@@ -2,9 +2,12 @@
 
 use std::path::Path;
 
-use canonical_archive::{ArchiveConfig, ArchiveDataset, ArchiveInspection, LocalParquetArchive};
+use canonical_archive::{
+    ArchiveConfig, ArchiveDataset, ArchiveInspection, LocalParquetArchive, RawV3Archive,
+    RawV3SourceInspection,
+};
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
-use storage_ports::ArchiveError;
+use storage_ports::{ArchiveError, RawArchiveCapacityBudgets, RawArchiveWorkloadEnvelope};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationSummary {
@@ -33,6 +36,18 @@ impl CountSummary {
     #[must_use]
     pub const fn canonical_objects(&self) -> u64 {
         self.canonical_objects
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V3InspectSummary {
+    sources: Vec<RawV3SourceInspection>,
+}
+
+impl V3InspectSummary {
+    #[must_use]
+    pub fn sources(&self) -> &[RawV3SourceInspection] {
+        &self.sources
     }
 }
 
@@ -83,9 +98,48 @@ pub async fn count(root: impl AsRef<Path>) -> Result<CountSummary, InspectError>
     })
 }
 
+pub fn scrub_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    inspect_v3(root)
+}
+
+pub fn stats_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    inspect_v3(root)
+}
+
+pub fn health_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    inspect_v3(root)
+}
+
+fn inspect_v3(root: impl AsRef<Path>) -> Result<V3InspectSummary, InspectError> {
+    let archive = open_v3(root.as_ref())?;
+    let sources = archive.inspect_sources()?;
+    if sources.is_empty() {
+        return Err(InspectError::EmptyArchive);
+    }
+    Ok(V3InspectSummary { sources })
+}
+
 fn open(root: &Path) -> Result<LocalParquetArchive, InspectError> {
     let config = ArchiveConfig::production("archive-inspect-v1")?;
     LocalParquetArchive::open(root, config).map_err(InspectError::from)
+}
+
+fn open_v3(root: &Path) -> Result<RawV3Archive, InspectError> {
+    let config = ArchiveConfig::production("archive-inspect-v3")?;
+    let workload = RawArchiveWorkloadEnvelope::try_new(
+        100,
+        1,
+        1_000,
+        3_600,
+        1_024,
+        1_000,
+        64 * 1024 * 1024,
+        64,
+    )
+    .map_err(ArchiveError::from)?;
+    let budgets = RawArchiveCapacityBudgets::try_new(u64::MAX, u64::MAX, u64::MAX, u64::MAX, true)
+        .map_err(ArchiveError::from)?;
+    RawV3Archive::open(root, config, workload, budgets).map_err(InspectError::from)
 }
 
 fn require_objects(inspection: &ArchiveInspection) -> Result<(), InspectError> {

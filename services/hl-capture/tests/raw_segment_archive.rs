@@ -441,3 +441,123 @@ async fn mixed_parser_dispositions_split_batches_without_breaking_local_sequence
         vec![1, 2, 3]
     );
 }
+
+fn generous_v3_capacity() -> (
+    storage_ports::RawArchiveWorkloadEnvelope,
+    storage_ports::RawArchiveCapacityBudgets,
+) {
+    (
+        storage_ports::RawArchiveWorkloadEnvelope::try_new(
+            100,
+            1,
+            1_000,
+            3_600,
+            1_024,
+            1_000,
+            64 * 1024 * 1024,
+            64,
+        )
+        .unwrap(),
+        storage_ports::RawArchiveCapacityBudgets::try_new(
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            true,
+        )
+        .unwrap(),
+    )
+}
+
+fn open_v3(path: &std::path::Path) -> std::sync::Arc<canonical_archive::RawV3Archive> {
+    let (workload, budgets) = generous_v3_capacity();
+    std::sync::Arc::new(
+        canonical_archive::RawV3Archive::open(
+            path,
+            ArchiveConfig::deterministic_fixture(
+                "raw-segment-v3-test",
+                domain_types::KnownTime::from_unix_micros(1_000).unwrap(),
+            )
+            .unwrap(),
+            workload,
+            budgets,
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn v3_byte_offset_segment_archives_and_open_scrubs() {
+    let root = TempDir::new().unwrap();
+    let archive_path = root.path().join("archive");
+    let archive = open_v3(&archive_path);
+    let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+    let archiver = BlockingRawSegmentArchive::new(raw_port);
+    let mut source_spool = byte_spool(&root);
+    for offset in [19, 47, 85] {
+        source_spool
+            .append(
+                &byte_observation(offset, 1_000),
+                i64::try_from(offset).unwrap(),
+            )
+            .unwrap();
+    }
+    let closed = source_spool.shutdown(200).unwrap().unwrap();
+
+    let summary = archiver
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(2),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(summary.observation_count(), 3);
+    assert_eq!(summary.batch_count(), 2);
+    let entries = summary.checkpoint_entries().unwrap().unwrap();
+    assert_eq!(entries.entries().len(), 2);
+
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let scrub = archive.scrub(&chain, &source).unwrap();
+    assert_eq!(scrub.logical_manifest_count(), 2);
+    drop(archive);
+
+    let reopened = open_v3(&archive_path);
+    let inspections = reopened.inspect_sources().unwrap();
+    assert_eq!(inspections.len(), 1);
+    assert_eq!(inspections[0].source_id().as_str(), "node-fills");
+    assert_eq!(inspections[0].scrub().logical_manifest_count(), 2);
+}
+
+#[tokio::test]
+async fn v3_archive_failure_before_publication_leaves_zero_receipts() {
+    let root = TempDir::new().unwrap();
+    let archive = open_v3(&root.path().join("archive"));
+    let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+    let archiver = BlockingRawSegmentArchive::new(raw_port);
+    let mut source_spool = byte_spool(&root);
+    source_spool
+        .append(&byte_observation(19, 1_000), 1_000)
+        .unwrap();
+    let closed = source_spool.shutdown(200).unwrap().unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(closed.segment_path())
+        .unwrap()
+        .write_all(b"mutation")
+        .unwrap();
+
+    let error = archiver
+        .archive_segment(
+            &ChainId::new("mainnet").unwrap(),
+            &closed,
+            archive_config(1024),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.reason_code(), "spool.segment_size_mismatch");
+    assert!(archive.inspect_sources().unwrap().is_empty());
+}

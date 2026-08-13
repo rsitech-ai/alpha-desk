@@ -518,10 +518,8 @@ pub(super) fn raw_record_batch_from_observations(
     chain_id: &ChainId,
     observations: &[SourceObservation],
 ) -> Result<RecordBatch, ArchiveError> {
-    let chain_ids = StringArray::from_iter_values(std::iter::repeat_n(
-        chain_id.as_str(),
-        observations.len(),
-    ));
+    let chain_ids =
+        StringArray::from_iter_values(std::iter::repeat_n(chain_id.as_str(), observations.len()));
     let source_ids =
         StringArray::from_iter_values(observations.iter().map(|value| value.source_id().as_str()));
     let versions =

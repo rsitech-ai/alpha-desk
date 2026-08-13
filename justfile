@@ -54,6 +54,9 @@ archive-verify path="fixtures/archive/valid-v1":
 archive-count path="fixtures/archive/valid-v1":
     cargo +1.97.1 run -p archive-inspect --locked --offline -- count {{quote(path)}}
 
+archive-scrub path="fixtures/archive/valid-v1":
+    cargo +1.97.1 run -p archive-inspect --locked --offline -- scrub {{quote(path)}}
+
 spool-fuzz seconds="60":
     cargo +nightly-2026-07-16 fuzz run spool_segment fixtures/spool/valid-v1 -- -max_total_time={{quote(seconds)}}
 

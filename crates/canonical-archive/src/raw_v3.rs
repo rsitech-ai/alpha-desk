@@ -4577,9 +4577,16 @@ mod tests {
         }
         assert_eq!(root.depth(), 1);
         let old = journal.commit_prefix(&root).unwrap();
-        let (pack, packed_leaves) =
-            pack_journal_leaves(chain.clone(), source.clone(), 1, &root, old.bytes(), &empty, &[])
-                .unwrap();
+        let (pack, packed_leaves) = pack_journal_leaves(
+            chain.clone(),
+            source.clone(),
+            1,
+            &root,
+            old.bytes(),
+            &empty,
+            &[],
+        )
+        .unwrap();
         assert_eq!(packed_leaves.len(), 2);
         let mut packs = IndexPackBytes::new();
         packs.insert(pack.object_sha256(), pack.bytes().to_vec());
