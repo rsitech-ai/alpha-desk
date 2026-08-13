@@ -150,10 +150,7 @@ pub fn run_maintenance_cycle<P: DiskSpaceProbe>(
 ) -> MaintenanceCycleReport {
     let mut status = CaptureMaintenanceStatus::idle(config.enabled(), false);
     let backup_receipt = match config.backup_receipt() {
-        Ok(receipt) => {
-            status.set_retention_authorized(receipt.is_some());
-            receipt
-        }
+        Ok(receipt) => receipt,
         Err(_) => {
             status.degrade(
                 CaptureHealth::Red,
@@ -165,7 +162,6 @@ pub fn run_maintenance_cycle<P: DiskSpaceProbe>(
     match kill_switch_latched(config.kill_switch_path()) {
         Ok(true) => {
             status = CaptureMaintenanceStatus::idle(config.enabled(), true);
-            status.set_retention_authorized(backup_receipt.is_some());
             collect_statistics(archive, &mut status);
             return MaintenanceCycleReport { status };
         }
@@ -317,7 +313,20 @@ fn apply_retention(
         return;
     };
     let plan = match archive.plan_packed_object_gc(chain, source, backup_receipt) {
-        Ok(plan) => plan,
+        Ok(plan) => {
+            status.set_retention_authorized(true);
+            plan
+        }
+        Err(ArchiveError::ManifestVerification(
+            "GC backup receipt artifact is missing or invalid"
+            | "backup receipt does not bind this archive root",
+        )) => {
+            status.degrade(
+                CaptureHealth::Yellow,
+                "capture_maintenance.retention_unauthorized",
+            );
+            return;
+        }
         Err(error) => {
             status.degrade(CaptureHealth::Yellow, maintenance_archive_reason(&error));
             return;

@@ -24,8 +24,10 @@ shutdown_grace_millis = 15000
 disk_reserve_bytes = 10737418240
 # Default raw_archive_format is v2 (legacy contiguous + byte-offset V2).
 # Set raw_archive_format = "v3" and a [runtime.raw_v3] capacity table to attach RawV3Archive.
-# V3 also starts an owned packing/scrub/retention task; GC still fail-closes without
-# [runtime.raw_v3.maintenance] backup_receipt_sha256. This is not 24-hour soak evidence.
+# V3 also starts an owned packing/scrub/retention task; GC still fail-closes without a
+# verified backup receipt artifact whose digest is configured as
+# [runtime.raw_v3.maintenance] backup_receipt_sha256. A typed hex token is not enough.
+# This is not 24-hour soak evidence.
 
 [spool]
 path = "state/capture-spool"

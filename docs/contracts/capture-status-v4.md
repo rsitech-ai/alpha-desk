@@ -92,3 +92,7 @@ publication formats are independently versioned and are not migrated by this
 change. A process starting over a V3, malformed, or foreign-build snapshot
 writes a fresh V4 snapshot for its own build and chain rather than trusting
 stale status state.
+
+Maintenance is not part of V4. Runtimes that expose maintenance write
+[`capture-status-v5.md`](capture-status-v5.md) instead of adding fields under
+this schema id.
