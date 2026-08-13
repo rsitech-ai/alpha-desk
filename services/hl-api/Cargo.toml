@@ -21,7 +21,7 @@ hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
 toml.workspace = true
 
 [dev-dependencies]

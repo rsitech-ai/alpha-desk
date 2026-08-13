@@ -1,5 +1,4 @@
 use std::fs;
-use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -183,14 +182,30 @@ impl QueryBudgets {
         self.try_acquire()
     }
 
+    /// Runs `work` on the blocking pool and fail-closes with [`BudgetError::Timeout`]
+    /// when it does not finish within `timeout_ms`.
+    ///
+    /// The deadline bounds the wait for a result. It does not interrupt in-flight
+    /// `std` I/O: the blocking task keeps running, and its concurrency permit is
+    /// held until `work` returns.
     pub async fn execute<F, T>(&self, query: Option<&str>, work: F) -> Result<T, BudgetError>
     where
-        F: Future<Output = T>,
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
     {
-        let _permit = self.check_and_acquire(query)?;
-        tokio::time::timeout(self.timeout, work)
-            .await
-            .map_err(|_| BudgetError::Timeout)
+        let permit = self.check_and_acquire(query)?;
+        let join = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        });
+        match tokio::time::timeout(self.timeout, join).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(join_error)) => match join_error.try_into_panic() {
+                Ok(payload) => std::panic::resume_unwind(payload),
+                Err(_) => Err(BudgetError::Timeout),
+            },
+            Err(_) => Err(BudgetError::Timeout),
+        }
     }
 }
 
@@ -226,6 +241,8 @@ fn requested_rows(query: Option<&str>) -> Result<Option<u32>, BudgetError> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{BudgetError, QueryBudgets};
 
     fn budgets() -> QueryBudgets {
@@ -298,5 +315,24 @@ mod tests {
         )
         .expect_err("zero max_rows");
         assert_eq!(error, super::BudgetLoadError::Invalid);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_work_is_abandoned_at_timeout() {
+        let started = Instant::now();
+        let error = budgets()
+            .execute(None, || {
+                std::thread::sleep(Duration::from_millis(400));
+                1_u8
+            })
+            .await
+            .expect_err("blocking work must not outlive timeout_ms");
+        assert_eq!(error, BudgetError::Timeout);
+        assert_eq!(error.status().as_u16(), 429);
+        assert_eq!(error.reason_code(), "query.timeout");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "timeout must not wait for the blocking sleep to finish"
+        );
     }
 }

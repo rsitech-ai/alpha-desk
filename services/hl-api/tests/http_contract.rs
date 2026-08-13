@@ -68,13 +68,13 @@ fn state_from(
     AppState::from_config(ApiConfig::from_path(&config_path).expect("config"))
 }
 
-fn call(state: &AppState, path: &str, headers: &[(&str, &str)]) -> (u16, Value) {
+async fn call(state: &AppState, path: &str, headers: &[(&str, &str)]) -> (u16, Value) {
     let mut builder = Request::builder().method("GET").uri(path);
     for (name, value) in headers {
         builder = builder.header(*name, *value);
     }
     let request = builder.body(Bytes::new()).expect("request");
-    let (status, body) = state.handle(request);
+    let (status, body) = state.handle(request).await;
     let value = if body.is_empty() {
         Value::Null
     } else {
@@ -84,19 +84,19 @@ fn call(state: &AppState, path: &str, headers: &[(&str, &str)]) -> (u16, Value) 
     (status.as_u16(), value)
 }
 
-#[test]
-fn healthz_returns_proto_health_without_inventing_canonical_data() {
+#[tokio::test]
+async fn healthz_returns_proto_health_without_inventing_canonical_data() {
     let directory = tempdir().expect("temporary directory");
     let state = state_from(directory.path(), "loopback-dev", None, None, None);
 
-    let (status, body) = call(&state, "/healthz", &[]);
+    let (status, body) = call(&state, "/healthz", &[]).await;
     assert_eq!(status, 200);
     assert_eq!(body["schema_version"], "hl.health.v1");
     assert_eq!(body["scope"], "api:process");
     assert_eq!(body["state"], "HEALTH_STATE_GREEN");
     assert_eq!(body["reason_code"], "healthy");
 
-    let (status, body) = call(&state, "/v1/health", &[]);
+    let (status, body) = call(&state, "/v1/health", &[]).await;
     assert_eq!(status, 503);
     assert_eq!(body["schema_version"], "hl.api.error.v1");
     assert_eq!(body["code"], "data_unavailable");
@@ -104,18 +104,18 @@ fn healthz_returns_proto_health_without_inventing_canonical_data() {
     assert!(body.get("state").is_none());
 }
 
-#[test]
-fn readyz_fail_closes_when_no_snapshots_are_configured() {
+#[tokio::test]
+async fn readyz_fail_closes_when_no_snapshots_are_configured() {
     let directory = tempdir().expect("temporary directory");
     let state = state_from(directory.path(), "loopback-dev", None, None, None);
-    let (status, body) = call(&state, "/readyz", &[]);
+    let (status, body) = call(&state, "/readyz", &[]).await;
     assert_eq!(status, 503);
     assert_eq!(body["state"], "HEALTH_STATE_RED");
     assert_eq!(body["reason_code"], "no_required_dependencies");
 }
 
-#[test]
-fn versioned_reads_serve_validated_fixtures_and_reject_invalid_snapshots() {
+#[tokio::test]
+async fn versioned_reads_serve_validated_fixtures_and_reject_invalid_snapshots() {
     let directory = tempdir().expect("temporary directory");
     let health_path = directory.path().join("canonical-health.json");
     let capture_path = directory.path().join("capture-status.json");
@@ -137,20 +137,20 @@ fn versioned_reads_serve_validated_fixtures_and_reject_invalid_snapshots() {
         Some(&capture_path),
     );
 
-    let (status, body) = call(&state, "/v1/health", &[]);
+    let (status, body) = call(&state, "/v1/health", &[]).await;
     assert_eq!(status, 200);
     assert_eq!(body["schema_version"], "hl.health.v1");
     assert_eq!(body["scope"], "canonical");
     assert_eq!(body["state"], "HEALTH_STATE_GREEN");
 
-    let (status, body) = call(&state, "/v1/capture/status", &[]);
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
     assert_eq!(status, 200);
     assert_eq!(body["schema_version"], "hl.capture.status.v4");
     assert_eq!(body["health"], "green");
     assert_eq!(body["pending_blocks"], 0);
     assert!(body.get("fills").is_none());
 
-    let (status, body) = call(&state, "/readyz", &[]);
+    let (status, body) = call(&state, "/readyz", &[]).await;
     assert_eq!(status, 200);
     assert_eq!(body["state"], "HEALTH_STATE_GREEN");
 
@@ -166,18 +166,18 @@ fn versioned_reads_serve_validated_fixtures_and_reject_invalid_snapshots() {
         .expect("write invalid snapshot");
     drop(invalid);
 
-    let (status, body) = call(&state, "/v1/capture/status", &[]);
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
     assert_eq!(status, 503);
     assert_eq!(body["reason_code"], "snapshot_invalid");
 }
 
-#[test]
-fn stream_paths_and_websocket_upgrades_are_typed_501() {
+#[tokio::test]
+async fn stream_paths_and_websocket_upgrades_are_typed_501() {
     let directory = tempdir().expect("temporary directory");
     let state = state_from(directory.path(), "loopback-dev", None, None, None);
 
     for path in ["/v1/stream", "/v1/stream/canonical-events"] {
-        let (status, body) = call(&state, path, &[]);
+        let (status, body) = call(&state, path, &[]).await;
         assert_eq!(status, 501);
         assert_eq!(body["schema_version"], "hl.api.error.v1");
         assert_eq!(body["code"], "not_implemented");
@@ -188,13 +188,14 @@ fn stream_paths_and_websocket_upgrades_are_typed_501() {
         &state,
         "/v1/stream",
         &[("Upgrade", "websocket"), ("Connection", "Upgrade")],
-    );
+    )
+    .await;
     assert_eq!(status, 501);
     assert_eq!(body["reason_code"], "stream.websocket_unspecified");
 }
 
-#[test]
-fn credential_mode_rejects_missing_bearer_and_accepts_a_matching_token() {
+#[tokio::test]
+async fn credential_mode_rejects_missing_bearer_and_accepts_a_matching_token() {
     let directory = tempdir().expect("temporary directory");
     let token_path = directory.path().join("token");
     std::fs::write(&token_path, "local-dev-token\n").expect("write token");
@@ -225,11 +226,11 @@ fn credential_mode_rejects_missing_bearer_and_accepts_a_matching_token() {
         AuthMode::Credential
     );
 
-    let (status, body) = call(&state, "/healthz", &[]);
+    let (status, body) = call(&state, "/healthz", &[]).await;
     assert_eq!(status, 200);
     assert_eq!(body["scope"], "api:process");
 
-    let (status, body) = call(&state, "/v1/health", &[]);
+    let (status, body) = call(&state, "/v1/health", &[]).await;
     assert_eq!(status, 401);
     assert_eq!(body["reason_code"], "auth.missing_bearer");
 
@@ -237,7 +238,8 @@ fn credential_mode_rejects_missing_bearer_and_accepts_a_matching_token() {
         &state,
         "/v1/health",
         &[("Authorization", "Bearer local-dev-token")],
-    );
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(body["scope"], "canonical");
 }
