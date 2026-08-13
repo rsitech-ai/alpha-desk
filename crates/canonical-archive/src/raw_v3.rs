@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 use storage_ports::{
     ArchiveError, RAW_ARCHIVE_MAXIMUM_DATA_PACK_BYTES,
     RAW_ARCHIVE_MAXIMUM_EMBEDDED_PACK_MANIFEST_BYTES, RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
-    RAW_ARCHIVE_MAXIMUM_PACK_LOGICAL_INPUTS, RAW_ARCHIVE_MAXIMUM_RELATIVE_PATH_BYTES,
-    RAW_ARCHIVE_MAXIMUM_SEQUENCE_PAGE_BYTES, RAW_ARCHIVE_MAXIMUM_SEQUENCE_TREE_DEPTH,
+    RAW_ARCHIVE_MAXIMUM_LOGICAL_MANIFEST_BYTES, RAW_ARCHIVE_MAXIMUM_PACK_LOGICAL_INPUTS,
+    RAW_ARCHIVE_MAXIMUM_RELATIVE_PATH_BYTES, RAW_ARCHIVE_MAXIMUM_SEQUENCE_PAGE_BYTES,
+    RAW_ARCHIVE_MAXIMUM_SEQUENCE_TREE_DEPTH,
 };
 
 use super::{fs, manifest, schema};
@@ -37,13 +38,21 @@ const JOURNAL_PREFIX_HASH_DOMAIN_V3: &[u8] =
     b"hyperliquid-alpha-desk:archive-raw-journal-prefix:v3\0";
 const JOURNAL_FRAME_MAGIC_V3: &[u8; 8] = b"HADJRV3\0";
 const JOURNAL_FRAME_HEADER_BYTES: u64 = 64;
-const MAX_SEQUENCE_LEAF_ENTRIES: usize = 256;
+pub(crate) const MAX_SEQUENCE_LEAF_ENTRIES: usize = 256;
 const MAX_SEQUENCE_INTERNAL_CHILDREN: usize = 256;
 const MAX_RECEIPT_HINT_ENTRIES: usize = 256;
 const MAX_INDEX_PACK_PAGES: usize = 4_096;
-const MAX_JOURNAL_RECORDS: u64 = 4_096;
-const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_JOURNAL_RECORDS: u64 = 4_096;
+pub(crate) const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TEXT_FIELD_BYTES: usize = 256;
+pub const RAW_LOGICAL_COMMIT_SCHEMA_V3: &str =
+    "hyperliquid-alpha-desk/archive-raw-logical-commit/v3";
+const LOGICAL_COMMIT_HASH_DOMAIN_V3: &[u8] =
+    b"hyperliquid-alpha-desk:archive-raw-logical-commit:v3\0";
+const RAW_V3_CURSOR_POLICY: &str = "monotonic-byte-offset";
+pub(crate) const RAW_V3_ROLLING_HASH_DOMAIN: &[u8] =
+    b"hyperliquid-alpha-desk/raw-rolling-content/v3";
+const RAW_V3_JOURNAL_FILE_IDENTITY_PREFIX: &str = "generation-";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +71,42 @@ pub struct JournalPrefixRefV3 {
     root_page_domain_sha256: String,
 }
 
+impl JournalPrefixRefV3 {
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn file_identity(&self) -> &str {
+        &self.file_identity
+    }
+
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    #[must_use]
+    pub const fn committed_prefix_length(&self) -> u64 {
+        self.committed_prefix_length
+    }
+
+    #[must_use]
+    pub const fn committed_record_count(&self) -> u64 {
+        self.committed_record_count
+    }
+
+    pub fn committed_prefix_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.committed_prefix_sha256)
+    }
+
+    #[must_use]
+    pub const fn root_record_sequence(&self) -> u64 {
+        self.root_record_sequence
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SequenceStorageRefV3 {
@@ -73,6 +118,28 @@ pub enum SequenceStorageRefV3 {
         pack_manifest_relative_path: String,
         pack_manifest_sha256: String,
     },
+}
+
+impl SequenceStorageRefV3 {
+    pub fn logical_manifest_sha256(&self) -> Result<Option<[u8; 32]>, ArchiveError> {
+        match self {
+            Self::Logical {
+                manifest_sha256, ..
+            } => manifest::parse_hash(manifest_sha256).map(Some),
+            Self::Packed { .. } => Ok(None),
+        }
+    }
+
+    #[must_use]
+    pub fn logical_manifest_relative_path(&self) -> Option<&str> {
+        match self {
+            Self::Logical {
+                manifest_relative_path,
+                ..
+            } => Some(manifest_relative_path),
+            Self::Packed { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -165,6 +232,36 @@ impl SequenceLeafEntryV3 {
     #[must_use]
     pub const fn logical_manifest_count(&self) -> u64 {
         self.logical_manifest_count
+    }
+
+    #[must_use]
+    pub const fn first_local_sequence(&self) -> u64 {
+        self.first_local_sequence
+    }
+
+    #[must_use]
+    pub const fn last_local_sequence(&self) -> u64 {
+        self.last_local_sequence
+    }
+
+    #[must_use]
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    #[must_use]
+    pub const fn object_size_bytes(&self) -> u64 {
+        self.object_size_bytes
+    }
+
+    #[must_use]
+    pub fn partition(&self) -> &str {
+        &self.partition
+    }
+
+    #[must_use]
+    pub const fn storage(&self) -> &SequenceStorageRefV3 {
+        &self.storage
     }
 }
 
@@ -595,6 +692,443 @@ impl BuiltIndexPackV3 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct LogicalObjectDescriptorV3 {
+    relative_path: String,
+    sha256: String,
+    size_bytes: u64,
+    row_count: u64,
+    schema_fingerprint_sha256: String,
+}
+
+impl LogicalObjectDescriptorV3 {
+    pub fn try_new(
+        relative_path: PathBuf,
+        sha256: [u8; 32],
+        size_bytes: u64,
+        row_count: u64,
+    ) -> Result<Self, ArchiveError> {
+        if size_bytes == 0 || row_count == 0 {
+            return Err(ArchiveError::InvalidInput(
+                "logical object size and row count must be nonzero",
+            ));
+        }
+        Ok(Self {
+            relative_path: checked_relative_string(&relative_path)?,
+            sha256: hex::encode(sha256),
+            size_bytes,
+            row_count,
+            schema_fingerprint_sha256: hex::encode(schema::raw_schema_fingerprint()?),
+        })
+    }
+
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    pub fn sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.sha256)
+    }
+
+    #[must_use]
+    pub const fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    #[must_use]
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalCommitDescriptorV3 {
+    chain_id: String,
+    source_id: String,
+    source_version: String,
+    observation_class: String,
+    cursor_policy: String,
+    cursor_epoch: String,
+    start_offset: u64,
+    end_offset: u64,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+    first_received_wall_micros: i64,
+    last_received_wall_micros: i64,
+    parser_schema_version: String,
+    spool_manifest_blake3: String,
+    spool_segment_blake3: String,
+    rolling_content_sha256: String,
+}
+
+impl LogicalCommitDescriptorV3 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        chain_id: ChainId,
+        source_id: SourceId,
+        source_version: impl Into<String>,
+        observation_class: impl Into<String>,
+        cursor_epoch: impl Into<String>,
+        start_offset: u64,
+        end_offset: u64,
+        first_local_sequence: u64,
+        last_local_sequence: u64,
+        first_received_wall_micros: i64,
+        last_received_wall_micros: i64,
+        parser_schema_version: impl Into<String>,
+        spool_manifest_blake3: [u8; 32],
+        spool_segment_blake3: [u8; 32],
+        rolling_content_sha256: [u8; 32],
+    ) -> Result<Self, ArchiveError> {
+        let source_version = source_version.into();
+        let observation_class = observation_class.into();
+        let cursor_epoch = cursor_epoch.into();
+        let parser_schema_version = parser_schema_version.into();
+        validate_text(&source_version, "logical commit source version")?;
+        validate_text(&observation_class, "logical commit observation class")?;
+        validate_text(&cursor_epoch, "logical commit cursor epoch")?;
+        validate_text(&parser_schema_version, "logical commit parser schema")?;
+        super::raw::parse_observation_class(&observation_class)?;
+        let row_count = sequence_span(first_local_sequence, last_local_sequence)?;
+        if start_offset > end_offset
+            || first_received_wall_micros < 0
+            || last_received_wall_micros < 0
+            || first_received_wall_micros > last_received_wall_micros
+            || row_count == 0
+        {
+            return Err(ArchiveError::InvalidInput(
+                "logical commit cursor, time, or sequence range",
+            ));
+        }
+        let first_partition = manifest::partition_for(first_received_wall_micros)?;
+        let last_partition = manifest::partition_for(last_received_wall_micros)?;
+        if first_partition != last_partition {
+            return Err(ArchiveError::InvalidInput(
+                "logical commit crosses an hour partition",
+            ));
+        }
+        Ok(Self {
+            chain_id: chain_id.as_str().to_owned(),
+            source_id: source_id.as_str().to_owned(),
+            source_version,
+            observation_class,
+            cursor_policy: RAW_V3_CURSOR_POLICY.to_owned(),
+            cursor_epoch,
+            start_offset,
+            end_offset,
+            first_local_sequence,
+            last_local_sequence,
+            first_received_wall_micros,
+            last_received_wall_micros,
+            parser_schema_version,
+            spool_manifest_blake3: hex::encode(spool_manifest_blake3),
+            spool_segment_blake3: hex::encode(spool_segment_blake3),
+            rolling_content_sha256: hex::encode(rolling_content_sha256),
+        })
+    }
+
+    pub fn chain_id(&self) -> Result<ChainId, ArchiveError> {
+        ChainId::new(self.chain_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid logical commit chain"))
+    }
+
+    pub fn source_id(&self) -> Result<SourceId, ArchiveError> {
+        SourceId::new(self.source_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid logical commit source"))
+    }
+
+    #[must_use]
+    pub const fn first_local_sequence(&self) -> u64 {
+        self.first_local_sequence
+    }
+
+    #[must_use]
+    pub const fn last_local_sequence(&self) -> u64 {
+        self.last_local_sequence
+    }
+
+    #[must_use]
+    pub fn cursor_epoch(&self) -> &str {
+        &self.cursor_epoch
+    }
+
+    #[must_use]
+    pub const fn start_offset(&self) -> u64 {
+        self.start_offset
+    }
+
+    #[must_use]
+    pub const fn end_offset(&self) -> u64 {
+        self.end_offset
+    }
+
+    pub fn rolling_content_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.rolling_content_sha256)
+    }
+
+    pub fn spool_manifest_blake3(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.spool_manifest_blake3)
+    }
+
+    pub fn spool_segment_blake3(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.spool_segment_blake3)
+    }
+
+    pub fn partition(&self) -> Result<String, ArchiveError> {
+        manifest::partition_for(self.first_received_wall_micros)
+    }
+
+    #[must_use]
+    pub fn source_version(&self) -> &str {
+        &self.source_version
+    }
+
+    #[must_use]
+    pub fn observation_class(&self) -> &str {
+        &self.observation_class
+    }
+
+    #[must_use]
+    pub fn parser_schema_version(&self) -> &str {
+        &self.parser_schema_version
+    }
+
+    #[must_use]
+    pub const fn first_received_wall_micros(&self) -> i64 {
+        self.first_received_wall_micros
+    }
+
+    #[must_use]
+    pub const fn last_received_wall_micros(&self) -> i64 {
+        self.last_received_wall_micros
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalCommitManifestV3 {
+    schema: String,
+    producer_build_id: String,
+    created_at_micros: i64,
+    commit: LogicalCommitDescriptorV3,
+    object: LogicalObjectDescriptorV3,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogicalCommitManifestWireV3 {
+    schema: String,
+    producer_build_id: String,
+    created_at_micros: i64,
+    commit: LogicalCommitDescriptorWireV3,
+    object: LogicalObjectDescriptorWireV3,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogicalCommitDescriptorWireV3 {
+    chain_id: String,
+    source_id: String,
+    source_version: String,
+    observation_class: String,
+    cursor_policy: String,
+    cursor_epoch: String,
+    start_offset: u64,
+    end_offset: u64,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+    first_received_wall_micros: i64,
+    last_received_wall_micros: i64,
+    parser_schema_version: String,
+    spool_manifest_blake3: String,
+    spool_segment_blake3: String,
+    rolling_content_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogicalObjectDescriptorWireV3 {
+    relative_path: String,
+    sha256: String,
+    size_bytes: u64,
+    row_count: u64,
+    schema_fingerprint_sha256: String,
+}
+
+impl LogicalCommitManifestV3 {
+    pub fn try_new(
+        producer_build_id: impl Into<String>,
+        created_at: KnownTime,
+        commit: LogicalCommitDescriptorV3,
+        object: LogicalObjectDescriptorV3,
+    ) -> Result<Self, ArchiveError> {
+        let producer_build_id = producer_build_id.into();
+        validate_text(&producer_build_id, "logical commit producer build ID")?;
+        let expected_rows = sequence_span(commit.first_local_sequence, commit.last_local_sequence)?;
+        if object.row_count != expected_rows
+            || object.schema_fingerprint_sha256 != hex::encode(schema::raw_schema_fingerprint()?)
+        {
+            return Err(ArchiveError::InvalidInput(
+                "logical commit object coverage or schema fingerprint",
+            ));
+        }
+        let expected_path = logical_object_relative_path(&commit, object.sha256()?)?;
+        if object.relative_path != expected_path {
+            return Err(ArchiveError::InvalidInput(
+                "logical commit object path is not content-addressed",
+            ));
+        }
+        Ok(Self {
+            schema: RAW_LOGICAL_COMMIT_SCHEMA_V3.to_owned(),
+            producer_build_id,
+            created_at_micros: created_at.unix_micros(),
+            commit,
+            object,
+        })
+    }
+
+    #[must_use]
+    pub const fn commit(&self) -> &LogicalCommitDescriptorV3 {
+        &self.commit
+    }
+
+    #[must_use]
+    pub const fn object(&self) -> &LogicalObjectDescriptorV3 {
+        &self.object
+    }
+
+    pub fn manifest_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        Ok(manifest::sha256(&manifest::canonical_json(self)?))
+    }
+
+    #[must_use]
+    pub const fn created_at_micros(&self) -> i64 {
+        self.created_at_micros
+    }
+}
+
+pub fn parse_logical_commit_manifest(
+    bytes: &[u8],
+) -> Result<LogicalCommitManifestV3, ArchiveError> {
+    let manifest_size = u64::try_from(bytes.len()).map_err(|_| {
+        ArchiveError::ManifestVerification("raw V3 logical commit exceeds address space")
+    })?;
+    if bytes.is_empty() || manifest_size > RAW_ARCHIVE_MAXIMUM_LOGICAL_MANIFEST_BYTES {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 logical commit size is invalid",
+        ));
+    }
+    let wire: LogicalCommitManifestWireV3 = serde_json::from_slice(bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 logical commit JSON"))?;
+    if wire.schema != RAW_LOGICAL_COMMIT_SCHEMA_V3
+        || wire.commit.cursor_policy != RAW_V3_CURSOR_POLICY
+        || KnownTime::from_unix_micros(wire.created_at_micros).is_err()
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 logical commit schema, cursor policy, or time is invalid",
+        ));
+    }
+    if wire.object.schema_fingerprint_sha256 != hex::encode(schema::raw_schema_fingerprint()?) {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 logical commit schema fingerprint is invalid",
+        ));
+    }
+    let commit = LogicalCommitDescriptorV3::try_new(
+        ChainId::new(wire.commit.chain_id).map_err(|_| {
+            ArchiveError::ManifestVerification("invalid raw V3 logical commit chain")
+        })?,
+        SourceId::new(wire.commit.source_id).map_err(|_| {
+            ArchiveError::ManifestVerification("invalid raw V3 logical commit source")
+        })?,
+        wire.commit.source_version,
+        wire.commit.observation_class,
+        wire.commit.cursor_epoch,
+        wire.commit.start_offset,
+        wire.commit.end_offset,
+        wire.commit.first_local_sequence,
+        wire.commit.last_local_sequence,
+        wire.commit.first_received_wall_micros,
+        wire.commit.last_received_wall_micros,
+        wire.commit.parser_schema_version,
+        manifest::parse_hash(&wire.commit.spool_manifest_blake3)?,
+        manifest::parse_hash(&wire.commit.spool_segment_blake3)?,
+        manifest::parse_hash(&wire.commit.rolling_content_sha256)?,
+    )?;
+    let object = LogicalObjectDescriptorV3::try_new(
+        PathBuf::from(wire.object.relative_path),
+        manifest::parse_hash(&wire.object.sha256)?,
+        wire.object.size_bytes,
+        wire.object.row_count,
+    )?;
+    let created_at = KnownTime::from_unix_micros(wire.created_at_micros)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 logical commit time"))?;
+    let reconstructed =
+        LogicalCommitManifestV3::try_new(wire.producer_build_id, created_at, commit, object)?;
+    if reconstructed.created_at_micros != wire.created_at_micros
+        || manifest::canonical_json(&reconstructed)? != bytes
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 logical commit canonical bytes are invalid",
+        ));
+    }
+    Ok(reconstructed)
+}
+
+pub fn logical_commit_domain_hash(
+    commit: &LogicalCommitManifestV3,
+) -> Result<[u8; 32], ArchiveError> {
+    domain_hash(
+        LOGICAL_COMMIT_HASH_DOMAIN_V3,
+        &manifest::canonical_json(commit)?,
+    )
+}
+
+pub(crate) fn logical_object_relative_path(
+    commit: &LogicalCommitDescriptorV3,
+    object_sha256: [u8; 32],
+) -> Result<String, ArchiveError> {
+    let chain = commit.chain_id()?;
+    let source = commit.source_id()?;
+    let partition = commit.partition()?;
+    let path = PathBuf::from(format!(
+        "chain={}",
+        manifest::encoded_component(chain.as_str())
+    ))
+    .join(format!("dataset={RAW_BYTE_DATASET_V3}"))
+    .join(format!(
+        "source={}",
+        manifest::encoded_component(source.as_str())
+    ))
+    .join(partition)
+    .join("objects")
+    .join(format!(
+        "epoch={}",
+        manifest::encoded_component(&commit.cursor_epoch)
+    ))
+    .join(format!(
+        "sequences={}-{}",
+        commit.first_local_sequence, commit.last_local_sequence
+    ))
+    .join(format!(
+        "offsets={}-{}",
+        commit.start_offset, commit.end_offset
+    ))
+    .join(format!("part-{}.parquet", hex::encode(object_sha256)));
+    checked_relative_string(&path)
+}
+
+pub(crate) fn journal_file_identity(generation: u64) -> Result<String, ArchiveError> {
+    if generation == 0 {
+        return Err(ArchiveError::InvalidInput(
+            "journal generation must be nonzero",
+        ));
+    }
+    Ok(format!("{RAW_V3_JOURNAL_FILE_IDENTITY_PREFIX}{generation}"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PackedLogicalInputV3 {
     original_schema: String,
     manifest_id: String,
@@ -646,6 +1180,49 @@ impl PackedLogicalInputV3 {
             start_offset: evidence.start_offset,
             end_offset: evidence.end_offset,
             rolling_content_sha256: hex::encode(evidence.rolling_content_sha256),
+        })
+    }
+
+    pub fn try_new_v3(
+        canonical_manifest_bytes: Vec<u8>,
+        manifest_sha256: [u8; 32],
+        row_slice_start: u64,
+    ) -> Result<Self, ArchiveError> {
+        if manifest::sha256(&canonical_manifest_bytes) != manifest_sha256 {
+            return Err(ArchiveError::ManifestVerification(
+                "packed raw V3 logical commit hash does not match canonical bytes",
+            ));
+        }
+        let commit = parse_logical_commit_manifest(&canonical_manifest_bytes)?;
+        let row_count = commit.object.row_count;
+        if row_slice_start.checked_add(row_count).is_none() {
+            return Err(ArchiveError::InvalidInput(
+                "packed logical row slice overflows",
+            ));
+        }
+        let canonical_manifest_json =
+            String::from_utf8(canonical_manifest_bytes).map_err(|_| {
+                ArchiveError::ManifestVerification("raw V3 logical commit is not UTF-8")
+            })?;
+        Ok(Self {
+            original_schema: "raw-v3".to_owned(),
+            manifest_id: super::manifest::manifest_id(manifest_sha256)?
+                .as_str()
+                .to_owned(),
+            canonical_manifest_json,
+            manifest_sha256: hex::encode(manifest_sha256),
+            chain_id: commit.commit.chain_id.clone(),
+            source_id: commit.commit.source_id.clone(),
+            partition: commit.commit.partition()?,
+            object_sha256: commit.object.sha256.clone(),
+            first_local_sequence: commit.commit.first_local_sequence,
+            last_local_sequence: commit.commit.last_local_sequence,
+            row_slice_start,
+            row_count,
+            cursor_epoch: commit.commit.cursor_epoch.clone(),
+            start_offset: commit.commit.start_offset,
+            end_offset: commit.commit.end_offset,
+            rolling_content_sha256: commit.commit.rolling_content_sha256.clone(),
         })
     }
 
@@ -952,6 +1529,484 @@ pub fn parse_sequence_leaf_page(bytes: &[u8]) -> Result<SequenceLeafPageV3, Arch
     Ok(page)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceNodeRefWireV3 {
+    chain_id: String,
+    source_id: String,
+    depth: u8,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+    row_count: u64,
+    logical_manifest_count: u64,
+    locator: SequencePageLocatorWireV3,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum SequencePageLocatorWireV3 {
+    Journal {
+        generation: u64,
+        file_identity: String,
+        record_sequence: u64,
+        payload_offset: u64,
+        payload_length: u64,
+        page_domain_sha256: String,
+    },
+    IndexPack {
+        pack_relative_path: String,
+        pack_sha256: String,
+        payload_offset: u64,
+        payload_length: u64,
+        page_domain_sha256: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceInternalPageWireV3 {
+    schema: String,
+    chain_id: String,
+    source_id: String,
+    dataset: String,
+    depth: u8,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+    row_count: u64,
+    logical_manifest_count: u64,
+    children: Vec<SequenceNodeRefWireV3>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptHintPageWireV3 {
+    schema: String,
+    chain_id: String,
+    source_id: String,
+    dataset: String,
+    authoritative: bool,
+    entries: Vec<ReceiptHintEntryWireV3>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptHintEntryWireV3 {
+    manifest_sha256: String,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootBundleWireV3 {
+    schema: String,
+    chain_id: String,
+    source_id: String,
+    dataset: String,
+    generation: u64,
+    created_at_micros: i64,
+    previous_root_sha256: Option<String>,
+    journal_prefix: JournalPrefixRefWireV3,
+    sequence_root: SequenceNodeRefWireV3,
+    head_local_sequence: u64,
+    logical_manifest_count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalPrefixRefWireV3 {
+    generation: u64,
+    file_identity: String,
+    relative_path: String,
+    committed_prefix_length: u64,
+    committed_record_count: u64,
+    committed_prefix_sha256: String,
+    root_record_sequence: u64,
+    root_first_local_sequence: u64,
+    root_last_local_sequence: u64,
+    root_row_count: u64,
+    root_logical_manifest_count: u64,
+    root_page_domain_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPackManifestWireV3 {
+    schema: String,
+    chain_id: String,
+    source_id: String,
+    dataset: String,
+    partition: String,
+    created_at_micros: i64,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+    logical_manifest_count: u64,
+    combined_rolling_content_sha256: String,
+    inputs: Vec<PackedLogicalInputWireV3>,
+    object: PackedObjectDescriptorWireV3,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackedLogicalInputWireV3 {
+    original_schema: String,
+    manifest_id: String,
+    canonical_manifest_json: String,
+    manifest_sha256: String,
+    chain_id: String,
+    source_id: String,
+    partition: String,
+    object_sha256: String,
+    first_local_sequence: u64,
+    last_local_sequence: u64,
+    row_slice_start: u64,
+    row_count: u64,
+    cursor_epoch: String,
+    start_offset: u64,
+    end_offset: u64,
+    rolling_content_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackedObjectDescriptorWireV3 {
+    relative_path: String,
+    sha256: String,
+    size_bytes: u64,
+    row_count: u64,
+    schema_fingerprint_sha256: String,
+}
+
+fn parse_sequence_page_locator(
+    wire: SequencePageLocatorWireV3,
+) -> Result<SequencePageLocatorV3, ArchiveError> {
+    match wire {
+        SequencePageLocatorWireV3::Journal {
+            generation,
+            file_identity,
+            record_sequence,
+            payload_offset,
+            payload_length,
+            page_domain_sha256,
+        } => SequencePageLocatorV3::journal(
+            generation,
+            &file_identity,
+            record_sequence,
+            payload_offset,
+            payload_length,
+            manifest::parse_hash(&page_domain_sha256)?,
+        ),
+        SequencePageLocatorWireV3::IndexPack {
+            pack_relative_path,
+            pack_sha256,
+            payload_offset,
+            payload_length,
+            page_domain_sha256,
+        } => {
+            let reconstructed = SequencePageLocatorV3::index_pack(
+                manifest::parse_hash(&pack_sha256)?,
+                payload_offset,
+                payload_length,
+                manifest::parse_hash(&page_domain_sha256)?,
+            )?;
+            let SequencePageLocatorV3::IndexPack {
+                pack_relative_path: expected_path,
+                ..
+            } = &reconstructed
+            else {
+                return Err(ArchiveError::ManifestVerification(
+                    "index-pack locator reconstruction failed",
+                ));
+            };
+            if expected_path != &pack_relative_path {
+                return Err(ArchiveError::ManifestVerification(
+                    "index-pack locator path is not content-addressed",
+                ));
+            }
+            Ok(reconstructed)
+        }
+    }
+}
+
+fn parse_sequence_node_ref(wire: SequenceNodeRefWireV3) -> Result<SequenceNodeRefV3, ArchiveError> {
+    let chain_id = ChainId::new(wire.chain_id)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid sequence node chain"))?;
+    let source_id = SourceId::new(wire.source_id)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid sequence node source"))?;
+    let expected_rows = sequence_span(wire.first_local_sequence, wire.last_local_sequence)?;
+    if wire.row_count != expected_rows
+        || wire.logical_manifest_count == 0
+        || wire.depth > RAW_ARCHIVE_MAXIMUM_SEQUENCE_TREE_DEPTH
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "sequence node coverage, count, or depth is invalid",
+        ));
+    }
+    Ok(SequenceNodeRefV3 {
+        chain_id: chain_id.as_str().to_owned(),
+        source_id: source_id.as_str().to_owned(),
+        depth: wire.depth,
+        first_local_sequence: wire.first_local_sequence,
+        last_local_sequence: wire.last_local_sequence,
+        row_count: wire.row_count,
+        logical_manifest_count: wire.logical_manifest_count,
+        locator: parse_sequence_page_locator(wire.locator)?,
+    })
+}
+
+pub fn parse_sequence_internal_page(bytes: &[u8]) -> Result<SequenceInternalPageV3, ArchiveError> {
+    let page_size = u64::try_from(bytes.len()).map_err(|_| {
+        ArchiveError::ManifestVerification("raw V3 sequence internal page too large")
+    })?;
+    if bytes.is_empty() || page_size > RAW_ARCHIVE_MAXIMUM_SEQUENCE_PAGE_BYTES {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 sequence internal page size is invalid",
+        ));
+    }
+    let wire: SequenceInternalPageWireV3 = serde_json::from_slice(bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 sequence internal JSON"))?;
+    if wire.schema != RAW_SEQUENCE_INTERNAL_SCHEMA_V3 || wire.dataset != RAW_BYTE_DATASET_V3 {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 sequence internal schema or dataset is invalid",
+        ));
+    }
+    let chain_id = ChainId::new(wire.chain_id).map_err(|_| {
+        ArchiveError::ManifestVerification("invalid raw V3 sequence internal chain")
+    })?;
+    let source_id = SourceId::new(wire.source_id).map_err(|_| {
+        ArchiveError::ManifestVerification("invalid raw V3 sequence internal source")
+    })?;
+    let mut children = Vec::with_capacity(wire.children.len().min(MAX_SEQUENCE_INTERNAL_CHILDREN));
+    for child in wire.children {
+        children.push(parse_sequence_node_ref(child)?);
+    }
+    let page = SequenceInternalPageV3::try_new(chain_id, source_id, wire.depth, children)?;
+    if page.first_local_sequence != wire.first_local_sequence
+        || page.last_local_sequence != wire.last_local_sequence
+        || page.row_count != wire.row_count
+        || page.logical_manifest_count != wire.logical_manifest_count
+        || manifest::canonical_json(&page)? != bytes
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 sequence internal aggregate or canonical bytes are invalid",
+        ));
+    }
+    Ok(page)
+}
+
+pub fn parse_receipt_hint_page(bytes: &[u8]) -> Result<ReceiptHintPageV3, ArchiveError> {
+    let page_size = u64::try_from(bytes.len())
+        .map_err(|_| ArchiveError::ManifestVerification("raw V3 receipt hint page too large"))?;
+    if bytes.is_empty() || page_size > RAW_ARCHIVE_MAXIMUM_SEQUENCE_PAGE_BYTES {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 receipt hint page size is invalid",
+        ));
+    }
+    let wire: ReceiptHintPageWireV3 = serde_json::from_slice(bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 receipt hint JSON"))?;
+    if wire.schema != RAW_RECEIPT_HINT_PAGE_SCHEMA_V3
+        || wire.dataset != RAW_BYTE_DATASET_V3
+        || wire.authoritative
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 receipt hint schema, dataset, or authority flag is invalid",
+        ));
+    }
+    let chain_id = ChainId::new(wire.chain_id)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 receipt hint chain"))?;
+    let source_id = SourceId::new(wire.source_id)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 receipt hint source"))?;
+    let mut entries = Vec::with_capacity(wire.entries.len().min(MAX_RECEIPT_HINT_ENTRIES));
+    for entry in wire.entries {
+        entries.push(ReceiptHintEntryV3::try_new(
+            manifest::parse_hash(&entry.manifest_sha256)?,
+            entry.first_local_sequence,
+            entry.last_local_sequence,
+        )?);
+    }
+    let page = ReceiptHintPageV3::try_new(chain_id, source_id, entries)?;
+    if manifest::canonical_json(&page)? != bytes {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 receipt hint canonical bytes are invalid",
+        ));
+    }
+    Ok(page)
+}
+
+pub fn parse_root_bundle(bytes: &[u8]) -> Result<RootBundleV3, ArchiveError> {
+    let wire: RootBundleWireV3 = serde_json::from_slice(bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 root bundle JSON"))?;
+    if wire.schema != RAW_ROOT_BUNDLE_SCHEMA_V3 || wire.dataset != RAW_BYTE_DATASET_V3 {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 root bundle schema or dataset is invalid",
+        ));
+    }
+    let created_at = KnownTime::from_unix_micros(wire.created_at_micros)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 root bundle time"))?;
+    let previous = wire
+        .previous_root_sha256
+        .as_deref()
+        .map(manifest::parse_hash)
+        .transpose()?;
+    let sequence_root = parse_sequence_node_ref(wire.sequence_root)?;
+    let journal_prefix = journal_prefix_from_wire(wire.journal_prefix, &sequence_root)?;
+    let reconstructed = RootBundleV3::from_prefix_and_root(
+        ChainId::new(wire.chain_id)
+            .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 root bundle chain"))?,
+        SourceId::new(wire.source_id)
+            .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 root bundle source"))?,
+        wire.generation,
+        previous,
+        &journal_prefix,
+        &sequence_root,
+        created_at,
+    )?;
+    if reconstructed.head_local_sequence != wire.head_local_sequence
+        || reconstructed.logical_manifest_count != wire.logical_manifest_count
+        || reconstructed.created_at_micros != wire.created_at_micros
+        || manifest::canonical_json(&reconstructed)? != bytes
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 root bundle aggregate or canonical bytes are invalid",
+        ));
+    }
+    Ok(reconstructed)
+}
+
+fn journal_prefix_from_wire(
+    wire: JournalPrefixRefWireV3,
+    root: &SequenceNodeRefV3,
+) -> Result<JournalPrefixRefV3, ArchiveError> {
+    validate_text(&wire.file_identity, "journal file identity")?;
+    let relative_path = checked_relative_string(Path::new(&wire.relative_path))?;
+    manifest::parse_hash(&wire.committed_prefix_sha256)?;
+    manifest::parse_hash(&wire.root_page_domain_sha256)?;
+    if wire.generation == 0
+        || wire.committed_prefix_length == 0
+        || wire.committed_record_count == 0
+        || wire.root_record_sequence == 0
+        || wire.root_record_sequence > wire.committed_record_count
+        || wire.root_first_local_sequence != 1
+        || wire.root_first_local_sequence != root.first_local_sequence
+        || wire.root_last_local_sequence != root.last_local_sequence
+        || wire.root_row_count != root.row_count
+        || wire.root_logical_manifest_count != root.logical_manifest_count
+        || wire.generation
+            != match &root.locator {
+                SequencePageLocatorV3::Journal { generation, .. } => *generation,
+                SequencePageLocatorV3::IndexPack { .. } => wire.generation,
+            }
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "journal prefix does not authenticate the sequence root",
+        ));
+    }
+    if let SequencePageLocatorV3::Journal {
+        file_identity,
+        page_domain_sha256,
+        ..
+    } = &root.locator
+        && (file_identity != &wire.file_identity
+            || page_domain_sha256 != &wire.root_page_domain_sha256)
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "journal prefix page identity does not match the sequence root",
+        ));
+    }
+    Ok(JournalPrefixRefV3 {
+        generation: wire.generation,
+        file_identity: wire.file_identity,
+        relative_path,
+        committed_prefix_length: wire.committed_prefix_length,
+        committed_record_count: wire.committed_record_count,
+        committed_prefix_sha256: wire.committed_prefix_sha256,
+        root_record_sequence: wire.root_record_sequence,
+        root_first_local_sequence: wire.root_first_local_sequence,
+        root_last_local_sequence: wire.root_last_local_sequence,
+        root_row_count: wire.root_row_count,
+        root_logical_manifest_count: wire.root_logical_manifest_count,
+        root_page_domain_sha256: wire.root_page_domain_sha256,
+    })
+}
+
+pub fn parse_pack_manifest(bytes: &[u8]) -> Result<RawPackManifestV3, ArchiveError> {
+    let wire: RawPackManifestWireV3 = serde_json::from_slice(bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 pack manifest JSON"))?;
+    if wire.schema != RAW_PACK_MANIFEST_SCHEMA_V3 || wire.dataset != RAW_BYTE_DATASET_V3 {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 pack schema or dataset is invalid",
+        ));
+    }
+    let created_at = KnownTime::from_unix_micros(wire.created_at_micros)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw V3 pack time"))?;
+    if wire.object.schema_fingerprint_sha256 != hex::encode(schema::raw_schema_fingerprint()?) {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 pack schema fingerprint is invalid",
+        ));
+    }
+    let object = PackedObjectDescriptorV3::try_new(
+        PathBuf::from(wire.object.relative_path),
+        manifest::parse_hash(&wire.object.sha256)?,
+        wire.object.size_bytes,
+        wire.object.row_count,
+    )?;
+    let mut inputs = Vec::with_capacity(wire.inputs.len());
+    for input in wire.inputs {
+        let manifest_bytes = input.canonical_manifest_json.into_bytes();
+        let manifest_sha256 = manifest::parse_hash(&input.manifest_sha256)?;
+        let reconstructed = match input.original_schema.as_str() {
+            "raw-v2" => PackedLogicalInputV3::try_new_v2(
+                manifest_bytes,
+                manifest_sha256,
+                input.row_slice_start,
+            )?,
+            "raw-v3" => PackedLogicalInputV3::try_new_v3(
+                manifest_bytes,
+                manifest_sha256,
+                input.row_slice_start,
+            )?,
+            _ => {
+                return Err(ArchiveError::ManifestVerification(
+                    "raw V3 pack input original schema is unsupported",
+                ));
+            }
+        };
+        if reconstructed.manifest_id != input.manifest_id
+            || reconstructed.chain_id != input.chain_id
+            || reconstructed.source_id != input.source_id
+            || reconstructed.partition != input.partition
+            || reconstructed.object_sha256 != input.object_sha256
+            || reconstructed.first_local_sequence != input.first_local_sequence
+            || reconstructed.last_local_sequence != input.last_local_sequence
+            || reconstructed.row_count != input.row_count
+            || reconstructed.cursor_epoch != input.cursor_epoch
+            || reconstructed.start_offset != input.start_offset
+            || reconstructed.end_offset != input.end_offset
+            || reconstructed.rolling_content_sha256 != input.rolling_content_sha256
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "raw V3 pack input is not derived from its embedded manifest",
+            ));
+        }
+        inputs.push(reconstructed);
+    }
+    let pack = RawPackManifestV3::try_new(inputs, object, created_at)?;
+    if pack.first_local_sequence != wire.first_local_sequence
+        || pack.last_local_sequence != wire.last_local_sequence
+        || pack.logical_manifest_count != wire.logical_manifest_count
+        || pack.combined_rolling_content_sha256 != wire.combined_rolling_content_sha256
+        || pack.chain_id != wire.chain_id
+        || pack.source_id != wire.source_id
+        || pack.partition != wire.partition
+        || manifest::canonical_json(&pack)? != bytes
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 pack aggregate or canonical bytes are invalid",
+        ));
+    }
+    Ok(pack)
+}
+
 impl SequenceLeafPageV3 {
     pub fn try_new(
         chain_id: ChainId,
@@ -1016,6 +2071,21 @@ impl SequenceLeafPageV3 {
     #[must_use]
     pub const fn row_count(&self) -> u64 {
         self.row_count
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[SequenceLeafEntryV3] {
+        &self.entries
+    }
+
+    pub fn chain_id(&self) -> Result<ChainId, ArchiveError> {
+        ChainId::new(self.chain_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid sequence leaf chain"))
+    }
+
+    pub fn source_id(&self) -> Result<SourceId, ArchiveError> {
+        SourceId::new(self.source_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid sequence leaf source"))
     }
 }
 
@@ -1131,6 +2201,41 @@ impl SequenceNodeRefV3 {
     #[must_use]
     pub const fn depth(&self) -> u8 {
         self.depth
+    }
+
+    #[must_use]
+    pub const fn first_local_sequence(&self) -> u64 {
+        self.first_local_sequence
+    }
+
+    #[must_use]
+    pub const fn last_local_sequence(&self) -> u64 {
+        self.last_local_sequence
+    }
+
+    #[must_use]
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    #[must_use]
+    pub const fn logical_manifest_count(&self) -> u64 {
+        self.logical_manifest_count
+    }
+
+    #[must_use]
+    pub const fn locator(&self) -> &SequencePageLocatorV3 {
+        &self.locator
+    }
+
+    pub fn chain_id(&self) -> Result<ChainId, ArchiveError> {
+        ChainId::new(self.chain_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid sequence node chain"))
+    }
+
+    pub fn source_id(&self) -> Result<SourceId, ArchiveError> {
+        SourceId::new(self.source_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid sequence node source"))
     }
 
     fn journal_commit_evidence(&self) -> Result<(u64, &str, u64, u64, u64, &str), ArchiveError> {
@@ -1263,6 +2368,21 @@ impl SequenceInternalPageV3 {
     pub const fn last_local_sequence(&self) -> u64 {
         self.last_local_sequence
     }
+
+    #[must_use]
+    pub fn children(&self) -> &[SequenceNodeRefV3] {
+        &self.children
+    }
+
+    pub fn chain_id(&self) -> Result<ChainId, ArchiveError> {
+        ChainId::new(self.chain_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid sequence internal chain"))
+    }
+
+    pub fn source_id(&self) -> Result<SourceId, ArchiveError> {
+        SourceId::new(self.source_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid sequence internal source"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1321,6 +2441,43 @@ impl JournalGenerationBuilderV3 {
             source_id: None,
             bytes: Vec::new(),
             record_count: 0,
+        })
+    }
+
+    pub fn try_resume(
+        generation: u64,
+        file_identity: impl Into<String>,
+        relative_path: PathBuf,
+        committed_prefix: Vec<u8>,
+        expected: &JournalPrefixRefV3,
+        chain_id: &str,
+        source_id: &str,
+    ) -> Result<Self, ArchiveError> {
+        let file_identity = file_identity.into();
+        validate_text(&file_identity, "journal file identity")?;
+        let relative_path = checked_relative_string(&relative_path)?;
+        let prefix_length = u64::try_from(committed_prefix.len())
+            .map_err(|_| ArchiveError::InvalidInput("journal prefix exceeds u64"))?;
+        if generation == 0
+            || generation != expected.generation
+            || file_identity != expected.file_identity
+            || relative_path != expected.relative_path
+            || prefix_length != expected.committed_prefix_length
+            || journal_prefix_hash(&committed_prefix)? != expected.committed_prefix_sha256()?
+            || count_journal_frames(&committed_prefix)? != expected.committed_record_count
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "journal prefix identity, bytes, or record count do not match the leased root",
+            ));
+        }
+        Ok(Self {
+            generation,
+            file_identity,
+            relative_path,
+            chain_id: Some(chain_id.to_owned()),
+            source_id: Some(source_id.to_owned()),
+            bytes: committed_prefix,
+            record_count: expected.committed_record_count,
         })
     }
 
@@ -1547,6 +2704,125 @@ impl JournalGenerationBuilderV3 {
     }
 }
 
+pub(crate) fn append_logical_entry(
+    journal: &mut JournalGenerationBuilderV3,
+    previous_root: Option<&SequenceNodeRefV3>,
+    chain_id: ChainId,
+    source_id: SourceId,
+    entry: SequenceLeafEntryV3,
+) -> Result<SequenceNodeRefV3, ArchiveError> {
+    match previous_root {
+        None => {
+            let page = SequenceLeafPageV3::try_new(chain_id, source_id, vec![entry])?;
+            journal.push_leaf(&page)
+        }
+        Some(node) => match cow_insert(journal, node, &chain_id, &source_id, entry)? {
+            CowInsert::Replace(root) => Ok(root),
+            CowInsert::Split { left, right } => {
+                if left.depth != right.depth {
+                    return Err(ArchiveError::InvalidInput(
+                        "sequence tree split produced mixed child depths",
+                    ));
+                }
+                let depth = left
+                    .depth
+                    .checked_add(1)
+                    .ok_or(ArchiveError::InvalidInput("sequence tree depth overflows"))?;
+                let page =
+                    SequenceInternalPageV3::try_new(chain_id, source_id, depth, vec![left, right])?;
+                journal.push_internal(&page)
+            }
+        },
+    }
+}
+
+enum CowInsert {
+    Replace(SequenceNodeRefV3),
+    Split {
+        left: SequenceNodeRefV3,
+        right: SequenceNodeRefV3,
+    },
+}
+
+fn cow_insert(
+    journal: &mut JournalGenerationBuilderV3,
+    node: &SequenceNodeRefV3,
+    chain_id: &ChainId,
+    source_id: &SourceId,
+    entry: SequenceLeafEntryV3,
+) -> Result<CowInsert, ArchiveError> {
+    let expected_next = node
+        .last_local_sequence
+        .checked_add(1)
+        .ok_or(ArchiveError::InvalidInput("local sequence overflows"))?;
+    if entry.first_local_sequence != expected_next {
+        return Err(ArchiveError::InvalidInput(
+            "logical commit does not extend the sequence head",
+        ));
+    }
+    if node.depth == 0 {
+        let page = load_sequence_leaf_from_journal(&journal.bytes, node)?;
+        if page.entries.len() < MAX_SEQUENCE_LEAF_ENTRIES {
+            let mut entries = page.entries.clone();
+            entries.push(entry);
+            let new_page =
+                SequenceLeafPageV3::try_new(chain_id.clone(), source_id.clone(), entries)?;
+            return Ok(CowInsert::Replace(journal.push_leaf(&new_page)?));
+        }
+        let new_page =
+            SequenceLeafPageV3::try_new(chain_id.clone(), source_id.clone(), vec![entry])?;
+        let right = journal.push_leaf(&new_page)?;
+        return Ok(CowInsert::Split {
+            left: node.clone(),
+            right,
+        });
+    }
+    let page = load_sequence_internal_from_journal(&journal.bytes, node)?;
+    let last = page
+        .children
+        .last()
+        .ok_or(ArchiveError::ManifestVerification(
+            "sequence internal page has no children",
+        ))?
+        .clone();
+    match cow_insert(journal, &last, chain_id, source_id, entry)? {
+        CowInsert::Replace(new_last) => {
+            let mut children = page.children.clone();
+            let last_index =
+                children
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(ArchiveError::ManifestVerification(
+                        "sequence internal page has no children",
+                    ))?;
+            children[last_index] = new_last;
+            let new_page = SequenceInternalPageV3::try_new(
+                chain_id.clone(),
+                source_id.clone(),
+                page.depth,
+                children,
+            )?;
+            Ok(CowInsert::Replace(journal.push_internal(&new_page)?))
+        }
+        CowInsert::Split { right, .. } => {
+            if page.children.len() >= MAX_SEQUENCE_INTERNAL_CHILDREN {
+                return Err(ArchiveError::InvalidInput(
+                    "sequence tree requires index packing before another append",
+                ));
+            }
+            let mut children = page.children.clone();
+            children.push(right);
+            let new_page = SequenceInternalPageV3::try_new(
+                chain_id.clone(),
+                source_id.clone(),
+                page.depth,
+                children,
+            )?;
+            Ok(CowInsert::Replace(journal.push_internal(&new_page)?))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootBundleV3 {
@@ -1572,23 +2848,41 @@ impl RootBundleV3 {
         journal_commit: &JournalCommitV3,
         created_at: KnownTime,
     ) -> Result<Self, ArchiveError> {
+        Self::from_prefix_and_root(
+            chain_id,
+            source_id,
+            generation,
+            previous_root_sha256,
+            &journal_commit.prefix,
+            &journal_commit.root,
+            created_at,
+        )
+    }
+
+    fn from_prefix_and_root(
+        chain_id: ChainId,
+        source_id: SourceId,
+        generation: u64,
+        previous_root_sha256: Option<[u8; 32]>,
+        journal_prefix: &JournalPrefixRefV3,
+        sequence_root: &SequenceNodeRefV3,
+        created_at: KnownTime,
+    ) -> Result<Self, ArchiveError> {
         if generation == 0
             || (generation == 1) != previous_root_sha256.is_none()
-            || journal_commit.root.chain_id != chain_id.as_str()
-            || journal_commit.root.source_id != source_id.as_str()
-            || journal_commit.prefix.root_first_local_sequence != 1
-            || journal_commit.prefix.root_last_local_sequence
-                != journal_commit.root.last_local_sequence
-            || journal_commit.prefix.root_row_count != journal_commit.root.row_count
-            || journal_commit.prefix.root_logical_manifest_count
-                != journal_commit.root.logical_manifest_count
+            || sequence_root.chain_id != chain_id.as_str()
+            || sequence_root.source_id != source_id.as_str()
+            || journal_prefix.root_first_local_sequence != 1
+            || journal_prefix.root_last_local_sequence != sequence_root.last_local_sequence
+            || journal_prefix.root_row_count != sequence_root.row_count
+            || journal_prefix.root_logical_manifest_count != sequence_root.logical_manifest_count
         {
             return Err(ArchiveError::InvalidInput(
                 "root generation, predecessor, journal, chain, or source",
             ));
         }
-        let head_local_sequence = journal_commit.root.last_local_sequence;
-        let logical_manifest_count = journal_commit.root.logical_manifest_count;
+        let head_local_sequence = sequence_root.last_local_sequence;
+        let logical_manifest_count = sequence_root.logical_manifest_count;
         Ok(Self {
             schema: RAW_ROOT_BUNDLE_SCHEMA_V3.to_owned(),
             chain_id: chain_id.as_str().to_owned(),
@@ -1597,8 +2891,8 @@ impl RootBundleV3 {
             generation,
             created_at_micros: created_at.unix_micros(),
             previous_root_sha256: previous_root_sha256.map(hex::encode),
-            journal_prefix: journal_commit.prefix.clone(),
-            sequence_root: journal_commit.root.clone(),
+            journal_prefix: journal_prefix.clone(),
+            sequence_root: sequence_root.clone(),
             head_local_sequence,
             logical_manifest_count,
         })
@@ -1612,6 +2906,38 @@ impl RootBundleV3 {
     #[must_use]
     pub const fn logical_manifest_count(&self) -> u64 {
         self.logical_manifest_count
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn previous_root_sha256(&self) -> Result<Option<[u8; 32]>, ArchiveError> {
+        self.previous_root_sha256
+            .as_deref()
+            .map(manifest::parse_hash)
+            .transpose()
+    }
+
+    #[must_use]
+    pub const fn journal_prefix(&self) -> &JournalPrefixRefV3 {
+        &self.journal_prefix
+    }
+
+    #[must_use]
+    pub const fn sequence_root(&self) -> &SequenceNodeRefV3 {
+        &self.sequence_root
+    }
+
+    pub fn chain_id(&self) -> Result<ChainId, ArchiveError> {
+        ChainId::new(self.chain_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid root bundle chain"))
+    }
+
+    pub fn source_id(&self) -> Result<SourceId, ArchiveError> {
+        SourceId::new(self.source_id.clone())
+            .map_err(|_| ArchiveError::ManifestVerification("invalid root bundle source"))
     }
 }
 
@@ -1658,6 +2984,165 @@ pub fn journal_prefix_hash(committed_prefix: &[u8]) -> Result<[u8; 32], ArchiveE
         ));
     }
     domain_hash(JOURNAL_PREFIX_HASH_DOMAIN_V3, committed_prefix)
+}
+
+pub(crate) fn journal_payload_bytes<'a>(
+    prefix: &'a [u8],
+    locator: &SequencePageLocatorV3,
+) -> Result<&'a [u8], ArchiveError> {
+    let SequencePageLocatorV3::Journal {
+        payload_offset,
+        payload_length,
+        page_domain_sha256,
+        ..
+    } = locator
+    else {
+        return Err(ArchiveError::ManifestVerification(
+            "sequence page is not journal-located",
+        ));
+    };
+    let start = usize::try_from(*payload_offset)
+        .map_err(|_| ArchiveError::ManifestVerification("journal payload exceeds address space"))?;
+    let end = usize::try_from(payload_offset.checked_add(*payload_length).ok_or(
+        ArchiveError::ManifestVerification("journal payload end overflows"),
+    )?)
+    .map_err(|_| ArchiveError::ManifestVerification("journal payload exceeds address space"))?;
+    let payload = prefix
+        .get(start..end)
+        .ok_or(ArchiveError::ManifestVerification(
+            "journal payload is outside the committed prefix",
+        ))?;
+    let expected = manifest::parse_hash(page_domain_sha256)?;
+    let actual = if parse_sequence_leaf_page(payload).is_ok() {
+        domain_hash(SEQUENCE_PAGE_HASH_DOMAIN_V3, payload)?
+    } else if parse_sequence_internal_page(payload).is_ok() {
+        domain_hash(SEQUENCE_INTERNAL_HASH_DOMAIN_V3, payload)?
+    } else {
+        return Err(ArchiveError::ManifestVerification(
+            "journal payload is not a valid sequence page",
+        ));
+    };
+    if actual != expected {
+        return Err(ArchiveError::ManifestVerification(
+            "journal payload hash does not authenticate the page",
+        ));
+    }
+    Ok(payload)
+}
+
+pub(crate) fn load_sequence_leaf_from_journal(
+    prefix: &[u8],
+    node: &SequenceNodeRefV3,
+) -> Result<SequenceLeafPageV3, ArchiveError> {
+    if node.depth != 0 {
+        return Err(ArchiveError::ManifestVerification(
+            "sequence node is not a leaf",
+        ));
+    }
+    let payload = journal_payload_bytes(prefix, &node.locator)?;
+    let page = parse_sequence_leaf_page(payload)?;
+    if page.first_local_sequence != node.first_local_sequence
+        || page.last_local_sequence != node.last_local_sequence
+        || page.row_count != node.row_count
+        || page.logical_manifest_count != node.logical_manifest_count
+        || page.chain_id != node.chain_id
+        || page.source_id != node.source_id
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "journal leaf page does not match the sequence node",
+        ));
+    }
+    Ok(page)
+}
+
+pub(crate) fn load_sequence_internal_from_journal(
+    prefix: &[u8],
+    node: &SequenceNodeRefV3,
+) -> Result<SequenceInternalPageV3, ArchiveError> {
+    if node.depth == 0 {
+        return Err(ArchiveError::ManifestVerification(
+            "sequence node is not internal",
+        ));
+    }
+    let payload = journal_payload_bytes(prefix, &node.locator)?;
+    let page = parse_sequence_internal_page(payload)?;
+    if page.depth != node.depth
+        || page.first_local_sequence != node.first_local_sequence
+        || page.last_local_sequence != node.last_local_sequence
+        || page.row_count != node.row_count
+        || page.logical_manifest_count != node.logical_manifest_count
+        || page.chain_id != node.chain_id
+        || page.source_id != node.source_id
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "journal internal page does not match the sequence node",
+        ));
+    }
+    Ok(page)
+}
+
+fn count_journal_frames(bytes: &[u8]) -> Result<u64, ArchiveError> {
+    let header_len = usize::try_from(JOURNAL_FRAME_HEADER_BYTES).map_err(|_| {
+        ArchiveError::ManifestVerification("journal frame header exceeds address space")
+    })?;
+    let mut offset = 0_usize;
+    let mut count = 0_u64;
+    while offset < bytes.len() {
+        let header_end =
+            offset
+                .checked_add(header_len)
+                .ok_or(ArchiveError::ManifestVerification(
+                    "journal frame header overflows",
+                ))?;
+        let header = bytes
+            .get(offset..header_end)
+            .ok_or(ArchiveError::ManifestVerification(
+                "journal frame header is truncated",
+            ))?;
+        if header.len() != header_len || header.get(..8) != Some(JOURNAL_FRAME_MAGIC_V3.as_slice())
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "journal frame magic is invalid",
+            ));
+        }
+        let encoded_record: [u8; 8] = header[16..24]
+            .try_into()
+            .map_err(|_| ArchiveError::ManifestVerification("journal record number is invalid"))?;
+        let encoded_length: [u8; 8] = header[24..32]
+            .try_into()
+            .map_err(|_| ArchiveError::ManifestVerification("journal payload length is invalid"))?;
+        let payload_length = usize::try_from(u64::from_be_bytes(encoded_length)).map_err(|_| {
+            ArchiveError::ManifestVerification("journal payload exceeds address space")
+        })?;
+        let frame_end =
+            header_end
+                .checked_add(payload_length)
+                .ok_or(ArchiveError::ManifestVerification(
+                    "journal frame length overflows",
+                ))?;
+        if frame_end > bytes.len() {
+            return Err(ArchiveError::ManifestVerification(
+                "journal frame payload is truncated",
+            ));
+        }
+        count = count
+            .checked_add(1)
+            .ok_or(ArchiveError::ManifestVerification(
+                "journal record count overflows",
+            ))?;
+        if u64::from_be_bytes(encoded_record) != count {
+            return Err(ArchiveError::ManifestVerification(
+                "journal record numbers are not contiguous",
+            ));
+        }
+        offset = frame_end;
+    }
+    if offset != bytes.len() {
+        return Err(ArchiveError::ManifestVerification(
+            "journal prefix has trailing unframed bytes",
+        ));
+    }
+    Ok(count)
 }
 
 fn combined_pack_hash(inputs: &[PackedLogicalInputV3]) -> Result<[u8; 32], ArchiveError> {
@@ -1744,11 +3229,15 @@ mod tests {
     use domain_types::{ChainId, KnownTime, SourceId};
 
     use super::{
-        IndexPackBuilderV3, JournalCommitV3, JournalGenerationBuilderV3, PackedLogicalInputV3,
-        PackedObjectDescriptorV3, RAW_SEQUENCE_LEAF_SCHEMA_V3, RawPackManifestV3,
-        ReceiptHintEntryV3, ReceiptHintPageV3, RootBundleV3, SequenceInternalPageV3,
-        SequenceLeafEntryV3, SequenceLeafPageV3, canonical_root_bytes, journal_prefix_hash,
-        parse_sequence_leaf_page, root_bundle_hash, sequence_page_hash,
+        IndexPackBuilderV3, JournalCommitV3, JournalGenerationBuilderV3, LogicalCommitDescriptorV3,
+        LogicalCommitManifestV3, LogicalObjectDescriptorV3, PackedLogicalInputV3,
+        PackedObjectDescriptorV3, RAW_LOGICAL_COMMIT_SCHEMA_V3, RAW_SEQUENCE_LEAF_SCHEMA_V3,
+        RawPackManifestV3, ReceiptHintEntryV3, ReceiptHintPageV3, RootBundleV3,
+        SequenceInternalPageV3, SequenceLeafEntryV3, SequenceLeafPageV3, append_logical_entry,
+        canonical_root_bytes, journal_prefix_hash, logical_commit_domain_hash,
+        parse_logical_commit_manifest, parse_pack_manifest, parse_receipt_hint_page,
+        parse_root_bundle, parse_sequence_internal_page, parse_sequence_leaf_page,
+        root_bundle_hash, sequence_internal_page_hash, sequence_page_hash,
     };
 
     fn logical(first: u64, last: u64, marker: u8) -> SequenceLeafEntryV3 {
@@ -2272,5 +3761,230 @@ mod tests {
                 .unwrap();
         let gap = journal.push_leaf(&gap_page).unwrap();
         assert!(SequenceInternalPageV3::try_new(chain, source, 1, vec![first, gap]).is_err());
+    }
+
+    fn frozen_logical_commit() -> LogicalCommitManifestV3 {
+        let object_sha256 = [0x44; 32];
+        let descriptor = LogicalCommitDescriptorV3::try_new(
+            ChainId::new("mainnet").unwrap(),
+            SourceId::new("node-fills").unwrap(),
+            "capture-v1",
+            "auxiliary-ledger",
+            "epoch-1",
+            10,
+            11,
+            1,
+            2,
+            1_000,
+            1_000,
+            "raw-parser-v1",
+            [0x11; 32],
+            [0x22; 32],
+            [0x33; 32],
+        )
+        .unwrap();
+        let relative = super::logical_object_relative_path(&descriptor, object_sha256).unwrap();
+        let object =
+            LogicalObjectDescriptorV3::try_new(PathBuf::from(relative), object_sha256, 512, 2)
+                .unwrap();
+        LogicalCommitManifestV3::try_new(
+            "build-v3",
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            descriptor,
+            object,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn logical_commit_canonical_json_and_domain_hash_are_frozen() {
+        let commit = frozen_logical_commit();
+        let bytes = super::manifest::canonical_json(&commit).unwrap();
+        assert_eq!(parse_logical_commit_manifest(&bytes).unwrap(), commit);
+        assert!(
+            bytes.starts_with(
+                br#"{"schema":"hyperliquid-alpha-desk/archive-raw-logical-commit/v3""#
+            )
+        );
+        assert_eq!(
+            hex::encode(super::manifest::sha256(&bytes)),
+            "59f22dcb99185b21ce203d8ebc4fc4ee33654a99683b97e0c8403c0d3a9b6472"
+        );
+        assert_eq!(
+            hex::encode(logical_commit_domain_hash(&commit).unwrap()),
+            "2607aac9756fa3f3caca4b868919b99160296d98501ff80f4a16a690599bdd36"
+        );
+        let mutated = String::from_utf8(bytes.clone()).unwrap().replacen(
+            RAW_LOGICAL_COMMIT_SCHEMA_V3,
+            "hyperliquid-alpha-desk/archive-raw-logical-commit/v999",
+            1,
+        );
+        assert!(parse_logical_commit_manifest(mutated.as_bytes()).is_err());
+        assert!(
+            parse_logical_commit_manifest(
+                format!(" {0}", String::from_utf8(bytes).unwrap()).as_bytes()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn remaining_wire_decoders_revalidate_canonical_bytes() {
+        let chain = ChainId::new("mainnet").unwrap();
+        let source = SourceId::new("node-fills").unwrap();
+        let first_page =
+            SequenceLeafPageV3::try_new(chain.clone(), source.clone(), vec![logical(1, 2, 1)])
+                .unwrap();
+        let second_page =
+            SequenceLeafPageV3::try_new(chain.clone(), source.clone(), vec![logical(3, 4, 2)])
+                .unwrap();
+        let mut journal = JournalGenerationBuilderV3::try_new(
+            7,
+            "journal-identity-7",
+            PathBuf::from("journals/generation-7.log"),
+        )
+        .unwrap();
+        let first = journal.push_leaf(&first_page).unwrap();
+        let second = journal.push_leaf(&second_page).unwrap();
+        let internal =
+            SequenceInternalPageV3::try_new(chain.clone(), source.clone(), 1, vec![first, second])
+                .unwrap();
+        let internal_bytes = super::manifest::canonical_json(&internal).unwrap();
+        assert_eq!(
+            parse_sequence_internal_page(&internal_bytes).unwrap(),
+            internal
+        );
+        assert_eq!(
+            hex::encode(sequence_internal_page_hash(&internal).unwrap()),
+            "069af0994969844ed07a71356ed7b5ec044b16a1e8d6b4639380767a1a17a7b5"
+        );
+        let mutated = String::from_utf8(internal_bytes.clone()).unwrap().replacen(
+            r#""depth":1"#,
+            r#""depth":2"#,
+            1,
+        );
+        assert!(parse_sequence_internal_page(mutated.as_bytes()).is_err());
+
+        let hints = ReceiptHintPageV3::try_new(
+            chain.clone(),
+            source.clone(),
+            vec![ReceiptHintEntryV3::try_new([1; 32], 1, 2).unwrap()],
+        )
+        .unwrap();
+        let hint_bytes = super::manifest::canonical_json(&hints).unwrap();
+        assert_eq!(parse_receipt_hint_page(&hint_bytes).unwrap(), hints);
+        let authoritative = String::from_utf8(hint_bytes).unwrap().replacen(
+            r#""authoritative":false"#,
+            r#""authoritative":true"#,
+            1,
+        );
+        assert!(parse_receipt_hint_page(authoritative.as_bytes()).is_err());
+
+        let commit = journal_commit(&first_page);
+        let root = RootBundleV3::try_new(
+            chain,
+            source,
+            1,
+            None,
+            &commit,
+            KnownTime::from_unix_micros(1_000).unwrap(),
+        )
+        .unwrap();
+        let root_bytes = canonical_root_bytes(&root).unwrap();
+        assert_eq!(parse_root_bundle(&root_bytes).unwrap(), root);
+        let mutated_root = String::from_utf8(root_bytes).unwrap().replacen(
+            r#""generation":1"#,
+            r#""generation":2"#,
+            1,
+        );
+        assert!(parse_root_bundle(mutated_root.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn pack_manifest_decoder_accepts_typed_v2_and_v3_inputs() {
+        let object = PackedObjectDescriptorV3::try_new(
+            PathBuf::from(format!(
+                "date=1970-01-01/hour=00/packs/pack-{}.parquet",
+                hex::encode([0x77; 32])
+            )),
+            [0x77; 32],
+            8_192,
+            4,
+        )
+        .unwrap();
+        let inputs = vec![packed_input(1, 1, 2, 0), packed_input(2, 3, 4, 2)];
+        let pack =
+            RawPackManifestV3::try_new(inputs, object, KnownTime::from_unix_micros(9_000).unwrap())
+                .unwrap();
+        let bytes = super::manifest::canonical_json(&pack).unwrap();
+        assert_eq!(parse_pack_manifest(&bytes).unwrap(), pack);
+
+        let v3 = frozen_logical_commit();
+        let v3_bytes = super::manifest::canonical_json(&v3).unwrap();
+        let v3_hash = super::manifest::sha256(&v3_bytes);
+        let packed_v3 = PackedLogicalInputV3::try_new_v3(v3_bytes.clone(), v3_hash, 0).unwrap();
+        assert_eq!(packed_v3.first_local_sequence, 1);
+        assert_eq!(packed_v3.last_local_sequence, 2);
+        assert_eq!(packed_v3.original_schema, "raw-v3");
+        assert!(PackedLogicalInputV3::try_new_v3(v3_bytes.clone(), [0; 32], 0).is_err());
+        let mutated = format!(
+            " {0}",
+            String::from_utf8(v3_bytes).expect("logical commit JSON is UTF-8")
+        );
+        assert!(PackedLogicalInputV3::try_new_v3(mutated.into_bytes(), v3_hash, 0).is_err());
+    }
+
+    #[test]
+    fn journal_resume_and_tree_append_keep_old_prefixes_exact() {
+        let chain = ChainId::new("mainnet").unwrap();
+        let source = SourceId::new("node-fills").unwrap();
+        let mut journal = JournalGenerationBuilderV3::try_new(
+            1,
+            super::journal_file_identity(1).unwrap(),
+            PathBuf::from("journals/generation-1.log"),
+        )
+        .unwrap();
+        let first = append_logical_entry(
+            &mut journal,
+            None,
+            chain.clone(),
+            source.clone(),
+            logical(1, 1, 1),
+        )
+        .unwrap();
+        let first_commit = journal.commit_prefix(&first).unwrap();
+        let resumed = JournalGenerationBuilderV3::try_resume(
+            1,
+            super::journal_file_identity(1).unwrap(),
+            PathBuf::from("journals/generation-1.log"),
+            first_commit.bytes().to_vec(),
+            first_commit.prefix(),
+            chain.as_str(),
+            source.as_str(),
+        )
+        .unwrap();
+        assert_eq!(resumed.record_count, 1);
+        let mut substituted = first_commit.bytes().to_vec();
+        substituted[0] ^= 1;
+        assert!(
+            JournalGenerationBuilderV3::try_resume(
+                1,
+                super::journal_file_identity(1).unwrap(),
+                PathBuf::from("journals/generation-1.log"),
+                substituted,
+                first_commit.prefix(),
+                chain.as_str(),
+                source.as_str(),
+            )
+            .is_err()
+        );
+
+        let second =
+            append_logical_entry(&mut journal, Some(&first), chain, source, logical(2, 2, 2))
+                .unwrap();
+        assert_eq!(second.first_local_sequence(), 1);
+        assert_eq!(second.last_local_sequence(), 2);
+        let extended = journal.commit_prefix(&second).unwrap();
+        assert!(extended.bytes().starts_with(first_commit.bytes()));
     }
 }

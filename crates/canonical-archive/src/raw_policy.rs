@@ -12,12 +12,14 @@ pub(super) const BYTE_V2_DATASET: &str = "raw_source_observations_byte_v2";
 pub(super) enum RawPolicy {
     LegacyContiguous,
     MonotonicByteV2,
+    MonotonicByteV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ActivePolicies {
     legacy: bool,
     byte_v2: bool,
+    byte_v3: bool,
 }
 
 impl ActivePolicies {
@@ -25,11 +27,12 @@ impl ActivePolicies {
         match policy {
             RawPolicy::LegacyContiguous => self.legacy,
             RawPolicy::MonotonicByteV2 => self.byte_v2,
+            RawPolicy::MonotonicByteV3 => self.byte_v3,
         }
     }
 
     pub(super) const fn conflicts(self) -> bool {
-        self.legacy && self.byte_v2
+        self.legacy as u32 + self.byte_v2 as u32 + self.byte_v3 as u32 > 1
     }
 }
 
@@ -47,6 +50,10 @@ pub(super) fn active_policies(
             root,
             &dataset_relative(chain, source, RawPolicy::MonotonicByteV2),
         )?,
+        byte_v3: checked_current_exists(
+            root,
+            &dataset_relative(chain, source, RawPolicy::MonotonicByteV3),
+        )?,
     })
 }
 
@@ -62,11 +69,12 @@ pub(super) fn ensure_append_policy(
             "raw source has more than one active cursor policy",
         ));
     }
-    let other = match requested {
-        RawPolicy::LegacyContiguous => RawPolicy::MonotonicByteV2,
-        RawPolicy::MonotonicByteV2 => RawPolicy::LegacyContiguous,
+    let other_active = match requested {
+        RawPolicy::LegacyContiguous => active.byte_v2 || active.byte_v3,
+        RawPolicy::MonotonicByteV2 => active.legacy || active.byte_v3,
+        RawPolicy::MonotonicByteV3 => active.legacy || active.byte_v2,
     };
-    if active.active(other) {
+    if other_active {
         return Err(ArchiveError::InvalidInput(
             "raw source already uses a different archive cursor policy",
         ));
@@ -97,6 +105,7 @@ pub(super) fn dataset_relative(chain: &ChainId, source: &SourceId, policy: RawPo
     let dataset = match policy {
         RawPolicy::LegacyContiguous => LEGACY_DATASET,
         RawPolicy::MonotonicByteV2 => BYTE_V2_DATASET,
+        RawPolicy::MonotonicByteV3 => super::raw_v3::RAW_BYTE_DATASET_V3,
     };
     PathBuf::from(format!(
         "chain={}",

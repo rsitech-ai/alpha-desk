@@ -2083,6 +2083,10 @@ pub enum ArchiveError {
     WriterBusy,
     #[error("canonical archive codec failed: {0}")]
     Codec(String),
+    #[error(transparent)]
+    Capacity(#[from] RawArchiveCapacityRejection),
+    #[error("raw archive receipt index rebuild is required")]
+    ReceiptIndexRebuildRequired,
 }
 
 impl ArchiveError {
@@ -2100,6 +2104,8 @@ impl ArchiveError {
             Self::UnsafePath => "archive.unsafe_path",
             Self::WriterBusy => "archive.writer_busy",
             Self::Codec(_) => "archive.codec",
+            Self::Capacity(rejection) => rejection.reason_code(),
+            Self::ReceiptIndexRebuildRequired => "archive.receipt_index_rebuild_required",
         }
     }
 }
