@@ -13,7 +13,7 @@ use market_intelligence::{
 };
 use signal_core::{
     FragilityAsymmetryEvaluator, SignalContext, SignalEvaluation, SignalEvaluator, SignalType,
-    SmartCrowdDivergenceEvaluator, SmartFlowAccelerationEvaluator,
+    SmartCrowdDivergenceEvaluator, SmartFlowAccelerationEvaluator, suppress_missing_book_or_fills,
 };
 
 fn time(micros: i64) -> ProtocolTime {
@@ -52,10 +52,19 @@ fn snapshot(
 fn green_values(
     pairs: &[(&str, FeatureValue)],
 ) -> BTreeMap<feature_core::FeatureKey, FeatureValue> {
-    pairs
+    let mut values: BTreeMap<_, _> = pairs
         .iter()
         .map(|(name, value)| (market_feature_key(*name).unwrap(), value.clone()))
-        .collect()
+        .collect();
+    values.insert(
+        market_feature_key("book").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    values.insert(
+        market_feature_key("fills").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    values
 }
 
 fn red_values(names: &[&str]) -> BTreeMap<feature_core::FeatureKey, FeatureValue> {
@@ -117,9 +126,9 @@ fn fragility(red_book: bool, unsupported: bool) -> FragilityResult {
     if unsupported {
         account.margin_mode = SimulatedMarginMode::Unsupported;
     }
-    let book = SimulatedBook {
-        executable_depth: usd(10),
-        health: health(
+    let book = SimulatedBook::observed(
+        usd(10),
+        health(
             "book",
             if red_book {
                 HealthState::Red
@@ -127,7 +136,7 @@ fn fragility(red_book: bool, unsupported: bool) -> FragilityResult {
                 HealthState::Green
             },
         ),
-    };
+    );
     simulate_fragility(&scenario, &[account], &book, -100).unwrap()
 }
 
@@ -310,4 +319,63 @@ fn only_three_v1_types_are_live_capable() {
             .unwrap()
             .can_enter_live()
     );
+}
+
+#[test]
+fn missing_book_or_fills_suppresses_live_capable_families() {
+    let trigger = snapshot(
+        HealthState::Green,
+        green_values(&[
+            (
+                "smart_flow_acceleration_milli",
+                FeatureValue::SignedInteger(400),
+            ),
+            ("historical_markout_bps", FeatureValue::SignedInteger(40)),
+            ("smart_flow_usd_milli", FeatureValue::SignedInteger(50)),
+            ("crowd_flow_usd_milli", FeatureValue::SignedInteger(-40)),
+            ("placeholder", FeatureValue::SignedInteger(1)),
+        ]),
+    );
+    let mut missing_book = trigger.clone();
+    missing_book.values.insert(
+        market_feature_key("book").unwrap(),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    let mut missing_fills = trigger.clone();
+    missing_fills.values.insert(
+        market_feature_key("fills").unwrap(),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    missing_book.provenance_hash = missing_book.compute_provenance_hash();
+    missing_fills.provenance_hash = missing_fills.compute_provenance_hash();
+
+    let flow = flow_eval();
+    let crowd = SmartCrowdDivergenceEvaluator::from_toml(include_str!(
+        "../../../config/signals/v1/smart-crowd-divergence.toml"
+    ))
+    .unwrap();
+    let fragility = FragilityAsymmetryEvaluator::from_toml(include_str!(
+        "../../../config/signals/v1/liquidation-fragility-asymmetry.toml"
+    ))
+    .unwrap();
+    let ctx = context(4, false, false, 5, 100, false, false);
+    for snapshot in [&missing_book, &missing_fills] {
+        assert!(suppress_missing_book_or_fills(snapshot).is_some());
+        for evaluation in [
+            flow.evaluate(snapshot, &ctx).unwrap(),
+            crowd.evaluate(snapshot, &ctx).unwrap(),
+            fragility.evaluate(snapshot, &ctx).unwrap(),
+        ] {
+            match evaluation {
+                SignalEvaluation::Suppressed { reasons, .. } => {
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|reason| reason == "missing_book_or_fills")
+                    );
+                }
+                other => panic!("missing book/fills must not emit {other:?}"),
+            }
+        }
+    }
 }

@@ -1,8 +1,12 @@
-use domain_types::{AccountId, Direction, MarketId, ProbabilityPpm, ScenarioId, UsdAmount};
-use feature_core::{HealthAssessment, HealthState};
+use domain_types::{
+    AccountId, BlockHeight, Direction, FeatureSetVersion, Horizon, KnownTime, MarketId,
+    ProbabilityPpm, ProtocolTime, ScenarioId, UsdAmount,
+};
+use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use market_intelligence::{
-    FragilityScenario, SimulatedAccount, SimulatedBook, SimulatedMarginMode, simulate_fragility,
-    simulate_path,
+    FragilityScenario, MarketError, MarketFeatureSnapshot, ObservationStatus, SimulatedAccount,
+    SimulatedBook, SimulatedMarginMode, market_feature_key, simulate_fragility,
+    simulate_fragility_from_snapshot, simulate_path,
 };
 
 fn usd(dollars: i128) -> UsdAmount {
@@ -26,10 +30,7 @@ fn account(id: &str, side: Direction, dollars: i128, distance: i64) -> Simulated
 }
 
 fn book(depth: i128, state: HealthState) -> SimulatedBook {
-    SimulatedBook {
-        executable_depth: usd(depth),
-        health: health(state),
-    }
+    SimulatedBook::observed(usd(depth), health(state))
 }
 
 fn scenario() -> FragilityScenario {
@@ -120,4 +121,79 @@ fn portfolio_uncertainty_separates_low_and_high_paths() {
     .unwrap();
     assert!(result.low.total_forced_notional.raw() <= result.high.total_forced_notional.raw());
     let _ = ProbabilityPpm::ONE;
+}
+
+fn market_snapshot(book: FeatureValue, fills: FeatureValue) -> MarketFeatureSnapshot {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert(
+        market_feature_key("registry").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    values.insert(market_feature_key("book").unwrap(), book);
+    values.insert(market_feature_key("fills").unwrap(), fills);
+    MarketFeatureSnapshot::try_new(
+        MarketId::new("BTC").unwrap(),
+        Horizon::MINUTES_5,
+        FeatureSetVersion::new("market-v1").unwrap(),
+        ProtocolTime::from_unix_micros(1_000_000).unwrap(),
+        KnownTime::from_unix_micros(1_000_000).unwrap(),
+        BlockHeight::new(1),
+        values,
+        health(HealthState::Amber),
+    )
+    .unwrap()
+}
+
+#[test]
+fn missing_book_does_not_invent_depth_or_emit_waves() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let invented = SimulatedBook {
+        executable_depth: usd(20_000),
+        health: health(HealthState::Amber),
+        observation: ObservationStatus::Missing(MissingReason::NotObserved),
+    };
+    let error = simulate_path(&scenario, &accounts, &invented, -100, 0).unwrap_err();
+    assert!(matches!(
+        error,
+        MarketError::Malformed {
+            what: "book",
+            reason: "missing book cannot carry executable depth",
+        }
+    ));
+
+    let missing = SimulatedBook::missing(MissingReason::NotObserved).unwrap();
+    let path = simulate_path(&scenario, &accounts, &missing, -100, 0).unwrap();
+    assert!(path.waves.is_empty());
+    assert_eq!(path.total_forced_notional.raw(), 0);
+    assert_eq!(path.health.state, HealthState::Red);
+    let result = simulate_fragility(&scenario, &accounts, &missing, -100).unwrap();
+    assert!(result.missing_inputs.iter().any(|item| item == "book"));
+    assert_eq!(result.confidence, ProbabilityPpm::ZERO);
+    assert!(result.base.waves.is_empty());
+}
+
+#[test]
+fn snapshot_without_book_or_fills_refuses_fragility() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let missing_both = market_snapshot(
+        FeatureValue::Missing(MissingReason::NotObserved),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    assert!(matches!(
+        simulate_fragility_from_snapshot(&missing_both, &scenario, &accounts, -100),
+        Err(MarketError::MissingInput { name: "book" })
+    ));
+    let missing_fills = market_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    assert!(matches!(
+        simulate_fragility_from_snapshot(&missing_fills, &scenario, &accounts, -100),
+        Err(MarketError::MissingInput { name: "fills" })
+    ));
 }

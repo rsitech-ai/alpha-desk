@@ -1,7 +1,7 @@
 use domain_types::{BasisPoints, EntityId, ProbabilityPpm, UsdAmount};
 use feature_core::{FeatureValue, HealthAssessment, HealthState};
 use market_intelligence::{
-    FragilityResult, MarketFeatureSnapshot, RegimeAssessment, ScoredDimension,
+    FragilityResult, MarketFeatureSnapshot, ObservationStatus, RegimeAssessment, ScoredDimension,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -73,6 +73,32 @@ impl FamilyThresholds {
     }
 }
 
+pub fn suppress_missing_book_or_fills(
+    snapshot: &MarketFeatureSnapshot,
+) -> Option<SignalEvaluation> {
+    let book = snapshot
+        .observation("book")
+        .unwrap_or(ObservationStatus::Missing(
+            feature_core::MissingReason::NotObserved,
+        ));
+    let fills = snapshot
+        .observation("fills")
+        .unwrap_or(ObservationStatus::Missing(
+            feature_core::MissingReason::NotObserved,
+        ));
+    match (book, fills) {
+        (ObservationStatus::Observed, ObservationStatus::Observed) => None,
+        (ObservationStatus::Observed, ObservationStatus::Missing(_))
+        | (ObservationStatus::Missing(_), ObservationStatus::Observed)
+        | (ObservationStatus::Missing(_), ObservationStatus::Missing(_)) => {
+            Some(SignalEvaluation::Suppressed {
+                health: snapshot.health.clone(),
+                reasons: vec!["missing_book_or_fills".to_owned()],
+            })
+        }
+    }
+}
+
 pub fn suppress_if_red(
     snapshot: &MarketFeatureSnapshot,
     context: &SignalContext,
@@ -87,7 +113,7 @@ pub fn suppress_if_red(
             reasons: vec!["red_required_dependency".to_owned()],
         });
     }
-    None
+    suppress_missing_book_or_fills(snapshot)
 }
 
 pub fn signed_feature(snapshot: &MarketFeatureSnapshot, name: &str) -> Result<i64, SignalError> {

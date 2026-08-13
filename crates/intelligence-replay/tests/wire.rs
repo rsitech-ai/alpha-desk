@@ -7,9 +7,9 @@ use canonical_events::{
     MarketCreated, SourceEvidence, SpotTransfer, SubaccountTransfer, VaultDeposit,
 };
 use domain_types::{
-    AccountId, Address, AssetId, BlockHeight, ChainId, ClosedInterval, DexId, Direction,
+    AccountId, Address, AssetId, BlockHeight, ChainId, ClosedInterval, DexId, Direction, EntityId,
     FeatureSetVersion, Horizon, KnownTime, MarketId, Price, ProbabilityPpm, ProtocolTime, Quantity,
-    QuoteAmount, SignalId, SourceId, TransactionId, UsdAmount, VaultId,
+    QuoteAmount, ScenarioId, SignalId, SourceId, TransactionId, UsdAmount, VaultId,
 };
 use feature_core::{FeatureValue, HealthState, MissingReason};
 use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
@@ -17,7 +17,14 @@ use intelligence_replay::{
     IntelligenceReplayError, IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
     materialize_committed_node, materialize_synthetic_replay,
 };
-use signal_core::{Signal, SignalConfirmationClass, SignalError, SignalLifecycleState, SignalType};
+use market_intelligence::{
+    CrowdingPosition, FragilityScenario, MarketError, crowding_components_from_snapshot,
+    simulate_fragility_from_snapshot,
+};
+use signal_core::{
+    Signal, SignalConfirmationClass, SignalError, SignalLifecycleState, SignalType,
+    suppress_missing_book_or_fills,
+};
 
 const BUYER: Address = Address::from_bytes([0x11; 20]);
 const SELLER: Address = Address::from_bytes([0x22; 20]);
@@ -325,6 +332,9 @@ fn assert_synthetic_unassessed(report: &IntelligenceReplayReport) {
     assert!(!report.fills_invented);
     assert!(!report.replica_cmds_used);
     assert_eq!(report.live_signal_count, 0);
+    assert_eq!(report.crowding_emitted, 0);
+    assert_eq!(report.fragility_emitted, 0);
+    assert!(!report.marks_invented);
     assert_eq!(
         report.signal_confirmation,
         SignalConfirmationClass::SyntheticUnqualified
@@ -612,4 +622,48 @@ fn synthetic_confirmation_cannot_enter_live() {
     )
     .unwrap_err();
     assert!(matches!(error, SignalError::ContractViolation(_)));
+}
+
+#[test]
+fn missing_book_or_fills_cannot_emit_crowding_fragility_or_live_signals() {
+    let report = materialize_synthetic_replay(&synthetic_blocks(), &request()).unwrap();
+    assert_synthetic_unassessed(&report);
+    assert!(!report.stage_3_pass);
+    assert!(!report.live_qualified);
+    assert!(!report.alpha_qualified);
+    assert_eq!(report.source_qualification, "synthetic_unassessed");
+
+    let remaining = UsdAmount::from_raw(0, 8).unwrap();
+    let invented_marks = vec![CrowdingPosition {
+        entity_id: EntityId::new("invented-mark").unwrap(),
+        independence_weight: ProbabilityPpm::ONE,
+        is_follower: false,
+        post_originator: false,
+        exposure: UsdAmount::from_raw(100_000_000, 8).unwrap(),
+        entry_bps_from_mark: 12,
+        funding_percentile: ProbabilityPpm::from_ppm(500_000).unwrap(),
+        leverage_milli: 200_000,
+    }];
+    let scenario = FragilityScenario::default_grid(ScenarioId::new("replay-deny").unwrap());
+    assert!(!report.market_snapshots.is_empty());
+    for snapshot in &report.market_snapshots {
+        assert!(matches!(
+            crowding_components_from_snapshot(snapshot, &invented_marks, remaining),
+            Err(MarketError::MissingInput { name: "book" })
+        ));
+        assert!(matches!(
+            simulate_fragility_from_snapshot(snapshot, &scenario, &[], -100),
+            Err(MarketError::MissingInput { name: "book" })
+        ));
+        match suppress_missing_book_or_fills(snapshot) {
+            Some(signal_core::SignalEvaluation::Suppressed { reasons, .. }) => {
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|reason| reason == "missing_book_or_fills")
+                );
+            }
+            other => panic!("expected suppression, got {other:?}"),
+        }
+    }
 }

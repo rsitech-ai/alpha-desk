@@ -10,7 +10,7 @@ use canonical_ledger::{
 };
 use domain_types::{
     AccountId, Address, BlockHeight, EvidenceId, FeatureSetVersion, Horizon, KnownTime,
-    ProtocolTime,
+    ProtocolTime, ScenarioId, UsdAmount,
 };
 use entity_graph::{EntityGraph, GraphNodeId, LinkEvidence, LinkKind};
 use feature_core::{
@@ -19,8 +19,11 @@ use feature_core::{
     PitSnapshotCalculator, require_asof,
 };
 use hl_protocol::node::v1::NodeRecordV1;
-use market_intelligence::{MarketFeatureSnapshot, market_feature_key};
-use signal_core::SignalConfirmationClass;
+use market_intelligence::{
+    FragilityScenario, MarketError, MarketFeatureSnapshot, crowding_components_from_snapshot,
+    market_feature_key, simulate_fragility_from_snapshot,
+};
+use signal_core::{SignalConfirmationClass, suppress_missing_book_or_fills};
 use wallet_intelligence::{
     DEFAULT_RETURN_SCALE, DEFAULT_USD_SCALE, IntelligenceError, IntelligenceSubject,
     PerformanceLedger,
@@ -99,7 +102,10 @@ pub struct IntelligenceReplayReport {
     pub alpha_qualified: bool,
     pub wallet_performance_withheld: bool,
     pub live_signal_count: u64,
+    pub crowding_emitted: u64,
+    pub fragility_emitted: u64,
     pub fills_invented: bool,
+    pub marks_invented: bool,
     pub replica_cmds_used: bool,
     pub signal_confirmation: SignalConfirmationClass,
 }
@@ -237,6 +243,8 @@ fn replay_and_materialize<R: EventReducer>(
     let entity_graph = emit_links(&facts, &block_times)?;
     let market_snapshots = emit_market_snapshots(&facts, &ctx)?;
     let wallet_performance_withheld = withhold_wallet_performance(&facts.accounts, &ctx)?;
+    let (crowding_emitted, fragility_emitted, live_signal_count) =
+        assess_market_emissions(&market_snapshots)?;
 
     Ok(IntelligenceReplayReport {
         feature_snapshots: calculator.snapshots().to_vec(),
@@ -249,8 +257,11 @@ fn replay_and_materialize<R: EventReducer>(
         live_qualified: false,
         alpha_qualified: false,
         wallet_performance_withheld,
-        live_signal_count: 0,
+        live_signal_count,
+        crowding_emitted,
+        fragility_emitted,
         fills_invented: false,
+        marks_invented: false,
         replica_cmds_used: false,
         signal_confirmation: SignalConfirmationClass::SyntheticUnqualified,
     })
@@ -537,4 +548,52 @@ fn withhold_wallet_performance(
         }
     }
     Ok(withheld)
+}
+
+fn assess_market_emissions(
+    snapshots: &[MarketFeatureSnapshot],
+) -> Result<(u64, u64, u64), IntelligenceReplayError> {
+    let remaining_capacity = UsdAmount::from_raw(0, 8)?;
+    let scenario =
+        FragilityScenario::default_grid(ScenarioId::new("synthetic-unassessed-fragility")?);
+    let mut crowding_emitted = 0_u64;
+    let mut fragility_emitted = 0_u64;
+    let mut missing_book_or_fills = false;
+    for snapshot in snapshots {
+        if suppress_missing_book_or_fills(snapshot).is_some() {
+            missing_book_or_fills = true;
+        }
+        match crowding_components_from_snapshot(snapshot, &[], remaining_capacity) {
+            Ok(_) => crowding_emitted = crowding_emitted.saturating_add(1),
+            Err(MarketError::MissingInput {
+                name: "book" | "fills",
+            }) => {}
+            Err(MarketError::InsufficientHistory { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        match simulate_fragility_from_snapshot(snapshot, &scenario, &[], 0) {
+            Ok(result) => {
+                if result.missing_inputs.is_empty()
+                    && (!result.base.waves.is_empty()
+                        || result.base.total_forced_notional.raw() != 0)
+                {
+                    fragility_emitted = fragility_emitted.saturating_add(1);
+                }
+            }
+            Err(MarketError::MissingInput {
+                name: "book" | "fills",
+            }) => {}
+            Err(MarketError::InsufficientHistory { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let live_signal_count = 0_u64;
+    if missing_book_or_fills
+        && (crowding_emitted > 0 || fragility_emitted > 0 || live_signal_count > 0)
+    {
+        return Err(IntelligenceReplayError::QualificationClaim {
+            what: "invented_marks_or_fills",
+        });
+    }
+    Ok((crowding_emitted, fragility_emitted, live_signal_count))
 }
