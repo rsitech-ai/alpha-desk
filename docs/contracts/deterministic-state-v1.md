@@ -298,6 +298,33 @@ balance, fee, funding, margin, liquidation, or order-book state. Its inputs are
 canonical-event contracts, not evidence that any deployed source emits those
 contracts correctly.
 
+`CanonicalTriggerReducerV1` owns only exact schema `1.0.0`
+`TriggerOrderActivated` events under reducer-set version
+`hyperliquid-alpha-desk-canonical-trigger@1.0.0`. The envelope must carry
+exactly one market and one account. The payload has no account or market
+fields; those identities come only from the envelope. The reducer writes one
+immutable `trigger-fact.v1`, one key-bound `trigger-current.v1`, and one
+hash-linked `trigger-transition.v1`. Duplicate market+order identity is a
+collision. It does not create `order-current.v1` or mutate positions.
+
+`CanonicalTwapReducerV1` owns only exact schema `1.0.0` `TwapStarted`,
+`TwapSliceFilled`, and `TwapCompleted` events under reducer-set version
+`hyperliquid-alpha-desk-canonical-twap@1.0.0`. Start requires payload account
+and market to match the envelope. Slice indices must strictly increase.
+Accumulated slice quantity cannot exceed the started total. Remaining quantity
+reaching zero does not auto-complete. Completion requires the asserted filled
+quantity to equal accumulated slices and may leave leftover remaining quantity.
+Average price is source-asserted and is never recomputed as VWAP. V1
+`TwapStarted` omits side; the reducer does not infer side or write position
+quantity.
+
+The production composite `CanonicalStateReducerV1` version
+`hyperliquid-alpha-desk-canonical-state@1.1.0` appends those two children after
+the frozen 1.0.0 market/order/trade/account/position set. Schema `1.1.0` events
+remain unsupported. These reducers reconstruct synthetic canonical facts only.
+They do not parse `replica_cmds`, fill a qualification registry, or claim Stage
+2 PASS.
+
 `CanonicalMarketReducerV1` freezes the point-in-time V1 market registry under
 reducer-set version `hyperliquid-alpha-desk-canonical-market@1.0.0`. It owns
 only exact schema `1.0.0` events for `DexCreated`, `AssetContextUpdated`,

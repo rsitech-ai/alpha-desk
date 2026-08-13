@@ -11,6 +11,8 @@ mod position;
 mod reducer;
 mod state;
 mod trade;
+mod trigger;
+mod twap;
 mod watermark_only;
 
 pub use account::{
@@ -57,6 +59,14 @@ pub use trade::{
     CanonicalTradeReducerSetV2, CanonicalTradeReducerV1, CanonicalTradeReducerV2,
     TradeParticipantRecordV1, TradeParticipantRecordV2, TradeReconciliationRecordV1,
     TradeReconciliationRecordV2, TradeStateError, TradeStateRecordV1, TradeStateRecordV2,
+};
+pub use trigger::{
+    CanonicalTriggerReducerV1, TriggerCurrentRecordV1, TriggerFactRecordV1, TriggerStateError,
+    TriggerTransitionRecordV1,
+};
+pub use twap::{
+    CanonicalTwapReducerV1, TwapCurrentRecordV1, TwapFactRecordV1, TwapLifecycleV1, TwapStateError,
+    TwapTransitionRecordV1,
 };
 pub use watermark_only::WatermarkOnlyReducerV1;
 
