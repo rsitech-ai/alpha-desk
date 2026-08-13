@@ -143,8 +143,9 @@ cargo +1.97.1 run -p hl-capture --locked --offline -- \
   serve-status --config config/capture.example.toml --listen 127.0.0.1:8741
 ```
 
-This is a watch surface for `hl.capture.status.v4`. It is not live-source
-qualification or a production desk.
+This is a watch surface for `hl.capture.status.v4` (maintenance omitted) and
+`hl.capture.status.v5` (maintenance required). Missing or invalid snapshots
+fail closed. It is not live-source qualification or a production desk.
 
 For focused commands and development conventions, read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

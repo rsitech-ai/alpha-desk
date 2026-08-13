@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use domain_types::{BlockHeight, ChainId, KnownTime};
@@ -12,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-async fn http_get(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
+async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     stream
         .write_all(
@@ -36,6 +37,44 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
 fn json_from_http(body: &str) -> serde_json::Value {
     let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
     serde_json::from_str(&body[json_start..]).expect("JSON body")
+}
+
+fn http_body_bytes(body: &str) -> &[u8] {
+    let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
+    &body.as_bytes()[json_start..]
+}
+
+fn capture_fixture(name: &str) -> Vec<u8> {
+    fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/capture")
+            .join(name),
+    )
+    .unwrap_or_else(|error| panic!("read fixture {name}: {error}"))
+}
+
+async fn serve_fixture(
+    name: &str,
+) -> (
+    tempfile::TempDir,
+    SocketAddr,
+    CancellationToken,
+    tokio::task::JoinHandle<Result<(), OperatorError>>,
+) {
+    let directory = tempdir().expect("temp directory");
+    let status_path = directory.path().join("capture-status.json");
+    fs::write(&status_path, capture_fixture(name)).expect("write fixture");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let cancellation = CancellationToken::new();
+    let server = tokio::spawn(accept_operator_status(
+        listener,
+        status_path,
+        cancellation.child_token(),
+    ));
+    (directory, addr, cancellation, server)
 }
 
 fn sample_status() -> CaptureStatus {
@@ -263,6 +302,84 @@ async fn operator_status_fails_closed_on_invalid_status_json() {
     let value = json_from_http(&body);
     assert_eq!(value["schema_version"], "hl.capture.error.v1");
     assert_eq!(value["reason_code"], "capture_status.serialization");
+
+    cancellation.cancel();
+    server.await.expect("join").expect("serve stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operator_status_serves_v4_and_v5_fixtures_as_read() {
+    let (_v4_dir, v4_addr, v4_cancel, v4_server) = serve_fixture("status-v4.json").await;
+    let (v4_status, v4_body) = http_get(v4_addr, "/status").await;
+    assert_eq!(v4_status, 200);
+    assert_eq!(http_body_bytes(&v4_body), capture_fixture("status-v4.json"));
+    let v4_value = json_from_http(&v4_body);
+    assert_eq!(v4_value["schema_version"], "hl.capture.status.v4");
+    assert!(v4_value.get("maintenance").is_none());
+    v4_cancel.cancel();
+    v4_server.await.expect("join").expect("serve stops");
+
+    let (_v5_dir, v5_addr, v5_cancel, v5_server) = serve_fixture("status-v5.json").await;
+    let (v5_status, v5_body) = http_get(v5_addr, "/status").await;
+    assert_eq!(v5_status, 200);
+    assert_eq!(http_body_bytes(&v5_body), capture_fixture("status-v5.json"));
+    let v5_value = json_from_http(&v5_body);
+    assert_eq!(v5_value["schema_version"], "hl.capture.status.v5");
+    assert_eq!(v5_value["maintenance"]["enabled"], true);
+    assert_eq!(v5_value["maintenance"]["retention_authorized"], false);
+    assert_eq!(
+        v5_value["auxiliary_sources"][0]["restart_reconstruction"],
+        "complete"
+    );
+    let (health_status, health_body) = http_get(v5_addr, "/healthz").await;
+    assert_eq!(health_status, 200);
+    assert!(health_body.contains("\"health\":\"green\""));
+    v5_cancel.cancel();
+    v5_server.await.expect("join").expect("serve stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operator_status_rejects_v4_smuggled_maintenance_v5_without_and_unknown_schema() {
+    let (_smuggled_dir, smuggled_addr, smuggled_cancel, smuggled_server) =
+        serve_fixture("status-v4-smuggled-maintenance.json").await;
+    let (status, body) = http_get(smuggled_addr, "/status").await;
+    assert_eq!(status, 503);
+    let value = json_from_http(&body);
+    assert_eq!(value["reason_code"], "capture_status.invalid_schema");
+    smuggled_cancel.cancel();
+    smuggled_server.await.expect("join").expect("serve stops");
+
+    let directory = tempdir().expect("temp directory");
+    let status_path = directory.path().join("capture-status.json");
+    let mut v5 = serde_json::from_slice::<serde_json::Value>(&capture_fixture("status-v4.json"))
+        .expect("v4 json");
+    v5["schema_version"] = serde_json::json!("hl.capture.status.v5");
+    fs::write(&status_path, serde_json::to_vec(&v5).expect("encode")).expect("write v5 without");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let cancellation = CancellationToken::new();
+    let server = tokio::spawn(accept_operator_status(
+        listener,
+        status_path.clone(),
+        cancellation.child_token(),
+    ));
+    let (status, body) = http_get(addr, "/status").await;
+    assert_eq!(status, 503);
+    assert_eq!(
+        json_from_http(&body)["reason_code"],
+        "capture_status.invalid_schema"
+    );
+
+    v5["schema_version"] = serde_json::json!("hl.capture.status.v6");
+    fs::write(&status_path, serde_json::to_vec(&v5).expect("encode")).expect("write unknown");
+    let (status, body) = http_get(addr, "/status").await;
+    assert_eq!(status, 503);
+    assert_eq!(
+        json_from_http(&body)["reason_code"],
+        "capture_status.invalid_schema"
+    );
 
     cancellation.cancel();
     server.await.expect("join").expect("serve stops");

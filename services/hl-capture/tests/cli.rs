@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -297,6 +298,52 @@ fn serve_status_cli_serves_v4_json_and_fails_closed_on_a_missing_file() {
     let value: serde_json::Value = serde_json::from_str(&body[json_start..]).expect("status JSON");
     assert_eq!(value["schema_version"], "hl.capture.status.v4");
     assert_eq!(value["durable_height"], 500);
+}
+
+fn capture_fixture(name: &str) -> Vec<u8> {
+    fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/capture")
+            .join(name),
+    )
+    .unwrap_or_else(|error| panic!("read fixture {name}: {error}"))
+}
+
+#[test]
+fn serve_status_cli_serves_v5_fixture_json_as_read() {
+    let directory = tempdir().expect("temporary directory");
+    let status_path = directory.path().join("capture-status.json");
+    let fixture = capture_fixture("status-v5.json");
+    fs::write(&status_path, &fixture).expect("write v5 fixture");
+    let config_path = directory.path().join("capture.toml");
+    let status_path_text = status_path.to_string_lossy();
+    let config = include_str!("../../../config/capture.example.toml").replace(
+        "status_path = \"state/capture-status.json\"",
+        &format!("status_path = \"{status_path_text}\""),
+    );
+    fs::write(&config_path, config).expect("write config");
+    let addr = reserve_loopback();
+    let _child = KillOnDrop(
+        binary()
+            .args(["serve-status", "--config"])
+            .arg(&config_path)
+            .args(["--listen", &addr.to_string()])
+            .spawn()
+            .expect("spawn serve-status"),
+    );
+
+    wait_for_listen(addr);
+    let (status, body) = http_get(addr, "/status");
+    assert_eq!(status, 200);
+    let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
+    assert_eq!(&body.as_bytes()[json_start..], fixture.as_slice());
+    let value: serde_json::Value = serde_json::from_str(&body[json_start..]).expect("status JSON");
+    assert_eq!(value["schema_version"], "hl.capture.status.v5");
+    assert_eq!(value["maintenance"]["enabled"], true);
+    assert_eq!(
+        value["auxiliary_sources"][0]["restart_reconstruction"],
+        "complete"
+    );
 }
 
 #[test]
