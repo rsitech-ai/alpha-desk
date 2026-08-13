@@ -1,0 +1,14 @@
+# Local hl-api surface. This is not production authentication or an SLO.
+
+[listen]
+bind = "127.0.0.1:8788"
+
+[auth]
+# loopback-dev requires a loopback bind and skips bearer credentials.
+# Use mode = "credential" with credential_file in non-dev; missing credentials
+# fail closed at startup.
+mode = "loopback-dev"
+
+[snapshots]
+canonical_health = "../fixtures/api/canonical-health.json"
+capture_status = "../fixtures/api/capture-status.json"
