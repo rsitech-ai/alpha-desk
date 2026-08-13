@@ -159,12 +159,26 @@ fn crowding_from_caller_marks(
     positions: &[CrowdingPosition],
     remaining_capacity: UsdAmount,
 ) -> Result<market_intelligence::CrowdingComponents, MarketError> {
-    let snapshot = observed_snapshot();
+    let mut snapshot = observed_snapshot();
+    snapshot.values.insert(
+        market_feature_key("inventory").unwrap(),
+        mark_inventory_value(positions),
+    );
+    snapshot.provenance_hash = snapshot.compute_provenance_hash();
     crowding_components(
         positions,
         remaining_capacity,
         snapshot.require_observed_book_and_fills()?,
     )
+}
+
+fn mark_inventory_value(positions: &[CrowdingPosition]) -> FeatureValue {
+    let scale = u32::from(positions[0].exposure.scale());
+    let raw: i128 = positions
+        .iter()
+        .map(|position| position.exposure.raw())
+        .sum();
+    FeatureValue::Decimal { raw, scale }
 }
 
 #[test]
@@ -203,13 +217,49 @@ fn caller_supplied_marks_with_not_observed_book_or_fills_cannot_produce_crowding
 fn missing_book_or_fills_refuses_crowding_without_inventing_marks() {
     let positions = vec![invented_mark_position()];
     let observed = observed_snapshot();
-    let components = crowding_components(
-        &positions,
-        usd(50),
-        observed.require_observed_book_and_fills().unwrap(),
-    )
-    .unwrap();
-    assert!(components.capacity_consumed.raw_value.raw() > 0);
-    let from_snapshot = crowding_components_from_snapshot(&observed, &positions, usd(50)).unwrap();
-    assert_eq!(components, from_snapshot);
+    assert!(matches!(
+        observed.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "inventory" })
+    ));
+    assert!(matches!(
+        crowding_components_from_snapshot(&observed, &positions, usd(50)),
+        Err(MarketError::MissingInput { name: "inventory" })
+    ));
+}
+
+#[test]
+fn constructed_accounts_with_invented_inventory_cannot_produce_crowding_scores() {
+    let positions = vec![invented_mark_position()];
+    let missing_inventory = crowding_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+    );
+    assert!(matches!(
+        missing_inventory.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "inventory" })
+    ));
+    assert!(matches!(
+        crowding_components_from_snapshot(&missing_inventory, &positions, usd(50)),
+        Err(MarketError::MissingInput { name: "inventory" })
+    ));
+    let mut mismatched = missing_inventory.clone();
+    mismatched.values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Decimal {
+            raw: 100_000_000,
+            scale: 8,
+        },
+    );
+    mismatched.provenance_hash = mismatched.compute_provenance_hash();
+    let stolen_inventory = mismatched.require_observed_book_and_fills().unwrap();
+    assert!(matches!(
+        crowding_components(&positions, usd(50), stolen_inventory),
+        Err(MarketError::Malformed {
+            what: "inventory",
+            reason: "observed inventory proof does not match caller inventory",
+        })
+    ));
 }

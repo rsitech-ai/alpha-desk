@@ -507,6 +507,10 @@ fn emit_market_snapshots(
             market_feature_key("fills")?,
             FeatureValue::Missing(MissingReason::NotObserved),
         );
+        values.insert(
+            market_feature_key("inventory")?,
+            FeatureValue::Missing(MissingReason::NotObserved),
+        );
         snapshots.push(MarketFeatureSnapshot::try_new(
             record.market_id().clone(),
             Horizon::MINUTES_5,
@@ -566,7 +570,7 @@ fn assess_market_emissions(
         match crowding_components_from_snapshot(snapshot, &[], remaining_capacity) {
             Ok(_) => crowding_emitted = crowding_emitted.saturating_add(1),
             Err(MarketError::MissingInput {
-                name: "book" | "fills",
+                name: "book" | "fills" | "inventory",
             }) => {}
             Err(MarketError::InsufficientHistory { .. }) => {}
             Err(error) => return Err(error.into()),
@@ -581,7 +585,7 @@ fn assess_market_emissions(
                 }
             }
             Err(MarketError::MissingInput {
-                name: "book" | "fills",
+                name: "book" | "fills" | "inventory",
             }) => {}
             Err(MarketError::InsufficientHistory { .. }) => {}
             Err(error) => return Err(error.into()),

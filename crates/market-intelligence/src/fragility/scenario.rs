@@ -1,5 +1,5 @@
 use domain_types::{AccountId, Direction, MarketId, ProbabilityPpm, ScenarioId, UsdAmount};
-use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
+use feature_core::{HealthAssessment, HealthState, MissingReason};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     hash::digest,
     market_feature_key,
     math::USD_SCALE,
-    sentiment::{MarketFeatureSnapshot, ObservedBookAndFills},
+    sentiment::{MarketFeatureSnapshot, ObservedBookAndFills, observed_usd_amount},
 };
 
 pub const DEFAULT_SHOCKS_BPS: [i64; 12] =
@@ -135,9 +135,10 @@ pub struct FragilityResult {
 }
 
 /// Fragility scores from a caller-supplied simulated book and accounts.
-/// Inputs are admitted only with [`ObservedBookAndFills`] issued after book
-/// and fills are observed. The proof must match the simulated book's health
-/// and executable depth when that book would be scored.
+/// Inputs are admitted only with [`ObservedBookAndFills`] issued after book,
+/// fills, and inventory are observed. The proof must match the simulated
+/// book's health and executable depth, and caller account inventory, when
+/// those inputs would be scored.
 pub fn simulate_fragility(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -191,7 +192,11 @@ pub fn simulate_fragility_from_snapshot(
     let evidence = snapshot.require_observed_book_and_fills()?;
     let book_key = market_feature_key("book")?;
     let executable_depth = match snapshot.values.get(&book_key) {
-        Some(value) => observed_executable_depth(value)?,
+        Some(value) => observed_usd_amount(
+            value,
+            "book",
+            "observed book must be decimal executable depth",
+        )?,
         None => return Err(MarketError::MissingInput { name: "book" }),
     };
     let book = SimulatedBook::observed(executable_depth, snapshot.health.clone());
@@ -199,10 +204,10 @@ pub fn simulate_fragility_from_snapshot(
 }
 
 /// Path scores from a caller-supplied simulated book and accounts.
-/// Inputs are admitted only with [`ObservedBookAndFills`] issued after book
-/// and fills are observed. The proof must match the simulated book being
-/// scored so an unrelated constructed book cannot ride another snapshot's
-/// token.
+/// Inputs are admitted only with [`ObservedBookAndFills`] issued after book,
+/// fills, and inventory are observed. The proof must match the simulated
+/// book and caller account inventory being scored so an unrelated constructed
+/// book or invented inventory cannot ride another snapshot's token.
 pub fn simulate_path(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -230,6 +235,7 @@ pub fn simulate_path(
     if accounts.is_empty() {
         return Err(MarketError::InsufficientHistory { what: "fragility" });
     }
+    evidence.require_matches_inventory(caller_account_inventory(accounts)?)?;
     let scale = accounts[0].notional.scale();
     let mut remaining: Vec<SimulatedAccount> = accounts
         .iter()
@@ -333,7 +339,11 @@ fn require_proof_matches_book(
             reason: "observed book proof does not match simulated book health",
         });
     }
-    let depth = observed_executable_depth(evidence.book_value())?;
+    let depth = observed_usd_amount(
+        evidence.book_value(),
+        "book",
+        "observed book must be decimal executable depth",
+    )?;
     if depth != book.executable_depth {
         return Err(MarketError::Malformed {
             what: "book",
@@ -343,22 +353,17 @@ fn require_proof_matches_book(
     Ok(())
 }
 
-fn observed_executable_depth(value: &FeatureValue) -> Result<UsdAmount, MarketError> {
-    match value {
-        FeatureValue::Decimal { raw, scale } => {
-            let scale = u8::try_from(*scale).map_err(|_| MarketError::OutOfRange)?;
-            Ok(UsdAmount::from_raw(*raw, scale)?)
-        }
-        FeatureValue::Missing(_) => Err(MarketError::MissingInput { name: "book" }),
-        FeatureValue::SignedInteger(_)
-        | FeatureValue::UnsignedInteger(_)
-        | FeatureValue::ProbabilityPpm(_)
-        | FeatureValue::Category(_)
-        | FeatureValue::Boolean(_) => Err(MarketError::Malformed {
-            what: "book",
-            reason: "observed book must be decimal executable depth",
-        }),
-    }
+fn caller_account_inventory(accounts: &[SimulatedAccount]) -> Result<UsdAmount, MarketError> {
+    let scale = accounts[0].notional.scale();
+    accounts
+        .iter()
+        .try_fold(UsdAmount::from_raw(0, scale)?, |acc, account| {
+            if account.notional.scale() != scale {
+                Err(MarketError::ScaleMismatch)
+            } else {
+                acc.checked_add(account.notional).map_err(Into::into)
+            }
+        })
 }
 
 fn wave_signed_impact(
