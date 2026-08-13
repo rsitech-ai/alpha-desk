@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use sha2::{Digest, Sha256};
 use storage_ports::ArchiveError;
 
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
@@ -150,6 +151,22 @@ pub fn try_read_regular(
     match fs::symlink_metadata(&path) {
         Ok(_) => read_regular(root, relative, max_bytes).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(ArchiveError::Io("inspecting archive file")),
+    }
+}
+
+pub fn exists_regular(root: &Path, relative: &Path) -> Result<bool, ArchiveError> {
+    validate_relative(relative)?;
+    let path = root.join(relative);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                Err(ArchiveError::UnsafePath)
+            } else {
+                Ok(true)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(ArchiveError::Io("inspecting archive file")),
     }
 }
@@ -314,6 +331,26 @@ pub fn open_writer_lock(root: &Path, relative: &Path) -> Result<File, ArchiveErr
 }
 
 pub fn open_shared_lease(root: &Path, relative: &Path) -> Result<File, ArchiveError> {
+    open_lease(
+        root,
+        relative,
+        rustix::fs::FlockOperation::NonBlockingLockShared,
+    )
+}
+
+pub fn open_exclusive_lease(root: &Path, relative: &Path) -> Result<File, ArchiveError> {
+    open_lease(
+        root,
+        relative,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+}
+
+fn open_lease(
+    root: &Path,
+    relative: &Path,
+    operation: rustix::fs::FlockOperation,
+) -> Result<File, ArchiveError> {
     validate_relative(relative)?;
     let parent_relative = relative.parent().ok_or(ArchiveError::UnsafePath)?;
     ensure_directory(root, parent_relative)?;
@@ -330,9 +367,144 @@ pub fn open_shared_lease(root: &Path, relative: &Path) -> Result<File, ArchiveEr
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(ArchiveError::UnsafePath);
     }
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared)
-        .map_err(|_| ArchiveError::WriterBusy)?;
+    rustix::fs::flock(&file, operation).map_err(|_| ArchiveError::WriterBusy)?;
     Ok(file)
+}
+
+pub fn list_regular_names(root: &Path, relative: &Path) -> Result<Vec<String>, ArchiveError> {
+    validate_relative(relative)?;
+    let path = root.join(relative);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(ArchiveError::UnsafePath);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(ArchiveError::Io("inspecting archive directory")),
+    }
+    let mut names = Vec::new();
+    let entries = fs::read_dir(&path).map_err(|_| ArchiveError::Io("listing archive directory"))?;
+    for entry in entries {
+        let entry = entry.map_err(|_| ArchiveError::Io("reading archive directory entry"))?;
+        let name = entry.file_name();
+        let child = path.join(&name);
+        let metadata = fs::symlink_metadata(&child)
+            .map_err(|_| ArchiveError::Io("inspecting archive directory entry"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ArchiveError::UnsafePath);
+        }
+        if metadata.is_file() {
+            let name = name.to_str().ok_or(ArchiveError::UnsafePath)?.to_owned();
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+pub fn regular_digest(
+    root: &Path,
+    relative: &Path,
+    max_bytes: u64,
+) -> Result<([u8; 32], u64), ArchiveError> {
+    let (mut file, length) = open_regular(root, relative, max_bytes)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut read_total = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| ArchiveError::Io("hashing archive file"))?;
+        if read == 0 {
+            break;
+        }
+        read_total = read_total
+            .checked_add(
+                u64::try_from(read)
+                    .map_err(|_| ArchiveError::InvalidInput("archive file exceeds u64"))?,
+            )
+            .ok_or(ArchiveError::InvalidInput("archive file size overflows"))?;
+        hasher.update(&buffer[..read]);
+    }
+    if read_total != length {
+        return Err(ArchiveError::Io("archive file changed while hashing"));
+    }
+    Ok((hasher.finalize().into(), length))
+}
+
+pub fn unlink_regular_matching(
+    root: &Path,
+    relative: &Path,
+    expected_sha256: [u8; 32],
+    expected_len: u64,
+) -> Result<(), ArchiveError> {
+    let (digest, length) = regular_digest(root, relative, expected_len.max(1))?;
+    if digest != expected_sha256 || length != expected_len {
+        return Err(ArchiveError::ManifestVerification(
+            "eligible object digest or length does not match the deletion plan",
+        ));
+    }
+    let parent_relative = relative.parent().ok_or(ArchiveError::UnsafePath)?;
+    let parent = ensure_directory(root, parent_relative)?;
+    fs::remove_file(root.join(relative)).map_err(|_| ArchiveError::Io("unlinking archive file"))?;
+    sync_directory(&parent)
+}
+
+pub fn append_journal_line(
+    root: &Path,
+    relative: &Path,
+    line: &[u8],
+    max_bytes: u64,
+) -> Result<(), ArchiveError> {
+    if line.is_empty() || line.contains(&b'\n') {
+        return Err(ArchiveError::InvalidInput(
+            "deletion journal line must be nonempty and single-line",
+        ));
+    }
+    let added = u64::try_from(line.len().checked_add(1).ok_or(ArchiveError::InvalidInput(
+        "deletion journal line overflows",
+    ))?)
+    .map_err(|_| ArchiveError::InvalidInput("deletion journal line exceeds u64"))?;
+    validate_relative(relative)?;
+    let parent_relative = relative.parent().ok_or(ArchiveError::UnsafePath)?;
+    let parent = ensure_directory(root, parent_relative)?;
+    let path = root.join(relative);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ArchiveError::UnsafePath);
+            }
+            if metadata
+                .len()
+                .checked_add(added)
+                .is_none_or(|total| total > max_bytes)
+            {
+                return Err(ArchiveError::InvalidInput(
+                    "deletion journal exceeds the reserved bound",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if added > max_bytes {
+                return Err(ArchiveError::InvalidInput(
+                    "deletion journal exceeds the reserved bound",
+                ));
+            }
+        }
+        Err(_) => return Err(ArchiveError::Io("inspecting deletion journal")),
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|_| ArchiveError::Io("opening deletion journal"))?;
+    file.write_all(line)
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|_| ArchiveError::Io("appending deletion journal"))?;
+    file.sync_all()
+        .map_err(|_| ArchiveError::Io("syncing deletion journal"))?;
+    sync_directory(&parent)
 }
 
 fn validate_existing_components(root: &Path, relative: &Path) -> Result<(), ArchiveError> {
@@ -408,6 +580,34 @@ mod tests {
                 1024
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn exclusive_lease_fails_closed_while_a_shared_lease_is_held() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = PathBuf::from("dataset/leases/root-ab.lease");
+        let shared = open_shared_lease(root.path(), &relative).unwrap();
+        assert!(matches!(
+            open_exclusive_lease(root.path(), &relative),
+            Err(ArchiveError::WriterBusy)
+        ));
+        drop(shared);
+        assert!(open_exclusive_lease(root.path(), &relative).is_ok());
+    }
+
+    #[test]
+    fn unlink_regular_matching_requires_digest_and_fsyncs_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = PathBuf::from("objects/part.bin");
+        publish_immutable(root.path(), &relative, b"payload").unwrap();
+        assert!(unlink_regular_matching(root.path(), &relative, [0x11; 32], 7).is_err());
+        let (digest, length) = regular_digest(root.path(), &relative, 1024).unwrap();
+        unlink_regular_matching(root.path(), &relative, digest, length).unwrap();
+        assert!(
+            try_read_regular(root.path(), &relative, 1024)
+                .unwrap()
+                .is_none()
         );
     }
 }

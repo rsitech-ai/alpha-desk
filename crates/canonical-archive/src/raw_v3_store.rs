@@ -23,10 +23,11 @@ use sha2::{Digest, Sha256};
 use storage_ports::{
     ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
     RAW_ARCHIVE_MAXIMUM_DATA_PACK_BYTES, RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
-    RawArchiveCapacityBudgets, RawArchiveDurableFormatEnvelope, RawArchiveObject,
-    RawArchiveProductionCapacityAdmission, RawArchiveRootLeaseIdentity, RawArchiveWorkloadEnvelope,
-    RawObservationArchive, RawObservationBatch, RawObservationIterator, RawObservationRange,
-    RawObservationReceipt, SequencedRawObservationIterator, VerifiedRawManifest,
+    RawArchiveCapacityBudgets, RawArchiveCheckpointEntriesV2, RawArchiveDurableFormatEnvelope,
+    RawArchiveObject, RawArchiveProductionCapacityAdmission, RawArchiveRootLeaseIdentity,
+    RawArchiveWorkloadEnvelope, RawObservationArchive, RawObservationBatch, RawObservationIterator,
+    RawObservationRange, RawObservationReceipt, SequencedRawObservationIterator,
+    VerifiedRawManifest,
 };
 
 use super::{
@@ -43,6 +44,13 @@ use super::{
     },
     schema,
 };
+
+mod checkpoint;
+mod gc;
+mod hint;
+
+pub use checkpoint::{RawArchiveCheckpoint, RawArchiveCheckpointV1, RawArchiveCheckpointV2};
+pub use gc::{RawArchiveGcPlan, RawArchiveGcReceipt};
 
 #[derive(Debug)]
 pub struct RawV3Archive {
@@ -128,6 +136,133 @@ impl RawV3Archive {
             raw_policy::RawPolicy::MonotonicByteV3,
         )?;
         pack_logical_range_locked(self, chain, source, range, self.now()?)
+    }
+
+    pub fn publish_checkpoint_v1(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        original_manifest_ids: &[ManifestId],
+        range: LocalRecordSequenceRange,
+    ) -> Result<[u8; 32], ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        checkpoint::publish_checkpoint_v1(self, chain, source, original_manifest_ids, range)
+    }
+
+    pub fn publish_checkpoint_v2(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        entries: RawArchiveCheckpointEntriesV2,
+    ) -> Result<[u8; 32], ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        checkpoint::publish_checkpoint_v2(self, chain, source, entries)
+    }
+
+    pub fn switch_checkpoint_current(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        expected_current: Option<[u8; 32]>,
+        target: [u8; 32],
+    ) -> Result<(), ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        checkpoint::switch_checkpoint_current(self, chain, source, expected_current, target)
+    }
+
+    pub fn load_checkpoint(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+    ) -> Result<Option<RawArchiveCheckpoint>, ArchiveError> {
+        checkpoint::load_checkpoint(self, chain, source)
+    }
+
+    pub fn plan_packed_object_gc(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        backup_receipt: [u8; 32],
+    ) -> Result<RawArchiveGcPlan, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        gc::plan_packed_object_gc(self, chain, source, backup_receipt)
+    }
+
+    pub fn execute_packed_object_gc(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        plan_digest: [u8; 32],
+        backup_receipt: [u8; 32],
+    ) -> Result<RawArchiveGcReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        gc::execute_packed_object_gc(self, chain, source, plan_digest, backup_receipt)
+    }
+
+    pub fn rebuild_receipt_hints(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+    ) -> Result<[u8; 32], ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        hint::rebuild_receipt_hints(self, chain, source)
+    }
+
+    pub fn lookup_receipt_hint(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        manifest: &ManifestId,
+    ) -> Result<(u64, u64), ArchiveError> {
+        hint::lookup_receipt_hint(self, chain, source, manifest)
     }
 }
 
@@ -631,8 +766,9 @@ fn write_packed_object(
             "packed object exceeds the global data-pack bound",
         ));
     }
-    let descriptor_relative =
-        PathBuf::from(partition).join("packs").join(format!("pack-{}.parquet", hex::encode(hash)));
+    let descriptor_relative = PathBuf::from(partition)
+        .join("packs")
+        .join(format!("pack-{}.parquet", hex::encode(hash)));
     let published_relative = dataset.join(&descriptor_relative);
     fs::publish_staged_immutable(&archive.root, &published_relative, staged)?;
     let published = fs::read_regular(&archive.root, &published_relative, size_bytes)?;
@@ -700,11 +836,22 @@ fn load_current_root(
             "raw V3 current pointer does not bind exact root path",
         ));
     }
+    Ok(Some(load_verified_root(archive, chain, source, hash)?))
+}
+
+fn load_verified_root(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    hash: [u8; 32],
+) -> Result<(RootBundleV3, Vec<u8>), ArchiveError> {
+    let dataset = dataset_relative(chain, source);
+    let expected = root_relative(&dataset, hash);
     let root_bytes = fs::read_manifest(&archive.root, &expected)?;
     let root = parse_root_bundle(&root_bytes)?;
     if root_bundle_hash(&root)? != hash {
         return Err(ArchiveError::ManifestVerification(
-            "raw V3 current pointer hash mismatch",
+            "raw V3 root path does not bind exact bytes",
         ));
     }
     if root.chain_id()?.as_str() != chain.as_str() || root.source_id()?.as_str() != source.as_str()
@@ -732,7 +879,7 @@ fn load_current_root(
             "journal committed prefix hash mismatch",
         ));
     }
-    Ok(Some((root, journal_bytes)))
+    Ok((root, journal_bytes))
 }
 
 fn pack_index_locked(
@@ -862,7 +1009,8 @@ fn pack_logical_range_locked(
         current.0.sequence_root().depth(),
     ) {
         pack_index_locked(archive, chain, source, durable_at)?;
-        current = load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+        current =
+            load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
     }
     let (root, journal_bytes) = current;
     let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
@@ -912,14 +1060,18 @@ fn pack_logical_range_locked(
         expected = entry
             .last_local_sequence()
             .checked_add(1)
-            .ok_or(ArchiveError::InvalidInput("packed local sequence overflows"))?;
+            .ok_or(ArchiveError::InvalidInput(
+                "packed local sequence overflows",
+            ))?;
     }
     if expected
         != range
             .end()
             .get()
             .checked_add(1)
-            .ok_or(ArchiveError::InvalidInput("packed local sequence overflows"))?
+            .ok_or(ArchiveError::InvalidInput(
+                "packed local sequence overflows",
+            ))?
     {
         return Err(ArchiveError::InvalidInput(
             "data packing range must cover exact consecutive leaf entries",
@@ -930,12 +1082,19 @@ fn pack_logical_range_locked(
     let mut inputs = Vec::new();
     let mut row_start = 0_u64;
     for entry in &leaves {
-        let hash = entry.storage().logical_manifest_sha256()?.ok_or(
-            ArchiveError::InvalidInput("data packing requires uncompacted logical leaves"),
-        )?;
-        let relative = entry.storage().logical_manifest_relative_path().ok_or(
-            ArchiveError::InvalidInput("logical sequence entry is missing a manifest path"),
-        )?;
+        let hash = entry
+            .storage()
+            .logical_manifest_sha256()?
+            .ok_or(ArchiveError::InvalidInput(
+                "data packing requires uncompacted logical leaves",
+            ))?;
+        let relative =
+            entry
+                .storage()
+                .logical_manifest_relative_path()
+                .ok_or(ArchiveError::InvalidInput(
+                    "logical sequence entry is missing a manifest path",
+                ))?;
         let bytes = fs::read_manifest(&archive.root, Path::new(relative))?;
         if manifest::sha256(&bytes) != hash {
             return Err(ArchiveError::ManifestVerification(
@@ -988,12 +1147,8 @@ fn pack_logical_range_locked(
         chain.as_str(),
         source.as_str(),
     )?;
-    let sequence_root = replace_range_with_packed_entry(
-        &mut journal,
-        &packs,
-        root.sequence_root(),
-        packed_entry,
-    )?;
+    let sequence_root =
+        replace_range_with_packed_entry(&mut journal, &packs, root.sequence_root(), packed_entry)?;
     let journal_commit = journal.commit_prefix(&sequence_root)?;
     fs::extend_append_only(
         &archive.root,
@@ -1564,13 +1719,10 @@ fn read_observations_by_sequence(
     for entry in leaves {
         match entry.storage() {
             SequenceStorageRefV3::Packed { .. } => {
-                let (pack, observations) =
-                    load_verified_pack_rows(archive, chain, source, &entry)?;
-                total_bytes = total_bytes
-                    .checked_add(pack.object().size_bytes())
-                    .ok_or(ArchiveError::InvalidInput(
-                        "raw observation byte count overflows",
-                    ))?;
+                let (pack, observations) = load_verified_pack_rows(archive, chain, source, &entry)?;
+                total_bytes = total_bytes.checked_add(pack.object().size_bytes()).ok_or(
+                    ArchiveError::InvalidInput("raw observation byte count overflows"),
+                )?;
                 if total_bytes > archive.config.max_read_bytes() {
                     return Err(ArchiveError::InvalidInput(
                         "raw observation sequence range exceeds configured byte limit",
@@ -1786,8 +1938,8 @@ fn push_replayed_rows(
     replayed: &mut Vec<storage_ports::OwnedSequencedSourceObservation>,
 ) -> Result<(), ArchiveError> {
     for (index, observation) in observations.into_iter().enumerate() {
-        let advance_by =
-            u64::try_from(index).map_err(|_| ArchiveError::InvalidInput("local record sequence overflows"))?;
+        let advance_by = u64::try_from(index)
+            .map_err(|_| ArchiveError::InvalidInput("local record sequence overflows"))?;
         let sequence =
             LocalRecordSequence::try_new(first_local_sequence)?.checked_advance_by(advance_by)?;
         if range.contains(sequence) {
@@ -1849,12 +2001,20 @@ fn load_pack_manifest(
     source: &SourceId,
     entry: &SequenceLeafEntryV3,
 ) -> Result<RawPackManifestV3, ArchiveError> {
-    let hash = entry.storage().pack_manifest_sha256()?.ok_or(
-        ArchiveError::ManifestVerification("packed sequence entry is missing a manifest hash"),
-    )?;
-    let relative = entry.storage().pack_manifest_relative_path().ok_or(
-        ArchiveError::ManifestVerification("packed sequence entry is missing a manifest path"),
-    )?;
+    let hash =
+        entry
+            .storage()
+            .pack_manifest_sha256()?
+            .ok_or(ArchiveError::ManifestVerification(
+                "packed sequence entry is missing a manifest hash",
+            ))?;
+    let relative =
+        entry
+            .storage()
+            .pack_manifest_relative_path()
+            .ok_or(ArchiveError::ManifestVerification(
+                "packed sequence entry is missing a manifest path",
+            ))?;
     let bytes = fs::read_manifest(&archive.root, Path::new(relative))?;
     if manifest::sha256(&bytes) != hash {
         return Err(ArchiveError::ManifestVerification(
@@ -1933,13 +2093,17 @@ fn load_verified_pack_rows(
     }
     for input in pack.inputs() {
         let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
-        let start = usize::try_from(input.row_slice_start())
-            .map_err(|_| ArchiveError::ManifestVerification("packed row slice exceeds address space"))?;
-        let count = usize::try_from(input.row_count())
-            .map_err(|_| ArchiveError::ManifestVerification("packed row count exceeds address space"))?;
+        let start = usize::try_from(input.row_slice_start()).map_err(|_| {
+            ArchiveError::ManifestVerification("packed row slice exceeds address space")
+        })?;
+        let count = usize::try_from(input.row_count()).map_err(|_| {
+            ArchiveError::ManifestVerification("packed row count exceeds address space")
+        })?;
         let end = start
             .checked_add(count)
-            .ok_or(ArchiveError::ManifestVerification("packed row slice overflows"))?;
+            .ok_or(ArchiveError::ManifestVerification(
+                "packed row slice overflows",
+            ))?;
         let slice = observations
             .get(start..end)
             .ok_or(ArchiveError::ManifestVerification(
@@ -2110,10 +2274,14 @@ fn verified_from_packed_input(
     })?;
     let end = start
         .checked_add(count)
-        .ok_or(ArchiveError::ManifestVerification("packed row slice overflows"))?;
-    let slice = rows.get(start..end).ok_or(ArchiveError::ManifestVerification(
-        "packed row slice is outside the packed object",
-    ))?;
+        .ok_or(ArchiveError::ManifestVerification(
+            "packed row slice overflows",
+        ))?;
+    let slice = rows
+        .get(start..end)
+        .ok_or(ArchiveError::ManifestVerification(
+            "packed row slice is outside the packed object",
+        ))?;
     let object = bind_observations_to_commit(commit, slice)?;
     Ok(VerifiedRawManifest::new(
         manifest::manifest_id(manifest_hash)?,

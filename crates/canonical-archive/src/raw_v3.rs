@@ -307,6 +307,20 @@ impl ReceiptHintEntryV3 {
             last_local_sequence,
         })
     }
+
+    pub fn manifest_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.manifest_sha256)
+    }
+
+    #[must_use]
+    pub const fn first_local_sequence(&self) -> u64 {
+        self.first_local_sequence
+    }
+
+    #[must_use]
+    pub const fn last_local_sequence(&self) -> u64 {
+        self.last_local_sequence
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -359,6 +373,11 @@ impl ReceiptHintPageV3 {
                 let entry = &self.entries[index];
                 (entry.first_local_sequence, entry.last_local_sequence)
             })
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[ReceiptHintEntryV3] {
+        &self.entries
     }
 }
 
@@ -1304,6 +1323,15 @@ impl PackedLogicalInputV3 {
     pub fn canonical_manifest_json(&self) -> &str {
         &self.canonical_manifest_json
     }
+
+    pub fn object_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.object_sha256)
+    }
+
+    #[must_use]
+    pub fn manifest_id(&self) -> &str {
+        &self.manifest_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1509,6 +1537,11 @@ impl RawPackManifestV3 {
     #[must_use]
     pub fn partition(&self) -> &str {
         &self.partition
+    }
+
+    #[must_use]
+    pub const fn created_at_micros(&self) -> i64 {
+        self.created_at_micros
     }
 
     pub fn chain_id(&self) -> Result<ChainId, ArchiveError> {
@@ -3101,6 +3134,11 @@ impl RootBundleV3 {
             .map_err(|_| ArchiveError::ManifestVerification("invalid root bundle chain"))
     }
 
+    #[must_use]
+    pub const fn created_at_micros(&self) -> i64 {
+        self.created_at_micros
+    }
+
     pub fn source_id(&self) -> Result<SourceId, ArchiveError> {
         SourceId::new(self.source_id.clone())
             .map_err(|_| ArchiveError::ManifestVerification("invalid root bundle source"))
@@ -3637,7 +3675,7 @@ fn combined_pack_hash(inputs: &[PackedLogicalInputV3]) -> Result<[u8; 32], Archi
     domain_hash(PACK_COMBINED_HASH_DOMAIN_V3, &evidence)
 }
 
-fn domain_hash(domain: &[u8], bytes: &[u8]) -> Result<[u8; 32], ArchiveError> {
+pub(crate) fn domain_hash(domain: &[u8], bytes: &[u8]) -> Result<[u8; 32], ArchiveError> {
     let domain_length = u64::try_from(domain.len())
         .map_err(|_| ArchiveError::InvalidInput("archive hash domain exceeds u64"))?;
     let bytes_length = u64::try_from(bytes.len())
@@ -4668,13 +4706,9 @@ mod tests {
         )
         .unwrap();
         let old = journal.commit_prefix(&root).unwrap();
-        let packed_root = replace_range_with_packed_entry(
-            &mut journal,
-            &empty,
-            &root,
-            packed(1, 2, 9, 2),
-        )
-        .unwrap();
+        let packed_root =
+            replace_range_with_packed_entry(&mut journal, &empty, &root, packed(1, 2, 9, 2))
+                .unwrap();
         let rewritten = journal.commit_prefix(&packed_root).unwrap();
         assert!(rewritten.bytes().starts_with(old.bytes()));
         let page = load_sequence_leaf(rewritten.bytes(), &empty, &packed_root).unwrap();
