@@ -11,6 +11,12 @@ readme.workspace = true
 publish = false
 
 [dependencies]
-anyhow.workspace = true
+blake3.workspace = true
+domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
+execution-sim = { path = "../../crates/execution-sim", version = "=0.1.0" }
+hex.workspace = true
+model-runtime = { path = "../../crates/model-runtime", version = "=0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
