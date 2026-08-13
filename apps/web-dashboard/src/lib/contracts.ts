@@ -72,7 +72,19 @@ export interface CaptureStatus {
   disk_free_basis_points?: number
   archive_manifest_id?: string
   auxiliary_sources?: AuxiliarySourceStatus[]
+  throughput_records_per_sec?: number
+  throughput_blocks_per_sec?: number
   extra_fields: Record<string, unknown>
+}
+
+export const LAST_HEARTBEAT_THROUGHPUT_FIELDS = [
+  "throughput_records_per_sec",
+  "throughput_blocks_per_sec",
+] as const
+
+export interface LastHeartbeatThroughput {
+  throughput_records_per_sec?: number
+  throughput_blocks_per_sec?: number
 }
 
 export const CAPTURE_STATUS_FIELD_ORDER = [
@@ -307,6 +319,8 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
     return auxiliary_sources
   }
 
+  const extras = collectExtraFields(value, CAPTURE_STATUS_FIELD_ORDER)
+  const throughput = lastHeartbeatThroughput(extras)
   return {
     ok: true,
     value: {
@@ -329,9 +343,49 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
       disk_free_basis_points: disk_free_basis_points.value,
       archive_manifest_id: archive_manifest_id.value,
       auxiliary_sources: auxiliary_sources.value,
-      extra_fields: collectExtraFields(value, CAPTURE_STATUS_FIELD_ORDER),
+      throughput_records_per_sec: throughput.throughput_records_per_sec,
+      throughput_blocks_per_sec: throughput.throughput_blocks_per_sec,
+      extra_fields: extrasWithoutMappedThroughput(extras, throughput),
     },
   }
+}
+
+export function lastHeartbeatThroughput(
+  extras: Record<string, unknown>
+): LastHeartbeatThroughput {
+  return {
+    throughput_records_per_sec: lastHeartbeatRate(
+      extras.throughput_records_per_sec
+    ),
+    throughput_blocks_per_sec: lastHeartbeatRate(
+      extras.throughput_blocks_per_sec
+    ),
+  }
+}
+
+export function lastHeartbeatRate(value: unknown): number | undefined {
+  if (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  ) {
+    return value
+  }
+  return undefined
+}
+
+function extrasWithoutMappedThroughput(
+  extras: Record<string, unknown>,
+  throughput: LastHeartbeatThroughput
+): Record<string, unknown> {
+  const rest: Record<string, unknown> = { ...extras }
+  for (const field of LAST_HEARTBEAT_THROUGHPUT_FIELDS) {
+    if (throughput[field] !== undefined) {
+      delete rest[field]
+    }
+  }
+  return rest
 }
 
 export function assertNever(value: never): never {

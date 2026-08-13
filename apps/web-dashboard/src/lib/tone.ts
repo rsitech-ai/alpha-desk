@@ -50,3 +50,10 @@ export function sourceHealthTone(health: string): Tone {
 export function readyTone(ready: boolean): Tone {
   return ready ? "green" : "red"
 }
+
+export function toneWithoutLiveOnHttpError(status: number, tone: Tone): Tone {
+  if (status === 503 && tone === "green") {
+    return "red"
+  }
+  return tone
+}

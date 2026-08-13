@@ -23,7 +23,12 @@ import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ToneBadge } from "@/components/desk/chips"
 import { FieldTable } from "@/components/desk/field-table"
-import { captureHealthTone, readyTone, sourceHealthTone } from "@/lib/tone"
+import {
+  captureHealthTone,
+  readyTone,
+  sourceHealthTone,
+  toneWithoutLiveOnHttpError,
+} from "@/lib/tone"
 import type { EndpointOutcome } from "@/lib/api"
 import {
   isRecord,
@@ -137,7 +142,8 @@ function Pipeline({
   httpStatus: number
 }) {
   const disk = status.disk_free_basis_points
-  const diskTone =
+  const diskTone = toneWithoutLiveOnHttpError(
+    httpStatus,
     disk === undefined
       ? "neutral"
       : disk < 1000
@@ -145,17 +151,30 @@ function Pipeline({
         : disk < 2000
           ? "yellow"
           : "green"
+  )
 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center gap-2">
-        <ToneBadge tone={captureHealthTone(status.health)}>
+        <ToneBadge
+          tone={toneWithoutLiveOnHttpError(
+            httpStatus,
+            captureHealthTone(status.health)
+          )}
+        >
           health={status.health}
         </ToneBadge>
-        <ToneBadge tone={readyTone(status.ready)}>
+        <ToneBadge
+          tone={toneWithoutLiveOnHttpError(httpStatus, readyTone(status.ready))}
+        >
           ready={String(status.ready)}
         </ToneBadge>
-        <ToneBadge tone={sourceHealthTone(status.primary_source_health)}>
+        <ToneBadge
+          tone={toneWithoutLiveOnHttpError(
+            httpStatus,
+            sourceHealthTone(status.primary_source_health)
+          )}
+        >
           primary_source_health={status.primary_source_health}
         </ToneBadge>
         {httpStatus === 503 ? <ToneBadge tone="red">HTTP 503</ToneBadge> : null}
@@ -263,14 +282,29 @@ function Pipeline({
           value={status.last_error_reason ?? formatOmitted("last_error_reason")}
         />
       </dl>
-      <ExtraStatusFields extras={status.extra_fields} />
+      <ExtraStatusFields
+        extras={status.extra_fields}
+        throughputRecordsPerSec={status.throughput_records_per_sec}
+        throughputBlocksPerSec={status.throughput_blocks_per_sec}
+      />
     </div>
   )
 }
 
-function ExtraStatusFields({ extras }: { extras: Record<string, unknown> }) {
+function ExtraStatusFields({
+  extras,
+  throughputRecordsPerSec,
+  throughputBlocksPerSec,
+}: {
+  extras: Record<string, unknown>
+  throughputRecordsPerSec: number | undefined
+  throughputBlocksPerSec: number | undefined
+}) {
   const keys = Object.keys(extras).sort()
-  if (keys.length === 0) {
+  const hasThroughput =
+    throughputRecordsPerSec !== undefined ||
+    throughputBlocksPerSec !== undefined
+  if (keys.length === 0 && !hasThroughput) {
     return null
   }
   const restart = extras.restart_reconstruction
@@ -289,6 +323,29 @@ function ExtraStatusFields({ extras }: { extras: Record<string, unknown> }) {
         Rendered when present. Unknown keys are listed and ignored. They are not
         live-source qualification.
       </p>
+      {hasThroughput ? (
+        <div className="flex flex-col gap-2">
+          <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
+            last-heartbeat throughput
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Windowed rates from the last completed status heartbeat. Not
+            live-qualified. Missing rates are omitted, not invented.
+          </p>
+          {throughputRecordsPerSec !== undefined ? (
+            <Pair
+              field="throughput_records_per_sec"
+              value={`${throughputRecordsPerSec} · last heartbeat`}
+            />
+          ) : null}
+          {throughputBlocksPerSec !== undefined ? (
+            <Pair
+              field="throughput_blocks_per_sec"
+              value={`${throughputBlocksPerSec} · last heartbeat`}
+            />
+          ) : null}
+        </div>
+      ) : null}
       {restart !== undefined ? (
         <Pair field="restart_reconstruction" value={formatJsonValue(restart)} />
       ) : null}
