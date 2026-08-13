@@ -1602,6 +1602,15 @@ dependencies = [
 [[package]]
 name = "entity-graph"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+]
 
 [[package]]
 name = "equivalent"
@@ -1649,6 +1658,13 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "feature-core"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "proptest",
+ "serde",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "fiat-crypto"
@@ -4679,6 +4695,15 @@ dependencies = [
 [[package]]
 name = "wallet-intelligence"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+]
 
 [[package]]
 name = "want"
