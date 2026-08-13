@@ -1,16 +1,18 @@
 #![forbid(unsafe_code)]
 
+mod evaluate;
 mod holdout;
 mod purge;
 mod runner;
 mod split;
 
-use domain_types::{BlockHeight, BlockRange};
+use domain_types::{BlockHeight, BlockRange, Decimal, ExperimentId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ResearchError;
 use crate::experiment::ExperimentManifest;
 
+pub use evaluate::{FoldEstimatorReport, run_evaluate_folds_bytes};
 pub use holdout::{
     HoldoutIsolationReport, HoldoutState, refuse_leaked_holdout_batch, run_holdout_isolation_bytes,
 };
@@ -30,12 +32,46 @@ pub struct LabeledRow {
     pub label_start: BlockHeight,
     pub label_end: BlockHeight,
     pub payload: String,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 impl LabeledRow {
     pub fn label_range(&self) -> Result<BlockRange, ResearchError> {
         BlockRange::new(self.label_start, self.label_end)
             .map_err(|_| ResearchError::SplitInvalid { field: "label" })
+    }
+
+    pub fn observation(&self) -> Result<(Vec<Decimal>, Decimal), ResearchError> {
+        let outcome = self
+            .outcome
+            .as_deref()
+            .ok_or(ResearchError::MissingObservation { field: "outcome" })?;
+        let outcome = Decimal::parse_at_scale(outcome, 8)
+            .map_err(|_| ResearchError::MissingObservation { field: "outcome" })?;
+        if self.features.is_empty() {
+            return Err(ResearchError::MissingObservation { field: "features" });
+        }
+        let features = self
+            .features
+            .iter()
+            .map(|value| {
+                Decimal::parse_at_scale(value, 8)
+                    .map_err(|_| ResearchError::MissingObservation { field: "features" })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((features, outcome))
+    }
+
+    pub fn outcome_value(&self) -> Result<Decimal, ResearchError> {
+        let outcome = self
+            .outcome
+            .as_deref()
+            .ok_or(ResearchError::MissingObservation { field: "outcome" })?;
+        Decimal::parse_at_scale(outcome, 8)
+            .map_err(|_| ResearchError::MissingObservation { field: "outcome" })
     }
 }
 
@@ -53,6 +89,8 @@ pub struct ResearchDataset {
     training_range: BlockRange,
     validation_ranges: Vec<BlockRange>,
     holdout_range: BlockRange,
+    experiment_id: ExperimentId,
+    random_seed: u64,
     rows: Vec<LabeledRow>,
 }
 
@@ -78,6 +116,8 @@ impl ResearchDataset {
             training_range: manifest.training_range,
             validation_ranges: manifest.validation_ranges.clone(),
             holdout_range: manifest.holdout_range,
+            experiment_id: manifest.experiment_id()?,
+            random_seed: manifest.random_seed,
             rows,
         };
         dataset.assert_no_holdout_label_leak()?;
@@ -102,6 +142,35 @@ impl ResearchDataset {
     #[must_use]
     pub const fn holdout_range(&self) -> BlockRange {
         self.holdout_range
+    }
+
+    #[must_use]
+    pub fn experiment_id(&self) -> &ExperimentId {
+        &self.experiment_id
+    }
+
+    #[must_use]
+    pub const fn random_seed(&self) -> u64 {
+        self.random_seed
+    }
+
+    pub fn rows_by_ids(
+        &self,
+        ids: &[String],
+        access: DatasetAccess,
+    ) -> Result<Vec<&LabeledRow>, ResearchError> {
+        let view = self.rows_for(access)?;
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row =
+                view.iter()
+                    .find(|row| row.id == *id)
+                    .ok_or(ResearchError::HoldoutLeakage {
+                        field: "row.missing_or_holdout",
+                    })?;
+            rows.push(*row);
+        }
+        Ok(rows)
     }
 
     pub fn folds(&self) -> Result<Vec<ValidationFold>, ResearchError> {
@@ -277,6 +346,12 @@ pub(crate) fn hash_rows(rows: &[&LabeledRow]) -> [u8; 32] {
         hasher.update(&row.label_start.get().to_le_bytes());
         hasher.update(&row.label_end.get().to_le_bytes());
         hasher.update(row.payload.as_bytes());
+        for feature in &row.features {
+            hasher.update(feature.as_bytes());
+        }
+        if let Some(outcome) = &row.outcome {
+            hasher.update(outcome.as_bytes());
+        }
     }
     *hasher.finalize().as_bytes()
 }

@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use hl_research::{
-    ResearchError, ResearchStatus, run_holdout_isolation_bytes, run_shadow_capture_bytes,
-    run_synthetic_bytes, run_walk_forward_bytes,
+    ResearchError, ResearchStatus, run_evaluate_folds_bytes, run_holdout_isolation_bytes,
+    run_shadow_capture_bytes, run_synthetic_bytes, run_walk_forward_bytes,
 };
 use serde::Serialize;
 
-const USAGE: &str = "usage: hl-research <status|run-synthetic|walk-forward|holdout-isolation|shadow-capture> [--fixture <path>] [--bundle <dir>] [--approved-key <hex>] [--output <path>]";
+const USAGE: &str = "usage: hl-research <status|run-synthetic|walk-forward|holdout-isolation|shadow-capture|evaluate-folds> [--fixture <path>] [--bundle <dir>] [--approved-key <hex>] [--output <path>]";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -79,6 +79,9 @@ fn execute(arguments: Vec<OsString>) -> Result<String, ResearchError> {
         Command::ShadowCapture { fixture } => {
             write_json(run_shadow_capture_bytes(&read_fixture(&fixture)?)?)
         }
+        Command::EvaluateFolds { fixture } => {
+            write_json(run_evaluate_folds_bytes(&read_fixture(&fixture)?)?)
+        }
     }
 }
 
@@ -108,6 +111,9 @@ enum Command {
         fixture: PathBuf,
     },
     ShadowCapture {
+        fixture: PathBuf,
+    },
+    EvaluateFolds {
         fixture: PathBuf,
     },
 }
@@ -154,7 +160,7 @@ impl Command {
                     output,
                 })
             }
-            "walk-forward" | "holdout-isolation" | "shadow-capture" => {
+            "walk-forward" | "holdout-isolation" | "shadow-capture" | "evaluate-folds" => {
                 let mut fixture = None;
                 while let Some(flag) = args.next() {
                     let flag = flag.into_string().map_err(|_| ResearchError::Usage)?;
@@ -173,6 +179,7 @@ impl Command {
                     "walk-forward" => Self::WalkForward { fixture },
                     "holdout-isolation" => Self::HoldoutIsolation { fixture },
                     "shadow-capture" => Self::ShadowCapture { fixture },
+                    "evaluate-folds" => Self::EvaluateFolds { fixture },
                     _ => return Err(ResearchError::Usage),
                 })
             }
