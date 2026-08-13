@@ -319,6 +319,42 @@ async fn durable_acknowledgement_must_match_an_emitted_cursor() {
 }
 
 #[tokio::test]
+async fn restart_after_rotation_opens_the_successor_epoch_at_offset_zero() {
+    let directory = TempDir::new().expect("temp directory");
+    let path = directory.path().join("fills");
+    let rotated = directory.path().join("fills.1");
+    let payload = fixture("fill.json");
+    write_line(&path, &payload);
+    let cancellation = CancellationToken::new();
+    let mut source =
+        NodeLineFileSource::open_with_clock(config(path.clone()), None, TestClock::new())
+            .expect("open source");
+    let first = source
+        .next_observation(&context(cancellation.clone(), Duration::from_secs(1)))
+        .await
+        .expect("first epoch record");
+    source
+        .acknowledge_durable(first.cursor())
+        .expect("first epoch durable");
+    let durable = first.cursor().clone();
+    drop(source);
+
+    fs::rename(&path, rotated).expect("rotate old file");
+    write_line(&path, &payload);
+    let mut restarted =
+        NodeLineFileSource::open_with_clock(config(path), Some(durable.clone()), TestClock::new())
+            .expect("successor epoch must open after rotation");
+    assert_eq!(restarted.committed_cursor(), Some(&durable));
+    let second = restarted
+        .next_observation(&context(cancellation, Duration::from_secs(1)))
+        .await
+        .expect("successor epoch record");
+    assert_ne!(second.cursor().epoch(), durable.epoch());
+    assert!(second.cursor().offset() > 0);
+    assert_eq!(second.payload().as_ref(), payload);
+}
+
+#[tokio::test]
 async fn adapter_never_reads_a_second_record_before_first_is_durable() {
     let directory = TempDir::new().expect("temp directory");
     let path = directory.path().join("fills");

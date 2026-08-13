@@ -36,6 +36,6 @@ pub use service::{ConnectedCapture, RuntimeConnectError, connect_capture};
 pub use shutdown::{AppError, OwnedTask, run_owned_tasks};
 pub use status::{
     AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
-    CaptureSourceHealth, CaptureStatus, CommittedSourceClass, StatusError, StatusWriter,
-    read_status,
+    CaptureSourceHealth, CaptureStatus, CommittedSourceClass, RestartReconstruction, StatusError,
+    StatusWriter, read_status,
 };

@@ -49,6 +49,15 @@ pub enum AuxiliaryQualificationState {
     Qualified,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartReconstruction {
+    #[default]
+    NotRequired,
+    Incomplete,
+    Complete,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuxiliarySourceStatus {
@@ -74,6 +83,8 @@ pub struct AuxiliarySourceStatus {
     quarantine_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error_reason: Option<String>,
+    #[serde(default)]
+    restart_reconstruction: RestartReconstruction,
 }
 
 impl AuxiliarySourceStatus {
@@ -93,6 +104,7 @@ impl AuxiliarySourceStatus {
             last_durable_wall_micros: None,
             quarantine_reason: None,
             last_error_reason: None,
+            restart_reconstruction: RestartReconstruction::NotRequired,
         }
     }
 
@@ -111,13 +123,17 @@ impl AuxiliarySourceStatus {
             AuxiliarySourceHealth::Healthy
         };
         self.cursor_epoch = Some(cursor_epoch.into());
+        self.tail_cursor_epoch = self.cursor_epoch.clone();
         self.durable_offset = Some(durable_offset);
         self.local_sequence = Some(local_sequence);
         self.spool_records = local_sequence;
         self.unarchived_records = 0;
+        self.unread_bytes = None;
+        self.partial_line = false;
         self.last_durable_wall_micros = Some(last_durable_wall_micros);
         self.quarantine_reason = quarantine_reason.map(ToOwned::to_owned);
         self.last_error_reason = None;
+        self.restart_reconstruction = RestartReconstruction::Incomplete;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -151,6 +167,13 @@ impl AuxiliarySourceStatus {
         self.partial_line = partial_line;
         self.last_durable_wall_micros = Some(last_durable_wall_micros);
         self.last_error_reason = None;
+        self.bind_live_tail();
+    }
+
+    fn bind_live_tail(&mut self) {
+        if self.restart_reconstruction == RestartReconstruction::Incomplete {
+            self.restart_reconstruction = RestartReconstruction::Complete;
+        }
     }
 
     pub(crate) fn record_tail(
@@ -162,6 +185,7 @@ impl AuxiliarySourceStatus {
         self.tail_cursor_epoch = Some(tail_cursor_epoch.into());
         self.unread_bytes = Some(unread_bytes);
         self.partial_line = partial_line;
+        self.bind_live_tail();
     }
 
     pub(crate) fn record_buffered(
@@ -177,6 +201,7 @@ impl AuxiliarySourceStatus {
         self.unarchived_records = unarchived_records;
         self.unread_bytes = Some(unread_bytes);
         self.partial_line = partial_line;
+        self.bind_live_tail();
     }
 
     pub(crate) fn latch(&mut self, reason_code: &str) {
@@ -277,6 +302,11 @@ impl AuxiliarySourceStatus {
         self.last_error_reason.as_deref()
     }
 
+    #[must_use]
+    pub const fn restart_reconstruction(&self) -> RestartReconstruction {
+        self.restart_reconstruction
+    }
+
     fn validate(&self) -> Result<(), StatusError> {
         validate_status_text(&self.source_id)?;
         if let Some(epoch) = &self.cursor_epoch {
@@ -312,6 +342,10 @@ impl AuxiliarySourceStatus {
             ) && !durable_fields[0]
             || self.health == AuxiliarySourceHealth::Quarantined && self.quarantine_reason.is_none()
             || self.health == AuxiliarySourceHealth::Latched && self.last_error_reason.is_none()
+            || matches!(
+                self.restart_reconstruction,
+                RestartReconstruction::Incomplete | RestartReconstruction::Complete
+            ) && !durable_fields[0]
         {
             return Err(StatusError::InvalidField);
         }
@@ -676,7 +710,7 @@ mod tests {
 
     use super::{
         AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
-        CaptureStatus, StatusError, read_status,
+        CaptureStatus, RestartReconstruction, StatusError, read_status,
     };
 
     #[test]
@@ -730,6 +764,10 @@ mod tests {
             value["auxiliary_sources"][0]["quarantine_reason"],
             "source.schema_drift"
         );
+        assert_eq!(
+            value["auxiliary_sources"][0]["restart_reconstruction"],
+            "not-required"
+        );
         assert!(value["auxiliary_sources"][0]["last_error_reason"].is_null());
     }
 
@@ -782,6 +820,27 @@ mod tests {
         )
         .with_auxiliary_sources(vec![invalid]);
         assert_eq!(status.validate(), Err(StatusError::InvalidField));
+    }
+
+    #[test]
+    fn recovered_auxiliary_status_is_incomplete_until_the_live_tail_binds() {
+        let mut auxiliary = AuxiliarySourceStatus::starting("node-fills");
+        auxiliary.record_recovered("node-file-v1:epoch-a", 47, 3, 1_000, None);
+        assert_eq!(
+            auxiliary.restart_reconstruction(),
+            RestartReconstruction::Incomplete
+        );
+        assert_eq!(auxiliary.cursor_epoch(), Some("node-file-v1:epoch-a"));
+        assert_eq!(auxiliary.tail_cursor_epoch(), Some("node-file-v1:epoch-a"));
+        auxiliary.validate().unwrap();
+
+        auxiliary.record_tail("node-file-v1:epoch-b", 0, false);
+        assert_eq!(
+            auxiliary.restart_reconstruction(),
+            RestartReconstruction::Complete
+        );
+        assert_eq!(auxiliary.tail_cursor_epoch(), Some("node-file-v1:epoch-b"));
+        auxiliary.validate().unwrap();
     }
 
     #[test]
