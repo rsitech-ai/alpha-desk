@@ -1,0 +1,15 @@
+# Bounded exception for HIGH/CRITICAL findings with no newer multi-arch digest.
+# Trivy still runs with --severity HIGH,CRITICAL and --exit-code 1.
+#
+# MinIO open-source images ended at RELEASE.2025-09-07 / mc RELEASE.2025-08-13.
+# The only published follow-up (RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772)
+# is linux/amd64-only and cannot satisfy images.lock linux_arm64_digest.
+# These MinIO CVEs have no fix in quay.io/minio/{minio,mc}; AIStor is a
+# different product and is not adopted here. Revisit when a rebuilt
+# multi-arch OSS image or an approved replacement exists.
+CVE-2026-33322
+CVE-2026-33419
+CVE-2026-34204
+CVE-2026-39414
+CVE-2026-40344
+CVE-2026-41145

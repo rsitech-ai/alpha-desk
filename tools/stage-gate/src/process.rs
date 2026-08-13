@@ -344,14 +344,10 @@ fn terminate_process_group(
 #[cfg(unix)]
 fn signal_process_group(process_group: u32, signal: Signal) -> Result<(), ProcessError> {
     let raw = i32::try_from(process_group).map_err(|_| {
-        ProcessError::TerminationFailed(format!(
-            "process group {process_group} is not a valid pid"
-        ))
+        ProcessError::TerminationFailed(format!("process group {process_group} is not a valid pid"))
     })?;
     let pid = Pid::from_raw(raw).ok_or_else(|| {
-        ProcessError::TerminationFailed(format!(
-            "process group {process_group} is not a valid pid"
-        ))
+        ProcessError::TerminationFailed(format!("process group {process_group} is not a valid pid"))
     })?;
     kill_process_group(pid, signal).map_err(|error| {
         ProcessError::TerminationFailed(format!(
@@ -379,7 +375,10 @@ fn poll_command_fds(
         return Ok(true);
     };
     if stdout_eof && stderr_eof {
-        let mut fds = [PollFd::new(&deadline_signal, PollFlags::IN | PollFlags::HUP)];
+        let mut fds = [PollFd::new(
+            &deadline_signal,
+            PollFlags::IN | PollFlags::HUP,
+        )];
         return poll_deadline(&mut fds, Some(&timeout), deadline);
     }
     let mut fds = [

@@ -257,9 +257,12 @@ jobs:
               -o "cyclonedx-json@1.6=$RUNNER_TEMP/security-artifacts/image-$index.cdx.json" ||
               syft_status=$?
             trivy_status=0
+            # --ignorefile lists only unfixed OSS MinIO CVEs; see that file.
+            # Severity and exit-code stay HIGH,CRITICAL / 1.
             trivy image \
               --cache-dir "$RUNNER_TEMP/trivy-cache" \
               --skip-db-update \
+              --ignorefile infra/docker-compose/.trivyignore \
               --exit-code 1 \
               --severity HIGH,CRITICAL \
               --format json \
