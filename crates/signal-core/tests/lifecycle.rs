@@ -554,6 +554,33 @@ fn inventory_bundle(
 }
 
 #[test]
+fn confirmation_live_gate_covers_every_class() {
+    for class in [
+        SignalConfirmationClass::CommittedPrimary,
+        SignalConfirmationClass::CommittedIndependent,
+        SignalConfirmationClass::ProvisionalSource,
+        SignalConfirmationClass::SyntheticUnqualified,
+    ] {
+        match class {
+            SignalConfirmationClass::CommittedPrimary
+            | SignalConfirmationClass::CommittedIndependent => {
+                assert!(
+                    class.can_enter_live(),
+                    "{class:?} committed lanes stay live-capable without new qualification"
+                );
+            }
+            SignalConfirmationClass::ProvisionalSource
+            | SignalConfirmationClass::SyntheticUnqualified => {
+                assert!(
+                    !class.can_enter_live(),
+                    "{class:?} must stay fail-closed for live entry"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn synthetic_confirmation_cannot_construct_live_signal() {
     let error = Signal::try_new(
         SignalId::new("sig-live").unwrap(),
