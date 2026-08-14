@@ -532,6 +532,35 @@ fn constructed_accounts_with_invented_inventory_cannot_produce_fragility_scores(
 }
 
 #[test]
+fn boolean_inventory_cannot_produce_fragility_scores() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let boolean_inventory = market_snapshot_with_health(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        FeatureValue::Boolean(true),
+        health(HealthState::Green),
+    );
+    assert!(matches!(
+        boolean_inventory.require_observed_book_and_fills(),
+        Err(MarketError::Malformed {
+            what: "inventory",
+            reason: "boolean cannot mint decimal depth",
+        })
+    ));
+    assert!(matches!(
+        simulate_fragility_from_snapshot(&boolean_inventory, &scenario, &accounts, -100),
+        Err(MarketError::Malformed {
+            what: "inventory",
+            reason: "boolean cannot mint decimal depth",
+        })
+    ));
+}
+
+#[test]
 fn matching_inventory_with_unrelated_book_depth_cannot_produce_path_or_fragility_scores() {
     let scenario = scenario();
     let concentrated = vec![account("a", Direction::Long, 100, 10)];
