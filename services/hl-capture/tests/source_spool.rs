@@ -563,6 +563,44 @@ fn byte_offset_policy_requires_per_record_fsync() {
 }
 
 #[test]
+fn byte_offset_durability_covers_every_constructible_writer_policy() {
+    for policy in [
+        DurabilityPolicy::FsyncEveryRecord,
+        DurabilityPolicy::FsyncEvery {
+            max_records: 2,
+            max_delay: Duration::from_secs(1),
+        },
+    ] {
+        let root = TempDir::new().unwrap();
+        let result = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            policy,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            CursorPolicy::MonotonicByteOffset,
+        );
+        match policy {
+            DurabilityPolicy::FsyncEveryRecord => {
+                result
+                    .expect("fsync-every-record remains admitted for byte-offset acknowledgements");
+            }
+            DurabilityPolicy::FsyncEvery {
+                max_records: _,
+                max_delay: _,
+            } => {
+                let error = result.expect_err("non-admitted byte-offset durability");
+                assert!(matches!(error, SpoolError::InvalidDurabilityPolicy));
+                assert_eq!(error.reason_code(), "spool.invalid_durability_policy");
+                assert!(!root.path().join("primary-node").exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_duplicate_index_is_bounded_by_segments_not_record_count() {
     let root = TempDir::new().unwrap();
     let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();

@@ -138,10 +138,14 @@ impl SourceSpoolConfig {
     ) -> Result<Self, SpoolError> {
         let source_version = source_version.into();
         let base_schema_version = schema_version.into();
-        if cursor_policy == CursorPolicy::MonotonicByteOffset
-            && durability != DurabilityPolicy::FsyncEveryRecord
-        {
-            return Err(SpoolError::InvalidDurabilityPolicy);
+        if cursor_policy == CursorPolicy::MonotonicByteOffset {
+            match durability {
+                DurabilityPolicy::FsyncEveryRecord => {}
+                DurabilityPolicy::FsyncEvery {
+                    max_records: _,
+                    max_delay: _,
+                } => return Err(SpoolError::InvalidDurabilityPolicy),
+            }
         }
         SegmentHeaderV1::new(
             source_id.clone(),
