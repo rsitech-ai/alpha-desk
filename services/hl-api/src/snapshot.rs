@@ -14,8 +14,10 @@ const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024;
 
 /// Frozen hl-core file dead-letter fail-closed reason codes. Documented on
 /// OpenAPI so clients type them instead of treating them as a generic 500.
-/// Unknown codes still fail closed and must not become ready. This crate does
-/// not vendor hl-core and this is not a live core or Stage 2 PASS.
+/// Unknown RED codes still fail closed as typed RED and must not become ready.
+/// AMBER plus any `core.deadletter_*` sibling (frozen or invented) is
+/// `snapshot_invalid`. This crate does not vendor hl-core and this is not a
+/// live core or Stage 2 PASS.
 pub const CORE_DEADLETTER_REASON_CODES: &[&str] = &[
     "core.deadletter_unsafe_path",
     "core.deadletter_io",
@@ -23,6 +25,8 @@ pub const CORE_DEADLETTER_REASON_CODES: &[&str] = &[
     "core.deadletter_serialization",
     "core.deadletter_corrupt",
 ];
+
+const CORE_DEADLETTER_REASON_PREFIX: &str = "core.deadletter_";
 
 const MAINTENANCE_FIELDS: &[&str] = &[
     "enabled",
@@ -116,7 +120,6 @@ fn reject_inconsistent_ready_reason(
     state: WireHealthState,
     reason_code: &str,
 ) -> Result<(), SnapshotError> {
-    let deadletter = is_core_deadletter_reason(reason_code);
     match state {
         WireHealthState::Green => {
             if reason_code == READY_REASON_CODE {
@@ -126,7 +129,11 @@ fn reject_inconsistent_ready_reason(
             }
         }
         WireHealthState::Amber => {
-            if deadletter {
+            // Dead-letter family codes are RED fail-closed reasons. AMBER plus
+            // a frozen enum value or an invented sibling is inconsistent, not
+            // typed AMBER. Other AMBER reasons stay typed; this is not a
+            // catalog of valid AMBER codes.
+            if is_core_deadletter_family(reason_code) {
                 Err(SnapshotError::Invalid)
             } else {
                 Ok(())
@@ -139,6 +146,11 @@ fn reject_inconsistent_ready_reason(
 #[must_use]
 pub fn is_core_deadletter_reason(reason_code: &str) -> bool {
     CORE_DEADLETTER_REASON_CODES.contains(&reason_code)
+}
+
+#[must_use]
+fn is_core_deadletter_family(reason_code: &str) -> bool {
+    reason_code.starts_with(CORE_DEADLETTER_REASON_PREFIX)
 }
 
 pub fn load_capture_status(path: Option<&Path>) -> Result<Value, SnapshotError> {
@@ -291,8 +303,8 @@ fn require_non_negative_int(object: &Map<String, Value>, field: &str) -> Result<
 mod tests {
     use super::{
         CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, CORE_DEADLETTER_REASON_CODES,
-        MAINTENANCE_FIELDS, SnapshotError, is_core_deadletter_reason, parse_canonical_health_bytes,
-        parse_capture_status_bytes,
+        MAINTENANCE_FIELDS, SnapshotError, is_core_deadletter_family, is_core_deadletter_reason,
+        parse_canonical_health_bytes, parse_capture_status_bytes,
     };
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, core_deadletter_reason_openapi_enum,
@@ -374,6 +386,20 @@ mod tests {
             !is_core_deadletter_reason("core.deadletter_unknown"),
             "undocumented sibling codes must not be treated as ready"
         );
+        for reason_code in CORE_DEADLETTER_REASON_CODES {
+            assert!(
+                is_core_deadletter_family(reason_code),
+                "frozen dead-letter {reason_code} is in the core.deadletter_* family"
+            );
+        }
+        assert!(
+            is_core_deadletter_family("core.deadletter_invented"),
+            "invented siblings stay in the family even when outside the frozen enum"
+        );
+        assert!(
+            !is_core_deadletter_family("lag"),
+            "non-deadletter AMBER reasons must not be classified as the family"
+        );
         assert!(document.contains("Unknown codes fail closed"));
         assert_openapi_does_not_claim_live_qualified(document);
     }
@@ -439,6 +465,27 @@ mod tests {
         assert_eq!(assessment.state, WireHealthState::Red);
         assert_eq!(assessment.reason_code, "core.deadletter_invented");
         assert!(!is_core_deadletter_reason(&assessment.reason_code));
+    }
+
+    #[test]
+    fn unknown_amber_deadletter_sibling_is_snapshot_invalid() {
+        assert_eq!(
+            parse_canonical_health_bytes(&health_bytes(
+                "HEALTH_STATE_AMBER",
+                "core.deadletter_invented"
+            ))
+            .expect_err("unknown amber dead-letter sibling must not be typed AMBER"),
+            SnapshotError::Invalid
+        );
+    }
+
+    #[test]
+    fn amber_non_deadletter_reason_remains_typed() {
+        let assessment = parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_AMBER", "lag"))
+            .expect("AMBER without a dead-letter family reason stays typed");
+        assert_eq!(assessment.state, WireHealthState::Amber);
+        assert_eq!(assessment.reason_code, "lag");
+        assert!(!is_core_deadletter_family(&assessment.reason_code));
     }
 
     fn fixture(name: &str) -> Vec<u8> {
