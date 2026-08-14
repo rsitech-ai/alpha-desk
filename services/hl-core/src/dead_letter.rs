@@ -241,8 +241,29 @@ impl DeadLetterSink for FileDeadLetterSink {
             Some(file) => file,
             None => self.file.insert(Self::open_file(&self.path, true)?),
         };
+        let cap = u64::try_from(MAX_DEAD_LETTER_FILE_BYTES).unwrap_or(u64::MAX);
+        let encoded_len = u64::try_from(encoded.len()).unwrap_or(u64::MAX);
+        let current_len = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(_) => {
+                if created {
+                    self.file = None;
+                    let _ = fs::remove_file(&self.path);
+                }
+                return Err(DeadLetterError::Io);
+            }
+        };
+        if current_len.saturating_add(encoded_len) > cap {
+            return Err(DeadLetterError::Corrupt);
+        }
         match file.write_all(&encoded).and_then(|_| file.sync_all()) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let written_len = file.metadata().map_err(|_| DeadLetterError::Io)?.len();
+                if written_len > cap {
+                    return Err(DeadLetterError::Corrupt);
+                }
+                Ok(())
+            }
             Err(_) => {
                 if created {
                     self.file = None;

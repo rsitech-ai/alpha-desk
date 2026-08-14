@@ -983,13 +983,67 @@ fn file_dead_letter_sink_open_reopens_valid_jsonl_at_file_cap() {
     let leftover = valid_dead_letter_jsonl_of_len(1_048_576);
     fs::write(&path, &leftover).expect("seed at-cap leftover");
 
+    // Leftover-open at the cap still succeeds; persist must not grow past it.
+
     let mut sink = FileDeadLetterSink::open(&path).expect("reopen at cap");
-    sink.persist(&sample_dead_letter("after-cap"))
-        .expect("append after reopen");
+    let error = sink
+        .persist(&sample_dead_letter("after-cap"))
+        .expect_err("persist past file cap");
+    assert_eq!(error, DeadLetterError::Corrupt);
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
     drop(sink);
-    let encoded = fs::read(&path).expect("readable jsonl");
-    assert!(encoded.starts_with(&leftover));
-    assert!(encoded.len() > leftover.len());
+    assert_eq!(fs::read(&path).expect("unchanged at cap"), leftover);
+}
+
+#[test]
+fn file_dead_letter_sink_persist_refuses_record_that_would_exceed_file_cap() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    let record = sample_dead_letter("would-exceed");
+    let record_len = persist_probe_len(root.path(), "would-exceed");
+    let leftover = valid_dead_letter_jsonl_of_len(1_048_576 - record_len + 1);
+    fs::write(&path, &leftover).expect("seed leftover that cannot fit one more record");
+    let previous_len = leftover.len();
+
+    let mut sink = FileDeadLetterSink::open(&path).expect("reopen under leftover-open cap");
+    let error = sink
+        .persist(&record)
+        .expect_err("persist that would grow past cap");
+    assert_eq!(error, DeadLetterError::Corrupt);
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    drop(sink);
+    assert_eq!(fs::read(&path).expect("previous valid size"), leftover);
+    assert_eq!(
+        usize::try_from(fs::metadata(&path).expect("metadata").len()).expect("len"),
+        previous_len
+    );
+}
+
+#[test]
+fn file_dead_letter_sink_persist_writes_up_to_file_cap() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    let record = sample_dead_letter("under-cap");
+    let record_len = persist_probe_len(root.path(), "under-cap");
+    let leftover = valid_dead_letter_jsonl_of_len(1_048_576 - record_len);
+    fs::write(&path, &leftover).expect("seed leftover that fits one more record");
+
+    let mut sink = FileDeadLetterSink::open(&path).expect("reopen under cap");
+    sink.persist(&record).expect("persist that fills the cap");
+    assert_eq!(
+        usize::try_from(fs::metadata(&path).expect("at cap").len()).expect("len"),
+        1_048_576
+    );
+    let error = sink
+        .persist(&sample_dead_letter("past-cap"))
+        .expect_err("persist past cap");
+    assert_eq!(error, DeadLetterError::Corrupt);
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    drop(sink);
+    assert_eq!(
+        usize::try_from(fs::metadata(&path).expect("still at cap").len()).expect("len"),
+        1_048_576
+    );
 }
 
 #[test]
@@ -1219,6 +1273,15 @@ fn sample_dead_letter(message_id: &str) -> DeadLetterRecord {
         1,
     )
     .expect("sample dead-letter record")
+}
+
+fn persist_probe_len(parent: &std::path::Path, message_id: &str) -> usize {
+    let path = parent.join(format!("probe-{message_id}.jsonl"));
+    let mut sink = FileDeadLetterSink::open(&path).expect("probe sink");
+    sink.persist(&sample_dead_letter(message_id))
+        .expect("probe persist");
+    drop(sink);
+    usize::try_from(fs::metadata(&path).expect("probe metadata").len()).expect("probe len")
 }
 
 fn valid_dead_letter_jsonl_of_len(total_bytes: usize) -> Vec<u8> {
