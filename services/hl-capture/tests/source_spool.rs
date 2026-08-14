@@ -1352,6 +1352,62 @@ fn recovery_retained_index_covers_every_constructible_cursor_policy() {
 }
 
 #[test]
+fn validate_successor_epoch_change_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                spool
+                    .append(&byte_observation_with("epoch-a", 49, "first"), 101)
+                    .unwrap();
+                let second = spool
+                    .append(&byte_observation_with("epoch-b", 7, "second"), 102)
+                    .expect("byte-offset still admits epoch change at first-in-segment");
+                assert!(second.closed_segment().is_some());
+                drop(spool);
+                let recovered = SourceSpool::open(config, 200).expect(
+                    "recovery still admits first-in-segment epoch change for monotonic byte offset",
+                );
+                assert_eq!(recovered.last_durable_cursor().unwrap().epoch(), "epoch-b");
+                assert_eq!(recovered.last_durable_cursor().unwrap().offset(), 7);
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                let error = spool
+                    .append(&observation_with("next-epoch", 1, "next"), 102)
+                    .expect_err("contiguous still rejects epoch change");
+                assert!(matches!(error, SpoolError::CursorRegression));
+                assert_eq!(error.reason_code(), "spool.cursor_regression");
+                drop(spool);
+                let recovered = SourceSpool::open(config, 200).expect(
+                    "contiguous recovery still succeeds when the durable tail has no epoch change",
+                );
+                assert_eq!(
+                    recovered.last_durable_cursor().unwrap().epoch(),
+                    "node-directory-epoch"
+                );
+                assert_eq!(recovered.last_durable_cursor().unwrap().offset(), 100);
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
     let root = TempDir::new().unwrap();
     let error = SourceSpoolConfig::try_new_with_cursor_policy(

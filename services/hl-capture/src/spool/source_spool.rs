@@ -848,14 +848,17 @@ fn validate_successor(
         .map_err(|_| SpoolError::CursorRegression)?
     {
         CursorTransition::Advanced { .. } => Ok(()),
-        CursorTransition::EpochChanged
-            if policy == CursorPolicy::MonotonicByteOffset && first_in_segment =>
-        {
-            Ok(())
-        }
-        CursorTransition::Duplicate | CursorTransition::EpochChanged => {
-            Err(SpoolError::CursorRegression)
-        }
+        CursorTransition::EpochChanged => match policy {
+            CursorPolicy::MonotonicByteOffset => {
+                if first_in_segment {
+                    Ok(())
+                } else {
+                    Err(SpoolError::CursorRegression)
+                }
+            }
+            CursorPolicy::ContiguousNativeOffset => Err(SpoolError::CursorRegression),
+        },
+        CursorTransition::Duplicate => Err(SpoolError::CursorRegression),
     }
 }
 
