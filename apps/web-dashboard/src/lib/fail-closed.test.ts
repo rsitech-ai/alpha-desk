@@ -13,6 +13,7 @@ import {
   COMMITTED_SOURCE_CLASS,
   CORE_DEADLETTER_REASONS,
   LEDGER_UNSUPPORTED_EVENT_REASONS,
+  RESTART_RECONSTRUCTION,
   lastHeartbeatThroughput,
   parseCaptureHealth,
   parseCaptureStatus,
@@ -418,31 +419,6 @@ describe("parseCaptureStatus extras", () => {
     expect(parsed.value.throughput_records_per_sec).toBe(7)
     expect(parsed.value.throughput_blocks_per_sec).toBeUndefined()
   })
-
-  it("ignores malformed restart_reconstruction without rejecting the snapshot", () => {
-    const parsed = parseCaptureStatus(
-      v4Status({
-        auxiliary_sources: [
-          {
-            source_id: "node-line-a",
-            health: "starting",
-            qualification: "unqualified",
-            spool_records: 0,
-            unarchived_records: 0,
-            partial_line: false,
-            restart_reconstruction: 12,
-          },
-        ],
-      })
-    )
-    expect(parsed.ok).toBe(true)
-    if (!parsed.ok) {
-      return
-    }
-    expect(
-      parsed.value.auxiliary_sources?.[0]?.restart_reconstruction
-    ).toBeUndefined()
-  })
 })
 
 describe("parseCaptureStatus source health", () => {
@@ -579,6 +555,106 @@ describe("parseCaptureStatus committed source class", () => {
       return
     }
     expect(parsed.detail).toMatch(/active_committed_source must be one of/)
+  })
+})
+
+describe("parseCaptureStatus restart reconstruction", () => {
+  function auxiliarySource(
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      source_id: "node-line-a",
+      health: "starting",
+      qualification: "unqualified",
+      spool_records: 0,
+      unarchived_records: 0,
+      partial_line: false,
+      ...overrides,
+    }
+  }
+
+  it("accepts every constructible restart reconstruction", () => {
+    expect(RESTART_RECONSTRUCTION).toEqual([
+      "not-required",
+      "incomplete",
+      "complete",
+    ])
+    for (const reconstruction of RESTART_RECONSTRUCTION) {
+      const parsed = parseCaptureStatus(
+        v4Status({
+          auxiliary_sources: [
+            auxiliarySource({ restart_reconstruction: reconstruction }),
+          ],
+        })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.auxiliary_sources?.[0]?.restart_reconstruction).toBe(
+        reconstruction
+      )
+    }
+  })
+
+  it("keeps omitted and null restart_reconstruction omitted", () => {
+    const omitted = parseCaptureStatus(
+      v4Status({ auxiliary_sources: [auxiliarySource()] })
+    )
+    expect(omitted.ok).toBe(true)
+    if (!omitted.ok) {
+      return
+    }
+    expect(
+      omitted.value.auxiliary_sources?.[0]?.restart_reconstruction
+    ).toBeUndefined()
+
+    const nulled = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [auxiliarySource({ restart_reconstruction: null })],
+      })
+    )
+    expect(nulled.ok).toBe(true)
+    if (!nulled.ok) {
+      return
+    }
+    expect(
+      nulled.value.auxiliary_sources?.[0]?.restart_reconstruction
+    ).toBeUndefined()
+  })
+
+  it("fail-closes unknown restart_reconstruction as invalid, not ignored", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          auxiliarySource({ restart_reconstruction: "NotRequired" }),
+        ],
+      })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      "auxiliary_sources[0].restart_reconstruction must be one of not-required, incomplete, complete"
+    )
+  })
+
+  it("fail-closes malformed restart_reconstruction instead of ignoring it", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          auxiliarySource({ restart_reconstruction: 12 }),
+        ],
+      })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(
+      /auxiliary_sources\[0\]\.restart_reconstruction must be one of/
+    )
   })
 })
 

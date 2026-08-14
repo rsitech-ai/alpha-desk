@@ -70,6 +70,17 @@ export const AUXILIARY_SOURCE_HEALTH = [
 
 export type AuxiliaryQualification = "unqualified" | "qualified"
 
+export type RestartReconstruction =
+  | "not-required"
+  | "incomplete"
+  | "complete"
+
+export const RESTART_RECONSTRUCTION = [
+  "not-required",
+  "incomplete",
+  "complete",
+] as const satisfies readonly RestartReconstruction[]
+
 export interface HealthAssessment {
   schema_version: typeof HEALTH_SCHEMA_VERSION
   scope: string
@@ -154,7 +165,7 @@ export interface AuxiliarySourceStatus {
   last_durable_wall_micros?: number
   quarantine_reason?: string
   last_error_reason?: string
-  restart_reconstruction?: string
+  restart_reconstruction?: RestartReconstruction
   extra_fields: Record<string, unknown>
 }
 
@@ -751,17 +762,6 @@ function collectExtraFields(
   return extras
 }
 
-function optionalIgnoredString(
-  object: Record<string, unknown>,
-  field: string
-): string | undefined {
-  const value = object[field]
-  if (typeof value === "string" && value.length > 0) {
-    return value
-  }
-  return undefined
-}
-
 function requireConst<T extends string>(
   object: Record<string, unknown>,
   field: string,
@@ -993,6 +993,14 @@ function parseAuxiliarySource(
   if (!last_error_reason.ok) {
     return { ok: false, detail: `${prefix}.${last_error_reason.detail}` }
   }
+  const restart_reconstruction = optionalEnum(
+    value,
+    "restart_reconstruction",
+    RESTART_RECONSTRUCTION
+  )
+  if (!restart_reconstruction.ok) {
+    return { ok: false, detail: `${prefix}.${restart_reconstruction.detail}` }
+  }
   return {
     ok: true,
     value: {
@@ -1010,10 +1018,7 @@ function parseAuxiliarySource(
       last_durable_wall_micros: last_durable_wall_micros.value,
       quarantine_reason: quarantine_reason.value,
       last_error_reason: last_error_reason.value,
-      restart_reconstruction: optionalIgnoredString(
-        value,
-        "restart_reconstruction"
-      ),
+      restart_reconstruction: restart_reconstruction.value,
       extra_fields: collectExtraFields(value, AUXILIARY_SOURCE_FIELD_ORDER),
     },
   }
