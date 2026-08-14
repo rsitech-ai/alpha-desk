@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use hl_capture::{CaptureConfig, ConfigError, NodeReplicaCmdsStyle, SourceAdapterConfig};
+use hl_capture::{
+    CaptureConfig, ConfigError, DurabilityPolicy, NodeReplicaCmdsStyle, SourceAdapterConfig,
+};
 use hl_protocol::{ObservationClass, SourceTrust};
 
 fn valid_config() -> String {
@@ -44,6 +46,20 @@ fn replica_cmds_style_toml(style: NodeReplicaCmdsStyle) -> &'static str {
         NodeReplicaCmdsStyle::Actions => "actions",
         NodeReplicaCmdsStyle::ActionsAndResponses => "actions-and-responses",
         NodeReplicaCmdsStyle::RecentActions => "recent-actions",
+    }
+}
+
+fn committed_durability_toml(policy: DurabilityPolicy) -> String {
+    match policy {
+        DurabilityPolicy::FsyncEveryRecord => {
+            "[spool.committed_durability]\nmode = \"fsync-every-record\"".to_owned()
+        }
+        DurabilityPolicy::Batched {
+            max_records,
+            max_delay_millis,
+        } => format!(
+            "[spool.committed_durability]\nmode = \"batched\"\nmax_records = {max_records}\nmax_delay_millis = {max_delay_millis}"
+        ),
     }
 }
 
@@ -577,17 +593,37 @@ fn runtime_boundaries_reject_inline_credentials_unsafe_paths_and_unbounded_limit
 }
 
 #[test]
-fn committed_evidence_requires_per_record_durability() {
-    let source = replace_once(
-        &valid_config(),
-        "[spool.committed_durability]\nmode = \"fsync-every-record\"",
-        "[spool.committed_durability]\nmode = \"batched\"\nmax_records = 8\nmax_delay_millis = 10",
-    );
-    let error = CaptureConfig::from_toml(&source).expect_err("committed batching is forbidden");
-    assert_eq!(
-        error.reason_code(),
-        "capture_config.invalid_durability_policy"
-    );
+fn committed_durability_covers_every_constructible_policy() {
+    for policy in [
+        DurabilityPolicy::FsyncEveryRecord,
+        DurabilityPolicy::Batched {
+            max_records: 8,
+            max_delay_millis: 10,
+        },
+    ] {
+        let source = replace_once(
+            &valid_config(),
+            "[spool.committed_durability]\nmode = \"fsync-every-record\"",
+            &committed_durability_toml(policy),
+        );
+        match policy {
+            DurabilityPolicy::FsyncEveryRecord => {
+                CaptureConfig::from_toml(&source)
+                    .expect("fsync-every-record remains the admitted committed durability");
+            }
+            DurabilityPolicy::Batched {
+                max_records: _,
+                max_delay_millis: _,
+            } => {
+                assert_eq!(
+                    CaptureConfig::from_toml(&source)
+                        .expect_err("non-admitted committed durability")
+                        .reason_code(),
+                    "capture_config.invalid_durability_policy"
+                );
+            }
+        }
+    }
 }
 
 #[test]
