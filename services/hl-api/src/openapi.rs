@@ -5,7 +5,8 @@
 /// identity, auxiliary spool_records, auxiliary unarchived_records,
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
-/// auxiliary last_durable_wall_micros, auxiliary quarantine_reason,
+/// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
+/// auxiliary quarantine_reason,
 /// auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
@@ -771,6 +772,54 @@ pub fn auxiliary_source_quarantine_reason_is_optional_string(document: &str) -> 
     .is_some_and(|required| required.contains(&"quarantine_reason"))
 }
 
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.last_error_reason`
+/// is an optional free string: `type: string`, not listed on `items.required`,
+/// and no `$ref`, `enum`, `format`, or `pattern`. Capture writer emits
+/// `last_error_reason` as a string (`Option` + `skip_serializing_if`); this
+/// crate does not invent a closed enum of error reasons.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
+#[must_use]
+pub fn auxiliary_source_last_error_reason_is_optional_string(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "last_error_reason",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("string")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"last_error_reason"))
+}
+
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
 /// no `$ref` (including `CoreDeadLetterReasonCode` or
 /// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
@@ -1169,6 +1218,7 @@ mod tests {
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string,
         auxiliary_source_last_durable_wall_micros_is_optional_i64,
+        auxiliary_source_last_error_reason_is_optional_string,
         auxiliary_source_local_sequence_is_optional_u64,
         auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
@@ -1260,6 +1310,10 @@ mod tests {
         assert!(
             auxiliary_source_quarantine_reason_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.quarantine_reason as an optional string"
+        );
+        assert!(
+            auxiliary_source_last_error_reason_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -3234,6 +3288,166 @@ components:
         assert!(
             auxiliary_source_quarantine_reason_is_optional_string(optional_string),
             "optional string quarantine_reason must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_last_error_reason_optional_string_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            last_error_reason remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_last_error_reason_is_optional_string(prose_only),
+            "prose mention of last_error_reason must not satisfy the optional-string freeze"
+        );
+
+        let required_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - last_error_reason
+            properties:
+              last_error_reason:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_last_error_reason_is_optional_string(required_string),
+            "required last_error_reason must not satisfy the optional-string freeze"
+        );
+
+        let integer_reason = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_error_reason:
+                type: integer
+"#;
+        assert!(
+            !auxiliary_source_last_error_reason_is_optional_string(integer_reason),
+            "optional non-string last_error_reason must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_error_reason:
+                type: string
+                format: uuid
+"#;
+        assert!(
+            !auxiliary_source_last_error_reason_is_optional_string(formatted),
+            "invented last_error_reason format must not satisfy the freeze"
+        );
+
+        let closed_enum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_error_reason:
+                type: string
+                enum:
+                  - source.temporary_disconnect
+"#;
+        assert!(
+            !auxiliary_source_last_error_reason_is_optional_string(closed_enum),
+            "invented last_error_reason enum must not satisfy the freeze"
+        );
+
+        let optional_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              last_error_reason:
+                type: string
+"#;
+        assert!(
+            auxiliary_source_last_error_reason_is_optional_string(optional_string),
+            "optional string last_error_reason must satisfy the freeze"
         );
     }
 
