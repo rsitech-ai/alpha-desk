@@ -887,6 +887,81 @@ fn append_covers_every_constructible_cursor_policy() {
     }
 }
 
+fn after_header_identities(encoded: &[u8]) -> usize {
+    let mut cursor = 12;
+    for _ in 0..3 {
+        let length = usize::from(u16::from_le_bytes(
+            encoded[cursor..cursor + 2]
+                .try_into()
+                .expect("identity length prefix"),
+        ));
+        cursor += 2 + length;
+    }
+    cursor
+}
+
+#[test]
+fn header_policy_byte_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new_with_cursor_policy(
+                root.path().join("primary-node"),
+                SourceId::new("primary-node").unwrap(),
+                "hyperliquid-node-v1",
+                "spool-v1",
+                [0x31; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+                cursor_policy,
+            )
+            .unwrap(),
+            100,
+        )
+        .unwrap();
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                spool
+                    .append(&byte_observation(17), 101)
+                    .expect("byte-offset append remains admitted");
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                spool
+                    .append(&observation(100), 101)
+                    .expect("contiguous native offset still uses the legacy append path");
+            }
+        }
+
+        let encoded = std::fs::read(spool.active_segment_path()).unwrap();
+        let after = after_header_identities(&encoded);
+        let header_len = usize::try_from(u32::from_le_bytes(
+            encoded[8..12].try_into().expect("header length"),
+        ))
+        .unwrap();
+        let reader = SpoolReader::open(spool.active_segment_path()).unwrap();
+        assert_eq!(reader.header().cursor_policy(), cursor_policy);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert_eq!(&encoded[..8], b"HLSPV001");
+                assert_eq!(header_len, after + 8 + 8 + 32);
+                assert_eq!(&encoded[after..after + 8], 1_u64.to_le_bytes().as_slice());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(&encoded[..8], b"HLSPV002");
+                assert_eq!(header_len, after + 1 + 8 + 8 + 32);
+                assert_eq!(encoded[after], 1);
+                assert_eq!(
+                    &encoded[after + 1..after + 9],
+                    1_u64.to_le_bytes().as_slice()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn observation_policy_covers_every_constructible_cursor_policy() {
     for cursor_policy in [
