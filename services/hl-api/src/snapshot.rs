@@ -44,6 +44,12 @@ pub const LEDGER_UNSUPPORTED_EVENT_REASON_CODES: &[&str] = &["ledger.unsupported
 pub const COMMITTED_SOURCE_CLASSES: &[&str] =
     &["locally-verified-committed", "independent-committed"];
 
+/// Capture writer kebab-case committed source health. Unknown values are
+/// `snapshot_invalid`. This crate does not vendor hl-capture and this is
+/// not a live capture or Stage PASS. `HealthAssessment.reason_code` stays a
+/// free string so unknown RED is not closed out.
+pub const CAPTURE_SOURCE_HEALTH: &[&str] = &["starting", "healthy", "range-unavailable"];
+
 const MAINTENANCE_FIELDS: &[&str] = &[
     "enabled",
     "kill_switch",
@@ -203,7 +209,10 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     require_enum(object, "health", &["green", "yellow", "red"])?;
     require_bool(object, "ready")?;
     require_enum(object, "active_committed_source", COMMITTED_SOURCE_CLASSES)?;
-    require_string(object, "primary_source_health", None)?;
+    require_enum(object, "primary_source_health", CAPTURE_SOURCE_HEALTH)?;
+    if object.contains_key("independent_source_health") {
+        require_enum(object, "independent_source_health", CAPTURE_SOURCE_HEALTH)?;
+    }
     require_non_negative_int(object, "pending_blocks")?;
     match schema {
         CaptureStatusSchema::V4 => {
@@ -328,15 +337,16 @@ fn require_non_negative_int(object: &Map<String, Value>, field: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, COMMITTED_SOURCE_CLASSES,
-        CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS,
-        SnapshotError, is_core_deadletter_family, is_core_deadletter_reason,
-        is_ledger_unsupported_event_reason, parse_canonical_health_bytes,
-        parse_capture_status_bytes,
+        CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5,
+        COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
+        LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS, SnapshotError,
+        is_core_deadletter_family, is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+        parse_canonical_health_bytes, parse_capture_status_bytes,
     };
     use crate::openapi::{
-        LAST_HEARTBEAT_THROUGHPUT_FIELDS, committed_source_class_openapi_enum,
-        core_deadletter_reason_openapi_enum, health_reason_code_is_unrestricted_string,
+        LAST_HEARTBEAT_THROUGHPUT_FIELDS, capture_source_health_openapi_enum,
+        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
+        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
         ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
     };
     use api_contracts::WireHealthState;
@@ -739,6 +749,84 @@ mod tests {
             assert_eq!(
                 parse_capture_status_bytes(&bytes)
                     .expect_err("unknown committed source must not be a free string"),
+                SnapshotError::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn openapi_document_lists_capture_source_health_enum() {
+        let document = openapi_yaml();
+        let enum_values = capture_source_health_openapi_enum(document)
+            .expect("OpenAPI must define CaptureStatusBase.primary_source_health.enum");
+        assert_eq!(
+            enum_values, CAPTURE_SOURCE_HEALTH,
+            "YAML enum must match the frozen const; prose mentions do not count"
+        );
+        let independent_values = independent_source_health_openapi_enum(document)
+            .expect("OpenAPI must define CaptureStatusBase.independent_source_health.enum");
+        assert_eq!(
+            independent_values, CAPTURE_SOURCE_HEALTH,
+            "optional independent_source_health must freeze the same closed set"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn closed_capture_source_health_values_are_accepted() {
+        for health in CAPTURE_SOURCE_HEALTH {
+            let mut value =
+                serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                    .expect("v4 json");
+            value["primary_source_health"] = serde_json::json!(health);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{health} should parse: {error}"));
+            assert_eq!(parsed["primary_source_health"], *health);
+            assert!(parsed.get("independent_source_health").is_none());
+
+            value["independent_source_health"] = serde_json::json!(health);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("independent {health} should parse: {error}"));
+            assert_eq!(parsed["independent_source_health"], *health);
+        }
+    }
+
+    #[test]
+    fn unknown_or_empty_primary_source_health_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for health in ["degraded", "latched", "range_unavailable", ""] {
+            value["primary_source_health"] = serde_json::json!(health);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("unknown primary source health must not be a free string"),
+                SnapshotError::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_independent_source_health_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for health in ["degraded", "latched", "range_unavailable", ""] {
+            value["independent_source_health"] = serde_json::json!(health);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("unknown independent source health must not be a free string"),
                 SnapshotError::Invalid
             );
         }

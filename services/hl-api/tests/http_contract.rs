@@ -5,16 +5,17 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hl_api::{
-    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, COMMITTED_SOURCE_CLASSES,
-    CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS,
-    LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
-    READYZ_GET_DESCRIPTION, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
+    ApiConfig, AppState, AuthMode, CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_IDS,
+    COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS,
+    LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+    READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, ROUTER_PATHS,
+    SNAPSHOT_UNAVAILABLE_REASON_CODES, capture_source_health_openapi_enum,
     committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
-    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
-    readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref, readyz_get_description,
-    spawn_local, unavailable_response_schema_ref,
+    independent_source_health_openapi_enum, is_core_deadletter_reason,
+    is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
+    readyz_200_description, readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
+    readyz_get_description, spawn_local, unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -288,6 +289,104 @@ async fn unknown_active_committed_source_is_snapshot_invalid() {
         serde_json::to_vec(&value).expect("encode unknown source"),
     )
     .expect("write unknown source");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+#[tokio::test]
+async fn unknown_primary_source_health_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    for health in CAPTURE_SOURCE_HEALTH {
+        value["primary_source_health"] = serde_json::json!(health);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known health"),
+        )
+        .expect("write known health");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{health} must remain a typed capture status");
+        assert_eq!(body["primary_source_health"], *health);
+        assert_eq!(body["schema_version"], "hl.capture.status.v4");
+    }
+
+    value["primary_source_health"] = serde_json::json!("degraded");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode unknown health"),
+    )
+    .expect("write unknown health");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+#[tokio::test]
+async fn unknown_independent_source_health_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    for health in CAPTURE_SOURCE_HEALTH {
+        value["independent_source_health"] = serde_json::json!(health);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known independent health"),
+        )
+        .expect("write known independent health");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(
+            status, 200,
+            "independent {health} must remain a typed capture status"
+        );
+        assert_eq!(body["independent_source_health"], *health);
+    }
+
+    value["independent_source_health"] = serde_json::json!("latched");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode unknown independent health"),
+    )
+    .expect("write unknown independent health");
     let state = state_from(
         directory.path(),
         "loopback-dev",
@@ -896,6 +995,21 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     for source in COMMITTED_SOURCE_CLASSES {
         assert!(document.contains(source), "OpenAPI must list {source}");
     }
+    let source_health_enum = capture_source_health_openapi_enum(document)
+        .expect("OpenAPI must define CaptureStatusBase.primary_source_health.enum");
+    assert_eq!(
+        source_health_enum, CAPTURE_SOURCE_HEALTH,
+        "YAML enum must match the frozen const; prose mentions do not count"
+    );
+    let independent_health_enum = independent_source_health_openapi_enum(document)
+        .expect("OpenAPI must define CaptureStatusBase.independent_source_health.enum");
+    assert_eq!(
+        independent_health_enum, CAPTURE_SOURCE_HEALTH,
+        "optional independent_source_health must freeze the same closed set"
+    );
+    for health in CAPTURE_SOURCE_HEALTH {
+        assert!(document.contains(health), "OpenAPI must list {health}");
+    }
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -1005,6 +1119,18 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert_eq!(
         committed_enum, COMMITTED_SOURCE_CLASSES,
         "served YAML enum must match the frozen const; prose mentions do not count"
+    );
+    let source_health_enum = capture_source_health_openapi_enum(document)
+        .expect("served OpenAPI must define CaptureStatusBase.primary_source_health.enum");
+    assert_eq!(
+        source_health_enum, CAPTURE_SOURCE_HEALTH,
+        "served YAML enum must match the frozen const; prose mentions do not count"
+    );
+    let independent_health_enum = independent_source_health_openapi_enum(document)
+        .expect("served OpenAPI must define CaptureStatusBase.independent_source_health.enum");
+    assert_eq!(
+        independent_health_enum, CAPTURE_SOURCE_HEALTH,
+        "served optional independent_source_health must freeze the same closed set"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),
