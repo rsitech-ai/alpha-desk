@@ -8,8 +8,8 @@ use hl_api::{
     AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, ApiConfig, AppState, AuthMode,
     CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_IDS, COMMITTED_SOURCE_CLASSES,
     CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS,
-    LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
-    READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, ROUTER_PATHS,
+    LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAX_AUXILIARY_SOURCES, READYZ_200_DESCRIPTION,
+    READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, ROUTER_PATHS,
     SNAPSHOT_UNAVAILABLE_REASON_CODES, auxiliary_source_cursor_epoch_is_optional_string,
     auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
     auxiliary_source_id_is_required_string,
@@ -21,14 +21,14 @@ use hl_api::{
     auxiliary_source_spool_records_is_required_u64,
     auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64,
-    auxiliary_source_unread_bytes_is_optional_u64, capture_source_health_openapi_enum,
-    committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-    independent_source_health_openapi_enum, is_core_deadletter_reason,
-    is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
-    readyz_200_description, readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
-    readyz_get_description, restart_reconstruction_openapi_enum, spawn_local,
-    unavailable_response_schema_ref,
+    auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
+    capture_source_health_openapi_enum, committed_source_class_openapi_enum,
+    core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+    health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+    readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref, readyz_get_description,
+    restart_reconstruction_openapi_enum, spawn_local, unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -714,6 +714,99 @@ async fn present_non_array_auxiliary_sources_is_snapshot_invalid() {
         assert_eq!(body["code"], "data_unavailable");
         assert_eq!(body["reason_code"], "snapshot_invalid");
     }
+}
+
+#[tokio::test]
+async fn auxiliary_sources_cardinality_matches_writer_cap() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+    let known = value["auxiliary_sources"][0].clone();
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "fixture array of known object auxiliary sources must stay 200"
+    );
+    assert!(body["auxiliary_sources"].is_array());
+    assert!(
+        body["auxiliary_sources"]
+            .as_array()
+            .expect("auxiliary_sources array")
+            .len()
+            <= MAX_AUXILIARY_SOURCES
+    );
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value["auxiliary_sources"] = serde_json::json!([]);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode empty auxiliary_sources"),
+    )
+    .expect("write empty auxiliary_sources");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "empty auxiliary_sources must stay valid");
+    assert_eq!(body["auxiliary_sources"], serde_json::json!([]));
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value["auxiliary_sources"] = Value::Array(vec![known.clone(); MAX_AUXILIARY_SOURCES]);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode cap auxiliary_sources"),
+    )
+    .expect("write cap auxiliary_sources");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "writer-cap auxiliary_sources must stay 200");
+    assert_eq!(
+        body["auxiliary_sources"]
+            .as_array()
+            .expect("auxiliary_sources array")
+            .len(),
+        MAX_AUXILIARY_SOURCES
+    );
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value["auxiliary_sources"] = Value::Array(vec![known; MAX_AUXILIARY_SOURCES + 1]);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode over-cap auxiliary_sources"),
+    )
+    .expect("write over-cap auxiliary_sources");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 503, "over-cap auxiliary_sources must not fail open");
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
 }
 
 #[tokio::test]
@@ -2630,6 +2723,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         auxiliary_source_last_error_reason_is_optional_string(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
     );
+    assert!(
+        auxiliary_sources_max_items_is_writer_cap(document),
+        "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
+    );
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -2824,6 +2921,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         auxiliary_source_last_error_reason_is_optional_string(document),
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
+    );
+    assert!(
+        auxiliary_sources_max_items_is_writer_cap(document),
+        "served OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),
