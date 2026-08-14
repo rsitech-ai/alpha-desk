@@ -16,7 +16,9 @@ import {
   LEFTOVER_V4_OMITTED_DETAIL,
   captureHealthObservedReason,
   captureHealthOmittedReasonUnready,
+  captureHealthWatchView,
   classifyHttpBody,
+  coreHealthWatchView,
   familyOf,
   leftoverV4LaneKind,
   mapApiError,
@@ -1037,5 +1039,175 @@ describe("capture leftover v4 / not live-ready healthz", () => {
       expect(classified.detail).toMatch(/Not a Stage PASS/)
       expect(classified.detail).not.toMatch(/live-qualified/i)
     }
+  })
+
+  it("shows capture healthz HTTP 200 unready omitted reason as red unknown, not leftover-v4 and not ok", () => {
+    const parsed = parseCaptureHealth({
+      schema_version: "hl.capture.health.v1",
+      ok: false,
+      ready: false,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.reason_code).toBeUndefined()
+    expect(leftoverV4LaneKind(200, parsed.value)).toBe("unknown_omitted")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("typed")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("not_observed")
+
+    const view = captureHealthWatchView(200, parsed.value)
+    expect(view).toBeDefined()
+    if (view === undefined) {
+      return
+    }
+    expect(view.tone).toBe("red")
+    expect(view.tone).not.toBe("green")
+    expect(view.family).toBe("data_unavailable")
+    expect(view.family).not.toBe("capture_health_not_ready")
+    expect(view.reasonCode).toBe("data_unavailable")
+    expect(view.reasonCode).not.toBe("capture_health.not_ready")
+    expect(view.title).not.toMatch(/ready/i)
+    expect(view.title).not.toBe("503 capture health not ready")
+
+    const classified = classifyHttpBody(200, {
+      schema_version: "hl.capture.health.v1",
+      ok: false,
+      ready: false,
+    })
+    expect(classified.kind).toBe("observed")
+    if (classified.kind !== "observed") {
+      return
+    }
+    expect(classified.view.httpStatus).toBe(200)
+    expect(classified.view.tone).toBe("red")
+    expect(classified.view.tone).not.toBe("green")
+    expect(classified.view.family).toBe("data_unavailable")
+    expect(classified.view.family).not.toBe("capture_health_not_ready")
+    expect(classified.view.reasonCode).not.toBe("capture_health.not_ready")
+
+    const leftoverV4 = parseCaptureStatus(v4Status())
+    expect(leftoverV4.ok).toBe(true)
+    if (!leftoverV4.ok) {
+      return
+    }
+    expect(leftoverV4.value.throughput_records_per_sec).toBeUndefined()
+    expect(leftoverV4.value.throughput_blocks_per_sec).toBeUndefined()
+  })
+
+  it("keeps present capture_health.not_ready typed on leftover-v4 when healthz is HTTP 200", () => {
+    const parsed = parseCaptureHealth(
+      captureHealth503("capture_health.not_ready")
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(leftoverV4LaneKind(200, parsed.value)).toBe("typed")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("unknown_omitted")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("not_observed")
+
+    const view = captureHealthWatchView(200, parsed.value)
+    expect(view).toBeDefined()
+    if (view === undefined) {
+      return
+    }
+    expect(view.family).toBe("capture_health_not_ready")
+    expect(view.reasonCode).toBe("capture_health.not_ready")
+    expect(view.tone).toBe("red")
+    expect(view.tone).not.toBe("green")
+  })
+
+  it("fail-closes unknown capture_health.* on HTTP 200 as generic red, not leftover-v4", () => {
+    const parsed = parseCaptureHealth(
+      captureHealth503("capture_health.unspecified_future")
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(leftoverV4LaneKind(200, parsed.value)).toBe("not_observed")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("typed")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("unknown_omitted")
+
+    const view = captureHealthWatchView(200, parsed.value)
+    expect(view).toBeDefined()
+    if (view === undefined) {
+      return
+    }
+    expect(view.family).toBe("data_unavailable")
+    expect(view.family).not.toBe("capture_health_not_ready")
+    expect(view.tone).toBe("red")
+    expect(view.tone).not.toBe("green")
+    expect(view.title).not.toMatch(/ready/i)
+
+    const classified = classifyHttpBody(
+      200,
+      captureHealth503("capture_health.unspecified_future")
+    )
+    expect(classified.kind).toBe("observed")
+    if (classified.kind !== "observed") {
+      return
+    }
+    expect(classified.view.httpStatus).toBe(200)
+    expect(classified.view.family).toBe("data_unavailable")
+    expect(classified.view.family).not.toBe("capture_health_not_ready")
+    expect(classified.view.tone).toBe("red")
+  })
+
+  it("does not treat HTTP 200 ready omitted-reason capture healthz as fail-closed leftover-v4", () => {
+    const parsed = parseCaptureHealth({
+      schema_version: "hl.capture.health.v1",
+      ok: true,
+      health: "green",
+      ready: true,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(captureHealthWatchView(200, parsed.value)).toBeUndefined()
+    expect(leftoverV4LaneKind(200, parsed.value)).toBe("not_observed")
+  })
+
+  it("shows core health HTTP 200 unready as red, not ok", () => {
+    const parsed = parseCoreHealth({
+      schema_version: "hl.core.health.v1",
+      ok: false,
+      ready: false,
+      reason_code: null,
+      live_qualified: false,
+      stage_2_qualified: false,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    const view = coreHealthWatchView(200, parsed.value)
+    expect(view).toBeDefined()
+    if (view === undefined) {
+      return
+    }
+    expect(view.tone).toBe("red")
+    expect(view.tone).not.toBe("green")
+    expect(view.family).not.toBe("capture_health_not_ready")
+    expect(view.reasonCode).not.toBe("capture_health.not_ready")
+    expect(view.title).not.toMatch(/ready/i)
+
+    const classified = classifyHttpBody(200, {
+      schema_version: "hl.core.health.v1",
+      ok: false,
+      ready: false,
+      reason_code: null,
+      live_qualified: false,
+      stage_2_qualified: false,
+    })
+    expect(classified.kind).toBe("observed")
+    if (classified.kind !== "observed") {
+      return
+    }
+    expect(classified.view.httpStatus).toBe(200)
+    expect(classified.view.tone).toBe("red")
+    expect(classified.view.tone).not.toBe("green")
   })
 })

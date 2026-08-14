@@ -33,7 +33,11 @@ import {
   type CoreHealth,
   type HealthBody,
 } from "@/lib/contracts"
-import { captureHealthObservedReason, mapApiError } from "@/lib/fail-closed"
+import {
+  captureHealthWatchView,
+  coreHealthWatchView,
+  mapApiError,
+} from "@/lib/fail-closed"
 import { formatUnixMicros } from "@/lib/format"
 
 export function DataHealthCard({
@@ -243,24 +247,7 @@ function CoreHealthBlock({
   status: number
   health: CoreHealth
 }) {
-  const failClosed =
-    status === 503 ||
-    !health.ok ||
-    !health.ready ||
-    health.live_qualified ||
-    health.stage_2_qualified ||
-    health.reason_code !== null
-  const view = failClosed
-    ? mapApiError(status === 200 ? 503 : status, {
-        schema_version: API_ERROR_SCHEMA_VERSION,
-        code: "data_unavailable",
-        reason_code:
-          health.reason_code ??
-          (health.live_qualified || health.stage_2_qualified
-            ? "core_status.qualification_claim"
-            : "core_status.not_ready"),
-      })
-    : undefined
+  const view = coreHealthWatchView(status, health)
   const rows = CORE_HEALTH_FIELD_ORDER.map((field) => {
     switch (field) {
       case "schema_version":
@@ -308,18 +295,7 @@ function CaptureHealthBlock({
   status: number
   health: CaptureHealthBody
 }) {
-  const failClosed =
-    status === 503 ||
-    !health.ok ||
-    health.ready !== true ||
-    health.reason_code !== undefined
-  const view = failClosed
-    ? mapApiError(status === 200 ? 503 : status, {
-        schema_version: API_ERROR_SCHEMA_VERSION,
-        code: "data_unavailable",
-        reason_code: captureHealthObservedReason(health.reason_code),
-      })
-    : undefined
+  const view = captureHealthWatchView(status, health)
   const rows = CAPTURE_HEALTH_FIELD_ORDER.map((field) => {
     switch (field) {
       case "schema_version":

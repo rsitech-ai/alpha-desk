@@ -199,6 +199,57 @@ export function captureHealthOmittedReasonUnready(
   return status === 503 || !health.ok || health.ready !== true
 }
 
+function watchDisplayStatus(status: number): number {
+  // Chips/data-health already fail-close unready HTTP 200 (red, not ok).
+  // Coerce the display status so the numeric title cannot look like the
+  // HTTP 200 not_observed path. leftoverV4LaneKind keeps the real status.
+  return status === 200 ? 503 : status
+}
+
+export function captureHealthWatchView(
+  status: number,
+  health: CaptureHealthBody
+): FailClosedView | undefined {
+  const failClosed =
+    status === 503 ||
+    !health.ok ||
+    health.ready !== true ||
+    health.reason_code !== undefined
+  if (!failClosed) {
+    return undefined
+  }
+  return mapApiError(watchDisplayStatus(status), {
+    schema_version: API_ERROR_SCHEMA_VERSION,
+    code: "data_unavailable",
+    reason_code: captureHealthObservedReason(health.reason_code),
+  })
+}
+
+export function coreHealthWatchView(
+  status: number,
+  health: CoreHealth
+): FailClosedView | undefined {
+  const failClosed =
+    status === 503 ||
+    !health.ok ||
+    !health.ready ||
+    health.live_qualified ||
+    health.stage_2_qualified ||
+    health.reason_code !== null
+  if (!failClosed) {
+    return undefined
+  }
+  return mapApiError(watchDisplayStatus(status), {
+    schema_version: API_ERROR_SCHEMA_VERSION,
+    code: "data_unavailable",
+    reason_code:
+      health.reason_code ??
+      (health.live_qualified || health.stage_2_qualified
+        ? "core_status.qualification_claim"
+        : "core_status.not_ready"),
+  })
+}
+
 function classifyCaptureHealth(
   status: number,
   health: CaptureHealthBody
