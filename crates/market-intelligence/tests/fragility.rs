@@ -208,7 +208,10 @@ fn market_snapshot(book: FeatureValue, fills: FeatureValue) -> MarketFeatureSnap
     market_snapshot_with_health(
         book,
         fills,
-        FeatureValue::Boolean(true),
+        FeatureValue::Decimal {
+            raw: 100 * 100_000_000,
+            scale: 8,
+        },
         health(HealthState::Amber),
     )
 }

@@ -37,7 +37,13 @@ fn snapshot(state: HealthState, signed: i64) -> MarketFeatureSnapshot {
         values.insert(fills, FeatureValue::Missing(MissingReason::RedDataHealth));
     } else {
         values.insert(flow, FeatureValue::SignedInteger(signed));
-        values.insert(book, FeatureValue::Boolean(true));
+        values.insert(
+            book,
+            FeatureValue::Decimal {
+                raw: 20_000 * 100_000_000,
+                scale: 8,
+            },
+        );
         values.insert(fills, FeatureValue::Boolean(true));
     }
     MarketFeatureSnapshot::try_new(
@@ -296,6 +302,76 @@ fn missing_book_or_fills_cannot_validate_or_go_live() {
     let missing_inputs = bundle.missing_for_admission();
     assert!(missing_inputs.contains(&"book".to_owned()));
     assert!(missing_inputs.contains(&"fills".to_owned()));
+    assert!(matches!(
+        transition_allowed(
+            Some(SignalLifecycleState::Candidate),
+            SignalLifecycleState::Validated,
+            &SignalType::IndependentSmartFlowAcceleration,
+            &bundle,
+            HealthState::Green,
+            true,
+        ),
+        Err(SignalError::IncompleteEvidence(_))
+    ));
+    assert!(matches!(
+        transition_allowed(
+            Some(SignalLifecycleState::Validated),
+            SignalLifecycleState::Live,
+            &SignalType::IndependentSmartFlowAcceleration,
+            &bundle,
+            HealthState::Green,
+            true,
+        ),
+        Err(SignalError::IncompleteEvidence(_))
+    ));
+}
+
+#[test]
+fn boolean_book_cannot_validate_or_go_live() {
+    let mut values = BTreeMap::new();
+    values.insert(
+        market_feature_key("smart_flow_acceleration_milli").unwrap(),
+        FeatureValue::SignedInteger(10),
+    );
+    values.insert(
+        market_feature_key("book").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    values.insert(
+        market_feature_key("fills").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    let minted = MarketFeatureSnapshot::try_new(
+        MarketId::new("BTC").unwrap(),
+        Horizon::MINUTES_5,
+        FeatureSetVersion::new("market-v1").unwrap(),
+        time(1_000_000),
+        known(1_000_000),
+        BlockHeight::new(9),
+        values,
+        health(HealthState::Green),
+    )
+    .unwrap();
+    let bundle = EvidenceBundle::try_new(
+        SignalId::new("sig-1").unwrap(),
+        vec![event_ref()],
+        vec![(EntityId::new("e1").unwrap(), ProbabilityPpm::ONE)],
+        minted.clone(),
+        minted,
+        BlockHeight::new(12),
+        ProbabilityPpm::ONE,
+        [4_u8; 32],
+        "cc9faa2".to_owned(),
+        [5_u8; 32],
+        analogues(),
+        vec![InvalidationRule::DataHealthNotGreen],
+        UsdAmount::from_raw(1_000_000_000, 8).unwrap(),
+        Horizon::MINUTES_5,
+        vec!["synthetic_unqualified".to_owned()],
+    )
+    .unwrap();
+    let missing_inputs = bundle.missing_for_admission();
+    assert!(missing_inputs.contains(&"book".to_owned()));
     assert!(matches!(
         transition_allowed(
             Some(SignalLifecycleState::Candidate),

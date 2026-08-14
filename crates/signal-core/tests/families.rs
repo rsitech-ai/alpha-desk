@@ -58,7 +58,10 @@ fn green_values(
         .collect();
     values.insert(
         market_feature_key("book").unwrap(),
-        FeatureValue::Boolean(true),
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
     );
     values.insert(
         market_feature_key("fills").unwrap(),
@@ -66,7 +69,10 @@ fn green_values(
     );
     values.insert(
         market_feature_key("inventory").unwrap(),
-        FeatureValue::Boolean(true),
+        FeatureValue::Decimal {
+            raw: 100 * 100_000_000,
+            scale: 8,
+        },
     );
     values
 }
@@ -415,6 +421,65 @@ fn missing_book_or_fills_suppresses_live_capable_families() {
                     );
                 }
                 other => panic!("missing book/fills must not emit {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn boolean_book_or_false_fills_cannot_emit_live_capable_families() {
+    let trigger = snapshot(
+        HealthState::Green,
+        green_values(&[
+            (
+                "smart_flow_acceleration_milli",
+                FeatureValue::SignedInteger(400),
+            ),
+            ("historical_markout_bps", FeatureValue::SignedInteger(40)),
+            ("smart_flow_usd_milli", FeatureValue::SignedInteger(50)),
+            ("crowd_flow_usd_milli", FeatureValue::SignedInteger(-40)),
+            ("placeholder", FeatureValue::SignedInteger(1)),
+        ]),
+    );
+    let mut boolean_book = trigger.clone();
+    boolean_book.values.insert(
+        market_feature_key("book").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    let mut false_fills = trigger.clone();
+    false_fills.values.insert(
+        market_feature_key("fills").unwrap(),
+        FeatureValue::Boolean(false),
+    );
+    boolean_book.provenance_hash = boolean_book.compute_provenance_hash();
+    false_fills.provenance_hash = false_fills.compute_provenance_hash();
+
+    let flow = flow_eval();
+    let crowd = SmartCrowdDivergenceEvaluator::from_toml(include_str!(
+        "../../../config/signals/v1/smart-crowd-divergence.toml"
+    ))
+    .unwrap();
+    let fragility = FragilityAsymmetryEvaluator::from_toml(include_str!(
+        "../../../config/signals/v1/liquidation-fragility-asymmetry.toml"
+    ))
+    .unwrap();
+    let ctx = context(4, false, false, 5, 100, false, false);
+    for snapshot in [&boolean_book, &false_fills] {
+        assert!(suppress_missing_book_or_fills(snapshot).is_some());
+        for evaluation in [
+            flow.evaluate(snapshot, &ctx).unwrap(),
+            crowd.evaluate(snapshot, &ctx).unwrap(),
+            fragility.evaluate(snapshot, &ctx).unwrap(),
+        ] {
+            match evaluation {
+                SignalEvaluation::Suppressed { reasons, .. } => {
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|reason| reason == "missing_book_or_fills")
+                    );
+                }
+                other => panic!("cross-kind or false fills must not emit {other:?}"),
             }
         }
     }

@@ -18,24 +18,133 @@ pub enum ObservationStatus {
     Missing(MissingReason),
 }
 
+/// Feature kind a snapshot value is allowed to mint as an observation.
+///
+/// Decimal depth and boolean presence cannot substitute for each other. Convert
+/// only through [`boolean_presence_from_decimal_depth`] or
+/// [`decimal_depth_from_boolean_presence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObservationMintKind {
+    DecimalDepth,
+    BooleanPresence,
+}
+
+/// Boolean observations that must not be silently coerced from decimal depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BooleanObservationPurpose {
+    Presence,
+    Crossed,
+    Live,
+    Ready,
+}
+
 impl ObservationStatus {
-    #[must_use]
-    pub fn from_feature(value: Option<&FeatureValue>) -> Self {
-        match value {
-            Some(FeatureValue::Missing(reason)) => Self::Missing(*reason),
-            None => Self::Missing(MissingReason::NotObserved),
-            Some(FeatureValue::Decimal { .. })
-            | Some(FeatureValue::SignedInteger(_))
-            | Some(FeatureValue::UnsignedInteger(_))
-            | Some(FeatureValue::ProbabilityPpm(_))
-            | Some(FeatureValue::Category(_))
-            | Some(FeatureValue::Boolean(_)) => Self::Observed,
+    pub fn from_typed_feature(
+        value: Option<&FeatureValue>,
+        kind: ObservationMintKind,
+    ) -> Result<Self, MarketError> {
+        let Some(value) = value else {
+            return Ok(Self::Missing(MissingReason::NotObserved));
+        };
+        match (kind, value) {
+            (_, FeatureValue::Missing(reason)) => Ok(Self::Missing(*reason)),
+            (ObservationMintKind::DecimalDepth, FeatureValue::Decimal { .. }) => Ok(Self::Observed),
+            (ObservationMintKind::DecimalDepth, FeatureValue::Boolean(_)) => {
+                Err(MarketError::Malformed {
+                    what: "observation",
+                    reason: "boolean cannot mint decimal depth",
+                })
+            }
+            (ObservationMintKind::BooleanPresence, FeatureValue::Boolean(true)) => {
+                Ok(Self::Observed)
+            }
+            (ObservationMintKind::BooleanPresence, FeatureValue::Boolean(false)) => {
+                Ok(Self::Missing(MissingReason::NotObserved))
+            }
+            (ObservationMintKind::BooleanPresence, FeatureValue::Decimal { .. }) => {
+                Err(MarketError::Malformed {
+                    what: "observation",
+                    reason: "decimal depth cannot mint boolean presence",
+                })
+            }
+            (
+                ObservationMintKind::DecimalDepth | ObservationMintKind::BooleanPresence,
+                FeatureValue::SignedInteger(_)
+                | FeatureValue::UnsignedInteger(_)
+                | FeatureValue::ProbabilityPpm(_)
+                | FeatureValue::Category(_),
+            ) => Err(unsupported_observation_value(value)),
         }
     }
 
     #[must_use]
     pub const fn is_observed(self) -> bool {
         matches!(self, Self::Observed)
+    }
+}
+
+fn unsupported_observation_value(value: &FeatureValue) -> MarketError {
+    match value {
+        FeatureValue::Decimal { .. }
+        | FeatureValue::SignedInteger(_)
+        | FeatureValue::UnsignedInteger(_)
+        | FeatureValue::ProbabilityPpm(_)
+        | FeatureValue::Category(_)
+        | FeatureValue::Boolean(_)
+        | FeatureValue::Missing(_) => MarketError::Malformed {
+            what: "observation",
+            reason: "unsupported observation value for mint kind",
+        },
+    }
+}
+
+/// Explicit conversion: observed decimal depth may mint boolean presence `true`.
+/// Missing decimal depth withholds the boolean and never serializes `false`.
+pub fn boolean_presence_from_decimal_depth(
+    depth: Option<&FeatureValue>,
+) -> Result<FeatureValue, MarketError> {
+    match ObservationStatus::from_typed_feature(depth, ObservationMintKind::DecimalDepth)? {
+        ObservationStatus::Missing(reason) => Ok(FeatureValue::Missing(reason)),
+        ObservationStatus::Observed => Ok(FeatureValue::Boolean(true)),
+    }
+}
+
+/// Explicit conversion: a boolean cannot invent decimal depth. Missing withholds.
+pub fn decimal_depth_from_boolean_presence(
+    value: Option<&FeatureValue>,
+) -> Result<FeatureValue, MarketError> {
+    match ObservationStatus::from_typed_feature(value, ObservationMintKind::BooleanPresence)? {
+        ObservationStatus::Missing(reason) => Ok(FeatureValue::Missing(reason)),
+        ObservationStatus::Observed => Err(MarketError::Malformed {
+            what: "observation",
+            reason: "boolean cannot mint decimal depth",
+        }),
+    }
+}
+
+/// Typed boolean mint from a depth-bearing feature. Presence is the only
+/// conversion that may succeed; live, ready, and crossed stay withheld.
+pub fn mint_boolean_observation(
+    source: Option<&FeatureValue>,
+    purpose: BooleanObservationPurpose,
+) -> Result<FeatureValue, MarketError> {
+    match purpose {
+        BooleanObservationPurpose::Presence => boolean_presence_from_decimal_depth(source),
+        BooleanObservationPurpose::Crossed
+        | BooleanObservationPurpose::Live
+        | BooleanObservationPurpose::Ready => Err(MarketError::Malformed {
+            what: boolean_observation_purpose_name(purpose),
+            reason: "decimal depth cannot mint live, ready, or crossed",
+        }),
+    }
+}
+
+const fn boolean_observation_purpose_name(purpose: BooleanObservationPurpose) -> &'static str {
+    match purpose {
+        BooleanObservationPurpose::Presence => "presence",
+        BooleanObservationPurpose::Crossed => "crossed",
+        BooleanObservationPurpose::Live => "live",
+        BooleanObservationPurpose::Ready => "ready",
     }
 }
 
@@ -237,25 +346,29 @@ impl MarketFeatureSnapshot {
         }
     }
 
-    pub fn observation(&self, name: &'static str) -> Result<ObservationStatus, MarketError> {
+    pub fn observation(
+        &self,
+        name: &'static str,
+        kind: ObservationMintKind,
+    ) -> Result<ObservationStatus, MarketError> {
         let key = market_feature_key(name)?;
-        Ok(ObservationStatus::from_feature(self.values.get(&key)))
+        ObservationStatus::from_typed_feature(self.values.get(&key), kind)
     }
 
     pub fn require_observed_book_and_fills(&self) -> Result<ObservedBookAndFills<'_>, MarketError> {
-        match self.observation("book")? {
+        match self.observation("book", ObservationMintKind::DecimalDepth)? {
             ObservationStatus::Observed => {}
             ObservationStatus::Missing(_) => {
                 return Err(MarketError::MissingInput { name: "book" });
             }
         }
-        match self.observation("fills")? {
+        match self.observation("fills", ObservationMintKind::BooleanPresence)? {
             ObservationStatus::Observed => {}
             ObservationStatus::Missing(_) => {
                 return Err(MarketError::MissingInput { name: "fills" });
             }
         }
-        match self.observation("inventory")? {
+        match self.observation("inventory", ObservationMintKind::DecimalDepth)? {
             ObservationStatus::Observed => {}
             ObservationStatus::Missing(_) => {
                 return Err(MarketError::MissingInput { name: "inventory" });
