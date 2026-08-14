@@ -97,6 +97,16 @@ pub fn health_reason_code_is_unrestricted_string(document: &str) -> bool {
     mapping.scalar("type") == Some("string") && !mapping.has_key("$ref") && !mapping.has_key("enum")
 }
 
+/// Schema `$ref` for `/readyz` 200.
+///
+/// Must stay `HealthAssessment`. Switching this path to `ApiError` would
+/// mis-document GREEN readiness. Named `components.responses` `$ref`
+/// returns `None`, same as [`readyz_503_schema_ref`].
+#[must_use]
+pub fn readyz_200_schema_ref(document: &str) -> Option<&str> {
+    path_response_schema_ref(document, "/readyz", "200")
+}
+
 /// Schema `$ref` for `/readyz` 503.
 ///
 /// Returns `None` when that status is a named `components.responses` `$ref`
@@ -148,9 +158,22 @@ pub fn unavailable_response_schema_ref(document: &str) -> Option<&str> {
     .scalar("$ref")
 }
 
+/// Frozen `/readyz` 200 path description after YAML folded-block join.
+///
+/// Exact path-item equality so substring `"GREEN-only"` without
+/// `"present and valid"` cannot pass after the prose is rewritten.
+/// Schema `$ref` stays `HealthAssessment`; this string is the
+/// description pin, not a whole-document search.
+pub const READYZ_200_DESCRIPTION: &str = concat!(
+    "Aggregate is HEALTH_STATE_GREEN. Readiness is GREEN-only and is ",
+    "not implied by /v1/health 200. AMBER, including lag, is 503.",
+);
+
 /// Folded or inline `/readyz` 200 description.
 ///
-/// Used so "present and valid" cannot be restored as GREEN-ready prose.
+/// Frozen by exact equality with [`READYZ_200_DESCRIPTION`] so 200 cannot
+/// keep `"GREEN-only"` (or restore `"present and valid"`) while the path
+/// description drifts.
 #[must_use]
 pub fn readyz_200_description(document: &str) -> Option<String> {
     path_response_description(document, "/readyz", "200")
@@ -417,10 +440,11 @@ fn unquote(value: &str) -> &str {
 mod tests {
     use super::{
         CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-        READYZ_503_DESCRIPTION, core_deadletter_reason_openapi_enum, health_503_response_ref,
-        health_503_schema_ref, health_reason_code_is_unrestricted_string,
+        READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, core_deadletter_reason_openapi_enum,
+        health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
         ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
-        readyz_503_description, readyz_503_schema_ref, unavailable_response_schema_ref,
+        readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
+        unavailable_response_schema_ref,
     };
 
     #[test]
@@ -588,14 +612,15 @@ components:
             Some("#/components/schemas/ApiError"),
             "shared Unavailable must stay ApiError for /v1/health 503"
         );
-        let description = readyz_200_description(document).expect("/readyz 200 description");
-        assert!(
-            !description.contains("present and valid"),
-            "/readyz 200 must not read as GREEN-ready merely because snapshots are valid, got {description}"
+        assert_eq!(
+            readyz_200_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "/readyz 200 must document hl.health.v1, not ApiError"
         );
-        assert!(
-            description.contains("GREEN-only"),
-            "/readyz 200 must name GREEN-only readiness, got {description}"
+        assert_eq!(
+            readyz_200_description(document).as_deref(),
+            Some(READYZ_200_DESCRIPTION),
+            "/readyz 200 path description must stay GREEN-only by exact equality"
         );
         assert_eq!(
             readyz_503_description(document).as_deref(),
@@ -757,6 +782,98 @@ paths:
             description.as_str(),
             READYZ_503_DESCRIPTION,
             "substring health-not-ApiError prose must not satisfy the exact path freeze, got {description}"
+        );
+    }
+
+    #[test]
+    fn inlined_readyz_200_api_error_fails_health_schema_freeze() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+"##;
+        assert_eq!(
+            readyz_200_schema_ref(document),
+            Some("#/components/schemas/ApiError")
+        );
+        assert_ne!(
+            readyz_200_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "inlining ApiError on /readyz 200 must fail the health freeze"
+        );
+    }
+
+    #[test]
+    fn readyz_200_present_and_valid_prose_fails_exact_path_description_freeze() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      responses:
+        "200":
+          description: >
+            Aggregate is HEALTH_STATE_GREEN. Readiness is GREEN-only and is
+            not implied by /v1/health 200. AMBER, including lag, is 503.
+            Snapshots are present and valid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+"##;
+        assert_eq!(
+            readyz_200_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "schema freeze must not hide a /readyz 200 description rewrite"
+        );
+        let description = readyz_200_description(document).expect("/readyz 200 description");
+        assert!(
+            description.contains("GREEN-only") && description.contains("present and valid"),
+            "fixture must still contain the old substring tokens, got {description}"
+        );
+        assert_ne!(
+            description.as_str(),
+            READYZ_200_DESCRIPTION,
+            "GREEN-only plus present-and-valid rewrite must fail the exact path freeze, got {description}"
+        );
+    }
+
+    #[test]
+    fn readyz_200_substring_prose_fails_exact_path_description_freeze() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      responses:
+        "200":
+          description: >
+            Aggregate is HEALTH_STATE_GREEN. Readiness is GREEN-only and is
+            not implied by /v1/health 200. AMBER, including lag, is 503.
+            Invented extra claim.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+"##;
+        assert_eq!(
+            readyz_200_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "schema freeze must not hide a /readyz 200 description rewrite"
+        );
+        let description = readyz_200_description(document).expect("/readyz 200 description");
+        assert!(
+            description.contains("GREEN-only") && !description.contains("present and valid"),
+            "fixture must still satisfy the old substring checks, got {description}"
+        );
+        assert_ne!(
+            description.as_str(),
+            READYZ_200_DESCRIPTION,
+            "substring GREEN-only prose must not satisfy the exact path freeze, got {description}"
         );
     }
 }
