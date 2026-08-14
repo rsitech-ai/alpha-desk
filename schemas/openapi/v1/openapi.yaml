@@ -321,7 +321,9 @@ components:
         or non-u64 values, and omitted, are snapshot_invalid. Top-level
         oldest_pending_capture_height is an optional u64 integer; present
         non-number or non-u64 values are snapshot_invalid. Omitted stays
-        omitted. Top-level last_error_reason is an optional string; present
+        omitted. Top-level disk_free_basis_points is an optional u16 integer;
+        present non-number or non-u16 values are snapshot_invalid. Omitted
+        stays omitted. Top-level last_error_reason is an optional string; present
         non-string values, and empty present strings, are snapshot_invalid.
         Omitted stays omitted. Present unknown nested properties are snapshot_invalid.
         Known objects without extras stay valid. This is nested item extra
@@ -683,6 +685,17 @@ components:
             extra numeric bounds. HealthAssessment.reason_code stays a free
             string so unknown RED is not closed out. This document does not
             claim Stage PASS.
+          type: integer
+          minimum: 0
+        disk_free_basis_points:
+          description: >
+            Optional capture writer disk free basis points. Present
+            non-number or non-u16 values are snapshot_invalid. Omitted stays
+            omitted. This is the top-level field. Capture writer emits
+            Option<u16> with skip_serializing_if. This document types width,
+            not capture writer range, and does not invent extra numeric bounds.
+            HealthAssessment.reason_code stays a free string so unknown RED is
+            not closed out. This document does not claim Stage PASS.
           type: integer
           minimum: 0
         throughput_records_per_sec:

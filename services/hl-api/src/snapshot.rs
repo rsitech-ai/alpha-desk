@@ -92,13 +92,13 @@ pub const MAX_AUXILIARY_SOURCES: usize = 16;
 /// already-typed optional `restart_reconstruction`. Present unknown nested
 /// properties are `snapshot_invalid`. Known objects without extras stay
 /// valid. This is not CaptureStatusBase extra keys: top-level writer fields
-/// such as `disk_free_basis_points` and `archive_manifest_id` stay untyped,
-/// and last-heartbeat throughput still passes through. Top-level
-/// `failover_height` is an optional u64. Top-level `failover_reason` is an
-/// optional kebab-case enum. Top-level `durable_height` is an optional u64.
-/// Top-level `capture_backlog_records` is a required u64. Top-level
-/// `oldest_pending_capture_height` is an optional u64. Top-level
-/// `last_error_reason` is an optional non-empty string.
+/// such as `archive_manifest_id` stay untyped, and last-heartbeat throughput
+/// still passes through. Top-level `failover_height` is an optional u64.
+/// Top-level `failover_reason` is an optional kebab-case enum. Top-level
+/// `durable_height` is an optional u64. Top-level `capture_backlog_records`
+/// is a required u64. Top-level `oldest_pending_capture_height` is an
+/// optional u64. Top-level `disk_free_basis_points` is an optional u16.
+/// Top-level `last_error_reason` is an optional non-empty string.
 /// `HealthAssessment.reason_code` stays a free string so unknown RED is not
 /// closed out.
 const AUXILIARY_SOURCE_FIELDS: &[&str] = &[
@@ -300,6 +300,9 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     if object.contains_key("oldest_pending_capture_height") {
         require_u64(object, "oldest_pending_capture_height")?;
     }
+    if object.contains_key("disk_free_basis_points") {
+        require_u16(object, "disk_free_basis_points")?;
+    }
     match schema {
         CaptureStatusSchema::V4 => {
             if object.contains_key("maintenance") {
@@ -497,6 +500,28 @@ fn require_u64(object: &Map<String, Value>, field: &str) -> Result<(), SnapshotE
     }
 }
 
+/// Present JSON integer that fits `u16`. Capture writer emits
+/// `Option<u16>` (`skip_serializing_if`) for top-level
+/// `disk_free_basis_points`. Writer `validate` rejects `> 10_000`; that
+/// range lives only in the capture writer and is not copied here.
+fn require_u16(object: &Map<String, Value>, field: &str) -> Result<(), SnapshotError> {
+    match object.get(field) {
+        Some(Value::Number(number)) => match number.as_u64() {
+            Some(value) => match u16::try_from(value) {
+                Ok(_) => Ok(()),
+                Err(_) => Err(SnapshotError::Invalid),
+            },
+            None => Err(SnapshotError::Invalid),
+        },
+        Some(Value::Null)
+        | Some(Value::Bool(_))
+        | Some(Value::String(_))
+        | Some(Value::Array(_))
+        | Some(Value::Object(_))
+        | None => Err(SnapshotError::Invalid),
+    }
+}
+
 /// Present JSON integer that fits `i64`. Capture writer emits
 /// `Option<i64>` (`skip_serializing_if`) with the durable cluster; this
 /// is not `require_u64` and does not invent extra range bounds.
@@ -533,6 +558,7 @@ mod tests {
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
         capture_source_health_openapi_enum, capture_status_capture_backlog_records_is_required_u64,
+        capture_status_disk_free_basis_points_is_optional_u16,
         capture_status_durable_height_is_optional_u64,
         capture_status_failover_height_is_optional_u64,
         capture_status_failover_reason_is_optional_enum,
@@ -1413,6 +1439,23 @@ mod tests {
         assert!(
             capture_status_oldest_pending_capture_height_is_optional_u64(document),
             "OpenAPI must define CaptureStatusBase.oldest_pending_capture_height as an optional u64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_top_level_disk_free_basis_points_optional_u16() {
+        let document = openapi_yaml();
+        assert!(
+            capture_status_disk_free_basis_points_is_optional_u16(document),
+            "OpenAPI must define CaptureStatusBase.disk_free_basis_points as an optional u16 integer"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
@@ -2984,6 +3027,112 @@ mod tests {
                     .expect_err("present non-u64 oldest_pending_capture_height must not fail open"),
                 SnapshotError::Invalid,
                 "{oldest_pending_capture_height} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_top_level_disk_free_basis_points_u16_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("disk_free_basis_points").is_none(),
+            "v4 fixture must omit optional top-level disk_free_basis_points"
+        );
+        for disk_free_basis_points in [0_u16, 47, 10_000, 10_001, u16::MAX] {
+            value["disk_free_basis_points"] = serde_json::json!(disk_free_basis_points);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{disk_free_basis_points} should parse: {error}"));
+            assert_eq!(
+                parsed["disk_free_basis_points"],
+                u64::from(disk_free_basis_points)
+            );
+            assert_eq!(
+                parsed["capture_backlog_records"], 0,
+                "typing disk_free_basis_points must not couple it to capture_backlog_records"
+            );
+            assert!(
+                parsed.get("oldest_pending_capture_height").is_none(),
+                "typing disk_free_basis_points must not couple it to oldest_pending_capture_height"
+            );
+            assert!(
+                parsed.get("archive_manifest_id").is_none(),
+                "typing disk_free_basis_points must not fold in archive_manifest_id"
+            );
+            assert!(
+                parsed.get("durable_height").is_none(),
+                "typing disk_free_basis_points must not couple it to durable_height"
+            );
+            assert!(
+                parsed.get("failover_height").is_none(),
+                "typing disk_free_basis_points must not couple it to failover_height"
+            );
+            assert!(
+                parsed.get("failover_reason").is_none(),
+                "typing disk_free_basis_points must not couple it to failover_reason"
+            );
+        }
+    }
+
+    #[test]
+    fn writer_disk_free_basis_points_range_is_not_copied_onto_api_parse() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        value["disk_free_basis_points"] = serde_json::json!(10_001_u16);
+        let bytes = serde_json::to_vec(&value).expect("encode writer-range 10001");
+        let parsed = parse_capture_status_bytes(&bytes)
+            .expect("10001 must stay 200 at API parse; writer 10000 max is not copied");
+        assert_eq!(parsed["disk_free_basis_points"], 10_001_u64);
+    }
+
+    #[test]
+    fn omitted_top_level_disk_free_basis_points_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("disk_free_basis_points").is_none(),
+            "v4 fixture must omit optional disk_free_basis_points"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted disk_free_basis_points");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted disk_free_basis_points");
+        assert!(parsed.get("disk_free_basis_points").is_none());
+
+        value["disk_free_basis_points"] = serde_json::json!(47_u16);
+        value
+            .as_object_mut()
+            .expect("capture status object")
+            .remove("disk_free_basis_points");
+        let bytes = serde_json::to_vec(&value).expect("encode removed disk_free_basis_points");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed disk_free_basis_points");
+        assert!(parsed.get("disk_free_basis_points").is_none());
+    }
+
+    #[test]
+    fn present_non_u16_top_level_disk_free_basis_points_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for disk_free_basis_points in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-u16"}),
+            serde_json::json!(["not-a-u16"]),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(65_536_u32),
+        ] {
+            value["disk_free_basis_points"] = disk_free_basis_points.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-u16 disk_free_basis_points must not fail open"),
+                SnapshotError::Invalid,
+                "{disk_free_basis_points} must be snapshot_invalid"
             );
         }
     }
