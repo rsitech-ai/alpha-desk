@@ -540,12 +540,15 @@ impl SourceAdapterConfig {
         validate_identity(stream_name).map_err(|_| ConfigError::InvalidSourceAdapter)?;
         if !(1..=MAX_SOURCE_POLL_INTERVAL_MILLIS).contains(&poll_interval_millis)
             || observation_class != expected_class
-            || replica_cmds_style
-                .is_some_and(|style| style != NodeReplicaCmdsStyle::ActionsAndResponses)
         {
             return Err(ConfigError::InvalidSourceAdapter);
         }
-        Ok(())
+        match replica_cmds_style {
+            None | Some(NodeReplicaCmdsStyle::ActionsAndResponses) => Ok(()),
+            Some(NodeReplicaCmdsStyle::Actions | NodeReplicaCmdsStyle::RecentActions) => {
+                Err(ConfigError::InvalidSourceAdapter)
+            }
+        }
     }
 }
 
