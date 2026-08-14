@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rustix::fs::{open, Mode, OFlags};
+use rustix::fs::{Mode, OFlags, open};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -15,6 +15,7 @@ use crate::CanonicalDelivery;
 pub const DEAD_LETTER_SCHEMA_V1: &str = "hl.core.deadletter.v1";
 const MAX_IDENTITY_BYTES: usize = 512;
 const MAX_RECORD_BYTES: usize = 4_096;
+const MAX_DEAD_LETTER_FILE_BYTES: usize = MAX_RECORD_BYTES.saturating_mul(256);
 const MAX_DEAD_LETTER_PATH_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,10 +299,15 @@ fn validate_existing_jsonl(path: &Path) -> Result<(), DeadLetterError> {
         .map_err(|_| DeadLetterError::Io)?,
     );
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let limit = u64::try_from(MAX_DEAD_LETTER_FILE_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
+    std::io::Read::take(&mut file, limit)
+        .read_to_end(&mut bytes)
         .map_err(|_| DeadLetterError::Io)?;
     if bytes.is_empty() {
         return Err(DeadLetterError::Io);
+    }
+    if bytes.len() > MAX_DEAD_LETTER_FILE_BYTES {
+        return Err(DeadLetterError::Corrupt);
     }
     decode_existing_jsonl(&bytes)
 }

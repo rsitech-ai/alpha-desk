@@ -11,12 +11,12 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    committed_block_delivery, committed_event_delivery, decode_committed_block_marker,
-    encode_committed_block_marker, CanonicalPullSource, CanonicalSubject, DeadLetterError,
+    CanonicalPullSource, CanonicalSubject, DEAD_LETTER_SCHEMA_V1, DeadLetterError,
     DeadLetterRecord, DeadLetterSink, FileDeadLetterSink, InMemoryCanonicalSource,
     InMemoryDeadLetterSink, InMemoryFetchSource, JetStreamFetchFrame, JetStreamReplayAuth,
     JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
-    JetStreamReplaySession, DEAD_LETTER_SCHEMA_V1,
+    JetStreamReplaySession, committed_block_delivery, committed_event_delivery,
+    decode_committed_block_marker, encode_committed_block_marker,
 };
 use sha2::{Digest as _, Sha256};
 use storage_ports::ArchiveReceipt;
@@ -961,6 +961,20 @@ fn file_dead_letter_sink_open_rejects_json_that_is_not_a_record() {
 }
 
 #[test]
+fn file_dead_letter_sink_open_rejects_oversized_jsonl() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    // One byte over `MAX_DEAD_LETTER_FILE_BYTES` (256 * 4 KiB records).
+    let leftover = vec![b'x'; 1_048_576 + 1];
+    fs::write(&path, &leftover).expect("seed oversized leftover");
+
+    let error = FileDeadLetterSink::open(&path).expect_err("oversized leftover");
+    assert_eq!(error, DeadLetterError::Corrupt);
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    assert_eq!(fs::read(&path).expect("left in place"), leftover);
+}
+
+#[test]
 fn file_dead_letter_sink_open_keeps_valid_records_readable() {
     let root = private_root();
     let path = root.path().join("dead-letter.jsonl");
@@ -1039,12 +1053,16 @@ fn assert_dead_letter_file_absent_or_typed_sentinel(path: &std::path::Path) {
             assert_eq!(record["schema_version"], DEAD_LETTER_SCHEMA_V1);
             let reason = record["reason_code"].as_str().expect("typed reason_code");
             assert!(!reason.is_empty());
-            assert!(record["subject"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
-            assert!(record["message_id"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
+            assert!(
+                record["subject"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+            );
+            assert!(
+                record["message_id"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+            );
         }
     }
 }
@@ -1237,14 +1255,16 @@ fn trade_event(height: u64) -> CanonicalEventEnvelope {
             Address::from_bytes([0x11; 20]),
             Address::from_bytes([0x22; 20]),
         ],
-        source_evidence: vec![SourceEvidence::try_new_indexed(
-            SourceId::new("jetstream-replay").expect("source"),
-            "v1",
-            height.to_string(),
-            payload_hash,
-            0,
-        )
-        .expect("evidence")],
+        source_evidence: vec![
+            SourceEvidence::try_new_indexed(
+                SourceId::new("jetstream-replay").expect("source"),
+                "v1",
+                height.to_string(),
+                payload_hash,
+                0,
+            )
+            .expect("evidence"),
+        ],
         confirmation_class: ConfirmationClass::CommittedPrimary,
         observed_at: KnownTime::from_unix_micros(height as i64).expect("known time"),
         ingested_at: KnownTime::from_unix_micros(height as i64).expect("known time"),

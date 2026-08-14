@@ -693,6 +693,86 @@ async fn dead_letter_open_before_store_is_visible_on_loopback_status() {
     assert!(!store_path.exists());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_letter_corrupt_open_before_store_is_visible_on_loopback_status() {
+    // Production order: bind HTTP → open file DLQ → connect wait → store only
+    // on success. A truncated leftover proves `core.deadletter_corrupt` is
+    // scrapeable before connect, matching unsafe-path HTTP coverage.
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let dead_letter_path = root.path().join("dead-letter.jsonl");
+    let leftover = b"{\"schema_version\":\"hl.core.deadletter.v1\"";
+    fs::write(&dead_letter_path, leftover).expect("truncated leftover");
+    let config =
+        CoreConfig::from_toml(&valid_toml(&store_path, 200, Some("127.0.0.1:0"))).expect("config");
+    let runtime = CoreRuntime::from_config(config);
+    let status = runtime.status().clone();
+    assert!(
+        !store_path.exists(),
+        "file-store must stay closed until after successful connect"
+    );
+    let cancellation = CancellationToken::new();
+    let run = runtime.run_jetstream(cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.snapshot().fail_closed_reason() == Some("core.deadletter_corrupt") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fail_closed");
+        assert!(
+            !store_path.exists(),
+            "dead-letter open must not create the file-store"
+        );
+        assert_eq!(
+            fs::read(&dead_letter_path).expect("corrupt leftover left in place"),
+            leftover
+        );
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 503);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ok"], false);
+        assert_eq!(health["ready"], false);
+        assert_eq!(health["reason_code"], "core.deadletter_corrupt");
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["fail_closed_reason"], "core.deadletter_corrupt");
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        let (metrics_code, metrics_body) = http_get(addr, "/metrics").await;
+        assert_eq!(metrics_code, 200);
+        assert!(metrics_body.contains("hl_core_ready 0"));
+        assert!(metrics_body.contains("hl_core_live_qualified 0"));
+        assert!(metrics_body.contains("hl_core_stage_2_qualified 0"));
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(run, probe);
+    let error = result.expect_err("dead-letter open");
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    let snapshot = status.snapshot();
+    assert!(!snapshot.ready());
+    assert_eq!(
+        snapshot.fail_closed_reason(),
+        Some("core.deadletter_corrupt")
+    );
+    assert!(!snapshot.live_qualified());
+    assert!(!snapshot.stage_2_qualified());
+    assert!(!store_path.exists());
+    assert_eq!(
+        fs::read(&dead_letter_path).expect("corrupt leftover left in place"),
+        leftover
+    );
+}
+
 #[tokio::test]
 async fn dead_letter_open_after_store_fails_closed_with_typed_reason() {
     let root = private_root();
