@@ -328,15 +328,15 @@ pub(crate) fn committed_node_tasks(
     let mut primary = None;
     let mut independent = None;
     for source in config.sources() {
-        let Some(SourceAdapterConfig::NodeBlockDirectory {
-            path,
-            stream_name,
-            start_height,
-            poll_interval_millis,
-            replica_cmds_style: _,
-        }) = source.adapter()
-        else {
-            continue;
+        let (path, stream_name, start_height, poll_interval_millis) = match source.adapter() {
+            Some(SourceAdapterConfig::NodeBlockDirectory {
+                path,
+                stream_name,
+                start_height,
+                poll_interval_millis,
+                replica_cmds_style: _,
+            }) => (path, stream_name, start_height, poll_interval_millis),
+            Some(SourceAdapterConfig::NodeLine { .. }) | None => continue,
         };
         let admission = source
             .admission()
@@ -459,14 +459,14 @@ pub(crate) fn auxiliary_node_task(
 ) -> Result<Option<OwnedTask>, SourceRuntimeError> {
     let mut sources = Vec::new();
     for source in config.sources() {
-        let Some(SourceAdapterConfig::NodeLine {
-            path,
-            stream_name,
-            stream,
-            poll_interval_millis,
-        }) = source.adapter()
-        else {
-            continue;
+        let (path, stream_name, stream, poll_interval_millis) = match source.adapter() {
+            Some(SourceAdapterConfig::NodeLine {
+                path,
+                stream_name,
+                stream,
+                poll_interval_millis,
+            }) => (path, stream_name, stream, poll_interval_millis),
+            Some(SourceAdapterConfig::NodeBlockDirectory { .. }) | None => continue,
         };
         let admission = source
             .admission()
