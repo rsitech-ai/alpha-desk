@@ -441,3 +441,67 @@ async fn mixed_parser_dispositions_split_batches_without_breaking_local_sequence
         vec![1, 2, 3]
     );
 }
+
+#[tokio::test]
+async fn last_local_sequence_check_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let archive = Arc::new(
+            LocalParquetArchive::open(
+                root.path().join("archive"),
+                ArchiveConfig::deterministic_fixture(
+                    "raw-segment-last-local-seq-test",
+                    domain_types::KnownTime::from_unix_micros(1_000).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+        let archiver = BlockingRawSegmentArchive::new(raw_port);
+        let mut source_spool = match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => spool(&root),
+            CursorPolicy::MonotonicByteOffset => byte_spool(&root),
+        };
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                source_spool.append(&observation(100, 1_000), 101).unwrap();
+                source_spool.append(&observation(101, 1_001), 102).unwrap();
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                source_spool
+                    .append(&byte_observation(19, 1_000), 101)
+                    .unwrap();
+                source_spool
+                    .append(&byte_observation(47, 1_001), 102)
+                    .unwrap();
+            }
+        }
+        let closed = source_spool.shutdown(200).unwrap().unwrap();
+
+        let summary = archiver
+            .archive_segment(
+                &ChainId::new("mainnet").unwrap(),
+                &closed,
+                archive_config(1024),
+            )
+            .await
+            .expect(
+                "last-local-sequence check still follows today's rule for this constructible cursor policy",
+            );
+
+        assert_eq!(summary.observation_count(), 2);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert!(closed.manifest().last_local_sequence().is_none());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(closed.manifest().last_local_sequence().unwrap().get(), 2);
+            }
+        }
+        assert_eq!(archive.inspect().unwrap().raw_observations(), 2);
+    }
+}

@@ -418,10 +418,13 @@ fn archive_segment(
     if observation_count != segment.manifest().record_count() {
         return Err(RawSegmentArchiveError::VerificationMismatch);
     }
-    if cursor_policy == CursorPolicy::MonotonicByteOffset
-        && last_local_sequence != segment.manifest().last_local_sequence()
-    {
-        return Err(RawSegmentArchiveError::VerificationMismatch);
+    match cursor_policy {
+        CursorPolicy::MonotonicByteOffset => {
+            if last_local_sequence != segment.manifest().last_local_sequence() {
+                return Err(RawSegmentArchiveError::VerificationMismatch);
+            }
+        }
+        CursorPolicy::ContiguousNativeOffset => {}
     }
     segment
         .verify_current()
