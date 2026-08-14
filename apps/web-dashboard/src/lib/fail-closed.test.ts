@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
 import { describe, expect, it } from "vitest"
 
+import type { FeedState } from "@/hooks/use-hl-api"
+import type { DeskFeed, EndpointOutcome } from "@/lib/api"
 import {
   CAPTURE_HEALTH_NOT_READY_REASONS,
   CORE_DEADLETTER_REASONS,
@@ -14,6 +20,7 @@ import {
   type CaptureStatus,
   type HealthBody,
 } from "@/lib/contracts"
+import { deriveConnection } from "@/lib/derive-connection"
 import {
   LEFTOVER_V4_OMITTED_DETAIL,
   captureHealthIsFailClosed,
@@ -27,6 +34,7 @@ import {
   healthBodyIsFailClosed,
   leftoverV4LaneKind,
   mapApiError,
+  type ProbeOutcome,
 } from "@/lib/fail-closed"
 
 const ERROR_SCHEMA = "hl.api.error.v1" as const
@@ -1218,14 +1226,71 @@ describe("capture leftover v4 / not live-ready healthz", () => {
 })
 
 describe("banner shares fail-closed helpers with chips", () => {
-  function bannerKindFromHealth(
-    status: number,
-    body: HealthBody
-  ): "degraded" | "polling" {
-    return healthBodyIsFailClosed(status, body) ? "degraded" : "polling"
+  const unusedProbe: ProbeOutcome = {
+    kind: "not_observed",
+    status: 200,
+    detail: "fixture — not a PASS",
   }
 
-  it("degrades the banner for HTTP 200 unready omitted capture healthz while chips stay red unknown", () => {
+  function leftoverGreen(): HealthBody {
+    return {
+      schema_version: "hl.health.v1",
+      scope: "canonical",
+      state: "HEALTH_STATE_GREEN",
+      reason_code: "healthy",
+      observed_at_micros: 1,
+      suppresses: [],
+    }
+  }
+
+  function okOutcome<T>(status: number, data: T): EndpointOutcome<T> {
+    return { kind: "ok", status, data, raw: data }
+  }
+
+  function feedWithOnlyHealthz(
+    healthz: EndpointOutcome<HealthBody>
+  ): DeskFeed {
+    const capture = parseCaptureStatus(
+      v4Status({ health: "green", ready: true })
+    )
+    if (!capture.ok) {
+      throw new Error(capture.detail)
+    }
+    const green = leftoverGreen()
+    return {
+      fetchedAt: 1,
+      healthz,
+      readyz: okOutcome(200, green),
+      canonicalHealth: okOutcome(200, green),
+      captureStatus: okOutcome(200, capture.value),
+      stream: {
+        kind: "http-error",
+        status: 501,
+        error: errorBody("not_implemented", "stream.websocket_unspecified"),
+      },
+      invalidQuery: unusedProbe,
+      queryBudget: unusedProbe,
+    }
+  }
+
+  function readyFromHealthz(healthz: EndpointOutcome<HealthBody>): FeedState {
+    return { phase: "ready", feed: feedWithOnlyHealthz(healthz) }
+  }
+
+  function bannerFromHealthz(status: number, body: HealthBody) {
+    return deriveConnection(readyFromHealthz(okOutcome(status, body)))
+  }
+
+  it("pins the App banner to deriveConnection, which includes /healthz in the production arrays", () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const app = readFileSync(join(here, "../App.tsx"), "utf8")
+    const wiring = readFileSync(join(here, "derive-connection.ts"), "utf8")
+    expect(app).toContain("deriveConnection(state)")
+    expect(wiring).toContain("[feed.healthz, feed.readyz, feed.canonicalHealth]")
+    expect(wiring).toContain("isTypedCoreFailClosed(feed.healthz)")
+  })
+
+  it("degrades the banner for HTTP 200 unready omitted capture /healthz while chips stay red unknown", () => {
     const parsed = parseCaptureHealth({
       schema_version: "hl.capture.health.v1",
       ok: false,
@@ -1238,8 +1303,20 @@ describe("banner shares fail-closed helpers with chips", () => {
     expect(parsed.value.reason_code).toBeUndefined()
     expect(captureHealthIsFailClosed(200, parsed.value)).toBe(true)
     expect(healthBodyIsFailClosed(200, parsed.value)).toBe(true)
-    expect(bannerKindFromHealth(200, parsed.value)).toBe("degraded")
-    expect(bannerKindFromHealth(200, parsed.value)).not.toBe("polling")
+
+    const feed = feedWithOnlyHealthz(okOutcome(200, parsed.value))
+    const connection = deriveConnection({ phase: "ready", feed })
+    expect(connection.kind).toBe("degraded")
+    expect(connection.kind).not.toBe("polling")
+    expect(connection.kind).not.toBe("unavailable")
+    expect(connection.detail).not.toMatch(/capture_health\.not_ready/)
+    expect(feed.captureStatus.kind).toBe("ok")
+    if (feed.captureStatus.kind === "ok") {
+      expect(feed.captureStatus.data.throughput_records_per_sec).toBeUndefined()
+      expect(feed.captureStatus.data.throughput_blocks_per_sec).toBeUndefined()
+      expect(feed.captureStatus.data.throughput_records_per_sec).not.toBe(0)
+      expect(feed.captureStatus.data.throughput_blocks_per_sec).not.toBe(0)
+    }
 
     const view = captureHealthWatchView(200, parsed.value)
     expect(view).toBeDefined()
@@ -1256,7 +1333,7 @@ describe("banner shares fail-closed helpers with chips", () => {
     expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("typed")
   })
 
-  it("keeps present leftover-v4 capture_health.not_ready typed on HTTP 200, not invented and not unknown omitted", () => {
+  it("keeps present leftover-v4 capture_health.not_ready typed on chips; banner is unavailable not degraded", () => {
     const parsed = parseCaptureHealth(
       captureHealth503("capture_health.not_ready")
     )
@@ -1271,6 +1348,12 @@ describe("banner shares fail-closed helpers with chips", () => {
     expect(view?.family).toBe("capture_health_not_ready")
     expect(view?.reasonCode).toBe("capture_health.not_ready")
     expect(view?.tone).toBe("red")
+
+    const connection = bannerFromHealthz(200, parsed.value)
+    expect(connection.kind).toBe("unavailable")
+    expect(connection.kind).not.toBe("degraded")
+    expect(connection.kind).not.toBe("polling")
+    expect(connection.detail).toMatch(/capture_health\.not_ready/)
   })
 
   it("fail-closes unknown capture_health.* as generic red on chips and degraded on the banner", () => {
@@ -1284,7 +1367,10 @@ describe("banner shares fail-closed helpers with chips", () => {
     expect(leftoverV4LaneKind(200, parsed.value)).toBe("not_observed")
     expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("typed")
     expect(healthBodyIsFailClosed(200, parsed.value)).toBe(true)
-    expect(bannerKindFromHealth(200, parsed.value)).toBe("degraded")
+    const connection = bannerFromHealthz(200, parsed.value)
+    expect(connection.kind).toBe("degraded")
+    expect(connection.kind).not.toBe("unavailable")
+    expect(connection.detail).not.toMatch(/capture_health\.not_ready/)
     const view = captureHealthWatchView(200, parsed.value)
     expect(view?.family).toBe("data_unavailable")
     expect(view?.family).not.toBe("capture_health_not_ready")
@@ -1306,11 +1392,11 @@ describe("banner shares fail-closed helpers with chips", () => {
     expect(captureHealthWatchView(200, parsed.value)).toBeUndefined()
     expect(captureHealthIsFailClosed(200, parsed.value)).toBe(false)
     expect(healthBodyIsFailClosed(200, parsed.value)).toBe(false)
-    expect(bannerKindFromHealth(200, parsed.value)).toBe("polling")
+    expect(bannerFromHealthz(200, parsed.value).kind).toBe("polling")
     expect(leftoverV4LaneKind(200, parsed.value)).toBe("not_observed")
   })
 
-  it("degrades the banner for core health HTTP 200 unready with the same helper as chips", () => {
+  it("degrades the banner for core health HTTP 200 unready on /healthz with the same helper as chips", () => {
     const parsed = parseCoreHealth({
       schema_version: "hl.core.health.v1",
       ok: false,
@@ -1325,7 +1411,10 @@ describe("banner shares fail-closed helpers with chips", () => {
     }
     expect(coreHealthIsFailClosed(200, parsed.value)).toBe(true)
     expect(healthBodyIsFailClosed(200, parsed.value)).toBe(true)
-    expect(bannerKindFromHealth(200, parsed.value)).toBe("degraded")
+    const connection = bannerFromHealthz(200, parsed.value)
+    expect(connection.kind).toBe("degraded")
+    expect(connection.kind).not.toBe("polling")
+    expect(connection.detail).not.toMatch(/capture_health\.not_ready/)
     const view = coreHealthWatchView(200, parsed.value)
     expect(view?.tone).toBe("red")
     expect(view?.reasonCode).not.toBe("capture_health.not_ready")
@@ -1345,6 +1434,6 @@ describe("banner shares fail-closed helpers with chips", () => {
       return
     }
     expect(healthBodyIsFailClosed(200, parsed.value)).toBe(false)
-    expect(bannerKindFromHealth(200, parsed.value)).toBe("polling")
+    expect(bannerFromHealthz(200, parsed.value).kind).toBe("polling")
   })
 })
