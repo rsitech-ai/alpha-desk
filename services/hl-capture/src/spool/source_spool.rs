@@ -376,8 +376,8 @@ impl SourceSpool {
                         } else {
                             next_local_sequence(last_local_sequence)?
                         };
-                        if config.cursor_policy == CursorPolicy::MonotonicByteOffset {
-                            match &mut retained_segment {
+                        match config.cursor_policy {
+                            CursorPolicy::MonotonicByteOffset => match &mut retained_segment {
                                 Some(index) => {
                                     if index.epoch != record.cursor().epoch()
                                         || record.cursor().offset() <= index.max_offset
@@ -395,7 +395,8 @@ impl SourceSpool {
                                         first_local_sequence: local_sequence,
                                     });
                                 }
-                            }
+                            },
+                            CursorPolicy::ContiguousNativeOffset => {}
                         }
                         last_local_sequence = Some(local_sequence);
                         last_record_identity = Some(LastRecordIdentity {
