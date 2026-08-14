@@ -11,8 +11,8 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    committed_block_delivery, committed_event_delivery, CoreConfig, CoreRuntime, CoreStatusHandle,
-    InMemoryCanonicalSource, DEAD_LETTER_SCHEMA_V1,
+    CoreConfig, CoreRuntime, CoreStatusHandle, DEAD_LETTER_SCHEMA_V1, InMemoryCanonicalSource,
+    committed_block_delivery, committed_event_delivery,
 };
 use storage_ports::{ArchiveReceipt, AtomicStateStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,11 +66,113 @@ async fn action_bearing_source_still_fails_closed_without_ack_or_state_advance()
 
     let store =
         SyncedWriteBatchStore::open(&store_path, StateImageLimits::production()).expect("reopen");
-    assert!(store
-        .load_latest(StateImageLimits::production())
-        .expect("load")
-        .is_none());
+    assert!(
+        store
+            .load_latest(StateImageLimits::production())
+            .expect("load")
+            .is_none()
+    );
     let encoded = fs::read_to_string(root.path().join("dead-letter.jsonl")).expect("dlq");
+    let record: serde_json::Value = serde_json::from_str(encoded.trim()).expect("dlq json");
+    assert_eq!(record["reason_code"], "ledger.unsupported_event");
+    assert!(record.get("stream_sequence").is_none());
+    assert!(record.get("live_qualified").is_none());
+    assert!(record.get("stage_2_qualified").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consume_poison_after_dlq_open_is_visible_on_loopback_status() {
+    // Store-then-DLQ-open-then-consume is the `run_source` path. Action-bearing
+    // poison already latches `ledger.unsupported_event` on the status handle;
+    // this proves the typed reason stays scrapeable after a successful file-DLQ
+    // open. Live NATS Term / HL_DEADLETTER remains unproven.
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let dead_letter_path = root.path().join("dead-letter.jsonl");
+    let config =
+        CoreConfig::from_toml(&valid_toml(&store_path, 200, Some("127.0.0.1:0"))).expect("config");
+    let runtime = CoreRuntime::open(config).expect("store open");
+    let status = runtime.status().clone();
+    assert!(
+        store_path.exists(),
+        "file-store must already be in play before consume"
+    );
+    assert!(
+        !dead_letter_path.exists(),
+        "file DLQ must not exist until the first poison persist"
+    );
+    let block = trade_block(200);
+    let receipt = archive_receipt(&block);
+    let marker = committed_block_delivery(&block, &receipt).expect("marker");
+    let event = committed_event_delivery(&block.events()[0], &block, &receipt).expect("event");
+    let event_id = event.message_id.clone();
+    let marker_id = marker.message_id.clone();
+    let mut source = InMemoryCanonicalSource::new([event, marker]);
+    let cancellation = CancellationToken::new();
+    let run = runtime.run_source(&mut source, cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.snapshot().fail_closed_reason() == Some("ledger.unsupported_event") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fail_closed");
+        assert!(
+            store_path.exists(),
+            "file-store must stay in play after consume-poison"
+        );
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 503);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ok"], false);
+        assert_eq!(health["ready"], false);
+        assert_eq!(health["reason_code"], "ledger.unsupported_event");
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["fail_closed_reason"], "ledger.unsupported_event");
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        assert!(value.get("last_applied_watermark").is_none());
+        let (metrics_code, metrics_body) = http_get(addr, "/metrics").await;
+        assert_eq!(metrics_code, 200);
+        assert!(metrics_body.contains("hl_core_ready 0"));
+        assert!(metrics_body.contains("hl_core_live_qualified 0"));
+        assert!(metrics_body.contains("hl_core_stage_2_qualified 0"));
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(run, probe);
+    let error = result.expect_err("action-bearing mapping/reducer still rejects");
+    assert_eq!(error.reason_code(), "ledger.unsupported_event");
+    assert!(!source.acked().contains(&event_id));
+    assert!(!source.acked().contains(&marker_id));
+    let snapshot = status.snapshot();
+    assert!(!snapshot.ready());
+    assert_eq!(
+        snapshot.fail_closed_reason(),
+        Some("ledger.unsupported_event")
+    );
+    assert!(snapshot.last_applied_watermark().is_none());
+    assert!(!snapshot.live_qualified());
+    assert!(!snapshot.stage_2_qualified());
+    assert!(store_path.exists());
+    let store =
+        SyncedWriteBatchStore::open(&store_path, StateImageLimits::production()).expect("reopen");
+    assert!(
+        store
+            .load_latest(StateImageLimits::production())
+            .expect("load")
+            .is_none()
+    );
+    let encoded = fs::read_to_string(&dead_letter_path).expect("dlq");
     let record: serde_json::Value = serde_json::from_str(encoded.trim()).expect("dlq json");
     assert_eq!(record["reason_code"], "ledger.unsupported_event");
     assert!(record.get("stream_sequence").is_none());
@@ -817,14 +919,16 @@ fn trade_event(height: u64) -> CanonicalEventEnvelope {
             Address::from_bytes([0x11; 20]),
             Address::from_bytes([0x22; 20]),
         ],
-        source_evidence: vec![SourceEvidence::try_new_indexed(
-            SourceId::new("jetstream-replay").expect("source"),
-            "v1",
-            height.to_string(),
-            payload_hash,
-            0,
-        )
-        .expect("evidence")],
+        source_evidence: vec![
+            SourceEvidence::try_new_indexed(
+                SourceId::new("jetstream-replay").expect("source"),
+                "v1",
+                height.to_string(),
+                payload_hash,
+                0,
+            )
+            .expect("evidence"),
+        ],
         confirmation_class: ConfirmationClass::CommittedPrimary,
         observed_at: KnownTime::from_unix_micros(height as i64).expect("known time"),
         ingested_at: KnownTime::from_unix_micros(height as i64).expect("known time"),

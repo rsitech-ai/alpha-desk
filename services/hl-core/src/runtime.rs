@@ -201,10 +201,16 @@ impl CoreRuntime {
         Dlq: DeadLetterSink,
     {
         self.status.mark_ready();
-        let result = self
-            .consume_until_cancelled(source, &mut dead_letter, cancellation)
-            .await;
-        Self::stop_status(status_cancellation, status_task, result).await
+        match self
+            .consume_until_cancelled(source, &mut dead_letter, cancellation.clone())
+            .await
+        {
+            Ok(report) => Self::stop_status(status_cancellation, status_task, Ok(report)).await,
+            Err(error) => {
+                self.latch_fail_closed(error, cancellation, status_cancellation, status_task)
+                    .await
+            }
+        }
     }
 
     async fn stop_status(
