@@ -45,7 +45,7 @@ fn originator_plus_followers_raises_saturation_without_inflating_independent_cou
             leverage_milli: 200_000,
         });
     }
-    let components = crowding_from_caller_marks(&positions, usd(50)).unwrap();
+    let components = crowding_from_caller_marks(&positions, observed_book_depth()).unwrap();
     assert_eq!(
         components.independent_entity_count.raw_value.raw(),
         2_000_000
@@ -80,8 +80,8 @@ fn dispersed_entries_cluster_less_than_tight_cohort() {
             leverage_milli: 100_000,
         })
         .collect();
-    let left = crowding_from_caller_marks(&dispersed, usd(100)).unwrap();
-    let right = crowding_from_caller_marks(&clustered, usd(100)).unwrap();
+    let left = crowding_from_caller_marks(&dispersed, observed_book_depth()).unwrap();
+    let right = crowding_from_caller_marks(&clustered, observed_book_depth()).unwrap();
     assert!(left.entry_clustering.raw_value.raw() < right.entry_clustering.raw_value.raw());
 }
 
@@ -155,16 +155,25 @@ fn observed_snapshot() -> MarketFeatureSnapshot {
     )
 }
 
-fn crowding_from_caller_marks(
-    positions: &[CrowdingPosition],
-    remaining_capacity: UsdAmount,
-) -> Result<market_intelligence::CrowdingComponents, MarketError> {
+fn observed_book_depth() -> UsdAmount {
+    usd(20_000)
+}
+
+fn crowding_from_caller_marks_snapshot(positions: &[CrowdingPosition]) -> MarketFeatureSnapshot {
     let mut snapshot = observed_snapshot();
     snapshot.values.insert(
         market_feature_key("inventory").unwrap(),
         mark_inventory_value(positions),
     );
     snapshot.provenance_hash = snapshot.compute_provenance_hash();
+    snapshot
+}
+
+fn crowding_from_caller_marks(
+    positions: &[CrowdingPosition],
+    remaining_capacity: UsdAmount,
+) -> Result<market_intelligence::CrowdingComponents, MarketError> {
+    let snapshot = crowding_from_caller_marks_snapshot(positions);
     crowding_components(
         positions,
         remaining_capacity,
@@ -256,12 +265,61 @@ fn constructed_accounts_with_invented_inventory_cannot_produce_crowding_scores()
     mismatched.provenance_hash = mismatched.compute_provenance_hash();
     let stolen_inventory = mismatched.require_observed_book_and_fills().unwrap();
     assert!(matches!(
-        crowding_components(&positions, usd(50), stolen_inventory),
+        crowding_components(&positions, observed_book_depth(), stolen_inventory),
         Err(MarketError::Malformed {
             what: "inventory",
             reason: "observed inventory proof does not match caller inventory",
         })
     ));
+}
+
+#[test]
+fn matching_inventory_with_unrelated_book_depth_cannot_produce_crowding_scores() {
+    let concentrated = vec![invented_mark_position()];
+    let split = vec![
+        CrowdingPosition {
+            entity_id: EntityId::new("left").unwrap(),
+            independence_weight: ProbabilityPpm::ONE,
+            is_follower: false,
+            post_originator: false,
+            exposure: usd(40),
+            entry_bps_from_mark: 4,
+            funding_percentile: ppm(500_000),
+            leverage_milli: 200_000,
+        },
+        CrowdingPosition {
+            entity_id: EntityId::new("right").unwrap(),
+            independence_weight: ProbabilityPpm::ONE,
+            is_follower: true,
+            post_originator: true,
+            exposure: usd(60),
+            entry_bps_from_mark: 40,
+            funding_percentile: ppm(200_000),
+            leverage_milli: 80_000,
+        },
+    ];
+    let snapshot = crowding_from_caller_marks_snapshot(&concentrated);
+    let evidence = snapshot.require_observed_book_and_fills().unwrap();
+    assert_eq!(
+        mark_inventory_value(&concentrated),
+        mark_inventory_value(&split)
+    );
+    assert!(matches!(
+        crowding_components(&concentrated, usd(50), evidence),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match caller book depth",
+        })
+    ));
+    assert!(matches!(
+        crowding_components(&split, usd(50), evidence),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match caller book depth",
+        })
+    ));
+    let admitted = crowding_components(&split, observed_book_depth(), evidence).unwrap();
+    assert!(admitted.capacity_consumed.raw_value.raw() > 0);
 }
 
 #[test]

@@ -442,7 +442,7 @@ fn constructed_observed_book_without_fills_cannot_produce_path_scores() {
         simulate_path(&scenario, &accounts, &constructed, -100, 0, stolen_depth),
         Err(MarketError::Malformed {
             what: "book",
-            reason: "observed book proof does not match simulated book depth",
+            reason: "observed book proof does not match caller book depth",
         })
     ));
 }
@@ -529,4 +529,52 @@ fn constructed_accounts_with_invented_inventory_cannot_produce_fragility_scores(
             reason: "observed inventory proof does not match caller inventory",
         })
     ));
+}
+
+#[test]
+fn matching_inventory_with_unrelated_book_depth_cannot_produce_path_or_fragility_scores() {
+    let scenario = scenario();
+    let concentrated = vec![account("a", Direction::Long, 100, 10)];
+    let split = vec![
+        account("left", Direction::Long, 40, 10),
+        account("right", Direction::Short, 60, 20),
+    ];
+    let constructed = book(20_000, HealthState::Green);
+    let unrelated_depth = market_snapshot_with_health(
+        FeatureValue::Decimal {
+            raw: 1_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        account_inventory_value(&concentrated),
+        health(HealthState::Green),
+    );
+    let stolen_depth = unrelated_depth.require_observed_book_and_fills().unwrap();
+    assert_eq!(
+        account_inventory_value(&concentrated),
+        account_inventory_value(&split)
+    );
+    assert!(matches!(
+        simulate_path(
+            &scenario,
+            &concentrated,
+            &constructed,
+            -100,
+            0,
+            stolen_depth
+        ),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match caller book depth",
+        })
+    ));
+    assert!(matches!(
+        simulate_fragility(&scenario, &split, &constructed, -100, stolen_depth),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof does not match caller book depth",
+        })
+    ));
+    let admitted = simulate_bound_path(&scenario, &split, &constructed, -100, 0).unwrap();
+    assert_eq!(admitted.health.state, HealthState::Green);
 }

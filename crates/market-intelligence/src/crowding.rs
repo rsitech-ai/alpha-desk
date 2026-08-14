@@ -46,7 +46,9 @@ pub fn crowding_components_from_snapshot(
 
 /// Crowding components from caller marks. Marks are admitted only with
 /// [`ObservedBookAndFills`] issued after book, fills, and inventory are
-/// observed. Caller exposure must match the observed inventory proof.
+/// observed. Remaining capacity must match the observed book depth, and
+/// caller exposure must match the observed inventory proof. Matching
+/// depth and totals still leave mark composition caller-chosen.
 pub fn crowding_components(
     positions: &[CrowdingPosition],
     remaining_capacity: UsdAmount,
@@ -62,6 +64,7 @@ pub fn crowding_components(
             reason: "capacity must be non-negative",
         });
     }
+    evidence.require_matches_book_depth(remaining_capacity)?;
     evidence.require_matches_inventory(caller_mark_inventory(positions)?)?;
     let mut independent = 0_u64;
     let mut follower = 0_u64;
