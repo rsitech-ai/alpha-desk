@@ -22,13 +22,14 @@ use hl_api::{
     auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64,
     auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-    capture_source_health_openapi_enum, committed_source_class_openapi_enum,
-    core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
-    health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
-    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
-    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
-    readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref, readyz_get_description,
-    restart_reconstruction_openapi_enum, spawn_local, unavailable_response_schema_ref,
+    capture_source_health_openapi_enum, capture_status_last_error_reason_is_optional_string,
+    committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
+    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
+    independent_source_health_openapi_enum, is_core_deadletter_reason,
+    is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
+    readyz_200_description, readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
+    readyz_get_description, restart_reconstruction_openapi_enum, spawn_local,
+    unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -2165,6 +2166,98 @@ async fn nested_auxiliary_last_error_reason_is_optional_string() {
     }
 }
 
+#[tokio::test]
+async fn top_level_capture_last_error_reason_is_optional_string() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level last_error_reason must stay 200"
+    );
+    assert!(body.get("last_error_reason").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v4");
+
+    value["last_error_reason"] = serde_json::json!("capture_bus.unavailable");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode known string last_error_reason"),
+    )
+    .expect("write known string last_error_reason");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known string last_error_reason must stay 200");
+    assert_eq!(body["last_error_reason"], "capture_bus.unavailable");
+
+    value
+        .as_object_mut()
+        .expect("capture status object")
+        .remove("last_error_reason");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted last_error_reason"),
+    )
+    .expect("write omitted last_error_reason");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level last_error_reason after removal must stay 200"
+    );
+    assert!(body.get("last_error_reason").is_none());
+
+    for last_error_reason in [
+        serde_json::json!(1),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-string"}),
+        serde_json::json!(["not-a-string"]),
+        serde_json::json!(""),
+    ] {
+        value["last_error_reason"] = last_error_reason.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-string last_error_reason"),
+        )
+        .expect("write non-string last_error_reason");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{last_error_reason} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -2862,6 +2955,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
     );
     assert!(
+        capture_status_last_error_reason_is_optional_string(document),
+        "OpenAPI must define CaptureStatusBase.last_error_reason as an optional string"
+    );
+    assert!(
         auxiliary_sources_max_items_is_writer_cap(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
     );
@@ -3083,6 +3180,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         auxiliary_source_last_error_reason_is_optional_string(document),
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
+    );
+    assert!(
+        capture_status_last_error_reason_is_optional_string(document),
+        "served OpenAPI must define CaptureStatusBase.last_error_reason as an optional string"
     );
     assert!(
         auxiliary_sources_max_items_is_writer_cap(document),

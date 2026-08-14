@@ -310,7 +310,9 @@ components:
         strings, are snapshot_invalid. Omitted stays omitted. Nested
         last_error_reason is an optional string; present non-string values,
         and empty present strings, are snapshot_invalid. Omitted stays
-        omitted. Present unknown nested properties are snapshot_invalid.
+        omitted. Top-level last_error_reason is an optional string; present
+        non-string values, and empty present strings, are snapshot_invalid.
+        Omitted stays omitted. Present unknown nested properties are snapshot_invalid.
         Known objects without extras stay valid. This is nested item extra
         keys, not CaptureStatusBase additionalProperties. Nested health,
         restart_reconstruction, and qualification, when present, use closed
@@ -385,6 +387,18 @@ components:
             - starting
             - healthy
             - range-unavailable
+        last_error_reason:
+          description: >
+            Optional capture writer last error reason string. Present
+            non-string values are snapshot_invalid. Empty present
+            strings are snapshot_invalid. Omitted stays omitted. This
+            document does not claim a closed enum of error reasons.
+            This is the top-level field, not nested
+            auxiliary_sources[].last_error_reason.
+            HealthAssessment.reason_code stays a free string so unknown
+            RED is not closed out. This document does not claim Stage
+            PASS.
+          type: string
         auxiliary_sources:
           description: >
             Extra snapshot sources passed through when present. Present arrays
