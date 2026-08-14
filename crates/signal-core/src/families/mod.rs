@@ -113,9 +113,12 @@ pub fn proof_withhold_reason(snapshot: &MarketFeatureSnapshot) -> Option<ProofWi
     }
 }
 
-pub fn suppress_missing_book_or_fills(
-    snapshot: &MarketFeatureSnapshot,
-) -> Option<SignalEvaluation> {
+/// Withhold a family emission when [`proof_withhold_reason`] is set.
+///
+/// Covers book, fills, and inventory: `missing_book_or_fills`,
+/// `missing_inventory`, and `malformed_inventory`.
+#[must_use]
+pub fn suppress_proof_withhold(snapshot: &MarketFeatureSnapshot) -> Option<SignalEvaluation> {
     let reason = proof_withhold_reason(snapshot)?;
     Some(SignalEvaluation::Suppressed {
         health: snapshot.health.clone(),
@@ -137,7 +140,7 @@ pub fn suppress_if_red(
             reasons: vec!["red_required_dependency".to_owned()],
         });
     }
-    suppress_missing_book_or_fills(snapshot)
+    suppress_proof_withhold(snapshot)
 }
 
 pub fn signed_feature(snapshot: &MarketFeatureSnapshot, name: &str) -> Result<i64, SignalError> {

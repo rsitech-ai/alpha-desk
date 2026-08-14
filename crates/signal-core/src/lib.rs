@@ -17,7 +17,7 @@ pub use evidence::EvidenceBundle;
 pub use families::{
     FamilyThresholds, FragilityAsymmetryEvaluator, ProofWithholdReason, SignalContext,
     SignalEvaluation, SignalEvaluator, SmartCrowdDivergenceEvaluator,
-    SmartFlowAccelerationEvaluator, proof_withhold_reason, suppress_missing_book_or_fills,
+    SmartFlowAccelerationEvaluator, proof_withhold_reason, suppress_proof_withhold,
 };
 pub use invalidation::{
     InvalidationObservation, InvalidationRule, InvalidationStatus, any_triggered, evaluate_rule,

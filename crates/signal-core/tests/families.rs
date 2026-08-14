@@ -14,7 +14,7 @@ use market_intelligence::{
 use signal_core::{
     FragilityAsymmetryEvaluator, ProofWithholdReason, SignalContext, SignalEvaluation,
     SignalEvaluator, SignalType, SmartCrowdDivergenceEvaluator, SmartFlowAccelerationEvaluator,
-    proof_withhold_reason, suppress_missing_book_or_fills,
+    proof_withhold_reason, suppress_proof_withhold,
 };
 
 fn time(micros: i64) -> ProtocolTime {
@@ -394,7 +394,7 @@ fn missing_book_or_fills_suppresses_live_capable_families() {
     .unwrap();
     let ctx = context(4, false, false, 5, 100, false, false);
     for snapshot in [&missing_book, &missing_fills] {
-        assert!(suppress_missing_book_or_fills(snapshot).is_some());
+        assert!(suppress_proof_withhold(snapshot).is_some());
         for evaluation in [
             flow.evaluate(snapshot, &ctx).unwrap(),
             crowd.evaluate(snapshot, &ctx).unwrap(),
@@ -451,7 +451,7 @@ fn boolean_book_or_false_fills_cannot_emit_live_capable_families() {
     .unwrap();
     let ctx = context(4, false, false, 5, 100, false, false);
     for snapshot in [&boolean_book, &false_fills] {
-        assert!(suppress_missing_book_or_fills(snapshot).is_some());
+        assert!(suppress_proof_withhold(snapshot).is_some());
         for evaluation in [
             flow.evaluate(snapshot, &ctx).unwrap(),
             crowd.evaluate(snapshot, &ctx).unwrap(),
@@ -560,7 +560,7 @@ fn assert_inventory_family_withhold(snapshot: &MarketFeatureSnapshot, expected_r
     ))
     .unwrap();
     let ctx = context(4, false, false, 5, 100, false, false);
-    match suppress_missing_book_or_fills(snapshot) {
+    match suppress_proof_withhold(snapshot) {
         Some(SignalEvaluation::Suppressed { reasons, .. }) => {
             assert_eq!(reasons.as_slice(), [expected_reason]);
             assert!(!reasons
