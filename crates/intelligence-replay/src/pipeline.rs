@@ -5,8 +5,8 @@ use canonical_events::{
 };
 use canonical_ledger::{
     AccountFactRecordV1, AccountVaultRelationCurrentRecordV1, ApplyOutcome, CanonicalLedger,
-    CanonicalStateReducerV1, EventReducer, LedgerLimits, MarketCurrentRecordV1, MarketStatusV1,
-    StateImage, SubaccountMasterCurrentRecordV1, WatermarkOnlyReducerV1,
+    CanonicalStateReducerV1, EventReducer, LedgerError, LedgerLimits, MarketCurrentRecordV1,
+    MarketStatusV1, StateImage, SubaccountMasterCurrentRecordV1, WatermarkOnlyReducerV1,
 };
 use domain_types::{
     AccountId, Address, BlockHeight, EvidenceId, FeatureSetVersion, Horizon, KnownTime,
@@ -14,9 +14,9 @@ use domain_types::{
 };
 use entity_graph::{EntityGraph, GraphNodeId, LinkEvidence, LinkKind};
 use feature_core::{
-    require_asof, EvidenceKind, EvidenceRef, FeatureCalculator, FeatureContext, FeatureDelta,
-    FeatureKey, FeatureSnapshot, FeatureSubject, FeatureValue, HealthAssessment, HealthState,
-    MissingReason, PitSnapshotCalculator,
+    EvidenceKind, EvidenceRef, FeatureCalculator, FeatureContext, FeatureDelta, FeatureKey,
+    FeatureSnapshot, FeatureSubject, FeatureValue, HealthAssessment, HealthState, MissingReason,
+    PitSnapshotCalculator, require_asof,
 };
 use hl_protocol::node::v1::NodeRecordV1;
 use market_intelligence::{
@@ -207,14 +207,7 @@ fn replay_and_materialize<R: EventReducer>(
     let mut calculator = PitSnapshotCalculator::new();
     let mut block_times = BTreeMap::new();
     for block in blocks {
-        if !matches!(
-            block.confirmation_class(),
-            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent
-        ) {
-            return Err(IntelligenceReplayError::Ledger {
-                reason_code: "ledger.non_committed_block",
-            });
-        }
+        admit_committed_confirmation(block.confirmation_class())?;
         match ledger.apply_block(block)? {
             ApplyOutcome::Applied(_) => {}
             ApplyOutcome::AlreadyApplied(_) => {
@@ -621,6 +614,23 @@ pub fn refuse_leaked_withheld_emission(
             what: qualification_what_for_withhold(reason),
         }),
         (None, true) | (_, false) => Ok(()),
+    }
+}
+
+/// Admit only committed primary and independent lanes.
+///
+/// Provisional, reconciled, corrected, and expired blocks fail closed with the
+/// ledger `NonCommittedBlock` reason. This synthetic path does not claim
+/// reconciled-lane qualification.
+pub fn admit_committed_confirmation(
+    class: ConfirmationClass,
+) -> Result<(), IntelligenceReplayError> {
+    match class {
+        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => Ok(()),
+        ConfirmationClass::ProvisionalSource
+        | ConfirmationClass::ReconciledSnapshot
+        | ConfirmationClass::Corrected
+        | ConfirmationClass::Expired => Err(LedgerError::NonCommittedBlock.into()),
     }
 }
 

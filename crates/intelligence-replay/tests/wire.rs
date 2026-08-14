@@ -12,11 +12,11 @@ use domain_types::{
     QuoteAmount, ScenarioId, SignalId, SourceId, TransactionId, UsdAmount, VaultId,
 };
 use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
-use hl_protocol::node::v1::{parse_node_record, NodeStreamKind};
+use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
 use intelligence_replay::{
-    fold_withhold_reason, materialize_committed_node, materialize_synthetic_replay,
-    qualification_what_for_withhold, refuse_leaked_withheld_emission, IntelligenceReplayError,
-    IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
+    IntelligenceReplayError, IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
+    admit_committed_confirmation, fold_withhold_reason, materialize_committed_node,
+    materialize_synthetic_replay, qualification_what_for_withhold, refuse_leaked_withheld_emission,
 };
 use market_intelligence::{
     CrowdingPosition, FragilityScenario, MarketError, MarketFeatureSnapshot,
@@ -70,6 +70,24 @@ fn event(
     market_ids: Vec<MarketId>,
     account_ids: Vec<Address>,
 ) -> CanonicalEventEnvelope {
+    confirmed_event(
+        height,
+        index,
+        payload,
+        market_ids,
+        account_ids,
+        ConfirmationClass::CommittedPrimary,
+    )
+}
+
+fn confirmed_event(
+    height: u64,
+    index: u32,
+    payload: EventPayload,
+    market_ids: Vec<MarketId>,
+    account_ids: Vec<Address>,
+    confirmation: ConfirmationClass,
+) -> CanonicalEventEnvelope {
     let payload_hash = *blake3::hash(&payload.encode_to_vec().unwrap()).as_bytes();
     let block_time = time(height);
     CanonicalEventEnvelope::from_input(CanonicalEventInput {
@@ -83,15 +101,17 @@ fn event(
         canonical_event_index: 0,
         market_ids,
         account_ids,
-        source_evidence: vec![SourceEvidence::try_new_indexed(
-            SourceId::new("intelligence-replay-synthetic").unwrap(),
-            "v1",
-            height.to_string(),
-            payload_hash,
-            index,
-        )
-        .unwrap()],
-        confirmation_class: ConfirmationClass::CommittedPrimary,
+        source_evidence: vec![
+            SourceEvidence::try_new_indexed(
+                SourceId::new("intelligence-replay-synthetic").unwrap(),
+                "v1",
+                height.to_string(),
+                payload_hash,
+                index,
+            )
+            .unwrap(),
+        ],
+        confirmation_class: confirmation,
         observed_at: known(height),
         ingested_at: known(height),
         canonicalized_at: known(height),
@@ -223,6 +243,48 @@ fn account_relation_block() -> BlockEnvelope {
 
 fn synthetic_blocks() -> Vec<BlockEnvelope> {
     vec![market_prerequisite_block(), account_relation_block()]
+}
+
+fn empty_confirmed_block(confirmation: ConfirmationClass) -> BlockEnvelope {
+    BlockEnvelope::try_new(
+        chain(),
+        BlockHeight::new(START_HEIGHT),
+        time(START_HEIGHT),
+        confirmation,
+        Vec::new(),
+        BTreeMap::from([(
+            SourceId::new("intelligence-replay-synthetic").unwrap(),
+            [START_HEIGHT as u8; 32],
+        )]),
+    )
+    .unwrap()
+}
+
+fn deposit_confirmed_block(confirmation: ConfirmationClass) -> BlockEnvelope {
+    BlockEnvelope::try_new(
+        chain(),
+        BlockHeight::new(START_HEIGHT),
+        time(START_HEIGHT),
+        confirmation,
+        vec![confirmed_event(
+            START_HEIGHT,
+            0,
+            EventPayload::DepositCredited(DepositCredited {
+                account_id: BUYER,
+                asset_id: usdc(),
+                amount: Quantity::from_str("10").unwrap(),
+                deposit_reference: "deposit".to_owned(),
+            }),
+            vec![],
+            vec![BUYER],
+            confirmation,
+        )],
+        BTreeMap::from([(
+            SourceId::new("intelligence-replay-synthetic").unwrap(),
+            [START_HEIGHT as u8; 32],
+        )]),
+    )
+    .unwrap()
 }
 
 fn usdc() -> AssetId {
@@ -408,12 +470,16 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
     assert!(first.entity_graph.links_as_of(time(1), known(1)).is_empty());
     let links = first.entity_graph.links_as_of(time(2), known(2));
     assert_eq!(links.len(), 2);
-    assert!(links
-        .iter()
-        .any(|link| link.kind == entity_graph::LinkKind::ProtocolSubaccount));
-    assert!(links
-        .iter()
-        .any(|link| link.kind == entity_graph::LinkKind::ProtocolVaultMembership));
+    assert!(
+        links
+            .iter()
+            .any(|link| link.kind == entity_graph::LinkKind::ProtocolSubaccount)
+    );
+    assert!(
+        links
+            .iter()
+            .any(|link| link.kind == entity_graph::LinkKind::ProtocolVaultMembership)
+    );
     let groups = first
         .entity_graph
         .known_administrative_groups(time(2), known(2))
@@ -455,10 +521,12 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
 
 fn assert_accounts_unmerged(report: &IntelligenceReplayReport) {
     assert_synthetic_unassessed(report);
-    assert!(report
-        .entity_graph
-        .links_as_of(time(1), known(1))
-        .is_empty());
+    assert!(
+        report
+            .entity_graph
+            .links_as_of(time(1), known(1))
+            .is_empty()
+    );
     let groups = report
         .entity_graph
         .known_administrative_groups(time(2), known(2))
@@ -472,20 +540,24 @@ fn assert_accounts_unmerged(report: &IntelligenceReplayReport) {
 #[test]
 fn distinct_deposit_addresses_do_not_merge() {
     let report = materialize_synthetic_replay(&independent_deposit_blocks(), &request()).unwrap();
-    assert!(report
-        .entity_graph
-        .links_as_of(time(2), known(2))
-        .is_empty());
+    assert!(
+        report
+            .entity_graph
+            .links_as_of(time(2), known(2))
+            .is_empty()
+    );
     assert_accounts_unmerged(&report);
 }
 
 #[test]
 fn spot_transfer_without_protocol_subaccount_does_not_merge() {
     let report = materialize_synthetic_replay(&spot_transfer_blocks(), &request()).unwrap();
-    assert!(report
-        .entity_graph
-        .links_as_of(time(2), known(2))
-        .is_empty());
+    assert!(
+        report
+            .entity_graph
+            .links_as_of(time(2), known(2))
+            .is_empty()
+    );
     assert_accounts_unmerged(&report);
 }
 
@@ -495,9 +567,11 @@ fn shared_vault_depositors_do_not_merge() {
         materialize_synthetic_replay(&shared_vault_depositor_blocks(), &request()).unwrap();
     let links = report.entity_graph.links_as_of(time(2), known(2));
     assert_eq!(links.len(), 2);
-    assert!(links
-        .iter()
-        .all(|link| link.kind == entity_graph::LinkKind::ProtocolVaultMembership));
+    assert!(
+        links
+            .iter()
+            .all(|link| link.kind == entity_graph::LinkKind::ProtocolVaultMembership)
+    );
     assert_accounts_unmerged(&report);
 }
 
@@ -509,6 +583,82 @@ fn missing_reconstructed_state_fails_closed() {
     let empty = block(START_HEIGHT, Vec::new());
     let error = materialize_synthetic_replay(&[empty], &request()).unwrap_err();
     assert!(matches!(error, IntelligenceReplayError::MissingState));
+}
+
+#[test]
+fn admit_committed_confirmation_covers_every_class() {
+    for class in [
+        ConfirmationClass::ProvisionalSource,
+        ConfirmationClass::CommittedPrimary,
+        ConfirmationClass::CommittedIndependent,
+        ConfirmationClass::ReconciledSnapshot,
+        ConfirmationClass::Corrected,
+        ConfirmationClass::Expired,
+    ] {
+        let admitted = admit_committed_confirmation(class);
+        match class {
+            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => {
+                admitted.expect("committed lanes are admitted");
+            }
+            ConfirmationClass::ProvisionalSource
+            | ConfirmationClass::ReconciledSnapshot
+            | ConfirmationClass::Corrected
+            | ConfirmationClass::Expired => {
+                let error = admitted.expect_err("non-committed lanes fail closed");
+                assert_eq!(error.reason_code(), "ledger.non_committed_block");
+            }
+        }
+
+        let error =
+            materialize_synthetic_replay(&[empty_confirmed_block(class)], &request()).unwrap_err();
+        match class {
+            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => {
+                assert!(
+                    matches!(error, IntelligenceReplayError::MissingState),
+                    "{class:?} empty committed block must stay missing_state, not non_committed"
+                );
+            }
+            ConfirmationClass::ProvisionalSource
+            | ConfirmationClass::ReconciledSnapshot
+            | ConfirmationClass::Corrected
+            | ConfirmationClass::Expired => {
+                assert_eq!(
+                    error.reason_code(),
+                    "ledger.non_committed_block",
+                    "{class:?} must fail closed before missing intelligence"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn provisional_account_events_cannot_materialize_intelligence() {
+    let error = materialize_synthetic_replay(
+        &[deposit_confirmed_block(
+            ConfirmationClass::ProvisionalSource,
+        )],
+        &request(),
+    )
+    .unwrap_err();
+    assert_eq!(error.reason_code(), "ledger.non_committed_block");
+}
+
+#[test]
+fn reconciled_corrected_and_expired_account_events_fail_closed() {
+    for class in [
+        ConfirmationClass::ReconciledSnapshot,
+        ConfirmationClass::Corrected,
+        ConfirmationClass::Expired,
+    ] {
+        let error = materialize_synthetic_replay(&[deposit_confirmed_block(class)], &request())
+            .unwrap_err();
+        assert_eq!(
+            error.reason_code(),
+            "ledger.non_committed_block",
+            "{class:?} account events must not materialize intelligence"
+        );
+    }
 }
 
 #[test]
@@ -649,9 +799,11 @@ fn missing_book_or_fills_cannot_emit_crowding_fragility_or_live_signals() {
         ));
         match suppress_proof_withhold(snapshot) {
             Some(signal_core::SignalEvaluation::Suppressed { reasons, .. }) => {
-                assert!(reasons
-                    .iter()
-                    .any(|reason| reason == "missing_book_or_fills"));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|reason| reason == "missing_book_or_fills")
+                );
             }
             other => panic!("expected suppression, got {other:?}"),
         }
@@ -705,9 +857,11 @@ fn missing_inventory_cannot_emit_live_signals_with_decimal_book() {
                 reasons.as_slice(),
                 [ProofWithholdReason::MissingInventory.as_wire_name()]
             );
-            assert!(!reasons
-                .iter()
-                .any(|reason| reason == "missing_book_or_fills"));
+            assert!(
+                !reasons
+                    .iter()
+                    .any(|reason| reason == "missing_book_or_fills")
+            );
         }
         other => panic!("expected missing inventory suppression, got {other:?}"),
     }
@@ -767,12 +921,16 @@ fn boolean_inventory_cannot_emit_live_signals_with_decimal_book() {
                 reasons.as_slice(),
                 [ProofWithholdReason::MalformedInventory.as_wire_name()]
             );
-            assert!(!reasons
-                .iter()
-                .any(|reason| reason == "missing_book_or_fills"));
-            assert!(!reasons
-                .iter()
-                .any(|reason| reason == ProofWithholdReason::MissingInventory.as_wire_name()));
+            assert!(
+                !reasons
+                    .iter()
+                    .any(|reason| reason == "missing_book_or_fills")
+            );
+            assert!(
+                !reasons
+                    .iter()
+                    .any(|reason| reason == ProofWithholdReason::MissingInventory.as_wire_name())
+            );
         }
         other => panic!("expected malformed inventory suppression, got {other:?}"),
     }
