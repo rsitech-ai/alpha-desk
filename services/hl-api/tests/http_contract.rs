@@ -635,6 +635,78 @@ async fn unknown_auxiliary_source_qualification_is_snapshot_invalid() {
 }
 
 #[tokio::test]
+async fn present_non_array_auxiliary_sources_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "array of known object auxiliary sources must stay 200"
+    );
+    assert!(body["auxiliary_sources"].is_array());
+    assert!(body["auxiliary_sources"][0].is_object());
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value
+        .as_object_mut()
+        .expect("status object")
+        .remove("auxiliary_sources");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted auxiliary_sources"),
+    )
+    .expect("write omitted auxiliary_sources");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "omitted auxiliary_sources must stay valid");
+    assert!(body.get("auxiliary_sources").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    for field in [
+        serde_json::json!("not-an-array"),
+        serde_json::json!({"not": "an-array"}),
+        serde_json::json!(null),
+        serde_json::json!(true),
+    ] {
+        value["auxiliary_sources"] = field.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-array auxiliary_sources"),
+        )
+        .expect("write non-array auxiliary_sources");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{field} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
+#[tokio::test]
 async fn non_object_auxiliary_source_item_is_snapshot_invalid() {
     let directory = tempdir().expect("temporary directory");
     let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
