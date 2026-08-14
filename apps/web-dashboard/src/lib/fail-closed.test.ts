@@ -10,6 +10,7 @@ import {
   AUXILIARY_SOURCE_HEALTH,
   CAPTURE_HEALTH_NOT_READY_REASONS,
   CAPTURE_SOURCE_HEALTH,
+  CAPTURE_STATUS_FIELD_ORDER,
   COMMITTED_SOURCE_CLASS,
   CORE_DEADLETTER_REASONS,
   FAILOVER_REASONS,
@@ -22,7 +23,6 @@ import {
   parseCoreStatus,
   parseHealthAssessment,
   type ApiError,
-  type CaptureStatus,
   type HealthBody,
 } from "@/lib/contracts"
 import { deriveConnection } from "@/lib/derive-connection"
@@ -271,29 +271,52 @@ describe("classifyHttpBody", () => {
 })
 
 describe("parseCaptureStatus extras", () => {
-  it("keeps frozen v4 fields and records unknown extras without crashing", () => {
-    const parsed = parseCaptureStatus(
+  it("allowlists this web parse's known CaptureStatus fields, not OpenAPI Base", () => {
+    expect(CAPTURE_STATUS_FIELD_ORDER).toContain("failover_reason")
+    expect(CAPTURE_STATUS_FIELD_ORDER).toContain("throughput_records_per_sec")
+    expect(CAPTURE_STATUS_FIELD_ORDER).toContain("throughput_blocks_per_sec")
+    expect(CAPTURE_STATUS_FIELD_ORDER).not.toContain("maintenance")
+    expect(CAPTURE_STATUS_FIELD_ORDER).not.toContain("restart_reconstruction")
+  })
+
+  it("fail-closes present unknown top-level keys as invalid, not recorded extras", () => {
+    for (const extra of ["fills", "invented", "adapter"] as const) {
+      const parsed = parseCaptureStatus(v4Status({ [extra]: true }))
+      expect(parsed.ok).toBe(false)
+      if (parsed.ok) {
+        return
+      }
+      expect(parsed.detail).toBe(`unknown capture status field: ${extra}`)
+    }
+
+    const both = parseCaptureStatus(
       v4Status({
         later_unknown: "ignored-as-qualification",
         px: 1.5,
       })
     )
-    expect(parsed.ok).toBe(true)
-    if (!parsed.ok) {
+    expect(both.ok).toBe(false)
+    if (both.ok) {
       return
     }
-    const status: CaptureStatus = parsed.value
-    expect(status.health).toBe("red")
-    expect(status.ready).toBe(false)
-    expect(status.extra_fields.later_unknown).toBe("ignored-as-qualification")
-    expect(status.extra_fields.px).toBe(1.5)
+    expect(both.detail).toBe("unknown capture status fields: later_unknown, px")
   })
 
-  it("renders restart_reconstruction and v5 maintenance when present", () => {
-    const parsed = parseCaptureStatus(
+  it("fail-closes top-level restart_reconstruction and maintenance as extras", () => {
+    const restart = parseCaptureStatus(
+      v4Status({ restart_reconstruction: "incomplete" })
+    )
+    expect(restart.ok).toBe(false)
+    if (restart.ok) {
+      return
+    }
+    expect(restart.detail).toBe(
+      "unknown capture status field: restart_reconstruction"
+    )
+
+    const maintenance = parseCaptureStatus(
       v4Status({
         schema_version: "hl.capture.status.v5",
-        restart_reconstruction: "incomplete",
         maintenance: {
           enabled: true,
           kill_switch: false,
@@ -305,6 +328,41 @@ describe("parseCaptureStatus extras", () => {
           physical_data_object_count: 2,
           retention_authorized: false,
         },
+      })
+    )
+    expect(maintenance.ok).toBe(false)
+    if (maintenance.ok) {
+      return
+    }
+    expect(maintenance.detail).toBe("unknown capture status field: maintenance")
+  })
+
+  it("parses a known payload without extras, including v5 without maintenance", () => {
+    const v4 = parseCaptureStatus(v4Status())
+    expect(v4.ok).toBe(true)
+    if (!v4.ok) {
+      return
+    }
+    expect(v4.value.schema_version).toBe("hl.capture.status.v4")
+    expect(v4.value.health).toBe("red")
+    expect(v4.value.ready).toBe(false)
+    expect(v4.value.extra_fields).toEqual({})
+
+    const v5 = parseCaptureStatus(
+      v4Status({ schema_version: "hl.capture.status.v5" })
+    )
+    expect(v5.ok).toBe(true)
+    if (!v5.ok) {
+      return
+    }
+    expect(v5.value.schema_version).toBe("hl.capture.status.v5")
+    expect(v5.value.extra_fields).toEqual({})
+  })
+
+  it("still records nested auxiliary extras on a known payload without top-level extras", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        schema_version: "hl.capture.status.v5",
         auxiliary_sources: [
           {
             source_id: "node-line-a",
@@ -324,14 +382,7 @@ describe("parseCaptureStatus extras", () => {
       return
     }
     expect(parsed.value.schema_version).toBe("hl.capture.status.v5")
-    expect(parsed.value.extra_fields.restart_reconstruction).toBe("incomplete")
-    expect(parsed.value.extra_fields.maintenance).toEqual(
-      expect.objectContaining({
-        enabled: true,
-        health: "yellow",
-        retention_authorized: false,
-      })
-    )
+    expect(parsed.value.extra_fields).toEqual({})
     const aux = parsed.value.auxiliary_sources?.[0]
     expect(aux?.qualification).toBe("unqualified")
     expect(aux?.restart_reconstruction).toBe("complete")

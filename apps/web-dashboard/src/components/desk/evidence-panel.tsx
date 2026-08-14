@@ -166,8 +166,9 @@ function EvidenceDetail({
           <SheetHeader>
             <SheetTitle>hl.capture.status.v4</SheetTitle>
             <SheetDescription>
-              Validated fields in contract order. Extra keys are listed after
-              the frozen set. This is not production qualification.
+              Validated fields in contract order. Unknown top-level keys fail
+              parse. Nested auxiliary extras may still be listed. This is not
+              production qualification.
             </SheetDescription>
           </SheetHeader>
           <ScrollArea className="h-full px-4 pb-4">

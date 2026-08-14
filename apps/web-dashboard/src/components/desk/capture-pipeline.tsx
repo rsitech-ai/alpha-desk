@@ -22,7 +22,6 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ToneBadge } from "@/components/desk/chips"
-import { FieldTable } from "@/components/desk/field-table"
 import {
   captureHealthTone,
   readyTone,
@@ -31,14 +30,12 @@ import {
 } from "@/lib/tone"
 import type { EndpointOutcome } from "@/lib/api"
 import {
-  isRecord,
   CAPTURE_STATUS_SCHEMA_VERSION,
   type CaptureStatus,
 } from "@/lib/contracts"
 import { mapApiError } from "@/lib/fail-closed"
 import {
   formatDiskFree,
-  formatJsonValue,
   formatOmitted,
   formatUnixMicros,
 } from "@/lib/format"
@@ -283,7 +280,6 @@ function Pipeline({
         />
       </dl>
       <ExtraStatusFields
-        extras={status.extra_fields}
         throughputRecordsPerSec={status.throughput_records_per_sec}
         throughputBlocksPerSec={status.throughput_blocks_per_sec}
       />
@@ -292,92 +288,39 @@ function Pipeline({
 }
 
 function ExtraStatusFields({
-  extras,
   throughputRecordsPerSec,
   throughputBlocksPerSec,
 }: {
-  extras: Record<string, unknown>
   throughputRecordsPerSec: number | undefined
   throughputBlocksPerSec: number | undefined
 }) {
-  const keys = Object.keys(extras).sort()
   const hasThroughput =
     throughputRecordsPerSec !== undefined ||
     throughputBlocksPerSec !== undefined
-  if (keys.length === 0 && !hasThroughput) {
+  if (!hasThroughput) {
     return null
   }
-  const restart = extras.restart_reconstruction
-  const maintenance = extras.maintenance
-  const rest = keys.filter(
-    (key) => key !== "restart_reconstruction" && key !== "maintenance"
-  )
-  const maintenanceRecord = isRecord(maintenance) ? maintenance : undefined
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2">
       <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
-        extra snapshot fields
+        last-heartbeat throughput
       </p>
       <p className="text-xs text-muted-foreground">
-        Rendered when present. Unknown keys are listed and ignored. They are not
-        live-source qualification.
+        Windowed rates from the last completed status heartbeat. Unknown
+        top-level keys fail parse. Not live-qualified. Missing rates are
+        omitted, not invented.
       </p>
-      {hasThroughput ? (
-        <div className="flex flex-col gap-2">
-          <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
-            last-heartbeat throughput
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Windowed rates from the last completed status heartbeat. Not
-            live-qualified. Missing rates are omitted, not invented.
-          </p>
-          {throughputRecordsPerSec !== undefined ? (
-            <Pair
-              field="throughput_records_per_sec"
-              value={`${throughputRecordsPerSec} · last heartbeat`}
-            />
-          ) : null}
-          {throughputBlocksPerSec !== undefined ? (
-            <Pair
-              field="throughput_blocks_per_sec"
-              value={`${throughputBlocksPerSec} · last heartbeat`}
-            />
-          ) : null}
-        </div>
+      {throughputRecordsPerSec !== undefined ? (
+        <Pair
+          field="throughput_records_per_sec"
+          value={`${throughputRecordsPerSec} · last heartbeat`}
+        />
       ) : null}
-      {restart !== undefined ? (
-        <Pair field="restart_reconstruction" value={formatJsonValue(restart)} />
-      ) : null}
-      {maintenance !== undefined ? (
-        <div className="flex flex-col gap-2">
-          <p className="font-mono text-[11px] tracking-wide text-muted-foreground uppercase">
-            maintenance
-          </p>
-          {maintenanceRecord ? (
-            <FieldTable
-              caption="maintenance"
-              rows={Object.keys(maintenanceRecord)
-                .sort()
-                .map((field) => ({
-                  field,
-                  value: maintenanceRecord[field],
-                  omitted: false,
-                }))}
-            />
-          ) : (
-            <p className="font-mono text-xs">{formatJsonValue(maintenance)}</p>
-          )}
-        </div>
-      ) : null}
-      {rest.length > 0 ? (
-        <FieldTable
-          caption="unrecognized capture fields"
-          rows={rest.map((field) => ({
-            field,
-            value: extras[field],
-            omitted: false,
-          }))}
+      {throughputBlocksPerSec !== undefined ? (
+        <Pair
+          field="throughput_blocks_per_sec"
+          value={`${throughputBlocksPerSec} · last heartbeat`}
         />
       ) : null}
     </div>
