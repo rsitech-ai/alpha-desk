@@ -87,6 +87,26 @@ pub fn readyz_503_schema_ref(document: &str) -> Option<&str> {
     path_response_schema_ref(document, "/readyz", "503")
 }
 
+/// Named `components.responses` `$ref` for `/v1/health` 503.
+///
+/// Must stay `Unavailable`. Shared `Unavailable` remaining `ApiError` does
+/// not pin this path: inlining `HealthAssessment` here while the handler
+/// still writes `hl.api.error.v1` would otherwise pass.
+#[must_use]
+pub fn health_503_response_ref(document: &str) -> Option<&str> {
+    path_response_named_ref(document, "/v1/health", "503")
+}
+
+/// Inline schema `$ref` for `/v1/health` 503.
+///
+/// Frozen shape is a named `Unavailable` `$ref`, so this is `None`. Inlining
+/// `HealthAssessment` while the handler still returns `hl.api.error.v1`
+/// fails the freeze.
+#[must_use]
+pub fn health_503_schema_ref(document: &str) -> Option<&str> {
+    path_response_schema_ref(document, "/v1/health", "503")
+}
+
 /// Schema `$ref` for the shared `Unavailable` response (`/v1/health` 503).
 ///
 /// Must stay `ApiError`. Retargeting this named response at health would
@@ -112,8 +132,16 @@ pub fn unavailable_response_schema_ref(document: &str) -> Option<&str> {
 /// Used so "present and valid" cannot be restored as GREEN-ready prose.
 #[must_use]
 pub fn readyz_200_description(document: &str) -> Option<String> {
-    yaml_mapping(document, &["paths", "/readyz", "get", "responses", "200"])?
-        .scalar_or_folded("description")
+    path_response_description(document, "/readyz", "200")
+}
+
+/// Folded or inline `/readyz` 503 description.
+///
+/// Used so 503 cannot be documented as `ApiError` while the body stays
+/// `hl.health.v1`.
+#[must_use]
+pub fn readyz_503_description(document: &str) -> Option<String> {
+    path_response_description(document, "/readyz", "503")
 }
 
 fn path_response_schema_ref<'a>(document: &'a str, path: &str, status: &str) -> Option<&'a str> {
@@ -131,6 +159,15 @@ fn path_response_schema_ref<'a>(document: &'a str, path: &str, status: &str) -> 
         ],
     )?
     .scalar("$ref")
+}
+
+fn path_response_named_ref<'a>(document: &'a str, path: &str, status: &str) -> Option<&'a str> {
+    yaml_mapping(document, &["paths", path, "get", "responses", status])?.scalar("$ref")
+}
+
+fn path_response_description(document: &str, path: &str, status: &str) -> Option<String> {
+    yaml_mapping(document, &["paths", path, "get", "responses", status])?
+        .scalar_or_folded("description")
 }
 
 struct YamlMapping<'a> {
@@ -344,9 +381,10 @@ fn unquote(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        CORE_DEADLETTER_REASON_CODES, core_deadletter_reason_openapi_enum,
-        health_reason_code_is_unrestricted_string, openapi_yaml, readyz_200_description,
-        readyz_503_schema_ref, unavailable_response_schema_ref,
+        CORE_DEADLETTER_REASON_CODES, core_deadletter_reason_openapi_enum, health_503_response_ref,
+        health_503_schema_ref, health_reason_code_is_unrestricted_string, openapi_yaml,
+        readyz_200_description, readyz_503_description, readyz_503_schema_ref,
+        unavailable_response_schema_ref,
     };
 
     #[test]
@@ -414,6 +452,20 @@ components:
             "/readyz 503 must document hl.health.v1, not ApiError"
         );
         assert_eq!(
+            health_503_response_ref(document),
+            Some("#/components/responses/Unavailable"),
+            "/v1/health 503 must $ref named Unavailable, not inline HealthAssessment"
+        );
+        assert!(
+            health_503_schema_ref(document).is_none(),
+            "/v1/health 503 must stay a named Unavailable $ref, not an inline schema"
+        );
+        assert_ne!(
+            health_503_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "/v1/health 503 must not switch to HealthAssessment while the handler returns hl.api.error.v1"
+        );
+        assert_eq!(
             unavailable_response_schema_ref(document),
             Some("#/components/schemas/ApiError"),
             "shared Unavailable must stay ApiError for /v1/health 503"
@@ -426,6 +478,15 @@ components:
         assert!(
             description.contains("GREEN-only"),
             "/readyz 200 must name GREEN-only readiness, got {description}"
+        );
+        let readyz_503 = readyz_503_description(document).expect("/readyz 503 description");
+        assert!(
+            readyz_503.contains("Not ApiError"),
+            "/readyz 503 prose must keep health-not-ApiError meaning, got {readyz_503}"
+        );
+        assert!(
+            readyz_503.contains("HealthAssessment") || readyz_503.contains("hl.health.v1"),
+            "/readyz 503 prose must name the health body, got {readyz_503}"
         );
     }
 
@@ -477,6 +538,78 @@ paths:
             readyz_503_schema_ref(document),
             Some("#/components/schemas/HealthAssessment"),
             "inlining ApiError on /readyz 503 must fail the health freeze"
+        );
+    }
+
+    #[test]
+    fn inlined_health_503_health_assessment_fails_unavailable_path_freeze() {
+        let document = r##"
+paths:
+  /v1/health:
+    get:
+      responses:
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+components:
+  responses:
+    Unavailable:
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+"##;
+        assert_eq!(
+            unavailable_response_schema_ref(document),
+            Some("#/components/schemas/ApiError"),
+            "shared Unavailable staying ApiError must not hide a /v1/health 503 path switch"
+        );
+        assert!(
+            health_503_response_ref(document).is_none(),
+            "inlined HealthAssessment must not satisfy the named Unavailable path freeze"
+        );
+        assert_ne!(
+            health_503_response_ref(document),
+            Some("#/components/responses/Unavailable"),
+            "inlining HealthAssessment on /v1/health 503 must fail the Unavailable path freeze"
+        );
+        assert_eq!(
+            health_503_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "inlining HealthAssessment on /v1/health 503 must fail while the handler returns hl.api.error.v1"
+        );
+    }
+
+    #[test]
+    fn readyz_503_api_error_prose_fails_health_not_api_error_freeze() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      responses:
+        "503":
+          description: >
+            Aggregate is not GREEN. Body is ApiError.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+"##;
+        assert_eq!(
+            readyz_503_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "schema freeze must not hide a /readyz 503 prose regression"
+        );
+        let description = readyz_503_description(document).expect("/readyz 503 description");
+        assert!(
+            !description.contains("Not ApiError"),
+            "ApiError-as-body prose must fail the health-not-ApiError freeze, got {description}"
+        );
+        assert!(
+            !description.contains("HealthAssessment") && !description.contains("hl.health.v1"),
+            "ApiError-as-body prose must not count as naming the health body, got {description}"
         );
     }
 }
