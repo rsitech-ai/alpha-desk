@@ -16,6 +16,7 @@ use hl_api::{
     auxiliary_source_last_durable_wall_micros_is_optional_i64,
     auxiliary_source_local_sequence_is_optional_u64,
     auxiliary_source_partial_line_is_required_bool, auxiliary_source_qualification_openapi_enum,
+    auxiliary_source_quarantine_reason_is_optional_string,
     auxiliary_source_spool_records_is_required_u64,
     auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64,
@@ -1725,6 +1726,109 @@ async fn nested_auxiliary_last_durable_wall_micros_is_optional_i64() {
     }
 }
 
+#[tokio::test]
+async fn nested_auxiliary_quarantine_reason_is_optional_string() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted nested quarantine_reason must stay 200"
+    );
+    assert!(
+        body["auxiliary_sources"][0]
+            .get("quarantine_reason")
+            .is_none()
+    );
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value["auxiliary_sources"][0]["quarantine_reason"] = serde_json::json!("source.schema_drift");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode known string quarantine_reason"),
+    )
+    .expect("write known string quarantine_reason");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known string quarantine_reason must stay 200");
+    assert_eq!(
+        body["auxiliary_sources"][0]["quarantine_reason"],
+        "source.schema_drift"
+    );
+
+    value["auxiliary_sources"][0]
+        .as_object_mut()
+        .expect("auxiliary source object")
+        .remove("quarantine_reason");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted quarantine_reason"),
+    )
+    .expect("write omitted quarantine_reason");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted nested quarantine_reason after removal must stay 200"
+    );
+    assert!(
+        body["auxiliary_sources"][0]
+            .get("quarantine_reason")
+            .is_none()
+    );
+
+    for quarantine_reason in [
+        serde_json::json!(1),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-string"}),
+        serde_json::json!(["not-a-string"]),
+        serde_json::json!(""),
+    ] {
+        value["auxiliary_sources"][0]["quarantine_reason"] = quarantine_reason.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-string quarantine_reason"),
+        )
+        .expect("write non-string quarantine_reason");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{quarantine_reason} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -2413,6 +2517,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         auxiliary_source_last_durable_wall_micros_is_optional_i64(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_durable_wall_micros as an optional i64 integer"
     );
+    assert!(
+        auxiliary_source_quarantine_reason_is_optional_string(document),
+        "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.quarantine_reason as an optional string"
+    );
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -2599,6 +2707,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         auxiliary_source_last_durable_wall_micros_is_optional_i64(document),
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_durable_wall_micros as an optional i64 integer"
+    );
+    assert!(
+        auxiliary_source_quarantine_reason_is_optional_string(document),
+        "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.quarantine_reason as an optional string"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),

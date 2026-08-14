@@ -372,6 +372,9 @@ fn require_auxiliary_source_closed_fields(
         if source.contains_key("last_durable_wall_micros") {
             require_i64(source, "last_durable_wall_micros")?;
         }
+        if source.contains_key("quarantine_reason") {
+            require_string(source, "quarantine_reason", None)?;
+        }
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -438,6 +441,7 @@ mod tests {
         auxiliary_source_local_sequence_is_optional_u64,
         auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
+        auxiliary_source_quarantine_reason_is_optional_string,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
@@ -1161,6 +1165,23 @@ mod tests {
         assert!(
             auxiliary_source_last_durable_wall_micros_is_optional_i64(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_durable_wall_micros as an optional i64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_auxiliary_quarantine_reason_optional_string() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_quarantine_reason_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.quarantine_reason as an optional string"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
@@ -1943,6 +1964,79 @@ mod tests {
                     .expect_err("present non-i64 last_durable_wall_micros must not fail open"),
                 SnapshotError::Invalid,
                 "{last_durable_wall_micros} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_auxiliary_quarantine_reason_string_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"][0]["quarantine_reason"] =
+            serde_json::json!("source.schema_drift");
+        let bytes = serde_json::to_vec(&value).expect("encode known quarantine_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("known string quarantine_reason");
+        assert_eq!(
+            parsed["auxiliary_sources"][0]["quarantine_reason"],
+            "source.schema_drift"
+        );
+    }
+
+    #[test]
+    fn omitted_auxiliary_quarantine_reason_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        assert!(
+            value["auxiliary_sources"][0]
+                .get("quarantine_reason")
+                .is_none(),
+            "v5 fixture must omit optional quarantine_reason"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted quarantine_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted quarantine_reason");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("quarantine_reason")
+                .is_none()
+        );
+
+        value["auxiliary_sources"][0]["quarantine_reason"] =
+            serde_json::json!("source.schema_drift");
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("quarantine_reason");
+        let bytes = serde_json::to_vec(&value).expect("encode removed quarantine_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed quarantine_reason");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("quarantine_reason")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn present_non_string_auxiliary_quarantine_reason_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for quarantine_reason in [
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-string"}),
+            serde_json::json!(["not-a-string"]),
+            serde_json::json!(""),
+        ] {
+            value["auxiliary_sources"][0]["quarantine_reason"] = quarantine_reason.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-string or empty quarantine_reason must not fail open"),
+                SnapshotError::Invalid,
+                "{quarantine_reason} must be snapshot_invalid"
             );
         }
     }
