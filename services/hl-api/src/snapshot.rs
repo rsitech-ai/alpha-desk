@@ -354,6 +354,9 @@ fn require_auxiliary_source_closed_fields(
         require_u64(source, "spool_records")?;
         require_u64(source, "unarchived_records")?;
         require_bool(source, "partial_line")?;
+        if source.contains_key("cursor_epoch") {
+            require_string(source, "cursor_epoch", None)?;
+        }
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -403,8 +406,9 @@ mod tests {
         parse_canonical_health_bytes, parse_capture_status_bytes,
     };
     use crate::openapi::{
-        LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_health_openapi_enum,
-        auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
+        LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_cursor_epoch_is_optional_string,
+        auxiliary_source_health_openapi_enum, auxiliary_source_id_is_required_string,
+        auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
@@ -1037,6 +1041,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_types_auxiliary_cursor_epoch_optional_string() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_cursor_epoch_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.cursor_epoch as an optional string"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1386,6 +1407,67 @@ mod tests {
                 .expect_err("omitted nested partial_line must not fail open"),
             SnapshotError::Invalid
         );
+    }
+
+    #[test]
+    fn known_auxiliary_cursor_epoch_string_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"][0]["cursor_epoch"] = serde_json::json!("node-file-v1:epoch");
+        let bytes = serde_json::to_vec(&value).expect("encode known cursor_epoch");
+        let parsed = parse_capture_status_bytes(&bytes).expect("known string cursor_epoch");
+        assert_eq!(
+            parsed["auxiliary_sources"][0]["cursor_epoch"],
+            "node-file-v1:epoch"
+        );
+    }
+
+    #[test]
+    fn omitted_auxiliary_cursor_epoch_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        assert!(
+            value["auxiliary_sources"][0].get("cursor_epoch").is_none(),
+            "v5 fixture must omit optional cursor_epoch"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted cursor_epoch");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted cursor_epoch");
+        assert!(parsed["auxiliary_sources"][0].get("cursor_epoch").is_none());
+
+        value["auxiliary_sources"][0]["cursor_epoch"] = serde_json::json!("node-file-v1:epoch");
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("cursor_epoch");
+        let bytes = serde_json::to_vec(&value).expect("encode removed cursor_epoch");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed cursor_epoch");
+        assert!(parsed["auxiliary_sources"][0].get("cursor_epoch").is_none());
+    }
+
+    #[test]
+    fn present_non_string_auxiliary_cursor_epoch_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for cursor_epoch in [
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-string"}),
+            serde_json::json!(["not-a-string"]),
+            serde_json::json!(""),
+        ] {
+            value["auxiliary_sources"][0]["cursor_epoch"] = cursor_epoch.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-string or empty cursor_epoch must not fail open"),
+                SnapshotError::Invalid,
+                "{cursor_epoch} must be snapshot_invalid"
+            );
+        }
     }
 
     #[test]
