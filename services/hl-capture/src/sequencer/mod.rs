@@ -17,8 +17,8 @@ use hl_protocol::{PublicationLane, SourceAdmission, SourceTrust};
 use divergence::{
     canonical_block_divergence, event_source_evidence_divergence, source_block_hash_divergence,
 };
-pub use gap::GapRange;
 use gap::gap_incident_id;
+pub use gap::GapRange;
 use watermark::Watermark;
 
 use crate::QuarantineRecord;
@@ -250,6 +250,8 @@ pub enum SequencerError {
         event_id: Option<EventId>,
         reason: &'static str,
     },
+    #[error(transparent)]
+    Candidate(CandidateError),
 }
 
 impl SequencerError {
@@ -261,6 +263,7 @@ impl SequencerError {
             Self::PendingCapacityExceeded { .. } => "sequencer.pending_capacity_exceeded",
             Self::InvalidMergedBlock(_) => "sequencer.invalid_merged_block",
             Self::InvalidMergedEvidence { .. } => "sequencer.invalid_merged_evidence",
+            Self::Candidate(error) => error.reason_code(),
         }
     }
 }
@@ -317,9 +320,9 @@ impl CanonicalSequencer {
             PublicationLane::Provisional => self.observe_provisional(candidate),
             PublicationLane::Reconciliation
             | PublicationLane::Recovery
-            | PublicationLane::Mempool => {
-                unreachable!("BlockCandidate rejects unsupported publication lanes")
-            }
+            | PublicationLane::Mempool => Err(SequencerError::Candidate(
+                CandidateError::UnsupportedPublicationLane,
+            )),
         }
     }
 
@@ -627,4 +630,150 @@ fn source_hash_conflict(
                 candidate_hash,
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canonical_events::{
+        CanonicalEventEnvelope, CanonicalEventInput, EventPayload, SourceEvidence, TradeMatched,
+    };
+    use domain_types::{KnownTime, Price, ProtocolTime, Quantity, TransactionId};
+    use hl_protocol::ObservationClass;
+
+    fn known(micros: i64) -> KnownTime {
+        KnownTime::from_unix_micros(micros).expect("known test time")
+    }
+
+    fn fixture_block(confirmation: ConfirmationClass) -> (SourceId, BlockEnvelope) {
+        let source_id = SourceId::new("primary").expect("source ID");
+        let event = CanonicalEventEnvelope::from_input(CanonicalEventInput {
+            schema_version: "1.0.0".to_owned(),
+            chain_id: ChainId::new("mainnet").expect("chain"),
+            block_height: BlockHeight::new(100),
+            block_time: ProtocolTime::from_unix_micros(100_000).expect("block time"),
+            transaction_id: TransactionId::new("tx-100").expect("transaction"),
+            transaction_index: 0,
+            canonical_event_index: 0,
+            market_ids: Vec::new(),
+            account_ids: Vec::new(),
+            source_evidence: vec![SourceEvidence::try_new(
+                source_id.clone(),
+                "node-v1",
+                "block:100",
+                [1; 32],
+            )
+            .expect("source evidence")],
+            confirmation_class: confirmation,
+            observed_at: known(2_000),
+            ingested_at: known(3_000),
+            canonicalized_at: known(4_000),
+            parser_version: "canonical-parser-v1".to_owned(),
+            payload: EventPayload::TradeMatched(TradeMatched::without_identities(
+                Price::parse_at_scale("65000", 6).expect("price"),
+                Quantity::parse_at_scale("0.01", 8).expect("quantity"),
+                1,
+            )),
+        })
+        .expect("canonical event");
+        let block = BlockEnvelope::try_new(
+            ChainId::new("mainnet").expect("chain"),
+            BlockHeight::new(100),
+            ProtocolTime::from_unix_micros(100_000).expect("block time"),
+            confirmation,
+            vec![event],
+            BTreeMap::from([(source_id.clone(), [0x55; 32])]),
+        )
+        .expect("canonical block");
+        (source_id, block)
+    }
+
+    fn sequencer() -> CanonicalSequencer {
+        CanonicalSequencer::new(
+            SequencerConfig::try_new(
+                ChainId::new("mainnet").expect("chain"),
+                BlockHeight::new(100),
+                8,
+                8,
+            )
+            .expect("sequencer config"),
+        )
+    }
+
+    fn confirmation_for(trust: SourceTrust) -> ConfirmationClass {
+        match trust {
+            SourceTrust::LocallyVerifiedCommitted => ConfirmationClass::CommittedPrimary,
+            SourceTrust::IndependentCommitted => ConfirmationClass::CommittedIndependent,
+            SourceTrust::ThirdPartyProvisional => ConfirmationClass::ProvisionalSource,
+            SourceTrust::ReconciledSnapshot
+            | SourceTrust::RecoveryOnly
+            | SourceTrust::MempoolProvisional => ConfirmationClass::CommittedPrimary,
+        }
+    }
+
+    fn assert_observe_rejects_unsupported_lane(
+        admission: SourceAdmission,
+        confirmation: ConfirmationClass,
+    ) {
+        let (source_id, block) = fixture_block(confirmation);
+        let candidate = BlockCandidate {
+            source_id,
+            admission,
+            block,
+        };
+        let error = sequencer()
+            .observe(candidate)
+            .expect_err("unsupported lanes fail closed at observe");
+        assert_eq!(
+            error,
+            SequencerError::Candidate(CandidateError::UnsupportedPublicationLane)
+        );
+        assert_eq!(
+            error.reason_code(),
+            "sequencer.unsupported_publication_lane"
+        );
+    }
+
+    #[test]
+    fn observe_returns_existing_unsupported_lane_error_when_try_new_is_bypassed() {
+        let mut saw_reconciliation = false;
+        let mut saw_recovery = false;
+        let mut saw_mempool = false;
+
+        for trust in SourceTrust::ALL {
+            for class in ObservationClass::ALL {
+                let Ok(admission) = SourceAdmission::new(trust, class) else {
+                    continue;
+                };
+                let confirmation = confirmation_for(trust);
+                match admission.publication_lane() {
+                    PublicationLane::CommittedCandidate | PublicationLane::Provisional => {
+                        let (source_id, block) = fixture_block(confirmation);
+                        let candidate = BlockCandidate::try_new(source_id, admission, block)
+                            .expect("admitted sequencer lanes still construct");
+                        sequencer()
+                            .observe(candidate)
+                            .expect("admitted lanes keep the observe success contract");
+                    }
+                    PublicationLane::Reconciliation => {
+                        saw_reconciliation = true;
+                        assert_observe_rejects_unsupported_lane(admission, confirmation);
+                    }
+                    PublicationLane::Recovery => {
+                        saw_recovery = true;
+                        assert_observe_rejects_unsupported_lane(admission, confirmation);
+                    }
+                    PublicationLane::Mempool => {
+                        saw_mempool = true;
+                        assert_observe_rejects_unsupported_lane(admission, confirmation);
+                    }
+                }
+            }
+        }
+
+        assert!(
+            saw_reconciliation && saw_recovery && saw_mempool,
+            "fixture must still construct reconciliation, recovery, and mempool admissions"
+        );
+    }
 }
