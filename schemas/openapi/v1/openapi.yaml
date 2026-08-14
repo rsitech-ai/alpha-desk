@@ -286,8 +286,9 @@ components:
         hl.capture.status.v4 and omit maintenance. Maintenance documents use
         hl.capture.status.v5 and require CaptureMaintenance. Extra snapshot
         fields such as auxiliary_sources are passed through when present.
-        Nested restart_reconstruction, when present, uses a closed kebab-case
-        set; unknown values are snapshot_invalid. Omitted stays omitted.
+        Nested health and restart_reconstruction, when present, use closed
+        kebab-case sets; unknown values are snapshot_invalid. Omitted stays
+        omitted.
         Optional throughput_records_per_sec and throughput_blocks_per_sec are
         last-heartbeat integers, not live-qualified. This is not a fills feed
         and does not mark sources live or qualified.
@@ -359,9 +360,9 @@ components:
             - range-unavailable
         auxiliary_sources:
           description: >
-            Extra snapshot sources passed through when present. Nested
-            restart_reconstruction is optional; present values use a closed
-            kebab-case set. Unknown values are snapshot_invalid. Omitted
+            Extra snapshot sources passed through when present. Nested health
+            and restart_reconstruction are optional; present values use closed
+            kebab-case sets. Unknown values are snapshot_invalid. Omitted
             stays omitted. HealthAssessment.reason_code stays a free string
             so unknown RED is not closed out. This document does not claim
             Stage PASS.
@@ -369,6 +370,20 @@ components:
           items:
             type: object
             properties:
+              health:
+                description: >
+                  Optional capture writer kebab-case auxiliary source health.
+                  Present values are starting, healthy, quarantined, or
+                  latched. Unknown values are snapshot_invalid. Omitted
+                  stays omitted. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS. This is not committed source health.
+                type: string
+                enum:
+                  - starting
+                  - healthy
+                  - quarantined
+                  - latched
               restart_reconstruction:
                 description: >
                   Optional capture writer kebab-case auxiliary restart

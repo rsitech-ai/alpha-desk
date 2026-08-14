@@ -5,18 +5,18 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hl_api::{
-    ApiConfig, AppState, AuthMode, CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_IDS,
-    COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS,
-    LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+    AUXILIARY_SOURCE_HEALTH, ApiConfig, AppState, AuthMode, CAPTURE_SOURCE_HEALTH,
+    CAPTURE_STATUS_SCHEMA_IDS, COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
+    HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
     READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
-    ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES, capture_source_health_openapi_enum,
-    committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-    independent_source_health_openapi_enum, is_core_deadletter_reason,
-    is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
-    readyz_200_description, readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
-    readyz_get_description, restart_reconstruction_openapi_enum, spawn_local,
-    unavailable_response_schema_ref,
+    ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES, auxiliary_source_health_openapi_enum,
+    capture_source_health_openapi_enum, committed_source_class_openapi_enum,
+    core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+    health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+    readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref, readyz_get_description,
+    restart_reconstruction_openapi_enum, spawn_local, unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -235,6 +235,7 @@ async fn capture_status_serves_v5_maintenance_and_rejects_v4_smuggled_maintenanc
         body["auxiliary_sources"][0]["restart_reconstruction"],
         "complete"
     );
+    assert_eq!(body["auxiliary_sources"][0]["health"], "starting");
     assert_eq!(body["auxiliary_sources"][0]["qualification"], "unqualified");
     assert!(body.get("fills").is_none());
 
@@ -388,6 +389,77 @@ async fn unknown_independent_source_health_is_snapshot_invalid() {
         serde_json::to_vec(&value).expect("encode unknown independent health"),
     )
     .expect("write unknown independent health");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+#[tokio::test]
+async fn unknown_auxiliary_source_health_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    for health in AUXILIARY_SOURCE_HEALTH {
+        value["auxiliary_sources"][0]["health"] = serde_json::json!(health);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known auxiliary health"),
+        )
+        .expect("write known auxiliary health");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{health} must remain a typed capture status");
+        assert_eq!(body["auxiliary_sources"][0]["health"], *health);
+        assert_eq!(body["schema_version"], "hl.capture.status.v5");
+    }
+
+    value["auxiliary_sources"][0]
+        .as_object_mut()
+        .expect("auxiliary source object")
+        .remove("health");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted auxiliary health"),
+    )
+    .expect("write omitted auxiliary health");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted auxiliary source health must stay valid"
+    );
+    assert!(body["auxiliary_sources"][0].get("health").is_none());
+
+    value["auxiliary_sources"][0]["health"] = serde_json::json!("range-unavailable");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode unknown auxiliary health"),
+    )
+    .expect("write unknown auxiliary health");
     let state = state_from(
         directory.path(),
         "loopback-dev",
@@ -1105,6 +1177,20 @@ fn openapi_document_covers_router_paths_and_health_fields() {
             "OpenAPI must list {reconstruction}"
         );
     }
+    let auxiliary_health_enum = auxiliary_source_health_openapi_enum(document)
+        .expect("OpenAPI must define CaptureStatusBase.auxiliary_sources.items.health.enum");
+    assert_eq!(
+        auxiliary_health_enum, AUXILIARY_SOURCE_HEALTH,
+        "YAML enum must match the frozen const; prose mentions do not count"
+    );
+    assert_ne!(
+        auxiliary_health_enum.as_slice(),
+        CAPTURE_SOURCE_HEALTH,
+        "auxiliary health must not reuse the committed source health set"
+    );
+    for health in AUXILIARY_SOURCE_HEALTH {
+        assert!(document.contains(health), "OpenAPI must list {health}");
+    }
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -1233,6 +1319,17 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert_eq!(
         reconstruction_enum, RESTART_RECONSTRUCTION,
         "served YAML enum must match the frozen const; prose mentions do not count"
+    );
+    let auxiliary_health_enum = auxiliary_source_health_openapi_enum(document)
+        .expect("served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.health.enum");
+    assert_eq!(
+        auxiliary_health_enum, AUXILIARY_SOURCE_HEALTH,
+        "served YAML enum must match the frozen const; prose mentions do not count"
+    );
+    assert_ne!(
+        auxiliary_health_enum.as_slice(),
+        CAPTURE_SOURCE_HEALTH,
+        "served auxiliary health must not reuse the committed source health set"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),
