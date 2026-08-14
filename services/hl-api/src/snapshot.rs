@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -74,10 +73,11 @@ pub const AUXILIARY_SOURCE_QUALIFICATION: &[&str] = &["unqualified", "qualified"
 
 /// Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
 /// are `snapshot_invalid`. Omitted and empty arrays stay valid. Duplicate
-/// present `source_id` is `snapshot_invalid`. Distinct ids stay valid. Sort
-/// order stays untyped. This crate does not vendor hl-capture and this is
-/// not a live capture or Stage PASS. `HealthAssessment.reason_code` stays a
-/// free string so unknown RED is not closed out.
+/// present `source_id` is `snapshot_invalid`. Distinct ids stay valid when
+/// strictly increasing (`previous >= source_id` is `snapshot_invalid`).
+/// This crate does not vendor hl-capture and this is not a live capture or
+/// Stage PASS. `HealthAssessment.reason_code` stays a free string so unknown
+/// RED is not closed out.
 pub const MAX_AUXILIARY_SOURCES: usize = 16;
 
 const MAINTENANCE_FIELDS: &[&str] = &[
@@ -358,7 +358,7 @@ fn require_auxiliary_source_closed_fields(
     if sources.len() > MAX_AUXILIARY_SOURCES {
         return Err(SnapshotError::Invalid);
     }
-    let mut seen_source_ids = HashSet::with_capacity(sources.len());
+    let mut previous: Option<&str> = None;
     for source in sources {
         let Value::Object(source) = source else {
             return Err(SnapshotError::Invalid);
@@ -367,9 +367,10 @@ fn require_auxiliary_source_closed_fields(
         let Some(Value::String(source_id)) = source.get("source_id") else {
             return Err(SnapshotError::Invalid);
         };
-        if !seen_source_ids.insert(source_id.as_str()) {
+        if previous.is_some_and(|value| value >= source_id.as_str()) {
             return Err(SnapshotError::Invalid);
         }
+        previous = Some(source_id.as_str());
         require_u64(source, "spool_records")?;
         require_u64(source, "unarchived_records")?;
         require_bool(source, "partial_line")?;
@@ -770,7 +771,7 @@ mod tests {
         (0..count)
             .map(|index| {
                 let mut item = known.clone();
-                item["source_id"] = serde_json::json!(format!("aux-source-{index}"));
+                item["source_id"] = serde_json::json!(format!("aux-source-{index:02}"));
                 item
             })
             .collect()
@@ -1259,6 +1260,14 @@ mod tests {
             "OpenAPI must describe source_id uniqueness without uniqueItems"
         );
         assert!(
+            document.contains("strictly increasing"),
+            "OpenAPI must describe source_id sort order without uniqueItems"
+        );
+        assert!(
+            !document.contains("Sort order stays untyped"),
+            "OpenAPI must not leave source_id sort order untyped"
+        );
+        assert!(
             health_reason_code_is_unrestricted_string(document),
             "reason_code must stay a free string so unknown RED codes fail closed"
         );
@@ -1503,14 +1512,31 @@ mod tests {
         let known = value["auxiliary_sources"][0].clone();
         let mut other = known.clone();
         other["source_id"] = serde_json::json!("node-fills");
-        value["auxiliary_sources"] = serde_json::json!([known, other]);
-        let bytes = serde_json::to_vec(&value).expect("encode distinct source_id");
-        let parsed = parse_capture_status_bytes(&bytes).expect("distinct source_id");
+        value["auxiliary_sources"] = serde_json::json!([other, known]);
+        let bytes = serde_json::to_vec(&value).expect("encode sorted distinct source_id");
+        let parsed = parse_capture_status_bytes(&bytes).expect("sorted distinct source_id");
+        assert_eq!(parsed["auxiliary_sources"][0]["source_id"], "node-fills");
         assert_eq!(
-            parsed["auxiliary_sources"][0]["source_id"],
+            parsed["auxiliary_sources"][1]["source_id"],
             "node-misc-events"
         );
-        assert_eq!(parsed["auxiliary_sources"][1]["source_id"], "node-fills");
+    }
+
+    #[test]
+    fn descending_auxiliary_source_ids_are_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        let known = value["auxiliary_sources"][0].clone();
+        let mut other = known.clone();
+        other["source_id"] = serde_json::json!("node-fills");
+        value["auxiliary_sources"] = serde_json::json!([known, other]);
+        let bytes = serde_json::to_vec(&value).expect("encode descending source_id");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes)
+                .expect_err("descending distinct source_id must not fail open"),
+            SnapshotError::Invalid
+        );
     }
 
     #[test]

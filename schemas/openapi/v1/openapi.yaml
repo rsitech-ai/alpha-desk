@@ -389,8 +389,10 @@ components:
             longer than 16 (capture writer MAX_AUXILIARY_SOURCES) are
             snapshot_invalid. Omitted and empty arrays stay valid. Duplicate
             present source_id values are snapshot_invalid. Distinct source_id
-            values stay valid. This is uniqueness of source_id, not uniqueItems
-            on the whole object. Sort order stays untyped. Nested source_id
+            values must be strictly increasing in lexicographic string order.
+            Out-of-order present source_id values are snapshot_invalid. This is
+            uniqueness and sort of source_id, not uniqueItems on the whole
+            object. Nested source_id
             is a required non-empty string; present non-string, omitted, or
             empty object items are snapshot_invalid. Nested spool_records is a
             required u64 integer; present non-number or non-u64 values, and
@@ -436,11 +438,12 @@ components:
                   string. Present non-string values are snapshot_invalid.
                   Omitted or empty object items are snapshot_invalid.
                   Duplicate present source_id across auxiliary_sources is
-                  snapshot_invalid. Distinct ids stay valid. This is not
-                  uniqueItems on the whole item. This document does not claim
-                  extra identity formats. HealthAssessment.reason_code stays a
-                  free string so unknown RED is not closed out. This document
-                  does not claim Stage PASS.
+                  snapshot_invalid. Distinct ids stay valid when strictly
+                  increasing. Out-of-order present ids are snapshot_invalid.
+                  This is not uniqueItems on the whole item. This document does
+                  not claim extra identity formats. HealthAssessment.reason_code
+                  stays a free string so unknown RED is not closed out. This
+                  document does not claim Stage PASS.
                 type: string
               spool_records:
                 description: >
