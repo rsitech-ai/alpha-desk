@@ -397,8 +397,9 @@ impl MarketFeatureSnapshot {
 /// Callers cannot construct this value; only
 /// [`MarketFeatureSnapshot::require_observed_book_and_fills`] issues it.
 /// The proof carries the issuing snapshot's health, book value, and inventory
-/// so a constructed book or caller-invented account inventory cannot ride a
-/// token from another snapshot.
+/// so a constructed book, unrelated book depth, or caller-invented account
+/// inventory cannot ride a token from another snapshot. Matching inventory
+/// totals alone do not admit an unrelated book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedBookAndFills<'a> {
     health: &'a HealthAssessment,
@@ -412,9 +413,19 @@ impl ObservedBookAndFills<'_> {
         self.health
     }
 
-    #[must_use]
-    pub(crate) fn book_value(&self) -> &FeatureValue {
-        self.book
+    pub(crate) fn require_matches_book_depth(&self, depth: UsdAmount) -> Result<(), MarketError> {
+        let observed = observed_usd_amount(
+            self.book,
+            "book",
+            "observed book must be decimal executable depth",
+        )?;
+        if observed != depth {
+            return Err(MarketError::Malformed {
+                what: "book",
+                reason: "observed book proof does not match caller book depth",
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn require_matches_inventory(

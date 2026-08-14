@@ -137,8 +137,11 @@ pub struct FragilityResult {
 /// Fragility scores from a caller-supplied simulated book and accounts.
 /// Inputs are admitted only with [`ObservedBookAndFills`] issued after book,
 /// fills, and inventory are observed. The proof must bind to the same book
-/// and inventory identity; a missing or red constructed book cannot ride an
-/// unrelated Observed proof onto the empty fail-closed path.
+/// identity, executable depth, health, and inventory totals; matching
+/// totals alone cannot admit an unrelated book. A missing or red constructed
+/// book cannot ride an unrelated Observed proof onto the empty fail-closed
+/// path. Account composition remains caller-chosen once depth and totals
+/// match.
 pub fn simulate_fragility(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -206,8 +209,11 @@ pub fn simulate_fragility_from_snapshot(
 /// Path scores from a caller-supplied simulated book and accounts.
 /// Inputs are admitted only with [`ObservedBookAndFills`] issued after book,
 /// fills, and inventory are observed. The proof must bind to the same book
-/// and inventory identity so an unrelated Observed proof cannot admit a
-/// missing or red constructed book as a successful empty observation.
+/// identity, executable depth, health, and inventory totals so matching
+/// totals cannot admit an unrelated book, and an unrelated Observed proof
+/// cannot admit a missing or red constructed book as a successful empty
+/// observation. Account composition remains caller-chosen once depth and
+/// totals match.
 pub fn simulate_path(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -344,18 +350,7 @@ fn require_proof_matches_book(
                         reason: "observed book proof does not match simulated book health",
                     });
                 }
-                let depth = observed_usd_amount(
-                    evidence.book_value(),
-                    "book",
-                    "observed book must be decimal executable depth",
-                )?;
-                if depth != book.executable_depth {
-                    return Err(MarketError::Malformed {
-                        what: "book",
-                        reason: "observed book proof does not match simulated book depth",
-                    });
-                }
-                Ok(())
+                evidence.require_matches_book_depth(book.executable_depth)
             }
         },
     }
