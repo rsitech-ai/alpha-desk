@@ -228,11 +228,15 @@ impl SpoolWriter {
 
     #[must_use]
     pub fn next_sync_deadline(&self) -> Option<Instant> {
-        let DurabilityPolicy::FsyncEvery { max_delay, .. } = self.durability else {
-            return None;
-        };
-        self.pending_since
-            .and_then(|started| started.checked_add(max_delay))
+        match self.durability {
+            DurabilityPolicy::FsyncEveryRecord => None,
+            DurabilityPolicy::FsyncEvery {
+                max_records: _,
+                max_delay,
+            } => self
+                .pending_since
+                .and_then(|started| started.checked_add(max_delay)),
+        }
     }
 
     pub fn flush_due(
