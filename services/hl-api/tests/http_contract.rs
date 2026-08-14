@@ -11,8 +11,8 @@ use hl_api::{
     LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
     READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, ROUTER_PATHS,
     SNAPSHOT_UNAVAILABLE_REASON_CODES, auxiliary_source_health_openapi_enum,
-    auxiliary_source_id_is_required_string, auxiliary_source_qualification_openapi_enum,
-    auxiliary_source_spool_records_is_required_u64,
+    auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
+    auxiliary_source_qualification_openapi_enum, auxiliary_source_spool_records_is_required_u64,
     auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
     committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
@@ -1042,6 +1042,98 @@ async fn nested_auxiliary_unarchived_records_is_required_u64() {
     assert_eq!(body["reason_code"], "snapshot_invalid");
 }
 
+#[tokio::test]
+async fn nested_auxiliary_partial_line_is_required_bool() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known bool partial_line must stay 200");
+    assert_eq!(body["auxiliary_sources"][0]["partial_line"], false);
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value["auxiliary_sources"][0]["partial_line"] = serde_json::json!(true);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode known true partial_line"),
+    )
+    .expect("write known true partial_line");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "true must stay 200");
+    assert_eq!(body["auxiliary_sources"][0]["partial_line"], true);
+
+    for partial_line in [
+        serde_json::json!("true"),
+        serde_json::json!("false"),
+        serde_json::json!(0),
+        serde_json::json!(1),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-bool"}),
+        serde_json::json!(["not-a-bool"]),
+    ] {
+        value["auxiliary_sources"][0]["partial_line"] = partial_line.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-bool partial_line"),
+        )
+        .expect("write non-bool partial_line");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{partial_line} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+
+    value["auxiliary_sources"][0]
+        .as_object_mut()
+        .expect("auxiliary source object")
+        .remove("partial_line");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted partial_line"),
+    )
+    .expect("write omitted partial_line");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 503,
+        "omitted nested partial_line must not fail open"
+    );
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -1702,6 +1794,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         auxiliary_source_unarchived_records_is_required_u64(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.unarchived_records as a required u64 integer"
     );
+    assert!(
+        auxiliary_source_partial_line_is_required_bool(document),
+        "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.partial_line as a required boolean"
+    );
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -1860,6 +1956,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         auxiliary_source_unarchived_records_is_required_u64(document),
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.unarchived_records as a required u64 integer"
+    );
+    assert!(
+        auxiliary_source_partial_line_is_required_bool(document),
+        "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.partial_line as a required boolean"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),

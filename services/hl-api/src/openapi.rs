@@ -3,7 +3,7 @@
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
 /// committed source class, committed source health, auxiliary source
 /// identity, auxiliary spool_records, auxiliary unarchived_records,
-/// auxiliary source health, auxiliary restart reconstruction,
+/// auxiliary partial_line, auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
 /// availability, or SLO contract, it does not invent fills or mark sources
@@ -367,6 +367,53 @@ pub fn auxiliary_source_unarchived_records_is_required_u64(document: &str) -> bo
         "required",
     )
     .is_some_and(|required| required.contains(&"unarchived_records"))
+}
+
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.partial_line`
+/// is a required boolean: `type: boolean`, listed on `items.required`, and
+/// no `$ref`, `enum`, `format`, or `pattern`. Capture writer always emits
+/// `partial_line` as bool; this crate does not invent extra boolean
+/// encodings. HealthAssessment.reason_code stays a free string so unknown
+/// RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_partial_line_is_required_bool(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "partial_line",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("boolean")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+    {
+        return false;
+    }
+    yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"partial_line"))
 }
 
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
@@ -763,7 +810,8 @@ mod tests {
         COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
         LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
         READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, auxiliary_source_health_openapi_enum,
-        auxiliary_source_id_is_required_string, auxiliary_source_qualification_openapi_enum,
+        auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
+        auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
@@ -817,6 +865,10 @@ mod tests {
         assert!(
             auxiliary_source_unarchived_records_is_required_u64(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.unarchived_records as a required u64 integer"
+        );
+        assert!(
+            auxiliary_source_partial_line_is_required_bool(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.partial_line as a required boolean"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -1501,6 +1553,145 @@ components:
         assert!(
             !auxiliary_source_unarchived_records_is_required_u64(bounded),
             "invented unarchived_records maximum must not satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_partial_line_required_bool_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            partial_line remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !auxiliary_source_partial_line_is_required_bool(prose_only),
+            "prose mention of partial_line must not satisfy the required-bool freeze"
+        );
+
+        let optional_boolean = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+            properties:
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_partial_line_is_required_bool(optional_boolean),
+            "optional partial_line must not satisfy the required-bool freeze"
+        );
+
+        let string_flag = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - partial_line
+            properties:
+              partial_line:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_partial_line_is_required_bool(string_flag),
+            "required non-boolean partial_line must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - partial_line
+            properties:
+              partial_line:
+                type: boolean
+                format: 0-1
+"#;
+        assert!(
+            !auxiliary_source_partial_line_is_required_bool(formatted),
+            "invented partial_line format must not satisfy the freeze"
+        );
+
+        let enumerated = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - partial_line
+            properties:
+              partial_line:
+                type: boolean
+                enum:
+                  - true
+                  - false
+"#;
+        assert!(
+            !auxiliary_source_partial_line_is_required_bool(enumerated),
+            "invented partial_line enum must not satisfy the freeze"
         );
     }
 
