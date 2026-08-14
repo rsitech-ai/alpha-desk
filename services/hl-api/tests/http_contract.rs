@@ -23,7 +23,8 @@ use hl_api::{
     auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64,
     auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-    capture_source_health_openapi_enum, capture_status_capture_backlog_records_is_required_u64,
+    capture_source_health_openapi_enum, capture_status_archive_manifest_id_is_optional_string,
+    capture_status_capture_backlog_records_is_required_u64,
     capture_status_disk_free_basis_points_is_optional_u16,
     capture_status_durable_height_is_optional_u64, capture_status_failover_height_is_optional_u64,
     capture_status_failover_reason_is_optional_enum, capture_status_failover_reason_openapi_enum,
@@ -2927,6 +2928,132 @@ async fn top_level_capture_disk_free_basis_points_is_optional_u16() {
     }
 }
 
+#[tokio::test]
+async fn top_level_capture_archive_manifest_id_is_optional_string() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level archive_manifest_id must stay 200"
+    );
+    assert!(body.get("archive_manifest_id").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v4");
+
+    for archive_manifest_id in [
+        serde_json::json!("manifest-42"),
+        serde_json::json!(" padded "),
+        serde_json::Value::String("a".repeat(513)),
+        serde_json::json!("manifest\u{0001}"),
+    ] {
+        value["archive_manifest_id"] = archive_manifest_id.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known string archive_manifest_id"),
+        )
+        .expect("write known string archive_manifest_id");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(
+            status, 200,
+            "{archive_manifest_id} must stay 200; writer 512/trim/control is not copied onto API parse"
+        );
+        assert_eq!(body["archive_manifest_id"], archive_manifest_id);
+        assert_eq!(
+            body["capture_backlog_records"], 0,
+            "typing archive_manifest_id must not couple it to capture_backlog_records"
+        );
+        assert!(
+            body.get("oldest_pending_capture_height").is_none(),
+            "typing archive_manifest_id must not couple it to oldest_pending_capture_height"
+        );
+        assert!(
+            body.get("disk_free_basis_points").is_none(),
+            "typing archive_manifest_id must not couple it to disk_free_basis_points"
+        );
+        assert!(
+            body.get("durable_height").is_none(),
+            "typing archive_manifest_id must not couple it to durable_height"
+        );
+        assert!(
+            body.get("failover_height").is_none(),
+            "typing archive_manifest_id must not couple it to failover_height"
+        );
+        assert!(
+            body.get("failover_reason").is_none(),
+            "typing archive_manifest_id must not couple it to failover_reason"
+        );
+    }
+
+    value
+        .as_object_mut()
+        .expect("capture status object")
+        .remove("archive_manifest_id");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted archive_manifest_id"),
+    )
+    .expect("write omitted archive_manifest_id");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level archive_manifest_id after removal must stay 200"
+    );
+    assert!(body.get("archive_manifest_id").is_none());
+
+    for archive_manifest_id in [
+        serde_json::json!(1),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-string"}),
+        serde_json::json!(["not-a-string"]),
+        serde_json::json!(""),
+    ] {
+        value["archive_manifest_id"] = archive_manifest_id.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-string archive_manifest_id"),
+        )
+        .expect("write non-string archive_manifest_id");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{archive_manifest_id} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -3661,6 +3788,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "OpenAPI must define CaptureStatusBase.disk_free_basis_points as an optional u16 integer"
     );
     assert!(
+        capture_status_archive_manifest_id_is_optional_string(document),
+        "OpenAPI must define CaptureStatusBase.archive_manifest_id as an optional string"
+    );
+    assert!(
         auxiliary_sources_max_items_is_writer_cap(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
     );
@@ -3916,6 +4047,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         capture_status_disk_free_basis_points_is_optional_u16(document),
         "served OpenAPI must define CaptureStatusBase.disk_free_basis_points as an optional u16 integer"
+    );
+    assert!(
+        capture_status_archive_manifest_id_is_optional_string(document),
+        "served OpenAPI must define CaptureStatusBase.archive_manifest_id as an optional string"
     );
     assert!(
         auxiliary_sources_max_items_is_writer_cap(document),

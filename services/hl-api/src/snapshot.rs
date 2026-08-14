@@ -91,16 +91,17 @@ pub const MAX_AUXILIARY_SOURCES: usize = 16;
 /// Capture writer `AuxiliarySourceStatus` public keys plus this stack's
 /// already-typed optional `restart_reconstruction`. Present unknown nested
 /// properties are `snapshot_invalid`. Known objects without extras stay
-/// valid. This is not CaptureStatusBase extra keys: top-level writer fields
-/// such as `archive_manifest_id` stay untyped, and last-heartbeat throughput
+/// valid. This is not CaptureStatusBase extra keys: last-heartbeat throughput
 /// still passes through. Top-level `failover_height` is an optional u64.
 /// Top-level `failover_reason` is an optional kebab-case enum. Top-level
 /// `durable_height` is an optional u64. Top-level `capture_backlog_records`
 /// is a required u64. Top-level `oldest_pending_capture_height` is an
 /// optional u64. Top-level `disk_free_basis_points` is an optional u16.
-/// Top-level `last_error_reason` is an optional non-empty string.
-/// `HealthAssessment.reason_code` stays a free string so unknown RED is not
-/// closed out.
+/// Top-level `archive_manifest_id` is an optional non-empty string. Writer
+/// `validate_status_text` trim/control/512 lives only in the capture writer
+/// and is not copied here. Top-level `last_error_reason` is an optional
+/// non-empty string. `HealthAssessment.reason_code` stays a free string so
+/// unknown RED is not closed out.
 const AUXILIARY_SOURCE_FIELDS: &[&str] = &[
     "source_id",
     "health",
@@ -302,6 +303,9 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     }
     if object.contains_key("disk_free_basis_points") {
         require_u16(object, "disk_free_basis_points")?;
+    }
+    if object.contains_key("archive_manifest_id") {
+        require_string(object, "archive_manifest_id", None)?;
     }
     match schema {
         CaptureStatusSchema::V4 => {
@@ -557,7 +561,8 @@ mod tests {
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-        capture_source_health_openapi_enum, capture_status_capture_backlog_records_is_required_u64,
+        capture_source_health_openapi_enum, capture_status_archive_manifest_id_is_optional_string,
+        capture_status_capture_backlog_records_is_required_u64,
         capture_status_disk_free_basis_points_is_optional_u16,
         capture_status_durable_height_is_optional_u64,
         capture_status_failover_height_is_optional_u64,
@@ -1456,6 +1461,23 @@ mod tests {
         assert!(
             capture_status_disk_free_basis_points_is_optional_u16(document),
             "OpenAPI must define CaptureStatusBase.disk_free_basis_points as an optional u16 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_top_level_archive_manifest_id_optional_string() {
+        let document = openapi_yaml();
+        assert!(
+            capture_status_archive_manifest_id_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.archive_manifest_id as an optional string"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
@@ -3133,6 +3155,114 @@ mod tests {
                     .expect_err("present non-u16 disk_free_basis_points must not fail open"),
                 SnapshotError::Invalid,
                 "{disk_free_basis_points} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_top_level_archive_manifest_id_string_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("archive_manifest_id").is_none(),
+            "v4 fixture must omit optional top-level archive_manifest_id"
+        );
+        value["archive_manifest_id"] = serde_json::json!("manifest-42");
+        let bytes = serde_json::to_vec(&value).expect("encode known archive_manifest_id");
+        let parsed = parse_capture_status_bytes(&bytes).expect("known string archive_manifest_id");
+        assert_eq!(parsed["archive_manifest_id"], "manifest-42");
+        assert_eq!(
+            parsed["capture_backlog_records"], 0,
+            "typing archive_manifest_id must not couple it to capture_backlog_records"
+        );
+        assert!(
+            parsed.get("oldest_pending_capture_height").is_none(),
+            "typing archive_manifest_id must not couple it to oldest_pending_capture_height"
+        );
+        assert!(
+            parsed.get("disk_free_basis_points").is_none(),
+            "typing archive_manifest_id must not couple it to disk_free_basis_points"
+        );
+        assert!(
+            parsed.get("durable_height").is_none(),
+            "typing archive_manifest_id must not couple it to durable_height"
+        );
+        assert!(
+            parsed.get("failover_height").is_none(),
+            "typing archive_manifest_id must not couple it to failover_height"
+        );
+        assert!(
+            parsed.get("failover_reason").is_none(),
+            "typing archive_manifest_id must not couple it to failover_reason"
+        );
+        assert!(parsed.get("auxiliary_sources").is_none());
+    }
+
+    #[test]
+    fn writer_archive_manifest_id_text_rules_are_not_copied_onto_api_parse() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for archive_manifest_id in [
+            serde_json::json!(" padded "),
+            serde_json::Value::String("a".repeat(513)),
+            serde_json::json!("manifest\u{0001}"),
+        ] {
+            value["archive_manifest_id"] = archive_manifest_id.clone();
+            let bytes =
+                serde_json::to_vec(&value).expect("encode writer-invalid archive_manifest_id");
+            let parsed = parse_capture_status_bytes(&bytes).unwrap_or_else(|error| {
+                panic!("{archive_manifest_id} must stay valid at API parse; writer 512/trim/control is not copied: {error}")
+            });
+            assert_eq!(parsed["archive_manifest_id"], archive_manifest_id);
+        }
+    }
+
+    #[test]
+    fn omitted_top_level_archive_manifest_id_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("archive_manifest_id").is_none(),
+            "v4 fixture must omit optional archive_manifest_id"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted archive_manifest_id");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted archive_manifest_id");
+        assert!(parsed.get("archive_manifest_id").is_none());
+
+        value["archive_manifest_id"] = serde_json::json!("manifest-42");
+        value
+            .as_object_mut()
+            .expect("capture status object")
+            .remove("archive_manifest_id");
+        let bytes = serde_json::to_vec(&value).expect("encode removed archive_manifest_id");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed archive_manifest_id");
+        assert!(parsed.get("archive_manifest_id").is_none());
+    }
+
+    #[test]
+    fn present_non_string_top_level_archive_manifest_id_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for archive_manifest_id in [
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-string"}),
+            serde_json::json!(["not-a-string"]),
+            serde_json::json!(""),
+        ] {
+            value["archive_manifest_id"] = archive_manifest_id.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes).expect_err(
+                    "present non-string or empty archive_manifest_id must not fail open"
+                ),
+                SnapshotError::Invalid,
+                "{archive_manifest_id} must be snapshot_invalid"
             );
         }
     }
