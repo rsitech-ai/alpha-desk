@@ -563,6 +563,57 @@ fn byte_offset_policy_requires_per_record_fsync() {
 }
 
 #[test]
+fn spool_config_fsync_gate_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let batched = DurabilityPolicy::FsyncEvery {
+            max_records: 2,
+            max_delay: Duration::from_secs(1),
+        };
+        let root = TempDir::new().unwrap();
+        let batched_result = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            batched,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        );
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                let error = batched_result
+                    .expect_err("byte-offset acknowledgements require immediate durability");
+                assert!(matches!(error, SpoolError::InvalidDurabilityPolicy));
+                assert_eq!(error.reason_code(), "spool.invalid_durability_policy");
+                assert!(!root.path().join("primary-node").exists());
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                batched_result.expect(
+                    "contiguous native offset still admits bounded FsyncEvery at construction",
+                );
+            }
+        }
+
+        let admitted = TempDir::new().unwrap();
+        SourceSpoolConfig::try_new_with_cursor_policy(
+            admitted.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .expect("fsync-every-record remains admitted for every current cursor policy");
+    }
+}
+
+#[test]
 fn byte_offset_durability_covers_every_constructible_writer_policy() {
     for policy in [
         DurabilityPolicy::FsyncEveryRecord,
