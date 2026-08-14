@@ -230,6 +230,7 @@ export const CAPTURE_STATUS_FIELD_ORDER = [
   "disk_free_basis_points",
   "archive_manifest_id",
   "auxiliary_sources",
+  ...LAST_HEARTBEAT_THROUGHPUT_FIELDS,
 ] as const
 
 export const HEALTH_FIELD_ORDER = [
@@ -648,8 +649,12 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
     return auxiliary_sources
   }
 
+  const throughput = lastHeartbeatThroughput(value)
+  if (!throughput.ok) {
+    return throughput
+  }
+
   const extras = collectExtraFields(value, CAPTURE_STATUS_FIELD_ORDER)
-  const throughput = lastHeartbeatThroughput(extras)
   return {
     ok: true,
     value: {
@@ -672,49 +677,47 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
       disk_free_basis_points: disk_free_basis_points.value,
       archive_manifest_id: archive_manifest_id.value,
       auxiliary_sources: auxiliary_sources.value,
-      throughput_records_per_sec: throughput.throughput_records_per_sec,
-      throughput_blocks_per_sec: throughput.throughput_blocks_per_sec,
-      extra_fields: extrasWithoutMappedThroughput(extras, throughput),
+      throughput_records_per_sec: throughput.value.throughput_records_per_sec,
+      throughput_blocks_per_sec: throughput.value.throughput_blocks_per_sec,
+      extra_fields: extras,
     },
   }
 }
 
 export function lastHeartbeatThroughput(
-  extras: Record<string, unknown>
-): LastHeartbeatThroughput {
+  object: Record<string, unknown>
+): ParseResult<LastHeartbeatThroughput> {
+  const throughput_records_per_sec = lastHeartbeatRate(
+    object.throughput_records_per_sec,
+    "throughput_records_per_sec"
+  )
+  if (!throughput_records_per_sec.ok) {
+    return throughput_records_per_sec
+  }
+  const throughput_blocks_per_sec = lastHeartbeatRate(
+    object.throughput_blocks_per_sec,
+    "throughput_blocks_per_sec"
+  )
+  if (!throughput_blocks_per_sec.ok) {
+    return throughput_blocks_per_sec
+  }
   return {
-    throughput_records_per_sec: lastHeartbeatRate(
-      extras.throughput_records_per_sec
-    ),
-    throughput_blocks_per_sec: lastHeartbeatRate(
-      extras.throughput_blocks_per_sec
-    ),
+    ok: true,
+    value: {
+      throughput_records_per_sec: throughput_records_per_sec.value,
+      throughput_blocks_per_sec: throughput_blocks_per_sec.value,
+    },
   }
 }
 
-export function lastHeartbeatRate(value: unknown): number | undefined {
-  if (
-    typeof value === "number" &&
-    Number.isInteger(value) &&
-    Number.isSafeInteger(value) &&
-    value >= 0
-  ) {
-    return value
+export function lastHeartbeatRate(
+  value: unknown,
+  field: string
+): ParseResult<number | undefined> {
+  if (value === undefined || value === null) {
+    return { ok: true, value: undefined }
   }
-  return undefined
-}
-
-function extrasWithoutMappedThroughput(
-  extras: Record<string, unknown>,
-  throughput: LastHeartbeatThroughput
-): Record<string, unknown> {
-  const rest: Record<string, unknown> = { ...extras }
-  for (const field of LAST_HEARTBEAT_THROUGHPUT_FIELDS) {
-    if (throughput[field] !== undefined) {
-      delete rest[field]
-    }
-  }
-  return rest
+  return requireNonNegativeInt({ [field]: value }, field)
 }
 
 export function assertNever(value: never): never {
