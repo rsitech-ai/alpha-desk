@@ -237,10 +237,12 @@ components:
             core.deadletter_corrupt), and LedgerUnsupportedEventReasonCode
             (ledger.unsupported_event). AMBER core.deadletter_* family-prefix
             reasons are 503 snapshot_invalid. AMBER plus
-            ledger.unsupported_event is 503 snapshot_invalid. Unknown RED
-            codes stay 200 typed fail-closed and must not be treated as
-            ready or as a generic 500. Unknown codes fail closed. This is
-            not a live core and not Stage 2 PASS.
+            ledger.unsupported_event is 503 snapshot_invalid. This field
+            stays an unrestricted string: no $ref and no inline enum, so
+            unknown RED is not closed out. Unknown RED codes stay 200 typed
+            fail-closed and must not be treated as ready or as a generic
+            500. Unknown codes fail closed. This is not a live core and not
+            Stage 2 PASS.
         observed_at_micros:
           type: integer
           minimum: 0

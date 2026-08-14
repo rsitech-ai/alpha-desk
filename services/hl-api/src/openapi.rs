@@ -75,10 +75,11 @@ pub fn ledger_unsupported_event_reason_openapi_enum(document: &str) -> Option<Ve
     )
 }
 
-/// True when `HealthAssessment.reason_code` is a free string, not a `$ref` to
-/// `CoreDeadLetterReasonCode` or `LedgerUnsupportedEventReasonCode`. Unknown
-/// RED codes must still fail closed at serve time; the enums are
-/// documentation-only.
+/// True when `HealthAssessment.reason_code` is a free string: `type: string`,
+/// no `$ref` (including `CoreDeadLetterReasonCode` or
+/// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
+/// codes must still fail closed at serve time; the named enums are
+/// documentation-only and must not close out this field.
 #[must_use]
 pub fn health_reason_code_is_unrestricted_string(document: &str) -> bool {
     let Some(mapping) = yaml_mapping(
@@ -93,7 +94,7 @@ pub fn health_reason_code_is_unrestricted_string(document: &str) -> bool {
     ) else {
         return false;
     };
-    mapping.scalar("type") == Some("string") && !mapping.has_key("$ref")
+    mapping.scalar("type") == Some("string") && !mapping.has_key("$ref") && !mapping.has_key("enum")
 }
 
 /// Schema `$ref` for `/readyz` 503.
@@ -418,6 +419,10 @@ mod tests {
             .expect("OpenAPI must define components.schemas.LedgerUnsupportedEventReasonCode.enum");
         assert_eq!(ledger_values, LEDGER_UNSUPPORTED_EVENT_REASON_CODES);
         assert!(health_reason_code_is_unrestricted_string(document));
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
     }
 
     #[test]
@@ -521,6 +526,25 @@ components:
         let values = ledger_unsupported_event_reason_openapi_enum(document)
             .expect("closed enum remaining in components must still parse");
         assert_eq!(values, LEDGER_UNSUPPORTED_EVENT_REASON_CODES);
+    }
+
+    #[test]
+    fn reason_code_inline_enum_fails_unrestricted_string_freeze() {
+        let document = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+          enum:
+            - ledger.unsupported_event
+            - healthy
+"#;
+        assert!(
+            !health_reason_code_is_unrestricted_string(document),
+            "inline enum on reason_code must fail so unknown RED stays typed"
+        );
     }
 
     #[test]
