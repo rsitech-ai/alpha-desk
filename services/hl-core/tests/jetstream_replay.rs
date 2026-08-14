@@ -11,11 +11,11 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    CanonicalPullSource, CanonicalSubject, DEAD_LETTER_SCHEMA_V1, FileDeadLetterSink,
+    committed_block_delivery, committed_event_delivery, decode_committed_block_marker,
+    encode_committed_block_marker, CanonicalPullSource, CanonicalSubject, FileDeadLetterSink,
     InMemoryCanonicalSource, InMemoryDeadLetterSink, InMemoryFetchSource, JetStreamFetchFrame,
     JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
-    JetStreamReplaySession, committed_block_delivery, committed_event_delivery,
-    decode_committed_block_marker, encode_committed_block_marker,
+    JetStreamReplaySession, DEAD_LETTER_SCHEMA_V1,
 };
 use sha2::{Digest as _, Sha256};
 use storage_ports::ArchiveReceipt;
@@ -892,6 +892,22 @@ fn committed_subject_rejects_provisional_fanout() {
     assert_eq!(error.reason_code(), "core.jetstream_provisional");
 }
 
+#[test]
+fn file_dead_letter_sink_open_does_not_leave_empty_jsonl() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    let sink = FileDeadLetterSink::open(&path).expect("file dlq");
+    assert_dead_letter_file_absent_or_typed_sentinel(&path);
+    drop(sink);
+    assert_dead_letter_file_absent_or_typed_sentinel(&path);
+
+    fs::write(&path, []).expect("seed empty leftover");
+    let leftover = FileDeadLetterSink::open(&path).expect("reopen leftover");
+    assert_dead_letter_file_absent_or_typed_sentinel(&path);
+    drop(leftover);
+    assert_dead_letter_file_absent_or_typed_sentinel(&path);
+}
+
 #[tokio::test]
 async fn file_dead_letter_sink_persists_poison_without_applying_state() {
     let root = private_root();
@@ -926,6 +942,34 @@ async fn file_dead_letter_sink_persists_poison_without_applying_state() {
     assert!(value.get("stream_sequence").is_none());
     assert!(value.get("live_qualified").is_none());
     assert!(value.get("stage_2_qualified").is_none());
+}
+
+fn assert_dead_letter_file_absent_or_typed_sentinel(path: &std::path::Path) {
+    match fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("dead-letter metadata: {error}"),
+        Ok(metadata) => {
+            assert!(
+                metadata.len() > 0,
+                "empty dead-letter.jsonl must not persist without a typed sentinel"
+            );
+            let encoded = fs::read_to_string(path).expect("dlq file");
+            let first = encoded
+                .lines()
+                .find(|line| !line.is_empty())
+                .expect("non-empty jsonl");
+            let record: serde_json::Value = serde_json::from_str(first).expect("jsonl");
+            assert_eq!(record["schema_version"], DEAD_LETTER_SCHEMA_V1);
+            let reason = record["reason_code"].as_str().expect("typed reason_code");
+            assert!(!reason.is_empty());
+            assert!(record["subject"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            assert!(record["message_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+        }
+    }
 }
 
 fn assert_one_dead_letter(
@@ -1100,16 +1144,14 @@ fn trade_event(height: u64) -> CanonicalEventEnvelope {
             Address::from_bytes([0x11; 20]),
             Address::from_bytes([0x22; 20]),
         ],
-        source_evidence: vec![
-            SourceEvidence::try_new_indexed(
-                SourceId::new("jetstream-replay").expect("source"),
-                "v1",
-                height.to_string(),
-                payload_hash,
-                0,
-            )
-            .expect("evidence"),
-        ],
+        source_evidence: vec![SourceEvidence::try_new_indexed(
+            SourceId::new("jetstream-replay").expect("source"),
+            "v1",
+            height.to_string(),
+            payload_hash,
+            0,
+        )
+        .expect("evidence")],
         confirmation_class: ConfirmationClass::CommittedPrimary,
         observed_at: KnownTime::from_unix_micros(height as i64).expect("known time"),
         ingested_at: KnownTime::from_unix_micros(height as i64).expect("known time"),

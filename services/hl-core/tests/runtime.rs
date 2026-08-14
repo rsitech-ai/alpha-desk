@@ -11,8 +11,8 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    CoreConfig, CoreRuntime, CoreStatusHandle, DEAD_LETTER_SCHEMA_V1, InMemoryCanonicalSource,
-    committed_block_delivery, committed_event_delivery,
+    committed_block_delivery, committed_event_delivery, CoreConfig, CoreRuntime, CoreStatusHandle,
+    InMemoryCanonicalSource, DEAD_LETTER_SCHEMA_V1,
 };
 use storage_ports::{ArchiveReceipt, AtomicStateStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,12 +66,10 @@ async fn action_bearing_source_still_fails_closed_without_ack_or_state_advance()
 
     let store =
         SyncedWriteBatchStore::open(&store_path, StateImageLimits::production()).expect("reopen");
-    assert!(
-        store
-            .load_latest(StateImageLimits::production())
-            .expect("load")
-            .is_none()
-    );
+    assert!(store
+        .load_latest(StateImageLimits::production())
+        .expect("load")
+        .is_none());
     let encoded = fs::read_to_string(root.path().join("dead-letter.jsonl")).expect("dlq");
     let record: serde_json::Value = serde_json::from_str(encoded.trim()).expect("dlq json");
     assert_eq!(record["reason_code"], "ledger.unsupported_event");
@@ -391,6 +389,7 @@ async fn hung_connect_serves_starting_loopback_status_without_opening_store() {
             !store_path.exists(),
             "hung connect must not open the file-store"
         );
+        assert_dead_letter_file_absent_or_typed_sentinel(&root.path().join("dead-letter.jsonl"));
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -424,6 +423,46 @@ async fn hung_connect_serves_starting_loopback_status_without_opening_store() {
     let error = result.expect_err("hung connect transport");
     assert_eq!(error.reason_code(), "core.jetstream_transport");
     assert!(!store_path.exists());
+    assert_connect_transport_sentinel(&root.path().join("dead-letter.jsonl"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hung_connect_abort_does_not_leave_empty_dlq_without_sentinel() {
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let dead_letter_path = root.path().join("dead-letter.jsonl");
+    let password_path = write_protected_secret(root.path());
+    let nats_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("hung NATS listener");
+    let nats_addr = nats_listener.local_addr().expect("nats addr");
+    let _hold = tokio::spawn(hold_tcp_without_nats(nats_listener));
+    let config = CoreConfig::from_toml(&hung_connect_toml(
+        &store_path,
+        &password_path,
+        nats_addr,
+        30_000,
+        Some("127.0.0.1:0"),
+    ))
+    .expect("config");
+    let runtime = CoreRuntime::from_config(config);
+    let status = runtime.status().clone();
+    let run = tokio::spawn(runtime.run_jetstream(CancellationToken::new()));
+    let addr = wait_for_listen_addr(&status).await;
+    let (health_code, health_body) = http_get(addr, "/healthz").await;
+    assert_eq!(health_code, 503);
+    let health = json_from_http(&health_body);
+    assert_eq!(health["ready"], false);
+    assert_eq!(health["reason_code"], "core_status.not_ready");
+    assert!(
+        !store_path.exists(),
+        "hung connect must not open the file-store"
+    );
+    assert_dead_letter_file_absent_or_typed_sentinel(&dead_letter_path);
+    run.abort();
+    let _ = run.await;
+    assert!(!store_path.exists());
+    assert_dead_letter_file_absent_or_typed_sentinel(&dead_letter_path);
 }
 
 #[tokio::test]
@@ -602,6 +641,46 @@ fn private_root() -> tempfile::TempDir {
     temporary
 }
 
+fn assert_dead_letter_file_absent_or_typed_sentinel(path: &std::path::Path) {
+    match fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("dead-letter metadata: {error}"),
+        Ok(metadata) => {
+            assert!(
+                metadata.len() > 0,
+                "empty dead-letter.jsonl must not persist without a typed sentinel"
+            );
+            let encoded = fs::read_to_string(path).expect("dlq");
+            let first = encoded
+                .lines()
+                .find(|line| !line.is_empty())
+                .expect("non-empty jsonl");
+            let record: serde_json::Value = serde_json::from_str(first).expect("jsonl");
+            assert_eq!(record["schema_version"], DEAD_LETTER_SCHEMA_V1);
+            let reason = record["reason_code"].as_str().expect("typed reason_code");
+            assert!(!reason.is_empty());
+            assert!(record["subject"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            assert!(record["message_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+        }
+    }
+}
+
+fn assert_connect_transport_sentinel(path: &std::path::Path) {
+    let encoded = fs::read_to_string(path).expect("dlq");
+    let found = encoded.lines().filter(|line| !line.is_empty()).any(|line| {
+        let record: serde_json::Value = serde_json::from_str(line).expect("jsonl");
+        record["schema_version"] == DEAD_LETTER_SCHEMA_V1
+            && record["reason_code"] == "core.jetstream_transport"
+            && record["subject"] == "hl.v1.connect.transport"
+            && record["message_id"] == "connect"
+    });
+    assert!(found, "connect transport sentinel missing from {path:?}");
+}
+
 fn trade_block(height: u64) -> BlockEnvelope {
     let event = trade_event(height);
     BlockEnvelope::try_new(
@@ -639,16 +718,14 @@ fn trade_event(height: u64) -> CanonicalEventEnvelope {
             Address::from_bytes([0x11; 20]),
             Address::from_bytes([0x22; 20]),
         ],
-        source_evidence: vec![
-            SourceEvidence::try_new_indexed(
-                SourceId::new("jetstream-replay").expect("source"),
-                "v1",
-                height.to_string(),
-                payload_hash,
-                0,
-            )
-            .expect("evidence"),
-        ],
+        source_evidence: vec![SourceEvidence::try_new_indexed(
+            SourceId::new("jetstream-replay").expect("source"),
+            "v1",
+            height.to_string(),
+            payload_hash,
+            0,
+        )
+        .expect("evidence")],
         confirmation_class: ConfirmationClass::CommittedPrimary,
         observed_at: KnownTime::from_unix_micros(height as i64).expect("known time"),
         ingested_at: KnownTime::from_unix_micros(height as i64).expect("known time"),

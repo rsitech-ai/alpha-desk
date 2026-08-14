@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rustix::fs::{Mode, OFlags, open};
+use rustix::fs::{open, Mode, OFlags};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
@@ -166,7 +166,7 @@ impl DeadLetterSink for InMemoryDeadLetterSink {
 
 #[derive(Debug)]
 pub struct FileDeadLetterSink {
-    file: File,
+    file: Option<File>,
     path: PathBuf,
 }
 
@@ -180,32 +180,19 @@ impl FileDeadLetterSink {
         {
             ensure_private_directory(parent)?;
         }
-        match fs::symlink_metadata(path) {
+        let file = match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 return Err(DeadLetterError::UnsafePath);
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(metadata) if metadata.len() == 0 => match fs::remove_file(path) {
+                Ok(()) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Err(DeadLetterError::Io),
+            },
+            Ok(_) => Some(Self::open_file(path, false)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(DeadLetterError::Io),
-        }
-        let file = File::from(
-            open(
-                path,
-                OFlags::WRONLY
-                    | OFlags::CREATE
-                    | OFlags::APPEND
-                    | OFlags::NOFOLLOW
-                    | OFlags::CLOEXEC,
-                Mode::RUSR | Mode::WUSR,
-            )
-            .map_err(|_| DeadLetterError::Io)?,
-        );
-        let opened = file.metadata().map_err(|_| DeadLetterError::Io)?;
-        if !opened.is_file() {
-            return Err(DeadLetterError::UnsafePath);
-        }
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|_| DeadLetterError::Io)?;
+        };
         Ok(Self {
             file,
             path: path.to_path_buf(),
@@ -216,16 +203,50 @@ impl FileDeadLetterSink {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    fn open_file(path: &Path, create: bool) -> Result<File, DeadLetterError> {
+        let mut flags = OFlags::WRONLY | OFlags::APPEND | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        if create {
+            flags |= OFlags::CREATE;
+        }
+        let file = File::from(
+            open(path, flags, Mode::RUSR | Mode::WUSR).map_err(|_| DeadLetterError::Io)?,
+        );
+        let opened = match file.metadata() {
+            Ok(opened) => opened,
+            Err(_) => return abandon_created(path, create, DeadLetterError::Io),
+        };
+        if !opened.is_file() {
+            return abandon_created(path, create, DeadLetterError::UnsafePath);
+        }
+        if file
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .is_err()
+        {
+            return abandon_created(path, create, DeadLetterError::Io);
+        }
+        Ok(file)
+    }
 }
 
 impl DeadLetterSink for FileDeadLetterSink {
     fn persist(&mut self, record: &DeadLetterRecord) -> Result<(), DeadLetterError> {
         let encoded = encode_record(record)?;
-        self.file
-            .write_all(&encoded)
-            .map_err(|_| DeadLetterError::Io)?;
-        self.file.sync_all().map_err(|_| DeadLetterError::Io)?;
-        Ok(())
+        let created = self.file.is_none();
+        let file = match self.file.as_mut() {
+            Some(file) => file,
+            None => self.file.insert(Self::open_file(&self.path, true)?),
+        };
+        match file.write_all(&encoded).and_then(|_| file.sync_all()) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                if created {
+                    self.file = None;
+                    let _ = fs::remove_file(&self.path);
+                }
+                Err(DeadLetterError::Io)
+            }
+        }
     }
 }
 
@@ -360,4 +381,15 @@ fn ensure_private_directory(path: &Path) -> Result<(), DeadLetterError> {
         }
         Err(_) => Err(DeadLetterError::Io),
     }
+}
+
+fn abandon_created<T>(
+    path: &Path,
+    create: bool,
+    error: DeadLetterError,
+) -> Result<T, DeadLetterError> {
+    if create {
+        let _ = fs::remove_file(path);
+    }
+    Err(error)
 }
