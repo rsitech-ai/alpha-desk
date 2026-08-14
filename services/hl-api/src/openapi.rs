@@ -6,7 +6,7 @@
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
-/// top-level last_error_reason, auxiliary quarantine_reason,
+/// top-level last_error_reason, top-level failover_height, auxiliary quarantine_reason,
 /// auxiliary_sources maxItems,
 /// auxiliary source_id uniqueness, auxiliary source_id sort order,
 /// auxiliary source extra keys, auxiliary source health, auxiliary restart
@@ -861,6 +861,47 @@ pub fn capture_status_last_error_reason_is_optional_string(document: &str) -> bo
     .is_some_and(|required| required.contains(&"last_error_reason"))
 }
 
+/// True when top-level `CaptureStatusBase.properties.failover_height` is an
+/// optional u64 integer: `type: integer`, `minimum: 0`, not listed on
+/// `CaptureStatusBase.required`, and no `$ref`, `enum`, `format`, `pattern`,
+/// or `maximum`. Capture writer emits top-level `failover_height` as
+/// `Option<u64>` with `skip_serializing_if`; this crate does not invent extra
+/// numeric bounds. HealthAssessment.reason_code stays a free string so
+/// unknown RED is not closed out.
+#[must_use]
+pub fn capture_status_failover_height_is_optional_u64(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "failover_height",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("integer")
+        || mapping.scalar("minimum") != Some("0")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("maximum")
+        || mapping.has_key("exclusiveMinimum")
+        || mapping.has_key("exclusiveMaximum")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &["components", "schemas", "CaptureStatusBase"],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"failover_height"))
+}
+
 /// True when `CaptureStatusBase.properties.auxiliary_sources` is an array
 /// capped at capture writer [`MAX_AUXILIARY_SOURCES`]: `type: array`,
 /// `maxItems` equal to that constant, and no `minItems` or `uniqueItems`.
@@ -898,10 +939,11 @@ pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
 /// properties are parse `snapshot_invalid`. Known objects without extras
 /// stay valid. CaptureStatusBase itself does not set
 /// `additionalProperties: false` (top-level writer fields such as
-/// `failover_height`, `failover_reason`, `durable_height`,
+/// `failover_reason`, `durable_height`,
 /// `capture_backlog_records`, `oldest_pending_capture_height`,
 /// `disk_free_basis_points`, and `archive_manifest_id` stay untyped).
-/// Top-level `last_error_reason` is an optional string.
+/// Top-level `failover_height` is an optional u64. Top-level
+/// `last_error_reason` is an optional string.
 /// HealthAssessment.reason_code stays a free string so unknown RED is not
 /// closed out.
 #[must_use]
@@ -1331,12 +1373,13 @@ mod tests {
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-        capture_source_health_openapi_enum, capture_status_last_error_reason_is_optional_string,
-        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-        health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
-        openapi_yaml, readyz_200_description, readyz_200_schema_ref, readyz_503_description,
-        readyz_503_schema_ref, readyz_get_description, restart_reconstruction_openapi_enum,
+        capture_source_health_openapi_enum, capture_status_failover_height_is_optional_u64,
+        capture_status_last_error_reason_is_optional_string, committed_source_class_openapi_enum,
+        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+        ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+        readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
+        readyz_get_description, restart_reconstruction_openapi_enum,
         unavailable_response_schema_ref,
     };
 
@@ -1423,6 +1466,10 @@ mod tests {
         assert!(
             capture_status_last_error_reason_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.last_error_reason as an optional string"
+        );
+        assert!(
+            capture_status_failover_height_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.failover_height as an optional u64 integer"
         );
         assert!(
             auxiliary_source_items_forbid_additional_properties(document),
@@ -3725,6 +3772,150 @@ components:
         assert!(
             capture_status_last_error_reason_is_optional_string(optional_string),
             "optional string last_error_reason must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_top_level_failover_height_optional_u64_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        pending_blocks:
+          description: >
+            failover_height remains in prose after the YAML property drops it.
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_failover_height_is_optional_u64(prose_only),
+            "prose mention of failover_height must not satisfy the optional-u64 freeze"
+        );
+
+        let nested_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - pending_blocks
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              failover_height:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !capture_status_failover_height_is_optional_u64(nested_only),
+            "nested failover_height must not satisfy the top-level optional-u64 freeze"
+        );
+
+        let required_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - failover_height
+      properties:
+        failover_height:
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_failover_height_is_optional_u64(required_integer),
+            "required failover_height must not satisfy the optional-u64 freeze"
+        );
+
+        let string_height = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        failover_height:
+          type: string
+"#;
+        assert!(
+            !capture_status_failover_height_is_optional_u64(string_height),
+            "optional non-integer failover_height must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        failover_height:
+          type: integer
+          minimum: 0
+          format: int64
+"#;
+        assert!(
+            !capture_status_failover_height_is_optional_u64(formatted),
+            "invented failover_height format must not satisfy the freeze"
+        );
+
+        let bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        failover_height:
+          type: integer
+          minimum: 0
+          maximum: 100
+"#;
+        assert!(
+            !capture_status_failover_height_is_optional_u64(bounded),
+            "invented failover_height maximum must not satisfy the freeze"
+        );
+
+        let optional_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - schema_version
+        - pending_blocks
+      properties:
+        failover_height:
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            capture_status_failover_height_is_optional_u64(optional_integer),
+            "optional u64 failover_height must satisfy the freeze"
         );
     }
 
