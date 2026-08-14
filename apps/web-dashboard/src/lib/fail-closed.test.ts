@@ -15,6 +15,7 @@ import {
   COMMITTED_SOURCE_CLASS,
   CORE_DEADLETTER_REASONS,
   FAILOVER_REASONS,
+  HEALTH_FIELD_ORDER,
   LEDGER_UNSUPPORTED_EVENT_REASONS,
   MAX_AUXILIARY_SOURCES,
   RESTART_RECONSTRUCTION,
@@ -67,6 +68,20 @@ function v4Status(
     active_committed_source: "locally-verified-committed",
     primary_source_health: "starting",
     pending_blocks: 0,
+    ...overrides,
+  }
+}
+
+function healthAssessment(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    schema_version: "hl.health.v1",
+    scope: "canonical",
+    state: "HEALTH_STATE_GREEN",
+    reason_code: "healthy",
+    observed_at_micros: 1,
+    suppresses: [],
     ...overrides,
   }
 }
@@ -528,6 +543,70 @@ describe("parseCaptureStatus extras", () => {
     }
     expect(parsed.value.throughput_records_per_sec).toBe(7)
     expect(parsed.value.throughput_blocks_per_sec).toBeUndefined()
+  })
+})
+
+describe("parseHealthAssessment extras", () => {
+  it("allowlists this web parse's known HealthAssessment fields", () => {
+    expect([...HEALTH_FIELD_ORDER]).toEqual([
+      "schema_version",
+      "scope",
+      "state",
+      "reason_code",
+      "observed_at_micros",
+      "suppresses",
+    ])
+    expect(HEALTH_FIELD_ORDER).not.toContain("fills")
+    expect(HEALTH_FIELD_ORDER).not.toContain("maintenance")
+  })
+
+  it("fail-closes present unknown keys as invalid, not a quiet extra", () => {
+    for (const extra of ["fills", "invented", "adapter"] as const) {
+      const parsed = parseHealthAssessment(healthAssessment({ [extra]: true }))
+      expect(parsed.ok).toBe(false)
+      if (parsed.ok) {
+        return
+      }
+      expect(parsed.detail).toBe(`unknown health field: ${extra}`)
+    }
+
+    const both = parseHealthAssessment(
+      healthAssessment({
+        later_unknown: "ignored-as-qualification",
+        px: 1.5,
+      })
+    )
+    expect(both.ok).toBe(false)
+    if (both.ok) {
+      return
+    }
+    expect(both.detail).toBe("unknown health fields: later_unknown, px")
+  })
+
+  it("parses a known payload without extras", () => {
+    const parsed = parseHealthAssessment(healthAssessment())
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.schema_version).toBe("hl.health.v1")
+    expect(parsed.value.state).toBe("HEALTH_STATE_GREEN")
+    expect(parsed.value.reason_code).toBe("healthy")
+  })
+
+  it("keeps unknown RED reason_code as a free string, not a closed enum", () => {
+    const parsed = parseHealthAssessment(
+      healthAssessment({
+        state: "HEALTH_STATE_RED",
+        reason_code: "not-a-known-catalog-code",
+      })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.state).toBe("HEALTH_STATE_RED")
+    expect(parsed.value.reason_code).toBe("not-a-known-catalog-code")
   })
 })
 
