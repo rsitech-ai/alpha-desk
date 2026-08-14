@@ -451,10 +451,13 @@ impl SourceSpool {
         observation: &SourceObservation,
         durable_at_micros: i64,
     ) -> Result<SourceSpoolAppend, SpoolError> {
-        if self.config.cursor_policy == CursorPolicy::MonotonicByteOffset {
-            self.append_byte_offset(observation, durable_at_micros)
-        } else {
-            self.append_legacy(observation, durable_at_micros)
+        match self.config.cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                self.append_byte_offset(observation, durable_at_micros)
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                self.append_legacy(observation, durable_at_micros)
+            }
         }
     }
 

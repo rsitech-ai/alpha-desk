@@ -819,6 +819,60 @@ fn byte_offset_policy_rejects_block_height_observations() {
 }
 
 #[test]
+fn append_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new_with_cursor_policy(
+                root.path().join("primary-node"),
+                SourceId::new("primary-node").unwrap(),
+                "hyperliquid-node-v1",
+                "spool-v1",
+                [0x31; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+                cursor_policy,
+            )
+            .unwrap(),
+            100,
+        )
+        .unwrap();
+
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                let appended = spool
+                    .append(&byte_observation(17), 101)
+                    .expect("byte-offset append remains admitted");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+
+                let error = spool
+                    .append(&observation(17), 102)
+                    .expect_err("block heights are not byte offsets");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                let appended = spool
+                    .append(&observation(100), 101)
+                    .expect("contiguous native offset still uses the legacy append path");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
     let root = TempDir::new().unwrap();
     let error = SourceSpoolConfig::try_new_with_cursor_policy(
