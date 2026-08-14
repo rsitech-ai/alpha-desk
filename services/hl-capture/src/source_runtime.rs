@@ -26,9 +26,9 @@ use crate::spool::{
 use crate::{
     AppError, BacklogError, BacklogRead, CaptureConfig, CommittedNodePipeline,
     CommittedNodePipelineConfig, DiskReserveError, DiskReserveGuard, DiskSpaceProbe,
-    FilesystemDiskSpaceProbe, OwnedTask, PipelineError, PipelineOutcome, RawSegmentArchive,
-    RawSegmentArchiveConfig, RawSegmentArchiveError, RawSegmentArchiveVerification,
-    RawSpoolArchiveEvidence, SourceAdapterConfig, SpoolBacklog,
+    FilesystemDiskSpaceProbe, NodeReplicaCmdsStyle, OwnedTask, PipelineError, PipelineOutcome,
+    RawSegmentArchive, RawSegmentArchiveConfig, RawSegmentArchiveError,
+    RawSegmentArchiveVerification, RawSpoolArchiveEvidence, SourceAdapterConfig, SpoolBacklog,
 };
 
 const SPOOL_SCHEMA_VERSION: &str = "spool-v1";
@@ -316,6 +316,15 @@ fn committed_source_role(trust: SourceTrust) -> Result<CommittedSourceRole, Sour
     }
 }
 
+fn committed_replica_cmds_style(style: NodeReplicaCmdsStyle) -> Result<(), SourceRuntimeError> {
+    match style {
+        NodeReplicaCmdsStyle::ActionsAndResponses => Ok(()),
+        NodeReplicaCmdsStyle::Actions | NodeReplicaCmdsStyle::RecentActions => {
+            Err(SourceRuntimeError::InvalidConfig)
+        }
+    }
+}
+
 pub(crate) fn committed_node_tasks(
     config: &CaptureConfig,
     progress: Arc<dyn CaptureProgressStore>,
@@ -334,8 +343,11 @@ pub(crate) fn committed_node_tasks(
                 stream_name,
                 start_height,
                 poll_interval_millis,
-                replica_cmds_style: _,
-            }) => (path, stream_name, start_height, poll_interval_millis),
+                replica_cmds_style,
+            }) => {
+                committed_replica_cmds_style(*replica_cmds_style)?;
+                (path, stream_name, start_height, poll_interval_millis)
+            }
             Some(SourceAdapterConfig::NodeLine { .. }) | None => continue,
         };
         let admission = source
@@ -2126,17 +2138,18 @@ mod tests {
     use crate::{
         AuxiliaryQualificationState, AuxiliarySourceHealth, BacklogError,
         BlockingRawSegmentArchive, CaptureConfig, DiskReserveError, DiskReserveGuard,
-        DiskSpaceProbe, FailoverStore, RawSegmentArchive, RestartReconstruction,
+        DiskSpaceProbe, FailoverStore, NodeReplicaCmdsStyle, RawSegmentArchive,
+        RestartReconstruction,
     };
 
     use super::{
         AuxiliaryNodeSourceTaskConfig, CommittedSourceRole, DrainSessionError,
         NodeSourceTaskConfig, RetryBackoff, SourceNotification, SourceRuntimeError,
         append_auxiliary_observation, attempt_failover, auxiliary_commit_policy,
-        auxiliary_node_task, classify_backlog_error, committed_source_role, group_commit_due,
-        open_auxiliary_node_source, prepare_source_spool_path,
-        run_auxiliary_node_acquisition_with_probe, run_committed_node_acquisition_with_probe,
-        supervise_auxiliary_tasks,
+        auxiliary_node_task, classify_backlog_error, committed_replica_cmds_style,
+        committed_source_role, group_commit_due, open_auxiliary_node_source,
+        prepare_source_spool_path, run_auxiliary_node_acquisition_with_probe,
+        run_committed_node_acquisition_with_probe, supervise_auxiliary_tasks,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -2463,6 +2476,36 @@ mod tests {
                         error.reason_code(),
                         "capture_source.invalid_config",
                         "{trust:?} must reuse the existing invalid-config reason"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn committed_replica_cmds_style_fail_closes_every_constructible_style() {
+        for style in [
+            NodeReplicaCmdsStyle::Actions,
+            NodeReplicaCmdsStyle::ActionsAndResponses,
+            NodeReplicaCmdsStyle::RecentActions,
+        ] {
+            let result = committed_replica_cmds_style(style);
+            match style {
+                NodeReplicaCmdsStyle::ActionsAndResponses => {
+                    result.expect("actions-and-responses remains the admitted replica_cmds style");
+                }
+                NodeReplicaCmdsStyle::Actions | NodeReplicaCmdsStyle::RecentActions => {
+                    let error = result.expect_err(
+                        "config-rejected replica_cmds styles fail closed if they reach runtime",
+                    );
+                    assert!(
+                        matches!(error, SourceRuntimeError::InvalidConfig),
+                        "{style:?} must reuse InvalidConfig"
+                    );
+                    assert_eq!(
+                        error.reason_code(),
+                        "capture_source.invalid_config",
+                        "{style:?} must reuse the existing invalid-config reason"
                     );
                 }
             }
