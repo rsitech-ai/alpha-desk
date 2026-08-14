@@ -218,10 +218,13 @@ pub(super) fn append_batch(
     batch: &RawObservationBatch,
     durable_at: KnownTime,
 ) -> Result<RawObservationReceipt, ArchiveError> {
-    if batch.cursor_policy() != CursorPolicy::MonotonicByteOffset {
-        return Err(ArchiveError::InvalidInput(
-            "raw V2 archive requires monotonic byte offsets",
-        ));
+    match batch.cursor_policy() {
+        CursorPolicy::MonotonicByteOffset => {}
+        CursorPolicy::ContiguousNativeOffset => {
+            return Err(ArchiveError::InvalidInput(
+                "raw V2 archive requires monotonic byte offsets",
+            ));
+        }
     }
     let first = batch
         .observations()
@@ -1627,6 +1630,102 @@ mod tests {
     use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor};
 
     use super::*;
+
+    #[test]
+    fn append_batch_covers_every_constructible_cursor_policy() {
+        for cursor_policy in [
+            CursorPolicy::ContiguousNativeOffset,
+            CursorPolicy::MonotonicByteOffset,
+        ] {
+            let temporary = tempfile::tempdir().expect("archive root");
+            let durable_at = KnownTime::from_unix_micros(1_721_779_300_000_000).expect("time");
+            let archive = crate::LocalParquetArchive::open(
+                temporary.path(),
+                crate::ArchiveConfig::deterministic_fixture("raw-v2-policy-test", durable_at)
+                    .expect("config"),
+            )
+            .expect("archive");
+            let batch = match cursor_policy {
+                CursorPolicy::ContiguousNativeOffset => contiguous_batch(),
+                CursorPolicy::MonotonicByteOffset => byte_offset_batch(),
+            };
+            let result = append_batch(&archive, &batch, durable_at);
+            match cursor_policy {
+                CursorPolicy::MonotonicByteOffset => {
+                    let receipt = result.expect("raw V2 append still admits MonotonicByteOffset");
+                    assert_eq!(receipt.cursor_policy(), CursorPolicy::MonotonicByteOffset);
+                    assert!(
+                        receipt.receipt_id().starts_with("raw-archive-receipt-v2-"),
+                        "MonotonicByteOffset still takes the V2 byte-offset append path"
+                    );
+                    assert!(receipt.local_sequence_range().is_some());
+                }
+                CursorPolicy::ContiguousNativeOffset => {
+                    let error = result.expect_err(
+                        "raw V2 append still rejects ContiguousNativeOffset as InvalidInput",
+                    );
+                    assert!(matches!(
+                        error,
+                        ArchiveError::InvalidInput(
+                            "raw V2 archive requires monotonic byte offsets"
+                        )
+                    ));
+                    assert_eq!(error.reason_code(), "archive.invalid_input");
+                }
+            }
+        }
+    }
+
+    fn contiguous_batch() -> RawObservationBatch {
+        RawObservationBatch::try_new(
+            ChainId::new("mainnet").expect("chain"),
+            vec![policy_observation(
+                "primary-node",
+                ObservationClass::CommittedBlock,
+                10,
+                b"legacy",
+            )],
+            [0xa1; 32],
+            [0xb2; 32],
+        )
+        .expect("contiguous batch")
+    }
+
+    fn byte_offset_batch() -> RawObservationBatch {
+        RawObservationBatch::try_new_byte_offsets(
+            ChainId::new("mainnet").expect("chain"),
+            vec![policy_observation(
+                "node-trades",
+                ObservationClass::AuxiliaryLedger,
+                19,
+                b"byte",
+            )],
+            [0xa1; 32],
+            [0xb2; 32],
+            LocalRecordSequence::try_new(41).expect("local sequence"),
+        )
+        .expect("byte-offset batch")
+    }
+
+    fn policy_observation(
+        source: &str,
+        observation_class: ObservationClass,
+        offset: u64,
+        payload: &'static [u8],
+    ) -> SourceObservation {
+        SourceObservation::new(
+            SourceId::new(source).expect("source"),
+            "capture-v1",
+            observation_class,
+            SourceCursor::new("epoch-a", offset).expect("cursor"),
+            ReceiveTimestamps::new(1_721_779_200_000_000, 9_000_000).expect("timestamps"),
+            "raw-parser-v1",
+            Bytes::from_static(payload),
+            Vec::new(),
+            1024,
+        )
+        .expect("observation")
+    }
 
     #[test]
     fn batch_manifest_v2_bytes_are_frozen() {
