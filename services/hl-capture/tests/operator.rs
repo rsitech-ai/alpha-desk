@@ -111,11 +111,11 @@ fn sample_status() -> CaptureStatus {
         "last_durable_wall_micros": 1_000,
         "restart_reconstruction": "incomplete"
     }]);
-    serde_json::from_value(value).expect("valid v4 snapshot")
+    serde_json::from_value(value).expect("valid v5 snapshot")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn operator_status_serves_v4_json_health_and_sse() {
+async fn operator_status_serves_written_v5_json_health_and_sse() {
     let directory = tempdir().expect("temp directory");
     let status_path = directory.path().join("capture-status.json");
     StatusWriter::new(status_path.clone())
@@ -142,7 +142,9 @@ async fn operator_status_serves_v4_json_health_and_sse() {
     let (status_code, status_body) = http_get(addr, "/status").await;
     assert_eq!(status_code, 200);
     let value = json_from_http(&status_body);
-    assert_eq!(value["schema_version"], "hl.capture.status.v4");
+    assert_eq!(value["schema_version"], "hl.capture.status.v5");
+    assert_eq!(value["maintenance"]["enabled"], false);
+    assert_eq!(value["maintenance"]["retention_authorized"], false);
     assert_eq!(value["durable_height"], 12);
     assert_eq!(value["capture_backlog_records"], 1);
     assert_eq!(value["throughput_records_per_sec"], 3);
@@ -177,7 +179,7 @@ async fn operator_status_serves_v4_json_health_and_sse() {
     .expect("first SSE status event");
     let sse_text = std::str::from_utf8(&sse_body).expect("UTF-8 SSE");
     assert!(sse_text.contains("event: status"));
-    assert!(sse_text.contains("hl.capture.status.v4"));
+    assert!(sse_text.contains("hl.capture.status.v5"));
 
     cancellation.cancel();
     server.await.expect("join").expect("serve stops");

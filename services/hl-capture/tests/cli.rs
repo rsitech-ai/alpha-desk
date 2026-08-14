@@ -117,7 +117,10 @@ fn status_outputs_the_validated_atomic_snapshot_without_config_secrets() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("status JSON");
-    assert_eq!(value["schema_version"], "hl.capture.status.v4");
+    assert_eq!(value["schema_version"], "hl.capture.status.v5");
+    assert_eq!(value["maintenance"]["enabled"], false);
+    assert_eq!(value["maintenance"]["retention_authorized"], false);
+    assert!(value.get("throughput_records_per_sec").is_none());
     assert_eq!(value["durable_height"], 500);
     assert_eq!(value["capture_backlog_records"], 12);
     assert_eq!(value["oldest_pending_capture_height"], 501);
@@ -128,6 +131,35 @@ fn status_outputs_the_validated_atomic_snapshot_without_config_secrets() {
             .expect("UTF-8 status")
             .contains("alpha-desk-postgres-url")
     );
+}
+
+#[test]
+fn status_json_still_reads_v4_without_inventing_maintenance_or_rates() {
+    let directory = tempdir().expect("temporary directory");
+    let status_path = directory.path().join("capture-status.json");
+    fs::write(&status_path, capture_fixture("status-v4.json")).expect("write v4 fixture");
+    let config_path = directory.path().join("capture.toml");
+    let status_path_text = status_path.to_string_lossy();
+    let config = include_str!("../../../config/capture.example.toml").replace(
+        "status_path = \"state/capture-status.json\"",
+        &format!("status_path = \"{status_path_text}\""),
+    );
+    fs::write(&config_path, config).expect("write config");
+
+    let output = binary()
+        .args(["status", "--config"])
+        .arg(&config_path)
+        .arg("--json")
+        .output()
+        .expect("run status");
+
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(value["schema_version"], "hl.capture.status.v4");
+    assert!(value.get("maintenance").is_none());
+    assert!(value.get("throughput_records_per_sec").is_none());
+    assert!(value.get("throughput_blocks_per_sec").is_none());
+    assert_eq!(value["ready"], true);
 }
 
 #[test]
@@ -246,7 +278,7 @@ fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
 }
 
 #[test]
-fn serve_status_cli_serves_v4_json_and_fails_closed_on_a_missing_file() {
+fn serve_status_cli_serves_written_v5_json_and_fails_closed_on_a_missing_file() {
     let directory = tempdir().expect("temporary directory");
     let status_path = directory.path().join("capture-status.json");
     let config_path = directory.path().join("capture.toml");
@@ -296,7 +328,10 @@ fn serve_status_cli_serves_v4_json_and_fails_closed_on_a_missing_file() {
     assert_eq!(status, 200);
     let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
     let value: serde_json::Value = serde_json::from_str(&body[json_start..]).expect("status JSON");
-    assert_eq!(value["schema_version"], "hl.capture.status.v4");
+    assert_eq!(value["schema_version"], "hl.capture.status.v5");
+    assert_eq!(value["maintenance"]["enabled"], false);
+    assert_eq!(value["maintenance"]["retention_authorized"], false);
+    assert!(value.get("throughput_records_per_sec").is_none());
     assert_eq!(value["durable_height"], 500);
 }
 

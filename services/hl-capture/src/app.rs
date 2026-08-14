@@ -44,8 +44,8 @@ pub(crate) struct RuntimeHealthSnapshot {
     auxiliary_sources: BTreeMap<String, AuxiliarySourceStatus>,
     archived_records_in_window: u64,
     captured_blocks_in_window: u64,
-    throughput_records_per_sec: u32,
-    throughput_blocks_per_sec: u32,
+    throughput_records_per_sec: Option<u32>,
+    throughput_blocks_per_sec: Option<u32>,
     rate_window_started: Instant,
 }
 
@@ -74,8 +74,8 @@ impl CaptureRuntimeHealth {
             auxiliary_sources: BTreeMap::new(),
             archived_records_in_window: 0,
             captured_blocks_in_window: 0,
-            throughput_records_per_sec: 0,
-            throughput_blocks_per_sec: 0,
+            throughput_records_per_sec: None,
+            throughput_blocks_per_sec: None,
             rate_window_started: Instant::now(),
         });
         Self { sender }
@@ -384,10 +384,14 @@ impl CaptureRuntimeHealth {
             let elapsed_millis = u64::try_from(snapshot.rate_window_started.elapsed().as_millis())
                 .unwrap_or(u64::MAX)
                 .max(1);
-            snapshot.throughput_records_per_sec =
-                per_second_rate(snapshot.archived_records_in_window, elapsed_millis);
-            snapshot.throughput_blocks_per_sec =
-                per_second_rate(snapshot.captured_blocks_in_window, elapsed_millis);
+            snapshot.throughput_records_per_sec = Some(per_second_rate(
+                snapshot.archived_records_in_window,
+                elapsed_millis,
+            ));
+            snapshot.throughput_blocks_per_sec = Some(per_second_rate(
+                snapshot.captured_blocks_in_window,
+                elapsed_millis,
+            ));
             snapshot.archived_records_in_window = 0;
             snapshot.captured_blocks_in_window = 0;
             snapshot.rate_window_started = Instant::now();
@@ -751,7 +755,7 @@ impl StatusContext {
         )
         .with_archive_manifest_id(archive_manifest_id)
         .with_last_error_reason(runtime_health.reason_code.map(str::to_owned))
-        .with_throughput(
+        .with_optional_throughput(
             runtime_health.throughput_records_per_sec,
             runtime_health.throughput_blocks_per_sec,
         )
@@ -792,7 +796,7 @@ impl StatusContext {
             runtime_health.oldest_pending_capture_height,
             runtime_health.disk_free_basis_points,
         )
-        .with_throughput(
+        .with_optional_throughput(
             runtime_health.throughput_records_per_sec,
             runtime_health.throughput_blocks_per_sec,
         )
@@ -915,6 +919,8 @@ mod tests {
         let pending = health.snapshot();
         assert_eq!(pending.captured_blocks_in_window, 1);
         assert_eq!(pending.archived_records_in_window, 3);
+        assert!(pending.throughput_records_per_sec.is_none());
+        assert!(pending.throughput_blocks_per_sec.is_none());
         assert_eq!(super::per_second_rate(0, 1_000), 0);
         assert_eq!(super::per_second_rate(5, 1_000), 5);
         assert_eq!(super::per_second_rate(1, 1), 1_000);
@@ -924,11 +930,13 @@ mod tests {
         let sampled = health.snapshot();
         assert_eq!(sampled.captured_blocks_in_window, 0);
         assert_eq!(sampled.archived_records_in_window, 0);
+        assert!(sampled.throughput_records_per_sec.is_some());
+        assert!(sampled.throughput_blocks_per_sec.is_some());
 
         health.sample_throughput();
         let idle = health.snapshot();
-        assert_eq!(idle.throughput_blocks_per_sec, 0);
-        assert_eq!(idle.throughput_records_per_sec, 0);
+        assert_eq!(idle.throughput_blocks_per_sec, Some(0));
+        assert_eq!(idle.throughput_records_per_sec, Some(0));
     }
 
     #[test]
