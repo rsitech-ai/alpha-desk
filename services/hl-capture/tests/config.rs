@@ -291,6 +291,46 @@ fn ambiguous_committed_source_topologies_fail_before_opening_files() {
 }
 
 #[test]
+fn committed_source_adapter_covers_every_constructible_kind() {
+    let admitted = CaptureConfig::from_toml(&valid_config())
+        .expect("node-block-directory remains the admitted committed adapter");
+    match admitted
+        .source("primary-node")
+        .expect("primary source")
+        .adapter()
+    {
+        Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => {}
+        Some(SourceAdapterConfig::NodeLine { .. }) | None => {
+            panic!("example committed adapter must remain node-block-directory")
+        }
+    }
+
+    let node_line = replace_once(
+        &valid_config(),
+        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25, replica_cmds_style = \"actions-and-responses\" }",
+        "adapter = { kind = \"node-line\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", stream = \"transaction-blocks\", poll_interval_millis = 25 }",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&node_line)
+            .expect_err("node-line cannot admit a committed source")
+            .reason_code(),
+        "capture_config.invalid_committed_source_adapter"
+    );
+
+    let missing_adapter = replace_once(
+        &valid_config(),
+        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25, replica_cmds_style = \"actions-and-responses\" }\n",
+        "",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing_adapter)
+            .expect_err("committed source adapter is required")
+            .reason_code(),
+        "capture_config.invalid_committed_source_adapter"
+    );
+}
+
+#[test]
 fn topology_counter_pins_every_source_trust_count_effect() {
     for trust in SourceTrust::ALL {
         match trust {

@@ -125,13 +125,11 @@ impl CaptureConfig {
 }
 
 fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), ConfigError> {
-    if matches!(
-        source.adapter,
-        Some(SourceAdapterConfig::NodeBlockDirectory { .. })
-    ) {
-        Ok(())
-    } else {
-        Err(ConfigError::InvalidCommittedSourceAdapter)
+    match source.adapter.as_ref() {
+        Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => Ok(()),
+        Some(SourceAdapterConfig::NodeLine { .. }) | None => {
+            Err(ConfigError::InvalidCommittedSourceAdapter)
+        }
     }
 }
 
