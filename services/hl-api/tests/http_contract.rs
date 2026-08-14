@@ -17,6 +17,7 @@ use hl_api::{
     auxiliary_source_local_sequence_is_optional_u64,
     auxiliary_source_partial_line_is_required_bool, auxiliary_source_qualification_openapi_enum,
     auxiliary_source_spool_records_is_required_u64,
+    auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
     committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
@@ -1231,6 +1232,109 @@ async fn nested_auxiliary_cursor_epoch_is_optional_string() {
 }
 
 #[tokio::test]
+async fn nested_auxiliary_tail_cursor_epoch_is_optional_string() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted nested tail_cursor_epoch must stay 200"
+    );
+    assert!(
+        body["auxiliary_sources"][0]
+            .get("tail_cursor_epoch")
+            .is_none()
+    );
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value["auxiliary_sources"][0]["tail_cursor_epoch"] = serde_json::json!("node-file-v1:epoch");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode known string tail_cursor_epoch"),
+    )
+    .expect("write known string tail_cursor_epoch");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known string tail_cursor_epoch must stay 200");
+    assert_eq!(
+        body["auxiliary_sources"][0]["tail_cursor_epoch"],
+        "node-file-v1:epoch"
+    );
+
+    value["auxiliary_sources"][0]
+        .as_object_mut()
+        .expect("auxiliary source object")
+        .remove("tail_cursor_epoch");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted tail_cursor_epoch"),
+    )
+    .expect("write omitted tail_cursor_epoch");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted nested tail_cursor_epoch after removal must stay 200"
+    );
+    assert!(
+        body["auxiliary_sources"][0]
+            .get("tail_cursor_epoch")
+            .is_none()
+    );
+
+    for tail_cursor_epoch in [
+        serde_json::json!(1),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-string"}),
+        serde_json::json!(["not-a-string"]),
+        serde_json::json!(""),
+    ] {
+        value["auxiliary_sources"][0]["tail_cursor_epoch"] = tail_cursor_epoch.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-string tail_cursor_epoch"),
+        )
+        .expect("write non-string tail_cursor_epoch");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{tail_cursor_epoch} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
+#[tokio::test]
 async fn nested_auxiliary_durable_offset_is_optional_u64() {
     let directory = tempdir().expect("temporary directory");
     let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
@@ -2197,6 +2301,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.cursor_epoch as an optional string"
     );
     assert!(
+        auxiliary_source_tail_cursor_epoch_is_optional_string(document),
+        "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.tail_cursor_epoch as an optional string"
+    );
+    assert!(
         auxiliary_source_durable_offset_is_optional_u64(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.durable_offset as an optional u64 integer"
     );
@@ -2374,6 +2482,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         auxiliary_source_cursor_epoch_is_optional_string(document),
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.cursor_epoch as an optional string"
+    );
+    assert!(
+        auxiliary_source_tail_cursor_epoch_is_optional_string(document),
+        "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.tail_cursor_epoch as an optional string"
     );
     assert!(
         auxiliary_source_durable_offset_is_optional_u64(document),

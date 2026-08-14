@@ -294,6 +294,8 @@ components:
         snapshot_invalid. Nested partial_line is a required boolean; present
         non-boolean values, and omitted, are snapshot_invalid. Nested cursor_epoch
         is an optional string; present non-string values, and empty present
+        strings, are snapshot_invalid. Omitted stays omitted. Nested tail_cursor_epoch
+        is an optional string; present non-string values, and empty present
         strings, are snapshot_invalid. Omitted stays omitted. Nested durable_offset
         is an optional u64 integer; present non-number or non-u64 values are
         snapshot_invalid. Omitted stays omitted. Nested local_sequence is an
@@ -385,7 +387,10 @@ components:
             boolean; present non-boolean values, and omitted, are
             snapshot_invalid. Nested cursor_epoch is an optional string;
             present non-string values, and empty present strings, are
-            snapshot_invalid. Omitted stays omitted. Nested durable_offset is
+            snapshot_invalid. Omitted stays omitted. Nested tail_cursor_epoch is
+            an optional string; present non-string values, and empty present
+            strings, are snapshot_invalid. Omitted stays omitted. Nested
+            durable_offset is
             an optional u64 integer; present non-number or non-u64 values are
             snapshot_invalid. Omitted stays omitted. Nested local_sequence is
             an optional u64 integer; present non-number or non-u64 values are
@@ -487,6 +492,16 @@ components:
               cursor_epoch:
                 description: >
                   Optional capture writer durable file-cursor identity string.
+                  Present non-string values are snapshot_invalid. Empty present
+                  strings are snapshot_invalid. Omitted stays omitted. This
+                  document does not claim extra identity formats.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+              tail_cursor_epoch:
+                description: >
+                  Optional capture writer tailed-file identity string.
                   Present non-string values are snapshot_invalid. Empty present
                   strings are snapshot_invalid. Omitted stays omitted. This
                   document does not claim extra identity formats.
