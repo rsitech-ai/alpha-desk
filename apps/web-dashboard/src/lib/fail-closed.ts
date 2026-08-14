@@ -1,6 +1,7 @@
 import {
   API_ERROR_SCHEMA_VERSION,
   asCoreDeadletterReason,
+  asLedgerUnsupportedEventReason,
   assertNever,
   parseApiError,
   parseCoreHealth,
@@ -20,6 +21,7 @@ export type FailClosedFamily =
   | "unauthorized"
   | "data_unavailable"
   | "core_deadletter"
+  | "ledger_unsupported_event"
   | "typed_other"
 
 export interface FailClosedView {
@@ -100,6 +102,9 @@ export function familyOf(status: number, error: ApiError): FailClosedFamily {
   }
   if (asCoreDeadletterReason(error.reason_code)) {
     return "core_deadletter"
+  }
+  if (asLedgerUnsupportedEventReason(error.reason_code)) {
+    return "ledger_unsupported_event"
   }
   if (status === 503 || error.code === "data_unavailable") {
     return "data_unavailable"
@@ -182,6 +187,8 @@ function titleOf(
       return `${status} data unavailable`
     case "core_deadletter":
       return titleOfDeadletter(reasonCode)
+    case "ledger_unsupported_event":
+      return titleOfLedgerUnsupported(reasonCode)
     case "typed_other":
       return `HTTP ${status}`
     default:
@@ -210,6 +217,19 @@ function titleOfDeadletter(reasonCode: string): string {
   }
 }
 
+function titleOfLedgerUnsupported(reasonCode: string): string {
+  const reason = asLedgerUnsupportedEventReason(reasonCode)
+  if (!reason) {
+    return "503 data unavailable"
+  }
+  switch (reason) {
+    case "ledger.unsupported_event":
+      return "503 ledger unsupported event"
+    default:
+      return assertNever(reason)
+  }
+}
+
 function detailOf(family: FailClosedFamily, error: ApiError): string {
   switch (family) {
     case "snapshot_missing":
@@ -228,6 +248,8 @@ function detailOf(family: FailClosedFamily, error: ApiError): string {
       return "Typed data_unavailable. Empty panels are not a green snapshot."
     case "core_deadletter":
       return detailOfDeadletter(error.reason_code)
+    case "ledger_unsupported_event":
+      return detailOfLedgerUnsupported(error.reason_code)
     case "typed_other":
       return `${error.code} · ${error.reason_code}`
     default:
@@ -256,6 +278,19 @@ function detailOfDeadletter(reasonCode: string): string {
   }
 }
 
+function detailOfLedgerUnsupported(reasonCode: string): string {
+  const reason = asLedgerUnsupportedEventReason(reasonCode)
+  if (!reason) {
+    return `${reasonCode} · fail-closed`
+  }
+  switch (reason) {
+    case "ledger.unsupported_event":
+      return "hl-core consume rejected an action-bearing or poison event. Fail-closed; not ready. /status fail_closed_reason is latched."
+    default:
+      return assertNever(reason)
+  }
+}
+
 function toneOf(family: FailClosedFamily): Tone {
   switch (family) {
     case "stream_unspecified":
@@ -267,6 +302,7 @@ function toneOf(family: FailClosedFamily): Tone {
     case "unauthorized":
     case "data_unavailable":
     case "core_deadletter":
+    case "ledger_unsupported_event":
     case "typed_other":
       return "red"
     default:

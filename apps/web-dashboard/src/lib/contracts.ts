@@ -20,6 +20,12 @@ export const CORE_DEADLETTER_REASONS = [
   "core.deadletter_corrupt",
 ] as const satisfies readonly CoreDeadletterReason[]
 
+export type LedgerUnsupportedEventReason = "ledger.unsupported_event"
+
+export const LEDGER_UNSUPPORTED_EVENT_REASONS = [
+  "ledger.unsupported_event",
+] as const satisfies readonly LedgerUnsupportedEventReason[]
+
 export type CaptureStatusSchema =
   typeof CAPTURE_STATUS_SCHEMA_VERSION | typeof CAPTURE_STATUS_SCHEMA_V5
 
@@ -284,6 +290,23 @@ export function asCoreDeadletterReason(
     default:
       return undefined
   }
+}
+
+export function asLedgerUnsupportedEventReason(
+  value: string
+): LedgerUnsupportedEventReason | undefined {
+  switch (value) {
+    case "ledger.unsupported_event":
+      return value
+    default:
+      return undefined
+  }
+}
+
+export function asTypedCoreFailClosedReason(
+  value: string
+): CoreDeadletterReason | LedgerUnsupportedEventReason | undefined {
+  return asCoreDeadletterReason(value) ?? asLedgerUnsupportedEventReason(value)
 }
 
 export function isCoreHealth(value: HealthBody): value is CoreHealth {

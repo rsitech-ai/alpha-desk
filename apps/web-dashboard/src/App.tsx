@@ -27,7 +27,7 @@ import {
 } from "@/lib/api"
 import {
   API_ERROR_SCHEMA_VERSION,
-  asCoreDeadletterReason,
+  asTypedCoreFailClosedReason,
   isCoreHealth,
   type ApiError,
   type CaptureStatus,
@@ -155,9 +155,9 @@ function deriveConnection(state: FeedState): {
     feed.captureStatus.kind === "http-error" ||
     feed.canonicalHealth.kind === "invalid" ||
     feed.captureStatus.kind === "invalid" ||
-    isDeadletterFailClosed(feed.healthz) ||
-    isDeadletterFailClosed(feed.readyz) ||
-    isDeadletterFailClosed(feed.canonicalHealth)
+    isTypedCoreFailClosed(feed.healthz) ||
+    isTypedCoreFailClosed(feed.readyz) ||
+    isTypedCoreFailClosed(feed.canonicalHealth)
   ) {
     const reason = unavailableReason(feed)
     return {
@@ -196,9 +196,9 @@ function unavailableReason(feed: DeskFeed): string {
     return feed.canonicalHealth.error.reason_code
   }
   const healthReason =
-    deadletterReason(feed.healthz) ??
-    deadletterReason(feed.readyz) ??
-    deadletterReason(feed.canonicalHealth)
+    typedCoreFailClosedReason(feed.healthz) ??
+    typedCoreFailClosedReason(feed.readyz) ??
+    typedCoreFailClosedReason(feed.canonicalHealth)
   if (healthReason !== undefined) {
     return healthReason
   }
@@ -211,15 +211,15 @@ function unavailableReason(feed: DeskFeed): string {
   return "data_unavailable"
 }
 
-function isDeadletterFailClosed(outcome: EndpointOutcome<HealthBody>): boolean {
-  return deadletterReason(outcome) !== undefined
+function isTypedCoreFailClosed(outcome: EndpointOutcome<HealthBody>): boolean {
+  return typedCoreFailClosedReason(outcome) !== undefined
 }
 
-function deadletterReason(
+function typedCoreFailClosedReason(
   outcome: EndpointOutcome<HealthBody>
 ): string | undefined {
   if (outcome.kind === "http-error") {
-    return asCoreDeadletterReason(outcome.error.reason_code)
+    return asTypedCoreFailClosedReason(outcome.error.reason_code)
   }
   if (outcome.kind !== "ok") {
     return undefined
@@ -228,9 +228,9 @@ function deadletterReason(
     if (outcome.data.reason_code === null) {
       return undefined
     }
-    return asCoreDeadletterReason(outcome.data.reason_code)
+    return asTypedCoreFailClosedReason(outcome.data.reason_code)
   }
-  return asCoreDeadletterReason(outcome.data.reason_code)
+  return asTypedCoreFailClosedReason(outcome.data.reason_code)
 }
 
 function healthBodyIsDegraded(status: number, body: HealthBody): boolean {
@@ -297,7 +297,8 @@ function HealthChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
       const view = mapApiError(outcome.status, outcome.error)
       return (
         <ToneBadge tone={view.tone}>
-          {view.family === "core_deadletter"
+          {view.family === "core_deadletter" ||
+          view.family === "ledger_unsupported_event"
             ? view.title
             : `${outcome.status} ${outcome.error.reason_code}`}
         </ToneBadge>
@@ -308,8 +309,8 @@ function HealthChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
         return <CoreHealthChip status={outcome.status} health={outcome.data} />
       }
       {
-        const deadletter = asCoreDeadletterReason(outcome.data.reason_code)
-        if (deadletter !== undefined) {
+        const typed = asTypedCoreFailClosedReason(outcome.data.reason_code)
+        if (typed !== undefined) {
           const view = mapApiError(outcome.status, {
             schema_version: API_ERROR_SCHEMA_VERSION,
             code: "data_unavailable",
@@ -347,7 +348,8 @@ function ReadyChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
       const view = mapApiError(outcome.status, outcome.error)
       return (
         <ToneBadge tone={view.tone}>
-          {view.family === "core_deadletter"
+          {view.family === "core_deadletter" ||
+          view.family === "ledger_unsupported_event"
             ? view.title
             : `${outcome.status} ${outcome.error.reason_code}`}
         </ToneBadge>

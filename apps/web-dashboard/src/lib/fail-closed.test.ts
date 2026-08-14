@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   CORE_DEADLETTER_REASONS,
+  LEDGER_UNSUPPORTED_EVENT_REASONS,
   lastHeartbeatThroughput,
   parseCaptureStatus,
   parseCoreHealth,
@@ -130,6 +131,40 @@ describe("mapApiError", () => {
       503,
       errorBody("data_unavailable", "core.deadletter_unspecified_future")
     )
+    expect(view.family).not.toBe("core_deadletter")
+    expect(view.family).not.toBe("ledger_unsupported_event")
+    expect(view.family).toBe("data_unavailable")
+    expect(view.tone).toBe("red")
+    expect(view.tone).not.toBe("green")
+    expect(view.title).not.toMatch(/ready/i)
+  })
+
+  it.each(LEDGER_UNSUPPORTED_EVENT_REASONS)(
+    "maps 503 %s as typed consume-poison fail-closed, not generic data_unavailable",
+    (reason_code) => {
+      const view = mapApiError(503, errorBody("data_unavailable", reason_code))
+      expect(view.family).toBe("ledger_unsupported_event")
+      expect(view.family).not.toBe("data_unavailable")
+      expect(view.family).not.toBe("core_deadletter")
+      expect(view.title).toBe("503 ledger unsupported event")
+      expect(view.title).not.toBe("503 data unavailable")
+      expect(view.tone).toBe("red")
+      expect(view.tone).not.toBe("green")
+      expect(view.detail).toMatch(/action-bearing or poison/)
+      expect(view.detail).not.toMatch(/live-qualified|Stage 6|Stage PASS/i)
+      expect(view.reasonCode).toBe(reason_code)
+      expect(familyOf(503, errorBody("data_unavailable", reason_code))).toBe(
+        "ledger_unsupported_event"
+      )
+    }
+  )
+
+  it("does not treat unknown ledger.* as ready or as ledger_unsupported_event", () => {
+    const view = mapApiError(
+      503,
+      errorBody("data_unavailable", "ledger.unspecified_future")
+    )
+    expect(view.family).not.toBe("ledger_unsupported_event")
     expect(view.family).not.toBe("core_deadletter")
     expect(view.family).toBe("data_unavailable")
     expect(view.tone).toBe("red")
@@ -467,6 +502,7 @@ describe("hl-core dead-letter health and status", () => {
       return
     }
     expect(outcome.view.family).not.toBe("core_deadletter")
+    expect(outcome.view.family).not.toBe("ledger_unsupported_event")
     expect(outcome.view.family).toBe("data_unavailable")
     expect(outcome.view.tone).toBe("red")
     expect(outcome.view.tone).not.toBe("green")
@@ -489,6 +525,7 @@ describe("hl-core dead-letter health and status", () => {
     expect(outcome.view.tone).toBe("red")
     expect(outcome.view.tone).not.toBe("green")
     expect(outcome.view.family).not.toBe("core_deadletter")
+    expect(outcome.view.family).not.toBe("ledger_unsupported_event")
   })
 
   it("parses ready core /healthz without inventing a dead-letter reason", () => {
@@ -516,5 +553,87 @@ describe("hl-core dead-letter health and status", () => {
       stage_2_qualified: false,
     })
     expect(classified.kind).toBe("not_observed")
+  })
+})
+
+describe("hl-core ledger.unsupported_event consume poison", () => {
+  it.each(LEDGER_UNSUPPORTED_EVENT_REASONS)(
+    "classifies /healthz 503 %s as typed fail-closed, not invalid or ready",
+    (reason_code) => {
+      const outcome = classifyHttpBody(503, coreHealth503(reason_code))
+      expect(outcome.kind).toBe("observed")
+      if (outcome.kind !== "observed") {
+        return
+      }
+      expect(outcome.view.family).toBe("ledger_unsupported_event")
+      expect(outcome.view.family).not.toBe("data_unavailable")
+      expect(outcome.view.family).not.toBe("core_deadletter")
+      expect(outcome.view.httpStatus).toBe(503)
+      expect(outcome.view.reasonCode).toBe(reason_code)
+      expect(outcome.view.tone).toBe("red")
+      expect(outcome.view.tone).not.toBe("green")
+      expect(outcome.view.title).toBe("503 ledger unsupported event")
+      expect(outcome.view.title).not.toBe("503 data unavailable")
+      expect(outcome.view.detail).toMatch(/action-bearing or poison/)
+      expect(outcome.view.detail).not.toMatch(/live-qualified|Stage PASS/i)
+    }
+  )
+
+  it.each(LEDGER_UNSUPPORTED_EVENT_REASONS)(
+    "classifies /status HTTP 200 with fail_closed_reason %s as typed 503, not ready",
+    (reason_code) => {
+      const outcome = classifyHttpBody(200, coreStatusFailClosed(reason_code))
+      expect(outcome.kind).toBe("observed")
+      if (outcome.kind !== "observed") {
+        return
+      }
+      expect(outcome.view.family).toBe("ledger_unsupported_event")
+      expect(outcome.view.family).not.toBe("data_unavailable")
+      expect(outcome.view.reasonCode).toBe(reason_code)
+      expect(outcome.view.tone).toBe("red")
+      expect(outcome.view.tone).not.toBe("green")
+      expect(outcome.view.title).toBe("503 ledger unsupported event")
+      expect(outcome.view.title).not.toBe("503 data unavailable")
+      expect(outcome.view.detail).toMatch(/fail_closed_reason/)
+    }
+  )
+
+  it("keeps omitted last_applied_watermark omitted, not 0, on ledger unsupported-event status", () => {
+    const parsed = parseCoreStatus(
+      coreStatusFailClosed("ledger.unsupported_event")
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.fail_closed_reason).toBe("ledger.unsupported_event")
+    expect(parsed.value.ready).toBe(false)
+    expect(parsed.value.last_applied_watermark).toBeUndefined()
+    expect(parsed.value.live_qualified).toBe(false)
+    expect(parsed.value.stage_2_qualified).toBe(false)
+
+    const missingThroughput = parseCaptureStatus(v4Status())
+    expect(missingThroughput.ok).toBe(true)
+    if (!missingThroughput.ok) {
+      return
+    }
+    expect(missingThroughput.value.throughput_records_per_sec).toBeUndefined()
+    expect(missingThroughput.value.throughput_blocks_per_sec).toBeUndefined()
+  })
+
+  it("fail-closes unknown ledger reason codes instead of showing ready", () => {
+    const outcome = classifyHttpBody(
+      503,
+      coreHealth503("ledger.unspecified_future")
+    )
+    expect(outcome.kind).toBe("observed")
+    if (outcome.kind !== "observed") {
+      return
+    }
+    expect(outcome.view.family).not.toBe("ledger_unsupported_event")
+    expect(outcome.view.family).toBe("data_unavailable")
+    expect(outcome.view.tone).toBe("red")
+    expect(outcome.view.tone).not.toBe("green")
+    expect(outcome.view.title).not.toMatch(/ready/i)
   })
 })

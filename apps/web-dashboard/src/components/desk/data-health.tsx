@@ -24,7 +24,7 @@ import {
   CORE_HEALTH_FIELD_ORDER,
   HEALTH_FIELD_ORDER,
   HEALTH_SCHEMA_VERSION,
-  asCoreDeadletterReason,
+  asTypedCoreFailClosedReason,
   assertNever,
   isCoreHealth,
   type CoreHealth,
@@ -145,7 +145,7 @@ function HealthBlock({
         )
       }
       const assessment = outcome.data
-      const deadletter = asCoreDeadletterReason(assessment.reason_code)
+      const typedReason = asTypedCoreFailClosedReason(assessment.reason_code)
       const rows = HEALTH_FIELD_ORDER.map((field) => {
         switch (field) {
           case "schema_version":
@@ -173,7 +173,7 @@ function HealthBlock({
         }
       })
       const typed =
-        deadletter !== undefined
+        typedReason !== undefined
           ? mapApiError(outcome.status, {
               schema_version: API_ERROR_SCHEMA_VERSION,
               code: "data_unavailable",
