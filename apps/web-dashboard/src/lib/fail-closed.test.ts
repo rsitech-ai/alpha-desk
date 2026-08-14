@@ -547,25 +547,27 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
   }
 
   // Distinct ids already valid on this web parse (existing fixture / capture
-  // test identities). Not an invented aux-source-{index} helper; writer charset
-  // is not copied. Sort order stays untyped.
+  // test identities), listed in strictly increasing lexicographic order so
+  // the 16-item cap fixture stays valid under `previous >= source_id`. Not
+  // an invented aux-source-{index} helper; writer charset is not copied.
+  // OpenAPI uniqueItems is not invented.
   const DISTINCT_AUX_SOURCE_IDS = [
-    "node-line-a",
-    "node-fills",
-    "primary-node",
-    "independent-node",
-    "node-fills-exit",
-    "node-fills-panic",
-    "node-fills-duplicate",
-    "node-fills-archive-lineage",
-    "node-fills-rotation",
-    "node-fills-partial",
-    "node-fills-oversized",
-    "node-fills-first-error",
-    "node-fills-drain-error",
-    "primary-node-fills",
-    "primary-node-blocks",
     "fixture-node-trades",
+    "independent-node",
+    "node-fills",
+    "node-fills-archive-lineage",
+    "node-fills-drain-error",
+    "node-fills-duplicate",
+    "node-fills-exit",
+    "node-fills-first-error",
+    "node-fills-oversized",
+    "node-fills-panic",
+    "node-fills-partial",
+    "node-fills-rotation",
+    "node-line-a",
+    "primary-node",
+    "primary-node-blocks",
+    "primary-node-fills",
   ] as const
 
   function auxiliarySources(count: number): Record<string, unknown>[] {
@@ -576,6 +578,11 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
     expect(MAX_AUXILIARY_SOURCES).toBe(16)
     expect(DISTINCT_AUX_SOURCE_IDS).toHaveLength(MAX_AUXILIARY_SOURCES)
     expect(new Set(DISTINCT_AUX_SOURCE_IDS).size).toBe(MAX_AUXILIARY_SOURCES)
+    for (let index = 1; index < DISTINCT_AUX_SOURCE_IDS.length; index += 1) {
+      expect(
+        DISTINCT_AUX_SOURCE_IDS[index - 1] < DISTINCT_AUX_SOURCE_IDS[index]
+      ).toBe(true)
+    }
   })
 
   it("keeps omitted and null auxiliary_sources omitted", () => {
@@ -616,7 +623,7 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
     expect(parsed.value.auxiliary_sources?.[0]?.extra_fields).toEqual({})
   })
 
-  it("parses auxiliary_sources at the writer cap with distinct source_id", () => {
+  it("parses auxiliary_sources at the writer cap with strictly increasing source_id", () => {
     const parsed = parseCaptureStatus(
       v4Status({
         auxiliary_sources: DISTINCT_AUX_SOURCE_IDS.map((source_id) =>
@@ -629,11 +636,13 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
       return
     }
     expect(parsed.value.auxiliary_sources).toHaveLength(MAX_AUXILIARY_SOURCES)
-    expect(
-      new Set(
-        parsed.value.auxiliary_sources?.map((source) => source.source_id)
-      ).size
-    ).toBe(MAX_AUXILIARY_SOURCES)
+    const parsedIds =
+      parsed.value.auxiliary_sources?.map((source) => source.source_id) ?? []
+    expect(new Set(parsedIds).size).toBe(MAX_AUXILIARY_SOURCES)
+    expect(parsedIds).toEqual([...DISTINCT_AUX_SOURCE_IDS])
+    for (let index = 1; index < parsedIds.length; index += 1) {
+      expect(parsedIds[index - 1] < parsedIds[index]).toBe(true)
+    }
   })
 
   it("fail-closes auxiliary_sources longer than the writer cap", () => {
@@ -693,8 +702,8 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
     expect(parsed.detail).toBe("auxiliary_sources source_id must be unique")
   })
 
-  it("parses two distinct source_id values including descending order", () => {
-    const ascending = parseCaptureStatus(
+  it("parses two strictly increasing distinct source_id values", () => {
+    const parsed = parseCaptureStatus(
       v4Status({
         auxiliary_sources: [
           knownAuxiliarySource({ source_id: "node-fills" }),
@@ -702,16 +711,16 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
         ],
       })
     )
-    expect(ascending.ok).toBe(true)
-    if (!ascending.ok) {
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
       return
     }
-    expect(ascending.value.auxiliary_sources?.[0]?.source_id).toBe("node-fills")
-    expect(ascending.value.auxiliary_sources?.[1]?.source_id).toBe(
-      "node-line-a"
-    )
+    expect(parsed.value.auxiliary_sources?.[0]?.source_id).toBe("node-fills")
+    expect(parsed.value.auxiliary_sources?.[1]?.source_id).toBe("node-line-a")
+  })
 
-    const descending = parseCaptureStatus(
+  it("fail-closes descending distinct auxiliary source_id", () => {
+    const parsed = parseCaptureStatus(
       v4Status({
         auxiliary_sources: [
           knownAuxiliarySource({ source_id: "node-line-a" }),
@@ -719,15 +728,12 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
         ],
       })
     )
-    expect(descending.ok).toBe(true)
-    if (!descending.ok) {
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
       return
     }
-    expect(descending.value.auxiliary_sources?.[0]?.source_id).toBe(
-      "node-line-a"
-    )
-    expect(descending.value.auxiliary_sources?.[1]?.source_id).toBe(
-      "node-fills"
+    expect(parsed.detail).toBe(
+      "auxiliary_sources source_id must be strictly increasing"
     )
   })
 })
