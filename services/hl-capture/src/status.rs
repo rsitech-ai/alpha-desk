@@ -329,6 +329,14 @@ impl AuxiliarySourceStatus {
             self.last_durable_wall_micros.is_some(),
         ];
         let durable_sequence = self.local_sequence.unwrap_or(0);
+        let health_fields_invalid = match self.health {
+            AuxiliarySourceHealth::Healthy => !durable_fields[0],
+            AuxiliarySourceHealth::Quarantined => {
+                !durable_fields[0] || self.quarantine_reason.is_none()
+            }
+            AuxiliarySourceHealth::Latched => self.last_error_reason.is_none(),
+            AuxiliarySourceHealth::Starting => false,
+        };
         if durable_fields
             .iter()
             .any(|present| *present != durable_fields[0])
@@ -337,12 +345,7 @@ impl AuxiliarySourceStatus {
                 .is_some_and(|sequence| sequence == 0 || sequence > self.spool_records)
             || self.spool_records.checked_sub(durable_sequence) != Some(self.unarchived_records)
             || self.last_durable_wall_micros.is_some_and(|value| value < 0)
-            || matches!(
-                self.health,
-                AuxiliarySourceHealth::Healthy | AuxiliarySourceHealth::Quarantined
-            ) && !durable_fields[0]
-            || self.health == AuxiliarySourceHealth::Quarantined && self.quarantine_reason.is_none()
-            || self.health == AuxiliarySourceHealth::Latched && self.last_error_reason.is_none()
+            || health_fields_invalid
             || matches!(
                 self.restart_reconstruction,
                 RestartReconstruction::Incomplete | RestartReconstruction::Complete
@@ -994,6 +997,109 @@ mod tests {
         )
         .with_auxiliary_sources(vec![invalid]);
         assert_eq!(status.validate(), Err(StatusError::InvalidField));
+    }
+
+    #[test]
+    fn auxiliary_source_health_validate_covers_every_constructible_health() {
+        for health in [
+            AuxiliarySourceHealth::Starting,
+            AuxiliarySourceHealth::Healthy,
+            AuxiliarySourceHealth::Quarantined,
+            AuxiliarySourceHealth::Latched,
+        ] {
+            match health {
+                AuxiliarySourceHealth::Starting => {
+                    auxiliary_health_status(health, false, None, None)
+                        .validate()
+                        .expect("starting remains valid without durable fields");
+                    auxiliary_health_status(health, true, None, None)
+                        .validate()
+                        .expect("starting remains valid with durable fields");
+                    auxiliary_health_status(
+                        health,
+                        false,
+                        None,
+                        Some("source.temporary_disconnect"),
+                    )
+                    .validate()
+                    .expect("starting remains valid with last_error_reason while retrying");
+                }
+                AuxiliarySourceHealth::Healthy => {
+                    auxiliary_health_status(health, true, None, None)
+                        .validate()
+                        .expect("healthy remains valid with durable fields");
+                    assert_eq!(
+                        auxiliary_health_status(health, false, None, None).validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                }
+                AuxiliarySourceHealth::Quarantined => {
+                    auxiliary_health_status(health, true, Some("source.schema_drift"), None)
+                        .validate()
+                        .expect("quarantined remains valid with durable fields and a cause");
+                    assert_eq!(
+                        auxiliary_health_status(health, false, Some("source.schema_drift"), None)
+                            .validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                    assert_eq!(
+                        auxiliary_health_status(health, true, None, None).validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                }
+                AuxiliarySourceHealth::Latched => {
+                    auxiliary_health_status(
+                        health,
+                        false,
+                        None,
+                        Some("source.temporary_disconnect"),
+                    )
+                    .validate()
+                    .expect(
+                        "latched remains valid without durable fields when last_error_reason is set",
+                    );
+                    auxiliary_health_status(
+                        health,
+                        true,
+                        None,
+                        Some("source.temporary_disconnect"),
+                    )
+                    .validate()
+                    .expect(
+                        "latched remains valid with durable fields when last_error_reason is set",
+                    );
+                    assert_eq!(
+                        auxiliary_health_status(health, false, None, None).validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                    assert_eq!(
+                        auxiliary_health_status(health, true, None, None).validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                }
+            }
+        }
+    }
+
+    fn auxiliary_health_status(
+        health: AuxiliarySourceHealth,
+        with_durable: bool,
+        quarantine_reason: Option<&str>,
+        last_error_reason: Option<&str>,
+    ) -> AuxiliarySourceStatus {
+        let mut source = AuxiliarySourceStatus::starting("node-fills");
+        if with_durable {
+            source.cursor_epoch = Some("node-file-v1:epoch".to_owned());
+            source.tail_cursor_epoch = Some("node-file-v1:epoch".to_owned());
+            source.durable_offset = Some(47);
+            source.local_sequence = Some(1);
+            source.spool_records = 1;
+            source.last_durable_wall_micros = Some(1_000);
+        }
+        source.health = health;
+        source.quarantine_reason = quarantine_reason.map(ToOwned::to_owned);
+        source.last_error_reason = last_error_reason.map(ToOwned::to_owned);
+        source
     }
 
     #[test]
