@@ -386,6 +386,57 @@ async fn amber_core_deadletter_health_is_snapshot_invalid_and_not_ready() {
 }
 
 #[tokio::test]
+async fn amber_lag_health_is_typed_and_does_not_become_ready() {
+    let directory = tempdir().expect("temporary directory");
+    const LAG: &str = "lag";
+    assert!(
+        !CORE_DEADLETTER_REASON_CODES.contains(&LAG),
+        "HTTP AMBER lag coverage must stay outside the frozen dead-letter enum"
+    );
+    assert!(!is_core_deadletter_reason(LAG));
+    let health_path = write_health_snapshot(
+        directory.path(),
+        "amber-lag.json",
+        "HEALTH_STATE_AMBER",
+        LAG,
+    );
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        Some(&health_path),
+        None,
+    );
+
+    let (status, body) = call(&state, "/v1/health", &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["schema_version"], "hl.health.v1");
+    assert_eq!(body["state"], "HEALTH_STATE_AMBER");
+    assert_eq!(body["reason_code"], LAG);
+    assert_ne!(
+        body["reason_code"], "snapshot_invalid",
+        "AMBER lag must stay typed, not snapshot_invalid"
+    );
+    assert_ne!(body["code"], "data_unavailable");
+
+    let (status, body) = call(&state, "/readyz", &[]).await;
+    assert_eq!(status, 503, "AMBER lag must not become ready");
+    assert_ne!(
+        body["state"], "HEALTH_STATE_GREEN",
+        "lag must not be treated as GREEN-ready"
+    );
+    let aggregate = body["reason_code"].as_str().expect("aggregate reason");
+    assert!(
+        aggregate.contains(LAG),
+        "readyz must surface typed {LAG}, got {aggregate}"
+    );
+    assert!(
+        !aggregate.contains("snapshot_invalid"),
+        "AMBER lag must not be rewritten as snapshot_invalid, got {aggregate}"
+    );
+}
+
+#[tokio::test]
 async fn unknown_amber_deadletter_sibling_is_snapshot_invalid_and_not_ready() {
     let directory = tempdir().expect("temporary directory");
     const UNKNOWN_AMBER: &str = "core.deadletter_invented";
@@ -560,6 +611,14 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         );
     }
     assert!(document.contains("Unknown codes fail closed"));
+    assert!(
+        document.contains("core.deadletter_* family-prefix"),
+        "OpenAPI must name AMBER-family core.deadletter_* as the 503 prefix"
+    );
+    assert!(
+        document.contains("Unknown HEALTH_STATE_RED codes stay 200 typed"),
+        "OpenAPI must name unknown RED as 200 typed fail-closed"
+    );
 }
 
 #[tokio::test]
@@ -600,6 +659,14 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         "served YAML enum must match the frozen const; prose mentions do not count"
     );
     assert!(health_reason_code_is_unrestricted_string(document));
+    assert!(
+        document.contains("core.deadletter_* family-prefix"),
+        "served OpenAPI must name AMBER-family core.deadletter_* as the 503 prefix"
+    );
+    assert!(
+        document.contains("Unknown HEALTH_STATE_RED codes stay 200 typed"),
+        "served OpenAPI must name unknown RED as 200 typed fail-closed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

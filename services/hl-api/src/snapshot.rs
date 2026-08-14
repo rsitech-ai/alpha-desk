@@ -401,6 +401,14 @@ mod tests {
             "non-deadletter AMBER reasons must not be classified as the family"
         );
         assert!(document.contains("Unknown codes fail closed"));
+        assert!(
+            document.contains("core.deadletter_* family-prefix"),
+            "OpenAPI must name AMBER-family core.deadletter_* as the 503 prefix"
+        );
+        assert!(
+            document.contains("Unknown HEALTH_STATE_RED codes stay 200 typed"),
+            "OpenAPI must name unknown RED as 200 typed fail-closed"
+        );
         assert_openapi_does_not_claim_live_qualified(document);
     }
 
