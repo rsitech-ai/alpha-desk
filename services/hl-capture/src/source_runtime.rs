@@ -1908,16 +1908,56 @@ async fn drain_backlog_once(
 
 fn classify_backlog_error(error: BacklogError) -> DrainSessionError {
     match &error {
-        BacklogError::Spool(SpoolError::IncompleteTail { .. }) => {
-            DrainSessionError::Retryable("capture_spool.incomplete_tail")
-        }
-        BacklogError::Spool(SpoolError::Io { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            DrainSessionError::Retryable("capture_spool.io")
-        }
+        BacklogError::Spool(spool_error) => match spool_error {
+            SpoolError::IncompleteTail { .. } => {
+                DrainSessionError::Retryable("capture_spool.incomplete_tail")
+            }
+            SpoolError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                DrainSessionError::Retryable("capture_spool.io")
+            }
+            SpoolError::Io { .. }
+            | SpoolError::InvalidHeader
+            | SpoolError::IncompleteHeader
+            | SpoolError::CorruptRecord { .. }
+            | SpoolError::SourceMismatch
+            | SpoolError::UnsupportedWarnings
+            | SpoolError::CursorRegression
+            | SpoolError::CursorConflict
+            | SpoolError::CursorPolicyMismatch
+            | SpoolError::InvalidDurabilityPolicy
+            | SpoolError::InvalidTimestamp
+            | SpoolError::EmptySegment
+            | SpoolError::InvalidManifest
+            | SpoolError::ManifestAlreadyExists
+            | SpoolError::UnsafeSpoolEntry
+            | SpoolError::IncompleteManifestPublication
+            | SpoolError::DuplicateSegmentSequence
+            | SpoolError::ManifestSegmentMissing
+            | SpoolError::ManifestChainBroken
+            | SpoolError::ManifestContentMismatch
+            | SpoolError::SegmentSizeMismatch
+            | SpoolError::SegmentHashMismatch
+            | SpoolError::UnexpectedOpenSegment
+            | SpoolError::SegmentClosed
+            | SpoolError::ClosedSegment
+            | SpoolError::SegmentAlreadyExists
+            | SpoolError::SizeOverflow => {
+                DrainSessionError::Fatal(SourceRuntimeError::Backlog(error))
+            }
+        },
         BacklogError::Gap { .. } => DrainSessionError::Latched(error.reason_code()),
-        _ => DrainSessionError::Fatal(SourceRuntimeError::Backlog(error)),
+        BacklogError::InvalidConfig
+        | BacklogError::SourceMismatch
+        | BacklogError::CursorPolicyMismatch
+        | BacklogError::Observation
+        | BacklogError::PendingAcknowledgement
+        | BacklogError::AcknowledgementMismatch
+        | BacklogError::OffsetOverflow
+        | BacklogError::SequenceOverflow
+        | BacklogError::SequenceGap { .. }
+        | BacklogError::InvalidState => {
+            DrainSessionError::Fatal(SourceRuntimeError::Backlog(error))
+        }
     }
 }
 
@@ -2079,21 +2119,23 @@ mod tests {
     use crate::app::CaptureRuntimeHealth;
     use crate::progress::InMemoryProgressStore;
     use crate::spool::{
-        DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolRotationPolicy, inspect_spool,
+        DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError, SpoolRotationPolicy,
+        inspect_spool,
     };
     use crate::{
-        AuxiliaryQualificationState, AuxiliarySourceHealth, BlockingRawSegmentArchive,
-        CaptureConfig, DiskReserveError, DiskReserveGuard, DiskSpaceProbe, FailoverStore,
-        RawSegmentArchive, RestartReconstruction,
+        AuxiliaryQualificationState, AuxiliarySourceHealth, BacklogError,
+        BlockingRawSegmentArchive, CaptureConfig, DiskReserveError, DiskReserveGuard,
+        DiskSpaceProbe, FailoverStore, RawSegmentArchive, RestartReconstruction,
     };
 
     use super::{
         AuxiliaryNodeSourceTaskConfig, CommittedSourceRole, DrainSessionError,
         NodeSourceTaskConfig, RetryBackoff, SourceNotification, SourceRuntimeError,
         append_auxiliary_observation, attempt_failover, auxiliary_commit_policy,
-        auxiliary_node_task, committed_source_role, group_commit_due, open_auxiliary_node_source,
-        prepare_source_spool_path, run_auxiliary_node_acquisition_with_probe,
-        run_committed_node_acquisition_with_probe, supervise_auxiliary_tasks,
+        auxiliary_node_task, classify_backlog_error, committed_source_role, group_commit_due,
+        open_auxiliary_node_source, prepare_source_spool_path,
+        run_auxiliary_node_acquisition_with_probe, run_committed_node_acquisition_with_probe,
+        supervise_auxiliary_tasks,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -2421,6 +2463,151 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum BacklogDrainClass {
+        Retryable(&'static str),
+        Latched(&'static str),
+        Fatal(&'static str),
+    }
+
+    fn backlog_drain_class(error: DrainSessionError) -> BacklogDrainClass {
+        match error {
+            DrainSessionError::Retryable(code) => BacklogDrainClass::Retryable(code),
+            DrainSessionError::Latched(code) => BacklogDrainClass::Latched(code),
+            DrainSessionError::Fatal(inner) => {
+                assert!(
+                    matches!(inner, SourceRuntimeError::Backlog(_)),
+                    "fatal classification must remain SourceRuntimeError::Backlog, got {inner:?}"
+                );
+                BacklogDrainClass::Fatal(inner.reason_code())
+            }
+        }
+    }
+
+    fn expected_backlog_drain_class(error: &BacklogError) -> BacklogDrainClass {
+        match error {
+            BacklogError::Spool(spool_error) => match spool_error {
+                SpoolError::IncompleteTail { .. } => {
+                    BacklogDrainClass::Retryable("capture_spool.incomplete_tail")
+                }
+                SpoolError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                    BacklogDrainClass::Retryable("capture_spool.io")
+                }
+                SpoolError::Io { .. }
+                | SpoolError::InvalidHeader
+                | SpoolError::IncompleteHeader
+                | SpoolError::CorruptRecord { .. }
+                | SpoolError::SourceMismatch
+                | SpoolError::UnsupportedWarnings
+                | SpoolError::CursorRegression
+                | SpoolError::CursorConflict
+                | SpoolError::CursorPolicyMismatch
+                | SpoolError::InvalidDurabilityPolicy
+                | SpoolError::InvalidTimestamp
+                | SpoolError::EmptySegment
+                | SpoolError::InvalidManifest
+                | SpoolError::ManifestAlreadyExists
+                | SpoolError::UnsafeSpoolEntry
+                | SpoolError::IncompleteManifestPublication
+                | SpoolError::DuplicateSegmentSequence
+                | SpoolError::ManifestSegmentMissing
+                | SpoolError::ManifestChainBroken
+                | SpoolError::ManifestContentMismatch
+                | SpoolError::SegmentSizeMismatch
+                | SpoolError::SegmentHashMismatch
+                | SpoolError::UnexpectedOpenSegment
+                | SpoolError::SegmentClosed
+                | SpoolError::ClosedSegment
+                | SpoolError::SegmentAlreadyExists
+                | SpoolError::SizeOverflow => BacklogDrainClass::Fatal(error.reason_code()),
+            },
+            BacklogError::Gap { .. } => BacklogDrainClass::Latched(error.reason_code()),
+            BacklogError::InvalidConfig
+            | BacklogError::SourceMismatch
+            | BacklogError::CursorPolicyMismatch
+            | BacklogError::Observation
+            | BacklogError::PendingAcknowledgement
+            | BacklogError::AcknowledgementMismatch
+            | BacklogError::OffsetOverflow
+            | BacklogError::SequenceOverflow
+            | BacklogError::SequenceGap { .. }
+            | BacklogError::InvalidState => BacklogDrainClass::Fatal(error.reason_code()),
+        }
+    }
+
+    fn spool_io(kind: std::io::ErrorKind) -> SpoolError {
+        SpoolError::Io {
+            operation: "open",
+            source: std::io::Error::from(kind),
+        }
+    }
+
+    fn every_spool_error() -> Vec<SpoolError> {
+        vec![
+            spool_io(std::io::ErrorKind::NotFound),
+            spool_io(std::io::ErrorKind::PermissionDenied),
+            SpoolError::InvalidHeader,
+            SpoolError::IncompleteHeader,
+            SpoolError::CorruptRecord { record_offset: 1 },
+            SpoolError::IncompleteTail { record_offset: 8 },
+            SpoolError::SourceMismatch,
+            SpoolError::UnsupportedWarnings,
+            SpoolError::CursorRegression,
+            SpoolError::CursorConflict,
+            SpoolError::CursorPolicyMismatch,
+            SpoolError::InvalidDurabilityPolicy,
+            SpoolError::InvalidTimestamp,
+            SpoolError::EmptySegment,
+            SpoolError::InvalidManifest,
+            SpoolError::ManifestAlreadyExists,
+            SpoolError::UnsafeSpoolEntry,
+            SpoolError::IncompleteManifestPublication,
+            SpoolError::DuplicateSegmentSequence,
+            SpoolError::ManifestSegmentMissing,
+            SpoolError::ManifestChainBroken,
+            SpoolError::ManifestContentMismatch,
+            SpoolError::SegmentSizeMismatch,
+            SpoolError::SegmentHashMismatch,
+            SpoolError::UnexpectedOpenSegment,
+            SpoolError::SegmentClosed,
+            SpoolError::ClosedSegment,
+            SpoolError::SegmentAlreadyExists,
+            SpoolError::SizeOverflow,
+        ]
+    }
+
+    fn every_backlog_error() -> Vec<BacklogError> {
+        let mut errors = vec![
+            BacklogError::InvalidConfig,
+            BacklogError::SourceMismatch,
+            BacklogError::CursorPolicyMismatch,
+            BacklogError::Observation,
+            BacklogError::PendingAcknowledgement,
+            BacklogError::AcknowledgementMismatch,
+            BacklogError::OffsetOverflow,
+            BacklogError::SequenceOverflow,
+            BacklogError::Gap {
+                expected: 1,
+                observed: 2,
+            },
+            BacklogError::SequenceGap {
+                expected: 1,
+                observed: 2,
+            },
+            BacklogError::InvalidState,
+        ];
+        errors.extend(every_spool_error().into_iter().map(BacklogError::Spool));
+        errors
+    }
+
+    #[test]
+    fn classify_backlog_error_pins_every_backlog_variant() {
+        for error in every_backlog_error() {
+            let expected = expected_backlog_drain_class(&error);
+            assert_eq!(backlog_drain_class(classify_backlog_error(error)), expected);
         }
     }
 
