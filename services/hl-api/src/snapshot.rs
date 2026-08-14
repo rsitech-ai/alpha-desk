@@ -294,7 +294,10 @@ mod tests {
         MAINTENANCE_FIELDS, SnapshotError, is_core_deadletter_reason, parse_canonical_health_bytes,
         parse_capture_status_bytes,
     };
-    use crate::openapi::{LAST_HEARTBEAT_THROUGHPUT_FIELDS, openapi_yaml};
+    use crate::openapi::{
+        LAST_HEARTBEAT_THROUGHPUT_FIELDS, core_deadletter_reason_openapi_enum,
+        health_reason_code_is_unrestricted_string, openapi_yaml,
+    };
     use api_contracts::WireHealthState;
     use std::path::Path;
 
@@ -347,11 +350,17 @@ mod tests {
     fn openapi_document_lists_core_deadletter_fail_closed_reasons() {
         let document = openapi_yaml();
         assert!(document.contains("CoreDeadLetterReasonCode"));
+        let enum_values = core_deadletter_reason_openapi_enum(document)
+            .expect("OpenAPI must define components.schemas.CoreDeadLetterReasonCode.enum");
+        assert_eq!(
+            enum_values, CORE_DEADLETTER_REASON_CODES,
+            "YAML enum must match the frozen const; prose mentions do not count"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
         for reason_code in CORE_DEADLETTER_REASON_CODES {
-            assert!(
-                document.contains(reason_code),
-                "OpenAPI missing dead-letter reason {reason_code}"
-            );
             assert!(
                 is_core_deadletter_reason(reason_code),
                 "helper must accept documented dead-letter reason {reason_code}"
