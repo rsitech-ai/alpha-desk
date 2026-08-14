@@ -350,6 +350,7 @@ fn require_auxiliary_source_closed_fields(
         let Value::Object(source) = source else {
             return Err(SnapshotError::Invalid);
         };
+        require_string(source, "source_id", None)?;
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -393,11 +394,11 @@ mod tests {
     };
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_health_openapi_enum,
-        auxiliary_source_qualification_openapi_enum, capture_source_health_openapi_enum,
-        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
-        ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
-        restart_reconstruction_openapi_enum,
+        auxiliary_source_id_is_required_string, auxiliary_source_qualification_openapi_enum,
+        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
+        core_deadletter_reason_openapi_enum, health_reason_code_is_unrestricted_string,
+        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
+        openapi_yaml, restart_reconstruction_openapi_enum,
     };
     use api_contracts::WireHealthState;
     use std::path::Path;
@@ -955,6 +956,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_requires_auxiliary_source_id_string() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_id_is_required_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.source_id as a required string"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1121,7 +1139,60 @@ mod tests {
         let value = parse_capture_status_bytes(&fixture("capture-status-v5.json")).expect("v5");
         assert!(value["auxiliary_sources"].is_array());
         assert!(value["auxiliary_sources"][0].is_object());
+        assert_eq!(
+            value["auxiliary_sources"][0]["source_id"],
+            "node-misc-events"
+        );
         assert_eq!(value["auxiliary_sources"][0]["health"], "starting");
+    }
+
+    #[test]
+    fn present_non_string_auxiliary_source_id_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for source_id in [
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-string"}),
+            serde_json::json!(["not-a-string"]),
+            serde_json::json!(""),
+        ] {
+            value["auxiliary_sources"][0]["source_id"] = source_id.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-string or empty source_id must not fail open"),
+                SnapshotError::Invalid,
+                "{source_id} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_or_empty_auxiliary_source_id_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("source_id");
+        let bytes = serde_json::to_vec(&value).expect("encode omitted source_id");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes)
+                .expect_err("omitted nested source_id must not fail open"),
+            SnapshotError::Invalid
+        );
+
+        value["auxiliary_sources"] = serde_json::json!([{}]);
+        let bytes = serde_json::to_vec(&value).expect("encode empty auxiliary item");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes)
+                .expect_err("empty auxiliary source object must not fail open"),
+            SnapshotError::Invalid
+        );
     }
 
     #[test]

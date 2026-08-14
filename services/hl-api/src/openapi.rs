@@ -2,8 +2,8 @@
 /// capture-status v4 (inactive) / v5 (maintenance) required keys, optional
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
 /// committed source class, committed source health, auxiliary source
-/// health, auxiliary restart reconstruction, auxiliary source
-/// qualification, core dead-letter and ledger.unsupported_event reason
+/// identity, auxiliary source health, auxiliary restart reconstruction,
+/// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
 /// availability, or SLO contract, it does not invent fills or mark sources
 /// live or qualified, and it is not a live core.
@@ -217,6 +217,53 @@ pub fn auxiliary_source_qualification_openapi_enum(document: &str) -> Option<Vec
         ],
         "enum",
     )
+}
+
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.source_id`
+/// is a required free string: `type: string`, listed on `items.required`,
+/// and no `$ref`, `enum`, `format`, or `pattern`. Capture writer always
+/// emits `source_id`; this crate does not invent extra identity formats.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
+#[must_use]
+pub fn auxiliary_source_id_is_required_string(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "source_id",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("string")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+    {
+        return false;
+    }
+    yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"source_id"))
 }
 
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
@@ -613,12 +660,13 @@ mod tests {
         COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
         LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
         READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, auxiliary_source_health_openapi_enum,
-        auxiliary_source_qualification_openapi_enum, capture_source_health_openapi_enum,
-        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-        health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
-        openapi_yaml, readyz_200_description, readyz_200_schema_ref, readyz_503_description,
-        readyz_503_schema_ref, readyz_get_description, restart_reconstruction_openapi_enum,
+        auxiliary_source_id_is_required_string, auxiliary_source_qualification_openapi_enum,
+        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
+        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+        ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+        readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
+        readyz_get_description, restart_reconstruction_openapi_enum,
         unavailable_response_schema_ref,
     };
 
@@ -654,6 +702,10 @@ mod tests {
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.qualification.enum",
         );
         assert_eq!(qualification_values, AUXILIARY_SOURCE_QUALIFICATION);
+        assert!(
+            auxiliary_source_id_is_required_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.source_id as a required string"
+        );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
             document.contains("no inline enum"),
@@ -949,6 +1001,130 @@ components:
             "shrinking the YAML enum without shrinking the const must fail the freeze"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_source_id_required_string_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            source_id remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            properties:
+              health:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_id_is_required_string(prose_only),
+            "prose mention of source_id must not satisfy the required-string freeze"
+        );
+
+        let optional_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              source_id:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_id_is_required_string(optional_string),
+            "optional source_id must not satisfy the required-string freeze"
+        );
+
+        let integer_id = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+            properties:
+              source_id:
+                type: integer
+"#;
+        assert!(
+            !auxiliary_source_id_is_required_string(integer_id),
+            "required non-string source_id must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+            properties:
+              source_id:
+                type: string
+                format: uuid
+"#;
+        assert!(
+            !auxiliary_source_id_is_required_string(formatted),
+            "invented source_id format must not satisfy the freeze"
+        );
+
+        let closed_enum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+            properties:
+              source_id:
+                type: string
+                enum:
+                  - node-misc-events
+"#;
+        assert!(
+            !auxiliary_source_id_is_required_string(closed_enum),
+            "invented source_id enum must not satisfy the freeze"
+        );
     }
 
     #[test]
