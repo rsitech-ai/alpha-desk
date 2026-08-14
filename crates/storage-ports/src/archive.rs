@@ -923,10 +923,13 @@ impl TryFrom<RawObservationReceipt> for SequenceBoundRawObservationReceipt {
     type Error = ArchiveError;
 
     fn try_from(receipt: RawObservationReceipt) -> Result<Self, Self::Error> {
-        if receipt.cursor_policy() != CursorPolicy::MonotonicByteOffset {
-            return Err(ArchiveError::InvalidInput(
-                "sequence-bound receipt requires monotonic byte offsets",
-            ));
+        match receipt.cursor_policy() {
+            CursorPolicy::MonotonicByteOffset => {}
+            CursorPolicy::ContiguousNativeOffset => {
+                return Err(ArchiveError::InvalidInput(
+                    "sequence-bound receipt requires monotonic byte offsets",
+                ));
+            }
         }
         let local_sequence_range =
             receipt
