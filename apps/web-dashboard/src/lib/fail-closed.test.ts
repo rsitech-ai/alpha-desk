@@ -16,6 +16,7 @@ import {
   CORE_DEADLETTER_REASONS,
   FAILOVER_REASONS,
   LEDGER_UNSUPPORTED_EVENT_REASONS,
+  MAX_AUXILIARY_SOURCES,
   RESTART_RECONSTRUCTION,
   lastHeartbeatThroughput,
   parseCaptureHealth,
@@ -527,6 +528,120 @@ describe("parseCaptureStatus extras", () => {
     }
     expect(parsed.value.throughput_records_per_sec).toBe(7)
     expect(parsed.value.throughput_blocks_per_sec).toBeUndefined()
+  })
+})
+
+describe("parseCaptureStatus auxiliary_sources cap", () => {
+  function knownAuxiliarySource(
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      source_id: "node-line-a",
+      health: "starting",
+      qualification: "unqualified",
+      spool_records: 0,
+      unarchived_records: 0,
+      partial_line: false,
+      ...overrides,
+    }
+  }
+
+  function auxiliarySources(count: number): Record<string, unknown>[] {
+    return Array.from({ length: count }, () => knownAuxiliarySource())
+  }
+
+  it("matches capture writer MAX_AUXILIARY_SOURCES", () => {
+    expect(MAX_AUXILIARY_SOURCES).toBe(16)
+  })
+
+  it("keeps omitted and null auxiliary_sources omitted", () => {
+    const omitted = parseCaptureStatus(v4Status())
+    expect(omitted.ok).toBe(true)
+    if (!omitted.ok) {
+      return
+    }
+    expect(omitted.value.auxiliary_sources).toBeUndefined()
+
+    const nulled = parseCaptureStatus(v4Status({ auxiliary_sources: null }))
+    expect(nulled.ok).toBe(true)
+    if (!nulled.ok) {
+      return
+    }
+    expect(nulled.value.auxiliary_sources).toBeUndefined()
+  })
+
+  it("parses empty auxiliary_sources", () => {
+    const parsed = parseCaptureStatus(v4Status({ auxiliary_sources: [] }))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.auxiliary_sources).toEqual([])
+  })
+
+  it("parses one known auxiliary source", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ auxiliary_sources: [knownAuxiliarySource()] })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.auxiliary_sources).toHaveLength(1)
+    expect(parsed.value.auxiliary_sources?.[0]?.source_id).toBe("node-line-a")
+    expect(parsed.value.auxiliary_sources?.[0]?.extra_fields).toEqual({})
+  })
+
+  it("parses auxiliary_sources at the writer cap", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ auxiliary_sources: auxiliarySources(MAX_AUXILIARY_SOURCES) })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.auxiliary_sources).toHaveLength(MAX_AUXILIARY_SOURCES)
+  })
+
+  it("fail-closes auxiliary_sources longer than the writer cap", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: auxiliarySources(MAX_AUXILIARY_SOURCES + 1),
+      })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      `auxiliary_sources must have at most ${MAX_AUXILIARY_SOURCES} items`
+    )
+  })
+
+  it("fail-closes present non-array auxiliary_sources", () => {
+    const parsed = parseCaptureStatus(v4Status({ auxiliary_sources: {} }))
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe("auxiliary_sources must be an array")
+  })
+
+  it("still fail-closes nested unknown auxiliary keys inside a capped array", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          knownAuxiliarySource({ future_aux_flag: true }),
+        ],
+      })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      "auxiliary_sources[0] unknown field: future_aux_flag"
+    )
   })
 })
 
