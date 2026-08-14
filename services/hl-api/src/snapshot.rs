@@ -64,6 +64,13 @@ pub const AUXILIARY_SOURCE_HEALTH: &[&str] = &["starting", "healthy", "quarantin
 /// closed out.
 pub const RESTART_RECONSTRUCTION: &[&str] = &["not-required", "incomplete", "complete"];
 
+/// Capture writer kebab-case auxiliary source qualification. Present
+/// unknown values are `snapshot_invalid`. Omitted stays omitted. This crate
+/// does not vendor hl-capture and this is not a live capture or Stage PASS.
+/// `HealthAssessment.reason_code` stays a free string so unknown RED is not
+/// closed out.
+pub const AUXILIARY_SOURCE_QUALIFICATION: &[&str] = &["unqualified", "qualified"];
+
 const MAINTENANCE_FIELDS: &[&str] = &[
     "enabled",
     "kill_switch",
@@ -347,6 +354,9 @@ fn require_auxiliary_source_closed_fields(
         if source.contains_key("restart_reconstruction") {
             require_enum(source, "restart_reconstruction", RESTART_RECONSTRUCTION)?;
         }
+        if source.contains_key("qualification") {
+            require_enum(source, "qualification", AUXILIARY_SOURCE_QUALIFICATION)?;
+        }
     }
     Ok(())
 }
@@ -372,19 +382,20 @@ fn require_non_negative_int(object: &Map<String, Value>, field: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        AUXILIARY_SOURCE_HEALTH, CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_V4,
-        CAPTURE_STATUS_SCHEMA_V5, COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
-        LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS, RESTART_RECONSTRUCTION,
-        SnapshotError, is_core_deadletter_family, is_core_deadletter_reason,
-        is_ledger_unsupported_event_reason, parse_canonical_health_bytes,
-        parse_capture_status_bytes,
+        AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
+        CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, COMMITTED_SOURCE_CLASSES,
+        CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS,
+        RESTART_RECONSTRUCTION, SnapshotError, is_core_deadletter_family,
+        is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+        parse_canonical_health_bytes, parse_capture_status_bytes,
     };
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_health_openapi_enum,
-        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
-        core_deadletter_reason_openapi_enum, health_reason_code_is_unrestricted_string,
-        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
-        openapi_yaml, restart_reconstruction_openapi_enum,
+        auxiliary_source_qualification_openapi_enum, capture_source_health_openapi_enum,
+        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
+        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+        ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
+        restart_reconstruction_openapi_enum,
     };
     use api_contracts::WireHealthState;
     use std::path::Path;
@@ -712,6 +723,10 @@ mod tests {
             "complete"
         );
         assert_eq!(value["auxiliary_sources"][0]["health"], "starting");
+        assert_eq!(
+            value["auxiliary_sources"][0]["qualification"],
+            "unqualified"
+        );
         assert!(value.get("fills").is_none());
         assert!(value.get("qualification").is_none());
     }
@@ -918,6 +933,26 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_lists_auxiliary_source_qualification_enum() {
+        let document = openapi_yaml();
+        let enum_values = auxiliary_source_qualification_openapi_enum(document).expect(
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.qualification.enum",
+        );
+        assert_eq!(
+            enum_values, AUXILIARY_SOURCE_QUALIFICATION,
+            "YAML enum must match the frozen const; prose mentions do not count"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1009,6 +1044,57 @@ mod tests {
             assert_eq!(
                 parse_capture_status_bytes(&bytes)
                     .expect_err("unknown restart reconstruction must not be a free string"),
+                SnapshotError::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn closed_auxiliary_source_qualification_values_are_accepted() {
+        for qualification in AUXILIARY_SOURCE_QUALIFICATION {
+            let mut value =
+                serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                    .expect("v5 json");
+            value["auxiliary_sources"][0]["qualification"] = serde_json::json!(qualification);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{qualification} should parse: {error}"));
+            assert_eq!(
+                parsed["auxiliary_sources"][0]["qualification"],
+                *qualification
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_auxiliary_source_qualification_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("qualification");
+        let bytes = serde_json::to_vec(&value).expect("encode");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted qualification");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("qualification")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unknown_or_empty_auxiliary_source_qualification_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for qualification in ["Unqualified", "Qualified", "un_qualified", ""] {
+            value["auxiliary_sources"][0]["qualification"] = serde_json::json!(qualification);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("unknown auxiliary source qualification must not be a free string"),
                 SnapshotError::Invalid
             );
         }

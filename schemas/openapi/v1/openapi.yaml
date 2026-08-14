@@ -360,12 +360,12 @@ components:
             - range-unavailable
         auxiliary_sources:
           description: >
-            Extra snapshot sources passed through when present. Nested health
-            and restart_reconstruction are optional; present values use closed
-            kebab-case sets. Unknown values are snapshot_invalid. Omitted
-            stays omitted. HealthAssessment.reason_code stays a free string
-            so unknown RED is not closed out. This document does not claim
-            Stage PASS.
+            Extra snapshot sources passed through when present. Nested health,
+            restart_reconstruction, and qualification are optional; present
+            values use closed kebab-case sets. Unknown values are
+            snapshot_invalid. Omitted stays omitted. HealthAssessment.reason_code
+            stays a free string so unknown RED is not closed out. This
+            document does not claim Stage PASS.
           type: array
           items:
             type: object
@@ -397,6 +397,18 @@ components:
                   - not-required
                   - incomplete
                   - complete
+              qualification:
+                description: >
+                  Optional capture writer kebab-case auxiliary source
+                  qualification. Present values are unqualified or qualified.
+                  Unknown values are snapshot_invalid. Omitted stays omitted.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+                enum:
+                  - unqualified
+                  - qualified
         pending_blocks:
           type: integer
           minimum: 0

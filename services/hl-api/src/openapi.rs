@@ -2,18 +2,19 @@
 /// capture-status v4 (inactive) / v5 (maintenance) required keys, optional
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
 /// committed source class, committed source health, auxiliary source
-/// health, auxiliary restart reconstruction, core dead-letter and
-/// ledger.unsupported_event reason codes, and the HTTP router. This is not
-/// a production authentication, availability, or SLO contract, it does not
-/// invent fills or mark sources live or qualified, and it is not a live core.
+/// health, auxiliary restart reconstruction, auxiliary source
+/// qualification, core dead-letter and ledger.unsupported_event reason
+/// codes, and the HTTP router. This is not a production authentication,
+/// availability, or SLO contract, it does not invent fills or mark sources
+/// live or qualified, and it is not a live core.
 pub fn openapi_yaml() -> &'static str {
     include_str!("../../../schemas/openapi/v1/openapi.yaml")
 }
 
 pub use crate::snapshot::{
-    AUXILIARY_SOURCE_HEALTH, CAPTURE_SOURCE_HEALTH, COMMITTED_SOURCE_CLASSES,
-    CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, RESTART_RECONSTRUCTION,
-    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
+    COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+    RESTART_RECONSTRUCTION, is_core_deadletter_reason, is_ledger_unsupported_event_reason,
 };
 
 pub const HEALTH_JSON_FIELDS: &[&str] = &[
@@ -188,6 +189,31 @@ pub fn restart_reconstruction_openapi_enum(document: &str) -> Option<Vec<&str>> 
             "items",
             "properties",
             "restart_reconstruction",
+        ],
+        "enum",
+    )
+}
+
+/// String values of nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.qualification.enum`.
+///
+/// Optional on the wire; when documented, the YAML enum must match
+/// [`AUXILIARY_SOURCE_QUALIFICATION`]. Returns `None` when that property
+/// or its block `enum` is missing. HealthAssessment.reason_code stays a
+/// free string so unknown RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_qualification_openapi_enum(document: &str) -> Option<Vec<&str>> {
+    yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "qualification",
         ],
         "enum",
     )
@@ -583,16 +609,16 @@ fn unquote(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUXILIARY_SOURCE_HEALTH, CAPTURE_SOURCE_HEALTH, COMMITTED_SOURCE_CLASSES,
-        CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-        READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION,
-        RESTART_RECONSTRUCTION, auxiliary_source_health_openapi_enum,
-        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
-        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
-        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
-        ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
-        readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
-        readyz_get_description, restart_reconstruction_openapi_enum,
+        AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
+        COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
+        LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
+        READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, auxiliary_source_health_openapi_enum,
+        auxiliary_source_qualification_openapi_enum, capture_source_health_openapi_enum,
+        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
+        health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
+        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
+        openapi_yaml, readyz_200_description, readyz_200_schema_ref, readyz_503_description,
+        readyz_503_schema_ref, readyz_get_description, restart_reconstruction_openapi_enum,
         unavailable_response_schema_ref,
     };
 
@@ -624,6 +650,10 @@ mod tests {
             .expect("OpenAPI must define CaptureStatusBase.auxiliary_sources.items.health.enum");
         assert_eq!(auxiliary_health_values, AUXILIARY_SOURCE_HEALTH);
         assert_ne!(auxiliary_health_values.as_slice(), CAPTURE_SOURCE_HEALTH);
+        let qualification_values = auxiliary_source_qualification_openapi_enum(document).expect(
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.qualification.enum",
+        );
+        assert_eq!(qualification_values, AUXILIARY_SOURCE_QUALIFICATION);
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
             document.contains("no inline enum"),
@@ -876,6 +906,46 @@ components:
         assert_ne!(
             values.as_slice(),
             RESTART_RECONSTRUCTION,
+            "shrinking the YAML enum without shrinking the const must fail the freeze"
+        );
+        assert!(health_reason_code_is_unrestricted_string(document));
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_source_qualification_enum_freeze() {
+        let document = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            qualified remains in prose after the YAML enum drops it.
+          type: array
+          items:
+            type: object
+            properties:
+              qualification:
+                description: >
+                  qualified remains in prose after the YAML enum drops it.
+                type: string
+                enum:
+                  - unqualified
+"#;
+        let values = auxiliary_source_qualification_openapi_enum(document)
+            .expect("synthetic schema must still parse the YAML enum");
+        assert_eq!(values, &["unqualified"]);
+        assert!(
+            !values.contains(&"qualified"),
+            "prose must not count as an enum value"
+        );
+        assert_ne!(
+            values.as_slice(),
+            AUXILIARY_SOURCE_QUALIFICATION,
             "shrinking the YAML enum without shrinking the const must fail the freeze"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
