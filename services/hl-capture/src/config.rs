@@ -61,16 +61,24 @@ impl CaptureConfig {
             if !ids.insert(source.id.as_str()) {
                 return Err(ConfigError::DuplicateSource);
             }
-            match (source.trust, source.observation_class) {
-                (SourceTrust::LocallyVerifiedCommitted, ObservationClass::CommittedBlock) => {
-                    primary_committed_sources = primary_committed_sources.saturating_add(1);
-                    validate_committed_source_adapter(source)?;
+            match source.trust {
+                SourceTrust::LocallyVerifiedCommitted => {
+                    if source.observation_class == ObservationClass::CommittedBlock {
+                        primary_committed_sources = primary_committed_sources.saturating_add(1);
+                        validate_committed_source_adapter(source)?;
+                    }
                 }
-                (SourceTrust::IndependentCommitted, ObservationClass::CommittedBlock) => {
-                    independent_committed_sources = independent_committed_sources.saturating_add(1);
-                    validate_committed_source_adapter(source)?;
+                SourceTrust::IndependentCommitted => {
+                    if source.observation_class == ObservationClass::CommittedBlock {
+                        independent_committed_sources =
+                            independent_committed_sources.saturating_add(1);
+                        validate_committed_source_adapter(source)?;
+                    }
                 }
-                _ => {}
+                SourceTrust::ReconciledSnapshot => {}
+                SourceTrust::RecoveryOnly => {}
+                SourceTrust::ThirdPartyProvisional => {}
+                SourceTrust::MempoolProvisional => {}
             }
         }
         if primary_committed_sources == 0 {

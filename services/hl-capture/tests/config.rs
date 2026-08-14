@@ -28,6 +28,84 @@ adapter = {{ kind = "node-block-directory", path = "{path}", stream_name = "{id}
     )
 }
 
+fn source_trust_toml(trust: SourceTrust) -> &'static str {
+    match trust {
+        SourceTrust::LocallyVerifiedCommitted => "locally-verified-committed",
+        SourceTrust::IndependentCommitted => "independent-committed",
+        SourceTrust::ReconciledSnapshot => "reconciled-snapshot",
+        SourceTrust::RecoveryOnly => "recovery-only",
+        SourceTrust::ThirdPartyProvisional => "third-party-provisional",
+        SourceTrust::MempoolProvisional => "mempool-provisional",
+    }
+}
+
+fn observation_class_toml(class: ObservationClass) -> &'static str {
+    match class {
+        ObservationClass::CommittedBlock => "committed-block",
+        ObservationClass::AuxiliaryOrderStatus => "auxiliary-order-status",
+        ObservationClass::AuxiliaryBookDiff => "auxiliary-book-diff",
+        ObservationClass::AuxiliaryLedger => "auxiliary-ledger",
+        ObservationClass::Snapshot => "snapshot",
+        ObservationClass::HistoricalBlock => "historical-block",
+        ObservationClass::PublicMarketData => "public-market-data",
+        ObservationClass::ProvisionalFeed => "provisional-feed",
+        ObservationClass::ProvisionalMempool => "provisional-mempool",
+    }
+}
+
+fn extra_source(id: &str, trust: SourceTrust, class: ObservationClass) -> String {
+    format!(
+        r#"
+
+[[sources]]
+id = "{id}"
+source_version = "probe-v1"
+trust = "{}"
+class = "{}"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+"#,
+        source_trust_toml(trust),
+        observation_class_toml(class)
+    )
+}
+
+fn independent_committed_source(id: &str) -> String {
+    committed_node_source(
+        id,
+        "independent-committed",
+        &format!("/var/lib/hyperliquid-{id}/hl/data/replica_cmds"),
+    )
+}
+
+fn assert_does_not_occupy_committed_slots(trust: SourceTrust, class: ObservationClass) {
+    let probe = extra_source("probe-source", trust, class);
+    let parsed =
+        CaptureConfig::from_toml(&format!("{}{probe}", valid_config())).unwrap_or_else(|error| {
+            panic!("{trust:?}/{class:?} must not occupy the primary slot: {error:?}")
+        });
+    assert_eq!(
+        parsed.source("probe-source").expect("probe source").trust(),
+        trust
+    );
+    assert_eq!(
+        parsed
+            .source("probe-source")
+            .expect("probe source")
+            .observation_class(),
+        class
+    );
+
+    CaptureConfig::from_toml(&format!(
+        "{}{probe}{}",
+        valid_config(),
+        independent_committed_source("independent-node")
+    ))
+    .unwrap_or_else(|error| {
+        panic!("{trust:?}/{class:?} must not occupy the independent slot: {error:?}")
+    });
+}
+
 #[test]
 fn example_configuration_is_strict_valid_and_complete() {
     let example = include_str!("../../../config/capture.example.toml");
@@ -210,6 +288,68 @@ fn ambiguous_committed_source_topologies_fail_before_opening_files() {
             .reason_code(),
         "capture_config.invalid_committed_source_adapter"
     );
+}
+
+#[test]
+fn topology_counter_pins_every_source_trust_count_effect() {
+    for trust in SourceTrust::ALL {
+        match trust {
+            SourceTrust::LocallyVerifiedCommitted => {
+                let duplicate_primary = format!(
+                    "{}{}",
+                    valid_config(),
+                    committed_node_source(
+                        "primary-node-two",
+                        "locally-verified-committed",
+                        "/var/lib/hyperliquid-two/hl/data/replica_cmds"
+                    )
+                );
+                assert_eq!(
+                    CaptureConfig::from_toml(&duplicate_primary)
+                        .expect_err("committed-block primary still occupies the primary slot")
+                        .reason_code(),
+                    "capture_config.duplicate_primary_committed_source"
+                );
+                assert_does_not_occupy_committed_slots(trust, ObservationClass::AuxiliaryLedger);
+            }
+            SourceTrust::IndependentCommitted => {
+                CaptureConfig::from_toml(&format!(
+                    "{}{}",
+                    valid_config(),
+                    independent_committed_source("independent-node")
+                ))
+                .expect("one committed-block independent occupies the independent slot once");
+
+                let duplicate_independent = format!(
+                    "{}{}{}",
+                    valid_config(),
+                    independent_committed_source("independent-node-one"),
+                    independent_committed_source("independent-node-two")
+                );
+                assert_eq!(
+                    CaptureConfig::from_toml(&duplicate_independent)
+                        .expect_err(
+                            "committed-block independent still occupies the independent slot"
+                        )
+                        .reason_code(),
+                    "capture_config.duplicate_independent_committed_source"
+                );
+                assert_does_not_occupy_committed_slots(trust, ObservationClass::AuxiliaryLedger);
+            }
+            SourceTrust::ReconciledSnapshot => {
+                assert_does_not_occupy_committed_slots(trust, ObservationClass::Snapshot);
+            }
+            SourceTrust::RecoveryOnly => {
+                assert_does_not_occupy_committed_slots(trust, ObservationClass::HistoricalBlock);
+            }
+            SourceTrust::ThirdPartyProvisional => {
+                assert_does_not_occupy_committed_slots(trust, ObservationClass::ProvisionalFeed);
+            }
+            SourceTrust::MempoolProvisional => {
+                assert_does_not_occupy_committed_slots(trust, ObservationClass::ProvisionalMempool);
+            }
+        }
+    }
 }
 
 #[test]
