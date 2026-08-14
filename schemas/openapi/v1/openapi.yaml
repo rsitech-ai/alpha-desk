@@ -333,7 +333,28 @@ components:
             - locally-verified-committed
             - independent-committed
         primary_source_health:
+          description: >
+            Capture writer kebab-case committed source health. Unknown values
+            are snapshot_invalid. HealthAssessment.reason_code stays a free
+            string so unknown RED is not closed out. This document does not
+            claim Stage PASS.
           type: string
+          enum:
+            - starting
+            - healthy
+            - range-unavailable
+        independent_source_health:
+          description: >
+            Optional capture writer kebab-case independent source health.
+            Present values use the same closed set as primary_source_health.
+            Unknown values are snapshot_invalid. HealthAssessment.reason_code
+            stays a free string so unknown RED is not closed out. This
+            document does not claim Stage PASS.
+          type: string
+          enum:
+            - starting
+            - healthy
+            - range-unavailable
         pending_blocks:
           type: integer
           minimum: 0
