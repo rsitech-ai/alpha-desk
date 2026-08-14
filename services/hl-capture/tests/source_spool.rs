@@ -1007,6 +1007,71 @@ fn persisted_schema_identity_covers_every_constructible_cursor_policy() {
 }
 
 #[test]
+fn local_sequence_chain_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new_with_cursor_policy(
+                root.path().join("primary-node"),
+                SourceId::new("primary-node").unwrap(),
+                "hyperliquid-node-v1",
+                "spool-v1",
+                [0x31; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap(),
+                cursor_policy,
+            )
+            .unwrap(),
+            100,
+        )
+        .unwrap();
+
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                let rotated = spool.append(&observation(101), 102).unwrap();
+                let first = rotated
+                    .closed_segment()
+                    .expect("contiguous rotation still closes the first segment");
+                assert!(first.manifest().first_local_sequence().is_none());
+                assert!(first.manifest().last_local_sequence().is_none());
+                let last = spool
+                    .shutdown(103)
+                    .unwrap()
+                    .expect("contiguous shutdown still closes the second segment");
+                assert!(last.manifest().first_local_sequence().is_none());
+                assert!(last.manifest().last_local_sequence().is_none());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                let rotated = spool.append(&byte_observation(49), 102).unwrap();
+                let first = rotated
+                    .closed_segment()
+                    .expect("byte-offset rotation still closes the first segment");
+                assert_eq!(first.manifest().first_local_sequence().unwrap().get(), 1);
+                assert_eq!(first.manifest().last_local_sequence().unwrap().get(), 1);
+                let last = spool
+                    .shutdown(103)
+                    .unwrap()
+                    .expect("byte-offset shutdown still closes the second segment");
+                assert_eq!(last.manifest().first_local_sequence().unwrap().get(), 2);
+                assert_eq!(last.manifest().last_local_sequence().unwrap().get(), 2);
+            }
+        }
+
+        let inspection = inspect_spool(root.path().join("primary-node")).expect(
+            "closed local-sequence chain still verifies for this constructible cursor policy",
+        );
+        assert_eq!(inspection.closed_segments(), 2);
+        assert_eq!(inspection.open_segments(), 0);
+        assert_eq!(inspection.records(), 2);
+    }
+}
+
+#[test]
 fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
     let root = TempDir::new().unwrap();
     let error = SourceSpoolConfig::try_new_with_cursor_policy(
