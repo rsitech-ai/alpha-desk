@@ -210,6 +210,11 @@ export interface LastHeartbeatThroughput {
   throughput_blocks_per_sec?: number
 }
 
+/** Known top-level keys for this web `parseCaptureStatus`. Present unknown
+ *  keys fail parse. This is this parse's typed field set, not OpenAPI
+ *  `CaptureStatusBase` (`maintenance` is not typed here and fails as an extra).
+ *  Nested `auxiliary_sources` extras stay recorded separately.
+ */
 export const CAPTURE_STATUS_FIELD_ORDER = [
   "schema_version",
   "snapshot_at_micros",
@@ -655,6 +660,16 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   }
 
   const extras = collectExtraFields(value, CAPTURE_STATUS_FIELD_ORDER)
+  const extraNames = Object.keys(extras).sort()
+  if (extraNames.length > 0) {
+    return {
+      ok: false,
+      detail:
+        extraNames.length === 1
+          ? `unknown capture status field: ${extraNames[0]}`
+          : `unknown capture status fields: ${extraNames.join(", ")}`,
+    }
+  }
   return {
     ok: true,
     value: {
@@ -761,6 +776,9 @@ function requireCaptureSchema(
   }
 }
 
+/** Keys outside `known`. Top-level CaptureStatus fail-closes when this is
+ *  non-empty. Nested auxiliary sources still record extras.
+ */
 function collectExtraFields(
   object: Record<string, unknown>,
   known: readonly string[]
