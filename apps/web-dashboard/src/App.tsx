@@ -39,7 +39,11 @@ import {
   type CoreHealth,
   type HealthBody,
 } from "@/lib/contracts"
-import { captureHealthObservedReason, mapApiError } from "@/lib/fail-closed"
+import {
+  captureHealthWatchView,
+  coreHealthWatchView,
+  mapApiError,
+} from "@/lib/fail-closed"
 
 export function App() {
   const state = useHlApi()
@@ -386,12 +390,7 @@ function ReadyChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
       switch (outcome.data.schema_version) {
         case CORE_HEALTH_SCHEMA_VERSION: {
           const unready =
-            outcome.status === 503 ||
-            !outcome.data.ok ||
-            !outcome.data.ready ||
-            outcome.data.live_qualified ||
-            outcome.data.stage_2_qualified ||
-            outcome.data.reason_code !== null
+            coreHealthWatchView(outcome.status, outcome.data) !== undefined
           return (
             <ToneBadge tone={unready ? "red" : "yellow"}>
               {unready ? "unready" : "not live-qualified"}
@@ -400,10 +399,7 @@ function ReadyChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
         }
         case CAPTURE_HEALTH_SCHEMA_VERSION: {
           const unready =
-            outcome.status === 503 ||
-            !outcome.data.ok ||
-            outcome.data.ready !== true ||
-            outcome.data.reason_code !== undefined
+            captureHealthWatchView(outcome.status, outcome.data) !== undefined
           return (
             <ToneBadge tone={unready ? "red" : "yellow"}>
               {unready ? "unready" : "not live-qualified"}
@@ -440,25 +436,10 @@ function CoreHealthChip({
   status: number
   health: CoreHealth
 }) {
-  const failClosed =
-    status === 503 ||
-    !health.ok ||
-    !health.ready ||
-    health.live_qualified ||
-    health.stage_2_qualified ||
-    health.reason_code !== null
-  if (!failClosed) {
+  const view = coreHealthWatchView(status, health)
+  if (view === undefined) {
     return <ToneBadge tone="yellow">not live-qualified</ToneBadge>
   }
-  const view = mapApiError(status === 200 ? 503 : status, {
-    schema_version: API_ERROR_SCHEMA_VERSION,
-    code: "data_unavailable",
-    reason_code:
-      health.reason_code ??
-      (health.live_qualified || health.stage_2_qualified
-        ? "core_status.qualification_claim"
-        : "core_status.not_ready"),
-  })
   return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
 }
 
@@ -469,19 +450,10 @@ function CaptureHealthzChip({
   status: number
   health: CaptureHealthBody
 }) {
-  const failClosed =
-    status === 503 ||
-    !health.ok ||
-    health.ready !== true ||
-    health.reason_code !== undefined
-  if (!failClosed) {
+  const view = captureHealthWatchView(status, health)
+  if (view === undefined) {
     return <ToneBadge tone="yellow">not live-qualified</ToneBadge>
   }
-  const view = mapApiError(status === 200 ? 503 : status, {
-    schema_version: API_ERROR_SCHEMA_VERSION,
-    code: "data_unavailable",
-    reason_code: captureHealthObservedReason(health.reason_code),
-  })
   return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
 }
 
