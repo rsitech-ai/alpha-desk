@@ -184,7 +184,11 @@ fn status_snapshot_is_atomic_versioned_bounded_and_secret_free() {
     assert!(!text.contains("postgresql://"));
     assert!(!text.contains("nats://"));
     let decoded: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
-    assert_eq!(decoded["schema_version"], "hl.capture.status.v4");
+    assert_eq!(decoded["schema_version"], "hl.capture.status.v5");
+    assert_eq!(decoded["maintenance"]["enabled"], false);
+    assert_eq!(decoded["maintenance"]["retention_authorized"], false);
+    assert!(decoded.get("throughput_records_per_sec").is_none());
+    assert!(decoded.get("throughput_blocks_per_sec").is_none());
     assert_eq!(decoded["snapshot_at_micros"], 200);
     assert_eq!(decoded["health"], "green");
     assert_eq!(decoded["ready"], true);

@@ -1,10 +1,12 @@
 # Capture Status V4
 
-`hl.capture.status.v4` is the atomic, bounded, machine-readable operator
-snapshot written by `hl-capture run` and returned by `hl-capture status
---json`. It extends the frozen V3 committed-source status with observable Node
-V1 auxiliary capture state. It contains no payloads, filesystem paths,
-connection strings, credentials, or private infrastructure identity.
+> Frozen compatibility contract. Current runtimes publish V5; see
+> [`capture-status-v5.md`](capture-status-v5.md). V4 remains a supported
+> read schema for inactive snapshots that omit `maintenance`.
+
+`hl.capture.status.v4` extends the frozen V3 committed-source status with
+observable Node V1 auxiliary capture state. It contains no payloads, filesystem
+paths, connection strings, credentials, or private infrastructure identity.
 
 All V3 committed-source, failover, backlog, disk, and readiness fields retain
 their meanings. See [`capture-status-v3.md`](capture-status-v3.md) for that
@@ -62,8 +64,11 @@ quarantined source can simultaneously expose a temporary transport outage in
 `throughput_records_per_sec` and `throughput_blocks_per_sec` are unsigned
 integer rates sampled over the status-heartbeat interval. They count
 archive-acknowledged auxiliary records and captured committed blocks in that
-window, then reset. Absent fields deserialize as zero. They describe the last
-completed window only and are not a live-qualification or Stage PASS claim.
+window, then reset. Frozen V4-only readers may deserialize absent fields as
+zero. The current dual reader treats missing last-heartbeat rates as omitted,
+not zero; see [`capture-status-v5.md`](capture-status-v5.md). They describe the
+last completed window only and are not a live-qualification or Stage PASS
+claim.
 
 ## Durability and quarantine semantics
 
@@ -102,5 +107,9 @@ the hot checkpoint baseline.
 V4 replaces V3 only for the ephemeral operator snapshot. Archive, spool, and
 publication formats are independently versioned and are not migrated by this
 change. A process starting over a V3, malformed, or foreign-build snapshot
-writes a fresh V4 snapshot for its own build and chain rather than trusting
+writes a fresh V5 snapshot for its own build and chain rather than trusting
 stale status state.
+
+Maintenance is not part of V4. Current writers emit
+[`capture-status-v5.md`](capture-status-v5.md) with a required `maintenance`
+object instead of adding fields under this schema id.

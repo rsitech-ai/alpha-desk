@@ -463,10 +463,10 @@ pub struct CaptureStatus {
     archive_manifest_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error_reason: Option<String>,
-    #[serde(default)]
-    throughput_records_per_sec: u32,
-    #[serde(default)]
-    throughput_blocks_per_sec: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    throughput_records_per_sec: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    throughput_blocks_per_sec: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     auxiliary_sources: Vec<AuxiliarySourceStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -482,7 +482,7 @@ impl CaptureStatus {
         health: CaptureHealth,
     ) -> Self {
         Self {
-            schema_version: STATUS_SCHEMA_V4.to_owned(),
+            schema_version: STATUS_SCHEMA_V5.to_owned(),
             snapshot_at_micros: snapshot_at.unix_micros(),
             build_id: build_id.into(),
             chain_id: chain_id.to_string(),
@@ -500,10 +500,10 @@ impl CaptureStatus {
             disk_free_basis_points: None,
             archive_manifest_id: None,
             last_error_reason: None,
-            throughput_records_per_sec: 0,
-            throughput_blocks_per_sec: 0,
+            throughput_records_per_sec: None,
+            throughput_blocks_per_sec: None,
             auxiliary_sources: Vec::new(),
-            maintenance: None,
+            maintenance: Some(CaptureMaintenanceStatus::idle(false, false)),
         }
     }
 
@@ -568,7 +568,16 @@ impl CaptureStatus {
     }
 
     #[must_use]
-    pub const fn with_throughput(mut self, records_per_sec: u32, blocks_per_sec: u32) -> Self {
+    pub const fn with_throughput(self, records_per_sec: u32, blocks_per_sec: u32) -> Self {
+        self.with_optional_throughput(Some(records_per_sec), Some(blocks_per_sec))
+    }
+
+    #[must_use]
+    pub(crate) const fn with_optional_throughput(
+        mut self,
+        records_per_sec: Option<u32>,
+        blocks_per_sec: Option<u32>,
+    ) -> Self {
         self.throughput_records_per_sec = records_per_sec;
         self.throughput_blocks_per_sec = blocks_per_sec;
         self
@@ -582,12 +591,9 @@ impl CaptureStatus {
 
     #[must_use]
     pub fn with_maintenance(mut self, maintenance: Option<CaptureMaintenanceStatus>) -> Self {
-        self.maintenance = maintenance;
-        self.schema_version = if self.maintenance.is_some() {
-            STATUS_SCHEMA_V5.to_owned()
-        } else {
-            STATUS_SCHEMA_V4.to_owned()
-        };
+        self.maintenance =
+            Some(maintenance.unwrap_or_else(|| CaptureMaintenanceStatus::idle(false, false)));
+        self.schema_version = STATUS_SCHEMA_V5.to_owned();
         self
     }
 
@@ -607,12 +613,12 @@ impl CaptureStatus {
     }
 
     #[must_use]
-    pub const fn throughput_records_per_sec(&self) -> u32 {
+    pub const fn throughput_records_per_sec(&self) -> Option<u32> {
         self.throughput_records_per_sec
     }
 
     #[must_use]
-    pub const fn throughput_blocks_per_sec(&self) -> u32 {
+    pub const fn throughput_blocks_per_sec(&self) -> Option<u32> {
         self.throughput_blocks_per_sec
     }
 
@@ -627,6 +633,10 @@ impl CaptureStatus {
         self.health = health;
         self.ready = false;
         self.last_error_reason = last_error_reason;
+        if self.maintenance.is_none() {
+            self.maintenance = Some(CaptureMaintenanceStatus::idle(false, false));
+        }
+        self.schema_version = STATUS_SCHEMA_V5.to_owned();
         self
     }
 
@@ -881,7 +891,11 @@ mod tests {
 
         status.validate().unwrap();
         let value = serde_json::to_value(status).unwrap();
-        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert_eq!(value["schema_version"], "hl.capture.status.v5");
+        assert_eq!(value["maintenance"]["enabled"], false);
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+        assert!(value.get("throughput_records_per_sec").is_none());
+        assert!(value.get("throughput_blocks_per_sec").is_none());
         assert_eq!(
             value["auxiliary_sources"][0]["source_id"],
             "node-misc-events"
@@ -1023,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_status_exposes_windowed_throughput_without_qualification() {
+    fn v5_status_exposes_windowed_throughput_without_qualification() {
         let status = CaptureStatus::new(
             KnownTime::from_unix_micros(1_000).unwrap(),
             "build-v1",
@@ -1033,12 +1047,14 @@ mod tests {
         .with_throughput(3, 1);
         status.validate().unwrap();
         let value = serde_json::to_value(&status).unwrap();
-        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert_eq!(value["schema_version"], "hl.capture.status.v5");
         assert_eq!(value["throughput_records_per_sec"], 3);
         assert_eq!(value["throughput_blocks_per_sec"], 1);
-        assert!(value.get("maintenance").is_none());
-        assert_eq!(status.throughput_records_per_sec(), 3);
-        assert_eq!(status.throughput_blocks_per_sec(), 1);
+        assert_eq!(value["maintenance"]["enabled"], false);
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+        assert!(value.get("qualification").is_none());
+        assert_eq!(status.throughput_records_per_sec(), Some(3));
+        assert_eq!(status.throughput_blocks_per_sec(), Some(1));
     }
 
     #[test]
@@ -1132,6 +1148,46 @@ mod tests {
         auxiliary_sources: Vec<AuxiliarySourceStatus>,
     }
 
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[expect(dead_code)]
+    struct FrozenCaptureStatusV5 {
+        schema_version: String,
+        snapshot_at_micros: i64,
+        build_id: String,
+        chain_id: String,
+        health: CaptureHealth,
+        ready: bool,
+        active_committed_source: super::CommittedSourceClass,
+        primary_source_health: super::CaptureSourceHealth,
+        #[serde(default)]
+        independent_source_health: Option<super::CaptureSourceHealth>,
+        #[serde(default)]
+        failover_height: Option<u64>,
+        #[serde(default)]
+        failover_reason: Option<crate::FailoverReason>,
+        #[serde(default)]
+        durable_height: Option<u64>,
+        pending_blocks: u64,
+        #[serde(default)]
+        capture_backlog_records: u64,
+        #[serde(default)]
+        oldest_pending_capture_height: Option<u64>,
+        #[serde(default)]
+        disk_free_basis_points: Option<u16>,
+        #[serde(default)]
+        archive_manifest_id: Option<String>,
+        #[serde(default)]
+        last_error_reason: Option<String>,
+        #[serde(default)]
+        throughput_records_per_sec: Option<u32>,
+        #[serde(default)]
+        throughput_blocks_per_sec: Option<u32>,
+        #[serde(default)]
+        auxiliary_sources: Vec<AuxiliarySourceStatus>,
+        maintenance: CaptureMaintenanceStatus,
+    }
+
     fn capture_fixture(name: &str) -> Vec<u8> {
         fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1161,6 +1217,10 @@ mod tests {
         let decoded: FrozenCaptureStatusV4 = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.schema_version, "hl.capture.status.v4");
         assert_eq!(decoded.build_id, "synthetic-serve-status-fixture");
+        assert_eq!(decoded.throughput_records_per_sec, 0);
+        assert_eq!(decoded.throughput_blocks_per_sec, 0);
+        assert!(status.throughput_records_per_sec().is_none());
+        assert!(status.throughput_blocks_per_sec().is_none());
     }
 
     #[test]
@@ -1179,7 +1239,10 @@ mod tests {
             value["auxiliary_sources"][0]["restart_reconstruction"],
             "complete"
         );
-        assert!(serde_json::from_value::<FrozenCaptureStatusV4>(value).is_err());
+        assert!(serde_json::from_value::<FrozenCaptureStatusV4>(value.clone()).is_err());
+        let decoded: FrozenCaptureStatusV5 = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.schema_version, "hl.capture.status.v5");
+        assert!(!decoded.maintenance.retention_authorized());
     }
 
     #[test]
@@ -1216,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_stays_on_v4_until_maintenance_is_present() {
+    fn writer_defaults_to_v5_with_inactive_maintenance_and_omitted_rates() {
         let status = CaptureStatus::new(
             KnownTime::from_unix_micros(1_000).unwrap(),
             "build-v1",
@@ -1225,15 +1288,76 @@ mod tests {
         );
         status.validate().unwrap();
         let value = serde_json::to_value(&status).unwrap();
-        assert_eq!(value["schema_version"], "hl.capture.status.v4");
-        assert!(value.get("maintenance").is_none());
-        assert_eq!(value["throughput_records_per_sec"], 0);
-        assert_eq!(value["throughput_blocks_per_sec"], 0);
+        assert_eq!(value["schema_version"], "hl.capture.status.v5");
+        assert_eq!(value["maintenance"]["enabled"], false);
+        assert_eq!(value["maintenance"]["kill_switch"], false);
+        assert_eq!(value["maintenance"]["health"], "green");
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+        assert_eq!(value["maintenance"]["pending_pack_manifest_count"], 0);
+        assert_eq!(value["maintenance"]["packed_range_count"], 0);
+        assert!(value["maintenance"].get("reason_code").is_none());
+        assert!(value["maintenance"].get("last_scrub_at_micros").is_none());
+        assert!(value.get("throughput_records_per_sec").is_none());
+        assert!(value.get("throughput_blocks_per_sec").is_none());
+        assert!(value.get("qualification").is_none());
+        let decoded: FrozenCaptureStatusV5 = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded.schema_version, "hl.capture.status.v5");
+        assert!(decoded.throughput_records_per_sec.is_none());
+        assert!(decoded.throughput_blocks_per_sec.is_none());
 
         let published = status.with_maintenance(Some(CaptureMaintenanceStatus::idle(true, false)));
         published.validate().unwrap();
         let value = serde_json::to_value(&published).unwrap();
         assert_eq!(value["schema_version"], "hl.capture.status.v5");
         assert_eq!(value["maintenance"]["enabled"], true);
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+
+        let cleared = published.with_maintenance(None);
+        cleared.validate().unwrap();
+        let value = serde_json::to_value(&cleared).unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v5");
+        assert_eq!(value["maintenance"]["enabled"], false);
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+
+        let sampled = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+        .with_throughput(0, 0);
+        let value = serde_json::to_value(&sampled).unwrap();
+        assert_eq!(value["throughput_records_per_sec"], 0);
+        assert_eq!(value["throughput_blocks_per_sec"], 0);
+    }
+
+    #[test]
+    fn v5_only_reader_rejects_ready_v4_as_live_ready() {
+        let value = serde_json::from_slice::<serde_json::Value>(&capture_fixture("status-v4.json"))
+            .unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert_eq!(value["ready"], true);
+        assert_eq!(value["health"], "green");
+        assert!(value.get("maintenance").is_none());
+        assert!(serde_json::from_value::<FrozenCaptureStatusV5>(value).is_err());
+    }
+
+    #[test]
+    fn into_terminal_promotes_a_v4_snapshot_to_v5() {
+        let (_root, path) = write_fixture("status-v4.json");
+        let status = read_status(&path).expect("v4 fixture");
+        assert!(status.maintenance().is_none());
+        let terminal = status.into_terminal(
+            KnownTime::from_unix_micros(2).unwrap(),
+            CaptureHealth::Yellow,
+            Some("capture_runtime.recovering".to_owned()),
+        );
+        terminal.validate().unwrap();
+        let value = serde_json::to_value(&terminal).unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v5");
+        assert_eq!(value["maintenance"]["enabled"], false);
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+        assert_eq!(value["ready"], false);
+        assert!(value.get("throughput_records_per_sec").is_none());
     }
 }
