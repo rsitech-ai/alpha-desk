@@ -71,6 +71,13 @@ pub const RESTART_RECONSTRUCTION: &[&str] = &["not-required", "incomplete", "com
 /// closed out.
 pub const AUXILIARY_SOURCE_QUALIFICATION: &[&str] = &["unqualified", "qualified"];
 
+/// Capture writer kebab-case top-level failover reason. Present unknown
+/// values are `snapshot_invalid`. Omitted stays omitted. This crate
+/// does not vendor hl-capture and this is not a live capture or Stage PASS.
+/// `HealthAssessment.reason_code` stays a free string so unknown RED is not
+/// closed out. This is not a closed enum of `HealthAssessment.reason_code`.
+pub const FAILOVER_REASONS: &[&str] = &["primary-range-unavailable"];
+
 /// Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
 /// are `snapshot_invalid`. Omitted and empty arrays stay valid. Duplicate
 /// present `source_id` is `snapshot_invalid`. Distinct ids stay valid when
@@ -85,11 +92,12 @@ pub const MAX_AUXILIARY_SOURCES: usize = 16;
 /// already-typed optional `restart_reconstruction`. Present unknown nested
 /// properties are `snapshot_invalid`. Known objects without extras stay
 /// valid. This is not CaptureStatusBase extra keys: top-level writer fields
-/// such as `failover_reason`, `durable_height`,
+/// such as `durable_height`,
 /// `capture_backlog_records`, `oldest_pending_capture_height`,
 /// `disk_free_basis_points`, and `archive_manifest_id` stay untyped, and
 /// last-heartbeat throughput still passes through. Top-level
-/// `failover_height` is an optional u64. Top-level `last_error_reason` is an
+/// `failover_height` is an optional u64. Top-level `failover_reason` is an
+/// optional kebab-case enum. Top-level `last_error_reason` is an
 /// optional non-empty string. `HealthAssessment.reason_code`
 /// stays a free string so unknown RED is not closed out.
 const AUXILIARY_SOURCE_FIELDS: &[&str] = &[
@@ -275,6 +283,9 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     }
     if object.contains_key("failover_height") {
         require_u64(object, "failover_height")?;
+    }
+    if object.contains_key("failover_reason") {
+        require_enum(object, "failover_reason", FAILOVER_REASONS)?;
     }
     if object.contains_key("last_error_reason") {
         require_string(object, "last_error_reason", None)?;
@@ -493,9 +504,9 @@ mod tests {
     use super::{
         AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
         CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, COMMITTED_SOURCE_CLASSES,
-        CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS,
-        MAX_AUXILIARY_SOURCES, RESTART_RECONSTRUCTION, SnapshotError, is_core_deadletter_family,
-        is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+        CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+        MAINTENANCE_FIELDS, MAX_AUXILIARY_SOURCES, RESTART_RECONSTRUCTION, SnapshotError,
+        is_core_deadletter_family, is_core_deadletter_reason, is_ledger_unsupported_event_reason,
         parse_canonical_health_bytes, parse_capture_status_bytes,
     };
     use crate::openapi::{
@@ -514,6 +525,8 @@ mod tests {
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
         capture_source_health_openapi_enum, capture_status_failover_height_is_optional_u64,
+        capture_status_failover_reason_is_optional_enum,
+        capture_status_failover_reason_openapi_enum,
         capture_status_last_error_reason_is_optional_string, committed_source_class_openapi_enum,
         core_deadletter_reason_openapi_enum, health_reason_code_is_unrestricted_string,
         independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
@@ -1314,6 +1327,29 @@ mod tests {
         assert!(
             capture_status_failover_height_is_optional_u64(document),
             "OpenAPI must define CaptureStatusBase.failover_height as an optional u64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_lists_failover_reason_enum() {
+        let document = openapi_yaml();
+        let enum_values = capture_status_failover_reason_openapi_enum(document)
+            .expect("OpenAPI must define CaptureStatusBase.failover_reason.enum");
+        assert_eq!(
+            enum_values, FAILOVER_REASONS,
+            "YAML enum must match the frozen const; prose mentions do not count"
+        );
+        assert!(
+            capture_status_failover_reason_is_optional_enum(document),
+            "OpenAPI must define CaptureStatusBase.failover_reason as an optional kebab-case enum"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
@@ -2568,6 +2604,80 @@ mod tests {
                     .expect_err("present non-u64 failover_height must not fail open"),
                 SnapshotError::Invalid,
                 "{failover_height} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_top_level_failover_reason_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("failover_reason").is_none(),
+            "v4 fixture must omit optional top-level failover_reason"
+        );
+        for reason in FAILOVER_REASONS {
+            value["failover_reason"] = serde_json::json!(reason);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{reason} should parse: {error}"));
+            assert_eq!(parsed["failover_reason"], *reason);
+            assert!(parsed.get("auxiliary_sources").is_none());
+            assert!(
+                parsed.get("failover_height").is_none(),
+                "typing failover_reason must not couple it to failover_height"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_top_level_failover_reason_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("failover_reason").is_none(),
+            "v4 fixture must omit optional failover_reason"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted failover_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted failover_reason");
+        assert!(parsed.get("failover_reason").is_none());
+
+        value["failover_reason"] = serde_json::json!("primary-range-unavailable");
+        value
+            .as_object_mut()
+            .expect("capture status object")
+            .remove("failover_reason");
+        let bytes = serde_json::to_vec(&value).expect("encode removed failover_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed failover_reason");
+        assert!(parsed.get("failover_reason").is_none());
+    }
+
+    #[test]
+    fn present_unknown_or_non_string_top_level_failover_reason_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for failover_reason in [
+            serde_json::json!("primary_range_unavailable"),
+            serde_json::json!("PrimaryRangeUnavailable"),
+            serde_json::json!("range-unavailable"),
+            serde_json::json!(""),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-string"}),
+            serde_json::json!(["not-a-string"]),
+        ] {
+            value["failover_reason"] = failover_reason.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes).expect_err(
+                    "present unknown, empty, or non-string failover_reason must not fail open"
+                ),
+                SnapshotError::Invalid,
+                "{failover_reason} must be snapshot_invalid"
             );
         }
     }
