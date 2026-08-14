@@ -45,7 +45,10 @@ zero is a sampled idle window, not live-qualification.
 Readers still accept frozen `hl.capture.status.v4` snapshots that omit
 `maintenance`. A V4 snapshot that smuggles `maintenance`, a V5 snapshot
 without `maintenance`, or an unknown schema id fail closed. A V5-only reader
-must not treat a ready V4 snapshot as live-ready.
+must not treat a ready V4 snapshot as live-ready. Production `GET /healthz`
+reports ready only for V5 with fail-closed `maintenance` present; a leftover
+ready V4 snapshot is not-ready (503), not `ready: true`. `GET /status` may
+still return V4 bytes as-read.
 
 Archive, spool, and publication formats are independently versioned. A process
 starting over a V4, malformed, or foreign-build snapshot writes a fresh V5

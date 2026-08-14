@@ -116,7 +116,7 @@ async fn handle_connection(
 
 async fn write_health(stream: &mut TcpStream, status_path: &Path) -> Result<(), OperatorError> {
     match read_status(status_path) {
-        Ok(status) => {
+        Ok(status) if status.has_fail_closed_maintenance() => {
             let health = match status.health() {
                 CaptureHealth::Green => "green",
                 CaptureHealth::Yellow => "yellow",
@@ -124,9 +124,16 @@ async fn write_health(stream: &mut TcpStream, status_path: &Path) -> Result<(), 
             };
             let body = format!(
                 "{{\"schema_version\":\"{HEALTH_SCHEMA}\",\"ok\":true,\"health\":\"{health}\",\"ready\":{}}}",
-                status.ready()
+                status.live_ready()
             );
             write_response(stream, 200, "application/json", body.as_bytes()).await
+        }
+        Ok(_) => {
+            let body = format!(
+                "{{\"schema_version\":\"{HEALTH_SCHEMA}\",\"ok\":false,\"reason_code\":\"{}\"}}",
+                OperatorError::NotReady.reason_code()
+            );
+            write_response(stream, 503, "application/json", body.as_bytes()).await
         }
         Err(error) => {
             let body = format!(
@@ -244,6 +251,8 @@ pub enum OperatorError {
     RequestTooLarge,
     #[error("operator status serialization failed")]
     Serialization,
+    #[error("operator healthz snapshot is not live-ready")]
+    NotReady,
     #[error("operator status snapshot is unavailable")]
     Status(crate::StatusError),
 }
@@ -259,6 +268,7 @@ impl OperatorError {
             Self::InvalidRequest => "capture_operator.invalid_request",
             Self::RequestTooLarge => "capture_operator.request_too_large",
             Self::Serialization => "capture_operator.serialization",
+            Self::NotReady => "capture_health.not_ready",
             Self::Status(error) => error.reason_code(),
         }
     }

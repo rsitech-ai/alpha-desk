@@ -590,9 +590,8 @@ impl CaptureStatus {
     }
 
     #[must_use]
-    pub fn with_maintenance(mut self, maintenance: Option<CaptureMaintenanceStatus>) -> Self {
-        self.maintenance =
-            Some(maintenance.unwrap_or_else(|| CaptureMaintenanceStatus::idle(false, false)));
+    pub fn with_maintenance(mut self, maintenance: CaptureMaintenanceStatus) -> Self {
+        self.maintenance = Some(maintenance);
         self.schema_version = STATUS_SCHEMA_V5.to_owned();
         self
     }
@@ -600,6 +599,20 @@ impl CaptureStatus {
     #[must_use]
     pub const fn maintenance(&self) -> Option<&CaptureMaintenanceStatus> {
         self.maintenance.as_ref()
+    }
+
+    /// True when this snapshot is v5 with fail-closed `maintenance` present.
+    /// Idle maintenance (`enabled: false`, `retention_authorized: false`) counts.
+    #[must_use]
+    pub fn has_fail_closed_maintenance(&self) -> bool {
+        self.schema_version == STATUS_SCHEMA_V5 && self.maintenance.is_some()
+    }
+
+    /// Operator `/healthz` may report ready only for v5 with fail-closed
+    /// maintenance. Dual-read v4 leftovers are never live-ready.
+    #[must_use]
+    pub fn live_ready(&self) -> bool {
+        self.has_fail_closed_maintenance() && self.ready
     }
 
     #[must_use]
@@ -865,7 +878,8 @@ mod tests {
 
     use super::{
         AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
-        CaptureMaintenanceStatus, CaptureStatus, RestartReconstruction, StatusError, read_status,
+        CaptureMaintenanceStatus, CaptureSourceHealth, CaptureStatus, CommittedSourceClass,
+        RestartReconstruction, StatusError, read_status,
     };
 
     #[test]
@@ -1305,14 +1319,14 @@ mod tests {
         assert!(decoded.throughput_records_per_sec.is_none());
         assert!(decoded.throughput_blocks_per_sec.is_none());
 
-        let published = status.with_maintenance(Some(CaptureMaintenanceStatus::idle(true, false)));
+        let published = status.with_maintenance(CaptureMaintenanceStatus::idle(true, false));
         published.validate().unwrap();
         let value = serde_json::to_value(&published).unwrap();
         assert_eq!(value["schema_version"], "hl.capture.status.v5");
         assert_eq!(value["maintenance"]["enabled"], true);
         assert_eq!(value["maintenance"]["retention_authorized"], false);
 
-        let cleared = published.with_maintenance(None);
+        let cleared = published.with_maintenance(CaptureMaintenanceStatus::idle(false, false));
         cleared.validate().unwrap();
         let value = serde_json::to_value(&cleared).unwrap();
         assert_eq!(value["schema_version"], "hl.capture.status.v5");
@@ -1340,6 +1354,41 @@ mod tests {
         assert_eq!(value["health"], "green");
         assert!(value.get("maintenance").is_none());
         assert!(serde_json::from_value::<FrozenCaptureStatusV5>(value).is_err());
+    }
+
+    #[test]
+    fn ready_v4_fixture_is_not_live_ready() {
+        let (_root, path) = write_fixture("status-v4.json");
+        let status = read_status(&path).expect("v4 fixture");
+        assert!(status.ready());
+        assert_eq!(status.health(), CaptureHealth::Green);
+        assert!(status.maintenance().is_none());
+        assert!(!status.has_fail_closed_maintenance());
+        assert!(!status.live_ready());
+    }
+
+    #[test]
+    fn v5_idle_maintenance_can_be_live_ready() {
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Green,
+        )
+        .with_readiness(true)
+        .with_source_state(
+            CommittedSourceClass::LocallyVerifiedCommitted,
+            CaptureSourceHealth::Healthy,
+            None,
+            None,
+            None,
+        );
+        status.validate().unwrap();
+        let maintenance = status.maintenance().expect("idle maintenance");
+        assert!(!maintenance.enabled());
+        assert!(!maintenance.retention_authorized());
+        assert!(status.has_fail_closed_maintenance());
+        assert!(status.live_ready());
     }
 
     #[test]

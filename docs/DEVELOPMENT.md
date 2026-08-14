@@ -188,7 +188,9 @@ serves that snapshot over HTTP (`GET /status`, `GET /healthz`, SSE
 serves the same file without starting capture. Bind addresses must be
 loopback. `GET /status` fail-closed-reads inactive `hl.capture.status.v4`
 (no `maintenance`) and `hl.capture.status.v5` (`maintenance` required), and
-returns the snapshot bytes as read. This HTTP surface does not replace
+returns the snapshot bytes as read. `GET /healthz` reports ready only for V5
+with fail-closed `maintenance` present; a leftover ready V4 snapshot is
+not-ready (503), not `ready: true`. This HTTP surface does not replace
 `hl-api` `/v1/capture/status`, which reads the status file on disk. Writer
 schema V5 is not Stage 1 PASS or live-source qualification.
 
