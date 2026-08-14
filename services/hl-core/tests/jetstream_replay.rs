@@ -12,9 +12,10 @@ use domain_types::{
 };
 use hl_core::{
     committed_block_delivery, committed_event_delivery, decode_committed_block_marker,
-    encode_committed_block_marker, CanonicalPullSource, CanonicalSubject, FileDeadLetterSink,
-    InMemoryCanonicalSource, InMemoryDeadLetterSink, InMemoryFetchSource, JetStreamFetchFrame,
-    JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
+    encode_committed_block_marker, CanonicalPullSource, CanonicalSubject, DeadLetterError,
+    DeadLetterRecord, DeadLetterSink, FileDeadLetterSink, InMemoryCanonicalSource,
+    InMemoryDeadLetterSink, InMemoryFetchSource, JetStreamFetchFrame, JetStreamReplayAuth,
+    JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
     JetStreamReplaySession, DEAD_LETTER_SCHEMA_V1,
 };
 use sha2::{Digest as _, Sha256};
@@ -908,6 +909,82 @@ fn file_dead_letter_sink_open_does_not_leave_empty_jsonl() {
     assert_dead_letter_file_absent_or_typed_sentinel(&path);
 }
 
+#[test]
+fn file_dead_letter_sink_open_rejects_truncated_jsonl() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    {
+        let mut sink = FileDeadLetterSink::open(&path).expect("file dlq");
+        sink.persist(&sample_dead_letter("complete"))
+            .expect("first record");
+        sink.persist(&sample_dead_letter("partial"))
+            .expect("second record");
+    }
+    let mut leftover = fs::read(&path).expect("complete jsonl");
+    leftover.truncate(leftover.len().saturating_sub(24));
+    assert!(
+        !leftover.is_empty(),
+        "truncated leftover must remain non-empty"
+    );
+    fs::write(&path, &leftover).expect("truncate last line");
+
+    let error = FileDeadLetterSink::open(&path).expect_err("truncated jsonl");
+    assert_eq!(error, DeadLetterError::Corrupt);
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    assert_eq!(fs::read(&path).expect("left in place"), leftover);
+}
+
+#[test]
+fn file_dead_letter_sink_open_rejects_non_json_bytes() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    let leftover = b"\x00\xff not-jsonl\n{";
+    fs::write(&path, leftover).expect("seed garbage");
+
+    let error = FileDeadLetterSink::open(&path).expect_err("non-json leftover");
+    assert_eq!(error, DeadLetterError::Corrupt);
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    assert_eq!(fs::read(&path).expect("left in place"), leftover);
+}
+
+#[test]
+fn file_dead_letter_sink_open_rejects_json_that_is_not_a_record() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    let leftover = b"{\"foo\":1}\n";
+    fs::write(&path, leftover).expect("seed garbage json");
+
+    let error = FileDeadLetterSink::open(&path).expect_err("non-record json");
+    assert_eq!(error, DeadLetterError::Corrupt);
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    assert_eq!(fs::read(&path).expect("left in place"), leftover);
+}
+
+#[test]
+fn file_dead_letter_sink_open_keeps_valid_records_readable() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    {
+        let mut sink = FileDeadLetterSink::open(&path).expect("file dlq");
+        sink.persist(&sample_dead_letter("first"))
+            .expect("first record");
+    }
+    {
+        let mut sink = FileDeadLetterSink::open(&path).expect("reopen valid jsonl");
+        sink.persist(&sample_dead_letter("second"))
+            .expect("second record");
+    }
+    let encoded = fs::read_to_string(&path).expect("readable jsonl");
+    let lines: Vec<_> = encoded.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(lines.len(), 2);
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first json");
+    let second: serde_json::Value = serde_json::from_str(lines[1]).expect("second json");
+    assert_eq!(first["schema_version"], DEAD_LETTER_SCHEMA_V1);
+    assert_eq!(first["message_id"], "first");
+    assert_eq!(second["schema_version"], DEAD_LETTER_SCHEMA_V1);
+    assert_eq!(second["message_id"], "second");
+}
+
 #[tokio::test]
 async fn file_dead_letter_sink_persists_poison_without_applying_state() {
     let root = private_root();
@@ -1090,6 +1167,22 @@ fn private_root() -> tempfile::TempDir {
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("private parent");
     temporary
+}
+
+fn sample_dead_letter(message_id: &str) -> DeadLetterRecord {
+    DeadLetterRecord::try_new(
+        "core.jetstream_transport",
+        "hl.v1.connect.transport",
+        message_id,
+        None,
+        None,
+        [0x11; 32],
+        [0x22; 32],
+        JetStreamReplayConfig::default_durable_name(),
+        0,
+        1,
+    )
+    .expect("sample dead-letter record")
 }
 
 fn empty_block(height: u64, seed: u8) -> BlockEnvelope {

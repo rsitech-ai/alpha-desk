@@ -389,7 +389,10 @@ async fn hung_connect_serves_starting_loopback_status_without_opening_store() {
             !store_path.exists(),
             "hung connect must not open the file-store"
         );
-        assert_dead_letter_file_absent_or_typed_sentinel(&root.path().join("dead-letter.jsonl"));
+        assert!(
+            !root.path().join("dead-letter.jsonl").exists(),
+            "hung connect wait must not create dead-letter.jsonl before timeout"
+        );
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -458,11 +461,17 @@ async fn hung_connect_abort_does_not_leave_empty_dlq_without_sentinel() {
         !store_path.exists(),
         "hung connect must not open the file-store"
     );
-    assert_dead_letter_file_absent_or_typed_sentinel(&dead_letter_path);
+    assert!(
+        !dead_letter_path.exists(),
+        "hung connect wait must not create dead-letter.jsonl before abort"
+    );
     run.abort();
     let _ = run.await;
     assert!(!store_path.exists());
-    assert_dead_letter_file_absent_or_typed_sentinel(&dead_letter_path);
+    assert!(
+        !dead_letter_path.exists(),
+        "abort during hung connect wait must not leave dead-letter.jsonl"
+    );
 }
 
 #[tokio::test]
@@ -488,6 +497,31 @@ async fn dead_letter_open_before_store_fails_closed_with_typed_reason() {
     assert!(
         dead_letter_path.is_dir(),
         "occupied dead-letter path must remain a directory"
+    );
+}
+
+#[tokio::test]
+async fn dead_letter_corrupt_open_before_store_fails_closed_with_typed_reason() {
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let dead_letter_path = root.path().join("dead-letter.jsonl");
+    let leftover = b"{\"schema_version\":\"hl.core.deadletter.v1\"";
+    fs::write(&dead_letter_path, leftover).expect("truncated leftover");
+    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200, None)).expect("config");
+    let runtime = CoreRuntime::from_config(config);
+
+    let error = runtime
+        .run_jetstream(CancellationToken::new())
+        .await
+        .expect_err("dead-letter open");
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    assert!(
+        !store_path.exists(),
+        "dead-letter open must not create the file-store"
+    );
+    assert_eq!(
+        fs::read(&dead_letter_path).expect("corrupt leftover left in place"),
+        leftover
     );
 }
 
@@ -732,34 +766,6 @@ fn private_root() -> tempfile::TempDir {
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("private parent");
     temporary
-}
-
-fn assert_dead_letter_file_absent_or_typed_sentinel(path: &std::path::Path) {
-    match fs::metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => panic!("dead-letter metadata: {error}"),
-        Ok(metadata) => {
-            assert!(
-                metadata.len() > 0,
-                "empty dead-letter.jsonl must not persist without a typed sentinel"
-            );
-            let encoded = fs::read_to_string(path).expect("dlq");
-            let first = encoded
-                .lines()
-                .find(|line| !line.is_empty())
-                .expect("non-empty jsonl");
-            let record: serde_json::Value = serde_json::from_str(first).expect("jsonl");
-            assert_eq!(record["schema_version"], DEAD_LETTER_SCHEMA_V1);
-            let reason = record["reason_code"].as_str().expect("typed reason_code");
-            assert!(!reason.is_empty());
-            assert!(record["subject"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
-            assert!(record["message_id"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
-        }
-    }
 }
 
 fn assert_connect_transport_sentinel(path: &std::path::Path) {

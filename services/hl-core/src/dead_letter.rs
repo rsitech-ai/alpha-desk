@@ -1,13 +1,13 @@
 use std::{
     fs::{self, File},
-    io::Write,
+    io::{Read as _, Write as _},
     os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use rustix::fs::{open, Mode, OFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::CanonicalDelivery;
@@ -189,7 +189,10 @@ impl FileDeadLetterSink {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(_) => return Err(DeadLetterError::Io),
             },
-            Ok(_) => Some(Self::open_file(path, false)?),
+            Ok(_) => {
+                validate_existing_jsonl(path)?;
+                Some(Self::open_file(path, false)?)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(DeadLetterError::Io),
         };
@@ -260,6 +263,8 @@ pub enum DeadLetterError {
     InvalidRecord,
     #[error("dead-letter record could not be serialized")]
     Serialization,
+    #[error("dead-letter file is truncated or corrupt")]
+    Corrupt,
 }
 
 impl DeadLetterError {
@@ -270,6 +275,7 @@ impl DeadLetterError {
             Self::Io => "core.deadletter_io",
             Self::InvalidRecord => "core.deadletter_invalid_record",
             Self::Serialization => "core.deadletter_serialization",
+            Self::Corrupt => "core.deadletter_corrupt",
         }
     }
 }
@@ -280,6 +286,87 @@ pub(crate) fn failed_at_unix_micros() -> i64 {
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_micros()).ok())
         .unwrap_or(0)
+}
+
+fn validate_existing_jsonl(path: &Path) -> Result<(), DeadLetterError> {
+    let mut file = File::from(
+        open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| DeadLetterError::Io)?,
+    );
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| DeadLetterError::Io)?;
+    if bytes.is_empty() {
+        return Err(DeadLetterError::Io);
+    }
+    decode_existing_jsonl(&bytes)
+}
+
+fn decode_existing_jsonl(bytes: &[u8]) -> Result<(), DeadLetterError> {
+    let Some(payload) = bytes.strip_suffix(b"\n") else {
+        return Err(DeadLetterError::Corrupt);
+    };
+    if payload.is_empty() {
+        return Err(DeadLetterError::Corrupt);
+    }
+    for line in payload.split(|&byte| byte == b'\n') {
+        decode_existing_line(line)?;
+    }
+    Ok(())
+}
+
+fn decode_existing_line(line: &[u8]) -> Result<(), DeadLetterError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ExistingRecord {
+        schema_version: String,
+        reason_code: String,
+        subject: String,
+        message_id: String,
+        #[serde(default)]
+        stream_sequence: Option<u64>,
+        #[serde(default)]
+        consumer_sequence: Option<u64>,
+        payload_sha256: String,
+        block_hash: String,
+        consumer: String,
+        retry_count: u64,
+        failed_at_unix_micros: i64,
+    }
+
+    if line.is_empty() || line.len() > MAX_RECORD_BYTES {
+        return Err(DeadLetterError::Corrupt);
+    }
+    let decoded: ExistingRecord =
+        serde_json::from_slice(line).map_err(|_| DeadLetterError::Corrupt)?;
+    if decoded.schema_version != DEAD_LETTER_SCHEMA_V1 {
+        return Err(DeadLetterError::Corrupt);
+    }
+    let payload_sha256 = decode_record_hash(&decoded.payload_sha256)?;
+    let block_hash = decode_record_hash(&decoded.block_hash)?;
+    DeadLetterRecord::try_new(
+        decoded.reason_code,
+        decoded.subject,
+        decoded.message_id,
+        decoded.stream_sequence,
+        decoded.consumer_sequence,
+        payload_sha256,
+        block_hash,
+        decoded.consumer,
+        decoded.retry_count,
+        decoded.failed_at_unix_micros,
+    )
+    .map(|_| ())
+    .map_err(|_| DeadLetterError::Corrupt)
+}
+
+fn decode_record_hash(value: &str) -> Result<[u8; 32], DeadLetterError> {
+    let bytes = hex::decode(value).map_err(|_| DeadLetterError::Corrupt)?;
+    <[u8; 32]>::try_from(bytes).map_err(|_| DeadLetterError::Corrupt)
 }
 
 fn encode_record(record: &DeadLetterRecord) -> Result<Vec<u8>, DeadLetterError> {
