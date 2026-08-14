@@ -858,13 +858,13 @@ fn persisted_schema_identity(
     schema_version: String,
     policy: CursorPolicy,
 ) -> Result<String, SpoolError> {
-    if policy == CursorPolicy::ContiguousNativeOffset {
-        return Ok(schema_version);
+    match policy {
+        CursorPolicy::ContiguousNativeOffset => Ok(schema_version),
+        CursorPolicy::MonotonicByteOffset => Ok(format!(
+            "{POLICY_SCHEMA_PREFIX}monotonic-byte-offset:{}",
+            blake3::hash(schema_version.as_bytes()).to_hex()
+        )),
     }
-    Ok(format!(
-        "{POLICY_SCHEMA_PREFIX}monotonic-byte-offset:{}",
-        blake3::hash(schema_version.as_bytes()).to_hex()
-    ))
 }
 
 fn duplicate_append(

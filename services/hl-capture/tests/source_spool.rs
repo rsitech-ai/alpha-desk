@@ -965,6 +965,48 @@ fn observation_policy_covers_every_constructible_cursor_policy() {
 }
 
 #[test]
+fn persisted_schema_identity_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let spool = SourceSpool::open(config, 100).unwrap();
+        let schema_version = SpoolReader::open(spool.active_segment_path())
+            .unwrap()
+            .header()
+            .schema_version()
+            .to_owned();
+
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert_eq!(schema_version, "spool-v1");
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(
+                    schema_version,
+                    format!(
+                        "hl-spool-policy-v1:monotonic-byte-offset:{}",
+                        blake3::hash(b"spool-v1").to_hex()
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
     let root = TempDir::new().unwrap();
     let error = SourceSpoolConfig::try_new_with_cursor_policy(
