@@ -4,7 +4,8 @@
 /// committed source class, committed source health, auxiliary source
 /// identity, auxiliary spool_records, auxiliary unarchived_records,
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary durable_offset,
-/// auxiliary local_sequence, auxiliary source health, auxiliary restart reconstruction,
+/// auxiliary local_sequence, auxiliary last_durable_wall_micros,
+/// auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
 /// availability, or SLO contract, it does not invent fills or mark sources
@@ -569,6 +570,59 @@ pub fn auxiliary_source_local_sequence_is_optional_u64(document: &str) -> bool {
     .is_some_and(|required| required.contains(&"local_sequence"))
 }
 
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.last_durable_wall_micros`
+/// is an optional i64 integer: `type: integer`, not listed on
+/// `items.required`, and no `$ref`, `enum`, `format`, `pattern`,
+/// `minimum`, or `maximum`. Capture writer emits `last_durable_wall_micros`
+/// as `Option<i64>` with `skip_serializing_if` once the durable cluster is
+/// present; this crate does not invent extra numeric bounds and does not
+/// reuse the u64 `minimum: 0` freeze. HealthAssessment.reason_code stays a
+/// free string so unknown RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_last_durable_wall_micros_is_optional_i64(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "last_durable_wall_micros",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("integer")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("minimum")
+        || mapping.has_key("maximum")
+        || mapping.has_key("exclusiveMinimum")
+        || mapping.has_key("exclusiveMaximum")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"last_durable_wall_micros"))
+}
+
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
 /// no `$ref` (including `CoreDeadLetterReasonCode` or
 /// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
@@ -965,7 +1019,9 @@ mod tests {
         READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
         auxiliary_source_cursor_epoch_is_optional_string,
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
-        auxiliary_source_id_is_required_string, auxiliary_source_local_sequence_is_optional_u64,
+        auxiliary_source_id_is_required_string,
+        auxiliary_source_last_durable_wall_micros_is_optional_i64,
+        auxiliary_source_local_sequence_is_optional_u64,
         auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
@@ -1037,6 +1093,10 @@ mod tests {
         assert!(
             auxiliary_source_local_sequence_is_optional_u64(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.local_sequence as an optional u64 integer"
+        );
+        assert!(
+            auxiliary_source_last_durable_wall_micros_is_optional_i64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_durable_wall_micros as an optional i64 integer"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -2346,6 +2406,188 @@ components:
         assert!(
             auxiliary_source_local_sequence_is_optional_u64(optional_integer),
             "optional u64 local_sequence must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_last_durable_wall_micros_optional_i64_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            last_durable_wall_micros remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_last_durable_wall_micros_is_optional_i64(prose_only),
+            "prose mention of last_durable_wall_micros must not satisfy the optional-i64 freeze"
+        );
+
+        let required_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - last_durable_wall_micros
+            properties:
+              last_durable_wall_micros:
+                type: integer
+"#;
+        assert!(
+            !auxiliary_source_last_durable_wall_micros_is_optional_i64(required_integer),
+            "required last_durable_wall_micros must not satisfy the optional-i64 freeze"
+        );
+
+        let string_wall = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_durable_wall_micros:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_last_durable_wall_micros_is_optional_i64(string_wall),
+            "optional non-integer last_durable_wall_micros must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_durable_wall_micros:
+                type: integer
+                format: int64
+"#;
+        assert!(
+            !auxiliary_source_last_durable_wall_micros_is_optional_i64(formatted),
+            "invented last_durable_wall_micros format must not satisfy the freeze"
+        );
+
+        let bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_durable_wall_micros:
+                type: integer
+                maximum: 100
+"#;
+        assert!(
+            !auxiliary_source_last_durable_wall_micros_is_optional_i64(bounded),
+            "invented last_durable_wall_micros maximum must not satisfy the freeze"
+        );
+
+        let copied_u64_minimum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_durable_wall_micros:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !auxiliary_source_last_durable_wall_micros_is_optional_i64(copied_u64_minimum),
+            "copied u64 minimum: 0 must not satisfy the optional-i64 freeze"
+        );
+
+        let optional_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              last_durable_wall_micros:
+                type: integer
+"#;
+        assert!(
+            auxiliary_source_last_durable_wall_micros_is_optional_i64(optional_integer),
+            "optional i64 last_durable_wall_micros must satisfy the freeze"
         );
     }
 
