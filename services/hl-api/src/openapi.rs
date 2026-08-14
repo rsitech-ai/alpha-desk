@@ -1,12 +1,14 @@
 /// Checked-in OpenAPI document generated from the health proto JSON fields,
 /// capture-status v4 (inactive) / v5 (maintenance) required keys, optional
-/// last-heartbeat throughput integers, fail-closed query budgets, and the
-/// HTTP router. This is not a production authentication, availability, or
-/// SLO contract, and it does not invent fills or mark sources live or
-/// qualified.
+/// last-heartbeat throughput integers, fail-closed query budgets, frozen
+/// core dead-letter reason codes, and the HTTP router. This is not a
+/// production authentication, availability, or SLO contract, it does not
+/// invent fills or mark sources live or qualified, and it is not a live core.
 pub fn openapi_yaml() -> &'static str {
     include_str!("../../../schemas/openapi/v1/openapi.yaml")
 }
+
+pub use crate::snapshot::{CORE_DEADLETTER_REASON_CODES, is_core_deadletter_reason};
 
 pub const HEALTH_JSON_FIELDS: &[&str] = &[
     "schema_version",
