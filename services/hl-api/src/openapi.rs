@@ -6,7 +6,7 @@
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
-/// top-level last_error_reason, top-level failover_height, top-level failover_reason, top-level durable_height, top-level capture_backlog_records, top-level oldest_pending_capture_height, auxiliary quarantine_reason,
+/// top-level last_error_reason, top-level failover_height, top-level failover_reason, top-level durable_height, top-level capture_backlog_records, top-level oldest_pending_capture_height, top-level disk_free_basis_points, auxiliary quarantine_reason,
 /// auxiliary_sources maxItems,
 /// auxiliary source_id uniqueness, auxiliary source_id sort order,
 /// auxiliary source extra keys, auxiliary source health, auxiliary restart
@@ -1090,6 +1090,50 @@ pub fn capture_status_oldest_pending_capture_height_is_optional_u64(document: &s
     .is_some_and(|required| required.contains(&"oldest_pending_capture_height"))
 }
 
+/// True when top-level `CaptureStatusBase.properties.disk_free_basis_points`
+/// is an optional u16 integer: `type: integer`, `minimum: 0`, not listed on
+/// `CaptureStatusBase.required`, and no `$ref`, `enum`, `format`, `pattern`,
+/// or `maximum`. Capture writer emits top-level `disk_free_basis_points`
+/// as `Option<u16>` with `skip_serializing_if`. Writer `validate` rejects
+/// `> 10_000`; that range lives only in the capture writer and is not copied
+/// here. This crate does not invent extra numeric bounds. This stack has no
+/// existing u16 OpenAPI `maximum`, so this freeze matches other unsigned
+/// integers (`minimum: 0`, no `maximum`). HealthAssessment.reason_code stays
+/// a free string so unknown RED is not closed out.
+#[must_use]
+pub fn capture_status_disk_free_basis_points_is_optional_u16(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "disk_free_basis_points",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("integer")
+        || mapping.scalar("minimum") != Some("0")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("maximum")
+        || mapping.has_key("exclusiveMinimum")
+        || mapping.has_key("exclusiveMaximum")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &["components", "schemas", "CaptureStatusBase"],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"disk_free_basis_points"))
+}
+
 /// True when `CaptureStatusBase.properties.auxiliary_sources` is an array
 /// capped at capture writer [`MAX_AUXILIARY_SOURCES`]: `type: array`,
 /// `maxItems` equal to that constant, and no `minItems` or `uniqueItems`.
@@ -1127,12 +1171,13 @@ pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
 /// properties are parse `snapshot_invalid`. Known objects without extras
 /// stay valid. CaptureStatusBase itself does not set
 /// `additionalProperties: false` (top-level writer fields such as
-/// `disk_free_basis_points` and `archive_manifest_id` stay untyped).
+/// `archive_manifest_id` stay untyped).
 /// Top-level `failover_height` is an optional u64. Top-level
 /// `failover_reason` is an optional kebab-case enum. Top-level
 /// `durable_height` is an optional u64. Top-level
 /// `capture_backlog_records` is a required u64. Top-level
 /// `oldest_pending_capture_height` is an optional u64. Top-level
+/// `disk_free_basis_points` is an optional u16. Top-level
 /// `last_error_reason` is an optional string.
 /// HealthAssessment.reason_code stays a free string so unknown RED is not
 /// closed out.
@@ -1564,6 +1609,7 @@ mod tests {
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
         capture_source_health_openapi_enum, capture_status_capture_backlog_records_is_required_u64,
+        capture_status_disk_free_basis_points_is_optional_u16,
         capture_status_durable_height_is_optional_u64,
         capture_status_failover_height_is_optional_u64,
         capture_status_failover_reason_is_optional_enum,
@@ -1684,6 +1730,10 @@ mod tests {
         assert!(
             capture_status_oldest_pending_capture_height_is_optional_u64(document),
             "OpenAPI must define CaptureStatusBase.oldest_pending_capture_height as an optional u64 integer"
+        );
+        assert!(
+            capture_status_disk_free_basis_points_is_optional_u16(document),
+            "OpenAPI must define CaptureStatusBase.disk_free_basis_points as an optional u16 integer"
         );
         assert!(
             auxiliary_source_items_forbid_additional_properties(document),
@@ -4629,6 +4679,169 @@ components:
         assert!(
             capture_status_oldest_pending_capture_height_is_optional_u64(optional_integer),
             "optional u64 oldest_pending_capture_height must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_top_level_disk_free_basis_points_optional_u16_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        pending_blocks:
+          description: >
+            disk_free_basis_points remains in prose after the YAML property drops it.
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_disk_free_basis_points_is_optional_u16(prose_only),
+            "prose mention of disk_free_basis_points must not satisfy the optional-u16 freeze"
+        );
+
+        let nested_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - pending_blocks
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              disk_free_basis_points:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !capture_status_disk_free_basis_points_is_optional_u16(nested_only),
+            "nested disk_free_basis_points must not satisfy the top-level optional-u16 freeze"
+        );
+
+        let required_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - disk_free_basis_points
+      properties:
+        disk_free_basis_points:
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_disk_free_basis_points_is_optional_u16(required_integer),
+            "required disk_free_basis_points must not satisfy the optional-u16 freeze"
+        );
+
+        let string_points = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        disk_free_basis_points:
+          type: string
+"#;
+        assert!(
+            !capture_status_disk_free_basis_points_is_optional_u16(string_points),
+            "optional non-integer disk_free_basis_points must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        disk_free_basis_points:
+          type: integer
+          minimum: 0
+          format: int16
+"#;
+        assert!(
+            !capture_status_disk_free_basis_points_is_optional_u16(formatted),
+            "invented disk_free_basis_points format must not satisfy the freeze"
+        );
+
+        let writer_bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        disk_free_basis_points:
+          type: integer
+          minimum: 0
+          maximum: 10000
+"#;
+        assert!(
+            !capture_status_disk_free_basis_points_is_optional_u16(writer_bounded),
+            "writer disk_free_basis_points maximum 10000 must not satisfy the freeze"
+        );
+
+        let width_bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        disk_free_basis_points:
+          type: integer
+          minimum: 0
+          maximum: 65535
+"#;
+        assert!(
+            !capture_status_disk_free_basis_points_is_optional_u16(width_bounded),
+            "invented disk_free_basis_points maximum 65535 must not satisfy the freeze"
+        );
+
+        let optional_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - schema_version
+        - pending_blocks
+      properties:
+        disk_free_basis_points:
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            capture_status_disk_free_basis_points_is_optional_u16(optional_integer),
+            "optional u16 disk_free_basis_points must satisfy the freeze"
         );
     }
 
