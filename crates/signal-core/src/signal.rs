@@ -94,7 +94,10 @@ impl SignalConfirmationClass {
 
     #[must_use]
     pub const fn can_enter_live(self) -> bool {
-        matches!(self, Self::CommittedPrimary | Self::CommittedIndependent)
+        match self {
+            Self::CommittedPrimary | Self::CommittedIndependent => true,
+            Self::ProvisionalSource | Self::SyntheticUnqualified => false,
+        }
     }
 }
 

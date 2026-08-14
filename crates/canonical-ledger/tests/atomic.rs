@@ -245,15 +245,7 @@ fn wrong_chain_gap_and_provisional_blocks_fail_before_state_changes() {
             "ledger.height_discontinuity",
         ),
         (
-            BlockEnvelope::try_new(
-                ChainId::new("mainnet").expect("chain"),
-                BlockHeight::new(40),
-                ProtocolTime::from_unix_micros(40).expect("time"),
-                ConfirmationClass::ProvisionalSource,
-                Vec::new(),
-                source_hashes(40),
-            )
-            .expect("provisional block"),
+            empty_confirmed_block("mainnet", 40, 40, ConfirmationClass::ProvisionalSource),
             "ledger.non_committed_block",
         ),
     ];
@@ -264,6 +256,51 @@ fn wrong_chain_gap_and_provisional_blocks_fail_before_state_changes() {
         let error = ledger.apply_block(&block).expect_err(reason);
         assert_eq!(error.reason_code(), reason);
         assert_eq!(ledger.state_image().canonical_bytes(), before);
+    }
+}
+
+#[test]
+fn confirmation_boundary_covers_every_class() {
+    for class in [
+        ConfirmationClass::ProvisionalSource,
+        ConfirmationClass::CommittedPrimary,
+        ConfirmationClass::CommittedIndependent,
+        ConfirmationClass::ReconciledSnapshot,
+        ConfirmationClass::Corrected,
+        ConfirmationClass::Expired,
+    ] {
+        let mut ledger = ledger(40, RejectingReducer);
+        let before = ledger.state_image().canonical_bytes();
+        let block = empty_confirmed_block("mainnet", 40, 40, class);
+        match class {
+            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => {
+                let outcome = ledger
+                    .apply_block(&block)
+                    .expect("empty committed blocks still admit");
+                assert!(
+                    matches!(outcome, ApplyOutcome::Applied(_)),
+                    "{class:?} empty committed block must apply, not already-applied"
+                );
+                assert_eq!(
+                    ledger.checkpoint().expect("checkpoint").block_height(),
+                    BlockHeight::new(40)
+                );
+            }
+            ConfirmationClass::ProvisionalSource
+            | ConfirmationClass::ReconciledSnapshot
+            | ConfirmationClass::Corrected
+            | ConfirmationClass::Expired => {
+                let error = ledger
+                    .apply_block(&block)
+                    .expect_err("non-committed lanes fail closed");
+                assert_eq!(
+                    error.reason_code(),
+                    "ledger.non_committed_block",
+                    "{class:?} must not blur into the committed ledger lane"
+                );
+                assert_eq!(ledger.state_image().canonical_bytes(), before);
+            }
+        }
     }
 }
 
@@ -566,11 +603,20 @@ fn applied(outcome: ApplyOutcome) -> canonical_ledger::StateDelta {
 }
 
 fn empty_block(chain: &str, height: u64, time: i64) -> BlockEnvelope {
+    empty_confirmed_block(chain, height, time, ConfirmationClass::CommittedPrimary)
+}
+
+fn empty_confirmed_block(
+    chain: &str,
+    height: u64,
+    time: i64,
+    confirmation: ConfirmationClass,
+) -> BlockEnvelope {
     BlockEnvelope::try_new(
         ChainId::new(chain).expect("chain"),
         BlockHeight::new(height),
         ProtocolTime::from_unix_micros(time).expect("time"),
-        ConfirmationClass::CommittedPrimary,
+        confirmation,
         Vec::new(),
         source_hashes(height),
     )
