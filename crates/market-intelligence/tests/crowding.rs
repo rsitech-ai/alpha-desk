@@ -283,3 +283,24 @@ fn boolean_book_cannot_mint_crowding_proof() {
         })
     ));
 }
+
+#[test]
+fn empty_marks_with_observed_proof_cannot_look_like_empty_observation() {
+    let mut snapshot = crowding_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+    );
+    snapshot.values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Decimal { raw: 0, scale: 8 },
+    );
+    snapshot.provenance_hash = snapshot.compute_provenance_hash();
+    let evidence = snapshot.require_observed_book_and_fills().unwrap();
+    assert!(matches!(
+        crowding_components(&[], usd(50), evidence),
+        Err(MarketError::InsufficientHistory { what: "crowding" })
+    ));
+}

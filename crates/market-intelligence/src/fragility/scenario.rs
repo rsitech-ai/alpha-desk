@@ -136,9 +136,9 @@ pub struct FragilityResult {
 
 /// Fragility scores from a caller-supplied simulated book and accounts.
 /// Inputs are admitted only with [`ObservedBookAndFills`] issued after book,
-/// fills, and inventory are observed. The proof must match the simulated
-/// book's health and executable depth, and caller account inventory, when
-/// those inputs would be scored.
+/// fills, and inventory are observed. The proof must bind to the same book
+/// and inventory identity; a missing or red constructed book cannot ride an
+/// unrelated Observed proof onto the empty fail-closed path.
 pub fn simulate_fragility(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -205,9 +205,9 @@ pub fn simulate_fragility_from_snapshot(
 
 /// Path scores from a caller-supplied simulated book and accounts.
 /// Inputs are admitted only with [`ObservedBookAndFills`] issued after book,
-/// fills, and inventory are observed. The proof must match the simulated
-/// book and caller account inventory being scored so an unrelated constructed
-/// book or invented inventory cannot ride another snapshot's token.
+/// fills, and inventory are observed. The proof must bind to the same book
+/// and inventory identity so an unrelated Observed proof cannot admit a
+/// missing or red constructed book as a successful empty observation.
 pub fn simulate_path(
     scenario: &FragilityScenario,
     accounts: &[SimulatedAccount],
@@ -216,7 +216,6 @@ pub fn simulate_path(
     bound_sign: i32,
     evidence: ObservedBookAndFills<'_>,
 ) -> Result<ScenarioPathResult, MarketError> {
-    require_proof_matches_book(evidence, book)?;
     match book.observation {
         ObservationStatus::Missing(_) => {
             if book.executable_depth.raw() != 0 {
@@ -225,17 +224,25 @@ pub fn simulate_path(
                     reason: "missing book cannot carry executable depth",
                 });
             }
-            return red_path(accounts, &book.health);
         }
         ObservationStatus::Observed => {}
     }
-    if book.health.state == HealthState::Red {
-        return red_path(accounts, &book.health);
+    require_proof_matches_book(evidence, book)?;
+    if !accounts.is_empty() {
+        evidence.require_matches_inventory(caller_account_inventory(accounts)?)?;
+    }
+    match book.observation {
+        ObservationStatus::Missing(_) => {
+            return Err(unrelated_missing_book_proof());
+        }
+        ObservationStatus::Observed => match book.health.state {
+            HealthState::Red => return Err(unrelated_red_book_proof()),
+            HealthState::Green | HealthState::Amber => {}
+        },
     }
     if accounts.is_empty() {
         return Err(MarketError::InsufficientHistory { what: "fragility" });
     }
-    evidence.require_matches_inventory(caller_account_inventory(accounts)?)?;
     let scale = accounts[0].notional.scale();
     let mut remaining: Vec<SimulatedAccount> = accounts
         .iter()
@@ -327,30 +334,45 @@ fn require_proof_matches_book(
     book: &SimulatedBook,
 ) -> Result<(), MarketError> {
     match book.observation {
-        ObservationStatus::Missing(_) => return Ok(()),
-        ObservationStatus::Observed => {}
+        ObservationStatus::Missing(_) => Err(unrelated_missing_book_proof()),
+        ObservationStatus::Observed => match book.health.state {
+            HealthState::Red => Err(unrelated_red_book_proof()),
+            HealthState::Green | HealthState::Amber => {
+                if evidence.health() != &book.health {
+                    return Err(MarketError::Malformed {
+                        what: "book",
+                        reason: "observed book proof does not match simulated book health",
+                    });
+                }
+                let depth = observed_usd_amount(
+                    evidence.book_value(),
+                    "book",
+                    "observed book must be decimal executable depth",
+                )?;
+                if depth != book.executable_depth {
+                    return Err(MarketError::Malformed {
+                        what: "book",
+                        reason: "observed book proof does not match simulated book depth",
+                    });
+                }
+                Ok(())
+            }
+        },
     }
-    if book.health.state == HealthState::Red {
-        return Ok(());
+}
+
+const fn unrelated_missing_book_proof() -> MarketError {
+    MarketError::Malformed {
+        what: "book",
+        reason: "observed book proof is unrelated to missing constructed book",
     }
-    if evidence.health() != &book.health {
-        return Err(MarketError::Malformed {
-            what: "book",
-            reason: "observed book proof does not match simulated book health",
-        });
+}
+
+const fn unrelated_red_book_proof() -> MarketError {
+    MarketError::Malformed {
+        what: "book",
+        reason: "observed book proof is unrelated to red constructed book",
     }
-    let depth = observed_usd_amount(
-        evidence.book_value(),
-        "book",
-        "observed book must be decimal executable depth",
-    )?;
-    if depth != book.executable_depth {
-        return Err(MarketError::Malformed {
-            what: "book",
-            reason: "observed book proof does not match simulated book depth",
-        });
-    }
-    Ok(())
 }
 
 fn caller_account_inventory(accounts: &[SimulatedAccount]) -> Result<UsdAmount, MarketError> {

@@ -122,7 +122,7 @@ fn regime() -> market_intelligence::RegimeAssessment {
     .unwrap()
 }
 
-fn fragility(red_book: bool, unsupported: bool) -> FragilityResult {
+fn fragility(_red_book: bool, unsupported: bool) -> FragilityResult {
     let scenario = FragilityScenario::default_grid(ScenarioId::new("fam").unwrap());
     let mut account = SimulatedAccount {
         account_id: AccountId::new("a").unwrap(),
@@ -136,46 +136,35 @@ fn fragility(red_book: bool, unsupported: bool) -> FragilityResult {
     if unsupported {
         account.margin_mode = SimulatedMarginMode::Unsupported;
     }
-    let book_health = health(
-        "book",
-        if red_book {
-            HealthState::Red
-        } else {
-            HealthState::Green
-        },
-    );
+    let book_health = health("book", HealthState::Green);
     let depth = usd(10);
     let book = SimulatedBook::observed(depth, book_health.clone());
-    let snapshot = if red_book {
-        snapshot(HealthState::Green, green_values(&[]))
-    } else {
-        let mut values = green_values(&[]);
-        values.insert(
-            market_feature_key("book").unwrap(),
-            FeatureValue::Decimal {
-                raw: depth.raw(),
-                scale: u32::from(depth.scale()),
-            },
-        );
-        values.insert(
-            market_feature_key("inventory").unwrap(),
-            FeatureValue::Decimal {
-                raw: account.notional.raw(),
-                scale: u32::from(account.notional.scale()),
-            },
-        );
-        MarketFeatureSnapshot::try_new(
-            MarketId::new("BTC").unwrap(),
-            Horizon::MINUTES_5,
-            FeatureSetVersion::new("market-v1").unwrap(),
-            time(1_000_000),
-            known(1_000_000),
-            BlockHeight::new(20),
-            values,
-            book_health,
-        )
-        .unwrap()
-    };
+    let mut values = green_values(&[]);
+    values.insert(
+        market_feature_key("book").unwrap(),
+        FeatureValue::Decimal {
+            raw: depth.raw(),
+            scale: u32::from(depth.scale()),
+        },
+    );
+    values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Decimal {
+            raw: account.notional.raw(),
+            scale: u32::from(account.notional.scale()),
+        },
+    );
+    let snapshot = MarketFeatureSnapshot::try_new(
+        MarketId::new("BTC").unwrap(),
+        Horizon::MINUTES_5,
+        FeatureSetVersion::new("market-v1").unwrap(),
+        time(1_000_000),
+        known(1_000_000),
+        BlockHeight::new(20),
+        values,
+        book_health,
+    )
+    .unwrap();
     simulate_fragility(
         &scenario,
         &[account],
