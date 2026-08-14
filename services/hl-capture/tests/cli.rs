@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
@@ -247,34 +247,40 @@ fn reserve_loopback() -> SocketAddr {
         .expect("loopback addr")
 }
 
-fn wait_for_listen(addr: SocketAddr) {
-    for _ in 0..100 {
-        if TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    panic!("serve-status did not become reachable at {addr}");
-}
-
-fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
-    let mut stream = TcpStream::connect(addr).expect("connect");
-    stream
-        .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
-        )
-        .expect("write request");
-    stream.flush().expect("flush request");
+fn try_http_get(addr: SocketAddr, path: &str) -> io::Result<(u16, String)> {
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(100))?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(200)))?;
+    stream.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes(),
+    )?;
+    stream.flush()?;
     let mut body = Vec::new();
-    stream.read_to_end(&mut body).expect("read response");
-    let body = String::from_utf8(body).expect("UTF-8 response");
+    stream.read_to_end(&mut body)?;
+    let body = String::from_utf8(body)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let status = body
         .split_whitespace()
         .nth(1)
         .and_then(|value| value.parse().ok())
-        .expect("HTTP status");
-    (status, body)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing HTTP status"))?;
+    Ok((status, body))
+}
+
+fn wait_for_http(addr: SocketAddr, path: &str) -> (u16, String) {
+    let mut last_error = None;
+    for _ in 0..100 {
+        match try_http_get(addr, path) {
+            Ok(response) => return response,
+            Err(error) => last_error = Some(error),
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("serve-status did not accept HTTP at {addr}: {last_error:?}");
+}
+
+fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
+    try_http_get(addr, path).unwrap_or_else(|error| panic!("http get {path}: {error}"))
 }
 
 #[test]
@@ -298,8 +304,7 @@ fn serve_status_cli_serves_written_v5_json_and_fails_closed_on_a_missing_file() 
             .expect("spawn serve-status"),
     );
 
-    wait_for_listen(addr);
-    let (missing_status, missing_body) = http_get(addr, "/status");
+    let (missing_status, missing_body) = wait_for_http(addr, "/status");
     assert_eq!(missing_status, 503);
     assert!(missing_body.contains("capture_status."));
 
@@ -367,8 +372,7 @@ fn serve_status_cli_serves_v5_fixture_json_as_read() {
             .expect("spawn serve-status"),
     );
 
-    wait_for_listen(addr);
-    let (status, body) = http_get(addr, "/status");
+    let (status, body) = wait_for_http(addr, "/status");
     assert_eq!(status, 200);
     let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
     assert_eq!(&body.as_bytes()[json_start..], fixture.as_slice());
