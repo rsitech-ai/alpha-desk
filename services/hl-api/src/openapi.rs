@@ -3,7 +3,7 @@
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
 /// committed source class, committed source health, auxiliary source
 /// identity, auxiliary spool_records, auxiliary unarchived_records,
-/// auxiliary partial_line, auxiliary source health, auxiliary restart reconstruction,
+/// auxiliary partial_line, auxiliary cursor_epoch, auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
 /// availability, or SLO contract, it does not invent fills or mark sources
@@ -416,6 +416,54 @@ pub fn auxiliary_source_partial_line_is_required_bool(document: &str) -> bool {
     .is_some_and(|required| required.contains(&"partial_line"))
 }
 
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.cursor_epoch`
+/// is an optional free string: `type: string`, not listed on `items.required`,
+/// and no `$ref`, `enum`, `format`, or `pattern`. Capture writer emits
+/// `cursor_epoch` as a string with the durable cluster once healthy or
+/// quarantined (`Option` + `skip_serializing_if`); this crate does not invent
+/// extra identity formats. HealthAssessment.reason_code stays a free string
+/// so unknown RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_cursor_epoch_is_optional_string(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "cursor_epoch",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("string")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"cursor_epoch"))
+}
+
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
 /// no `$ref` (including `CoreDeadLetterReasonCode` or
 /// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
@@ -809,7 +857,8 @@ mod tests {
         AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
         COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
         LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
-        READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, auxiliary_source_health_openapi_enum,
+        READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
+        auxiliary_source_cursor_epoch_is_optional_string, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
@@ -869,6 +918,10 @@ mod tests {
         assert!(
             auxiliary_source_partial_line_is_required_bool(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.partial_line as a required boolean"
+        );
+        assert!(
+            auxiliary_source_cursor_epoch_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.cursor_epoch as an optional string"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -1692,6 +1745,166 @@ components:
         assert!(
             !auxiliary_source_partial_line_is_required_bool(enumerated),
             "invented partial_line enum must not satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_cursor_epoch_optional_string_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            cursor_epoch remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_cursor_epoch_is_optional_string(prose_only),
+            "prose mention of cursor_epoch must not satisfy the optional-string freeze"
+        );
+
+        let required_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - cursor_epoch
+            properties:
+              cursor_epoch:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_cursor_epoch_is_optional_string(required_string),
+            "required cursor_epoch must not satisfy the optional-string freeze"
+        );
+
+        let integer_epoch = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              cursor_epoch:
+                type: integer
+"#;
+        assert!(
+            !auxiliary_source_cursor_epoch_is_optional_string(integer_epoch),
+            "optional non-string cursor_epoch must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              cursor_epoch:
+                type: string
+                format: uuid
+"#;
+        assert!(
+            !auxiliary_source_cursor_epoch_is_optional_string(formatted),
+            "invented cursor_epoch format must not satisfy the freeze"
+        );
+
+        let closed_enum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              cursor_epoch:
+                type: string
+                enum:
+                  - node-file-v1:epoch
+"#;
+        assert!(
+            !auxiliary_source_cursor_epoch_is_optional_string(closed_enum),
+            "invented cursor_epoch enum must not satisfy the freeze"
+        );
+
+        let optional_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              cursor_epoch:
+                type: string
+"#;
+        assert!(
+            auxiliary_source_cursor_epoch_is_optional_string(optional_string),
+            "optional string cursor_epoch must satisfy the freeze"
         );
     }
 
