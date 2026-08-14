@@ -1293,6 +1293,65 @@ fn recovery_first_in_segment_covers_every_constructible_cursor_policy() {
 }
 
 #[test]
+fn recovery_retained_index_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                spool.append(&observation(101), 102).unwrap();
+                assert_eq!(spool.retained_segment_count(), 0);
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                spool.append(&byte_observation(49), 102).unwrap();
+                assert_eq!(spool.retained_segment_count(), 1);
+            }
+        }
+        drop(spool);
+
+        let mut recovered = SourceSpool::open(config, 200).expect(
+            "recovery still rebuilds or skips the retained index for this constructible cursor policy",
+        );
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert_eq!(recovered.retained_segment_count(), 0);
+                recovered
+                    .append(&observation(102), 201)
+                    .expect("contiguous recovery still skips retained-index updates");
+                assert_eq!(recovered.retained_segment_count(), 0);
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(recovered.retained_segment_count(), 1);
+                let duplicate = recovered.append(&byte_observation(17), 201).expect(
+                    "byte-offset recovery still serves duplicates from the rebuilt retained index",
+                );
+                assert_eq!(
+                    duplicate.disposition(),
+                    SourceSpoolAppendDisposition::Duplicate
+                );
+                assert_eq!(recovered.retained_segment_count(), 1);
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
     let root = TempDir::new().unwrap();
     let error = SourceSpoolConfig::try_new_with_cursor_policy(
