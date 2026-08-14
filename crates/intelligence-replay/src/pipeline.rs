@@ -624,8 +624,9 @@ pub fn refuse_leaked_withheld_emission(
     }
 }
 
+/// Prefer book/fills withhold over inventory, then missing inventory over malformed.
 #[must_use]
-fn fold_withhold_reason(
+pub const fn fold_withhold_reason(
     current: Option<ProofWithholdReason>,
     next: Option<ProofWithholdReason>,
 ) -> Option<ProofWithholdReason> {
@@ -633,12 +634,18 @@ fn fold_withhold_reason(
         (None, next) => next,
         (current, None) => current,
         (Some(current), Some(next)) => Some(match (current, next) {
-            (ProofWithholdReason::MissingBookOrFills, _)
-            | (_, ProofWithholdReason::MissingBookOrFills) => {
+            (ProofWithholdReason::MissingBookOrFills, ProofWithholdReason::MissingBookOrFills)
+            | (ProofWithholdReason::MissingBookOrFills, ProofWithholdReason::MissingInventory)
+            | (ProofWithholdReason::MissingBookOrFills, ProofWithholdReason::MalformedInventory)
+            | (ProofWithholdReason::MissingInventory, ProofWithholdReason::MissingBookOrFills)
+            | (ProofWithholdReason::MalformedInventory, ProofWithholdReason::MissingBookOrFills) => {
                 ProofWithholdReason::MissingBookOrFills
             }
-            (ProofWithholdReason::MissingInventory, _)
-            | (_, ProofWithholdReason::MissingInventory) => ProofWithholdReason::MissingInventory,
+            (ProofWithholdReason::MissingInventory, ProofWithholdReason::MissingInventory)
+            | (ProofWithholdReason::MissingInventory, ProofWithholdReason::MalformedInventory)
+            | (ProofWithholdReason::MalformedInventory, ProofWithholdReason::MissingInventory) => {
+                ProofWithholdReason::MissingInventory
+            }
             (ProofWithholdReason::MalformedInventory, ProofWithholdReason::MalformedInventory) => {
                 ProofWithholdReason::MalformedInventory
             }
