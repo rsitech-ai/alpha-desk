@@ -30,13 +30,14 @@ use hl_api::{
     capture_status_failover_reason_is_optional_enum, capture_status_failover_reason_openapi_enum,
     capture_status_last_error_reason_is_optional_string,
     capture_status_oldest_pending_capture_height_is_optional_u64,
-    committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-    independent_source_health_openapi_enum, is_core_deadletter_reason,
-    is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
-    readyz_200_description, readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
-    readyz_get_description, restart_reconstruction_openapi_enum, spawn_local,
-    unavailable_response_schema_ref,
+    capture_status_throughput_blocks_per_sec_is_optional_u64,
+    capture_status_throughput_records_per_sec_is_optional_u64, committed_source_class_openapi_enum,
+    core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+    health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+    readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref, readyz_get_description,
+    restart_reconstruction_openapi_enum, spawn_local, unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -3054,6 +3055,241 @@ async fn top_level_capture_archive_manifest_id_is_optional_string() {
     }
 }
 
+#[tokio::test]
+async fn top_level_capture_throughput_records_per_sec_is_optional_u64() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level throughput_records_per_sec must stay 200"
+    );
+    assert!(body.get("throughput_records_per_sec").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v4");
+
+    for throughput_records_per_sec in [0_u64, 3, u64::MAX] {
+        value["throughput_records_per_sec"] = serde_json::json!(throughput_records_per_sec);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known u64 throughput_records_per_sec"),
+        )
+        .expect("write known u64 throughput_records_per_sec");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{throughput_records_per_sec} must stay 200");
+        assert_eq!(
+            body["throughput_records_per_sec"],
+            throughput_records_per_sec
+        );
+        assert!(
+            body.get("throughput_blocks_per_sec").is_none(),
+            "typing throughput_records_per_sec must not couple it to throughput_blocks_per_sec"
+        );
+        assert!(body.get("fills").is_none());
+        assert!(body.get("qualification").is_none());
+        assert!(
+            body.get("archive_manifest_id").is_none(),
+            "typing throughput_records_per_sec must not couple it to archive_manifest_id"
+        );
+        assert!(
+            body.get("disk_free_basis_points").is_none(),
+            "typing throughput_records_per_sec must not couple it to disk_free_basis_points"
+        );
+        assert!(
+            body.get("durable_height").is_none(),
+            "typing throughput_records_per_sec must not couple it to durable_height"
+        );
+    }
+
+    value
+        .as_object_mut()
+        .expect("capture status object")
+        .remove("throughput_records_per_sec");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted throughput_records_per_sec"),
+    )
+    .expect("write omitted throughput_records_per_sec");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level throughput_records_per_sec after removal must stay 200"
+    );
+    assert!(body.get("throughput_records_per_sec").is_none());
+
+    for throughput_records_per_sec in [
+        serde_json::json!("0"),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-u64"}),
+        serde_json::json!(["not-a-u64"]),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+    ] {
+        value["throughput_records_per_sec"] = throughput_records_per_sec.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-u64 throughput_records_per_sec"),
+        )
+        .expect("write non-u64 throughput_records_per_sec");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(
+            status, 503,
+            "{throughput_records_per_sec} must not fail open"
+        );
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
+#[tokio::test]
+async fn top_level_capture_throughput_blocks_per_sec_is_optional_u64() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level throughput_blocks_per_sec must stay 200"
+    );
+    assert!(body.get("throughput_blocks_per_sec").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v4");
+
+    for throughput_blocks_per_sec in [0_u64, 1, u64::MAX] {
+        value["throughput_blocks_per_sec"] = serde_json::json!(throughput_blocks_per_sec);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known u64 throughput_blocks_per_sec"),
+        )
+        .expect("write known u64 throughput_blocks_per_sec");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{throughput_blocks_per_sec} must stay 200");
+        assert_eq!(body["throughput_blocks_per_sec"], throughput_blocks_per_sec);
+        assert!(
+            body.get("throughput_records_per_sec").is_none(),
+            "typing throughput_blocks_per_sec must not couple it to throughput_records_per_sec"
+        );
+        assert!(body.get("fills").is_none());
+        assert!(body.get("qualification").is_none());
+        assert!(
+            body.get("archive_manifest_id").is_none(),
+            "typing throughput_blocks_per_sec must not couple it to archive_manifest_id"
+        );
+        assert!(
+            body.get("disk_free_basis_points").is_none(),
+            "typing throughput_blocks_per_sec must not couple it to disk_free_basis_points"
+        );
+        assert!(
+            body.get("durable_height").is_none(),
+            "typing throughput_blocks_per_sec must not couple it to durable_height"
+        );
+    }
+
+    value
+        .as_object_mut()
+        .expect("capture status object")
+        .remove("throughput_blocks_per_sec");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted throughput_blocks_per_sec"),
+    )
+    .expect("write omitted throughput_blocks_per_sec");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level throughput_blocks_per_sec after removal must stay 200"
+    );
+    assert!(body.get("throughput_blocks_per_sec").is_none());
+
+    for throughput_blocks_per_sec in [
+        serde_json::json!("0"),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-u64"}),
+        serde_json::json!(["not-a-u64"]),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+    ] {
+        value["throughput_blocks_per_sec"] = throughput_blocks_per_sec.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-u64 throughput_blocks_per_sec"),
+        )
+        .expect("write non-u64 throughput_blocks_per_sec");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(
+            status, 503,
+            "{throughput_blocks_per_sec} must not fail open"
+        );
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -3792,6 +4028,14 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "OpenAPI must define CaptureStatusBase.archive_manifest_id as an optional string"
     );
     assert!(
+        capture_status_throughput_records_per_sec_is_optional_u64(document),
+        "OpenAPI must define CaptureStatusBase.throughput_records_per_sec as an optional u64 integer"
+    );
+    assert!(
+        capture_status_throughput_blocks_per_sec_is_optional_u64(document),
+        "OpenAPI must define CaptureStatusBase.throughput_blocks_per_sec as an optional u64 integer"
+    );
+    assert!(
         auxiliary_sources_max_items_is_writer_cap(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
     );
@@ -4051,6 +4295,14 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         capture_status_archive_manifest_id_is_optional_string(document),
         "served OpenAPI must define CaptureStatusBase.archive_manifest_id as an optional string"
+    );
+    assert!(
+        capture_status_throughput_records_per_sec_is_optional_u64(document),
+        "served OpenAPI must define CaptureStatusBase.throughput_records_per_sec as an optional u64 integer"
+    );
+    assert!(
+        capture_status_throughput_blocks_per_sec_is_optional_u64(document),
+        "served OpenAPI must define CaptureStatusBase.throughput_blocks_per_sec as an optional u64 integer"
     );
     assert!(
         auxiliary_sources_max_items_is_writer_cap(document),

@@ -91,17 +91,19 @@ pub const MAX_AUXILIARY_SOURCES: usize = 16;
 /// Capture writer `AuxiliarySourceStatus` public keys plus this stack's
 /// already-typed optional `restart_reconstruction`. Present unknown nested
 /// properties are `snapshot_invalid`. Known objects without extras stay
-/// valid. This is not CaptureStatusBase extra keys: last-heartbeat throughput
-/// still passes through. Top-level `failover_height` is an optional u64.
-/// Top-level `failover_reason` is an optional kebab-case enum. Top-level
-/// `durable_height` is an optional u64. Top-level `capture_backlog_records`
-/// is a required u64. Top-level `oldest_pending_capture_height` is an
-/// optional u64. Top-level `disk_free_basis_points` is an optional u16.
-/// Top-level `archive_manifest_id` is an optional non-empty string. Writer
+/// valid. This is not CaptureStatusBase extra keys. Top-level `failover_height`
+/// is an optional u64. Top-level `failover_reason` is an optional kebab-case
+/// enum. Top-level `durable_height` is an optional u64. Top-level
+/// `capture_backlog_records` is a required u64. Top-level
+/// `oldest_pending_capture_height` is an optional u64. Top-level
+/// `disk_free_basis_points` is an optional u16. Top-level
+/// `archive_manifest_id` is an optional non-empty string. Writer
 /// `validate_status_text` trim/control/512 lives only in the capture writer
 /// and is not copied here. Top-level `last_error_reason` is an optional
-/// non-empty string. `HealthAssessment.reason_code` stays a free string so
-/// unknown RED is not closed out.
+/// non-empty string. Top-level last-heartbeat `throughput_records_per_sec`
+/// and `throughput_blocks_per_sec` are optional u64 integers; this stack's
+/// capture writer does not serialize them. `HealthAssessment.reason_code`
+/// stays a free string so unknown RED is not closed out.
 const AUXILIARY_SOURCE_FIELDS: &[&str] = &[
     "source_id",
     "health",
@@ -306,6 +308,12 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     }
     if object.contains_key("archive_manifest_id") {
         require_string(object, "archive_manifest_id", None)?;
+    }
+    if object.contains_key("throughput_records_per_sec") {
+        require_u64(object, "throughput_records_per_sec")?;
+    }
+    if object.contains_key("throughput_blocks_per_sec") {
+        require_u64(object, "throughput_blocks_per_sec")?;
     }
     match schema {
         CaptureStatusSchema::V4 => {
@@ -570,6 +578,8 @@ mod tests {
         capture_status_failover_reason_openapi_enum,
         capture_status_last_error_reason_is_optional_string,
         capture_status_oldest_pending_capture_height_is_optional_u64,
+        capture_status_throughput_blocks_per_sec_is_optional_u64,
+        capture_status_throughput_records_per_sec_is_optional_u64,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
         health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
         ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
@@ -889,18 +899,181 @@ mod tests {
     }
 
     #[test]
-    fn last_heartbeat_throughput_fields_pass_through_as_read() {
+    fn known_top_level_throughput_records_per_sec_u64_is_accepted() {
         let mut value =
             serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
                 .expect("v4 json");
-        value["throughput_records_per_sec"] = serde_json::json!(3);
-        value["throughput_blocks_per_sec"] = serde_json::json!(1);
-        let bytes = serde_json::to_vec(&value).expect("encode");
-        let parsed = parse_capture_status_bytes(&bytes).expect("as-read extras");
-        assert_eq!(parsed["throughput_records_per_sec"], 3);
-        assert_eq!(parsed["throughput_blocks_per_sec"], 1);
-        assert!(parsed.get("fills").is_none());
-        assert!(parsed.get("qualification").is_none());
+        assert!(
+            value.get("throughput_records_per_sec").is_none(),
+            "v4 fixture must omit optional top-level throughput_records_per_sec"
+        );
+        for throughput_records_per_sec in [0_u64, 3, u64::MAX] {
+            value["throughput_records_per_sec"] = serde_json::json!(throughput_records_per_sec);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes).unwrap_or_else(|error| {
+                panic!("{throughput_records_per_sec} should parse: {error}")
+            });
+            assert_eq!(
+                parsed["throughput_records_per_sec"],
+                throughput_records_per_sec
+            );
+            assert!(
+                parsed.get("throughput_blocks_per_sec").is_none(),
+                "typing throughput_records_per_sec must not couple it to throughput_blocks_per_sec"
+            );
+            assert!(parsed.get("fills").is_none());
+            assert!(parsed.get("qualification").is_none());
+            assert!(
+                parsed.get("archive_manifest_id").is_none(),
+                "typing throughput_records_per_sec must not couple it to archive_manifest_id"
+            );
+            assert!(
+                parsed.get("disk_free_basis_points").is_none(),
+                "typing throughput_records_per_sec must not couple it to disk_free_basis_points"
+            );
+            assert!(
+                parsed.get("durable_height").is_none(),
+                "typing throughput_records_per_sec must not couple it to durable_height"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_top_level_throughput_records_per_sec_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("throughput_records_per_sec").is_none(),
+            "v4 fixture must omit optional throughput_records_per_sec"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted throughput_records_per_sec");
+        let parsed =
+            parse_capture_status_bytes(&bytes).expect("omitted throughput_records_per_sec");
+        assert!(parsed.get("throughput_records_per_sec").is_none());
+
+        value["throughput_records_per_sec"] = serde_json::json!(3_u64);
+        value
+            .as_object_mut()
+            .expect("capture status object")
+            .remove("throughput_records_per_sec");
+        let bytes = serde_json::to_vec(&value).expect("encode removed throughput_records_per_sec");
+        let parsed =
+            parse_capture_status_bytes(&bytes).expect("removed throughput_records_per_sec");
+        assert!(parsed.get("throughput_records_per_sec").is_none());
+    }
+
+    #[test]
+    fn present_non_u64_top_level_throughput_records_per_sec_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for throughput_records_per_sec in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-u64"}),
+            serde_json::json!(["not-a-u64"]),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            value["throughput_records_per_sec"] = throughput_records_per_sec.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-u64 throughput_records_per_sec must not fail open"),
+                SnapshotError::Invalid,
+                "{throughput_records_per_sec} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_top_level_throughput_blocks_per_sec_u64_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("throughput_blocks_per_sec").is_none(),
+            "v4 fixture must omit optional top-level throughput_blocks_per_sec"
+        );
+        for throughput_blocks_per_sec in [0_u64, 1, u64::MAX] {
+            value["throughput_blocks_per_sec"] = serde_json::json!(throughput_blocks_per_sec);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes).unwrap_or_else(|error| {
+                panic!("{throughput_blocks_per_sec} should parse: {error}")
+            });
+            assert_eq!(
+                parsed["throughput_blocks_per_sec"],
+                throughput_blocks_per_sec
+            );
+            assert!(
+                parsed.get("throughput_records_per_sec").is_none(),
+                "typing throughput_blocks_per_sec must not couple it to throughput_records_per_sec"
+            );
+            assert!(parsed.get("fills").is_none());
+            assert!(parsed.get("qualification").is_none());
+            assert!(
+                parsed.get("archive_manifest_id").is_none(),
+                "typing throughput_blocks_per_sec must not couple it to archive_manifest_id"
+            );
+            assert!(
+                parsed.get("disk_free_basis_points").is_none(),
+                "typing throughput_blocks_per_sec must not couple it to disk_free_basis_points"
+            );
+            assert!(
+                parsed.get("durable_height").is_none(),
+                "typing throughput_blocks_per_sec must not couple it to durable_height"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_top_level_throughput_blocks_per_sec_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("throughput_blocks_per_sec").is_none(),
+            "v4 fixture must omit optional throughput_blocks_per_sec"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted throughput_blocks_per_sec");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted throughput_blocks_per_sec");
+        assert!(parsed.get("throughput_blocks_per_sec").is_none());
+
+        value["throughput_blocks_per_sec"] = serde_json::json!(1_u64);
+        value
+            .as_object_mut()
+            .expect("capture status object")
+            .remove("throughput_blocks_per_sec");
+        let bytes = serde_json::to_vec(&value).expect("encode removed throughput_blocks_per_sec");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed throughput_blocks_per_sec");
+        assert!(parsed.get("throughput_blocks_per_sec").is_none());
+    }
+
+    #[test]
+    fn present_non_u64_top_level_throughput_blocks_per_sec_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for throughput_blocks_per_sec in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-u64"}),
+            serde_json::json!(["not-a-u64"]),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            value["throughput_blocks_per_sec"] = throughput_blocks_per_sec.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-u64 throughput_blocks_per_sec must not fail open"),
+                SnapshotError::Invalid,
+                "{throughput_blocks_per_sec} must be snapshot_invalid"
+            );
+        }
     }
 
     #[test]
@@ -1478,6 +1651,40 @@ mod tests {
         assert!(
             capture_status_archive_manifest_id_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.archive_manifest_id as an optional string"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_top_level_throughput_records_per_sec_optional_u64() {
+        let document = openapi_yaml();
+        assert!(
+            capture_status_throughput_records_per_sec_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.throughput_records_per_sec as an optional u64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_top_level_throughput_blocks_per_sec_optional_u64() {
+        let document = openapi_yaml();
+        assert!(
+            capture_status_throughput_blocks_per_sec_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.throughput_blocks_per_sec as an optional u64 integer"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
