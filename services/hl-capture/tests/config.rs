@@ -39,6 +39,14 @@ fn source_trust_toml(trust: SourceTrust) -> &'static str {
     }
 }
 
+fn replica_cmds_style_toml(style: NodeReplicaCmdsStyle) -> &'static str {
+    match style {
+        NodeReplicaCmdsStyle::Actions => "actions",
+        NodeReplicaCmdsStyle::ActionsAndResponses => "actions-and-responses",
+        NodeReplicaCmdsStyle::RecentActions => "recent-actions",
+    }
+}
+
 fn observation_class_toml(class: ObservationClass) -> &'static str {
     match class {
         ObservationClass::CommittedBlock => "committed-block",
@@ -328,6 +336,38 @@ fn committed_source_adapter_covers_every_constructible_kind() {
             .reason_code(),
         "capture_config.invalid_committed_source_adapter"
     );
+}
+
+#[test]
+fn replica_cmds_style_covers_every_constructible_style() {
+    for style in [
+        NodeReplicaCmdsStyle::Actions,
+        NodeReplicaCmdsStyle::ActionsAndResponses,
+        NodeReplicaCmdsStyle::RecentActions,
+    ] {
+        let source = replace_once(
+            &valid_config(),
+            "replica_cmds_style = \"actions-and-responses\"",
+            &format!(
+                "replica_cmds_style = \"{}\"",
+                replica_cmds_style_toml(style)
+            ),
+        );
+        match style {
+            NodeReplicaCmdsStyle::ActionsAndResponses => {
+                CaptureConfig::from_toml(&source)
+                    .expect("actions-and-responses remains the admitted replica_cmds style");
+            }
+            NodeReplicaCmdsStyle::Actions | NodeReplicaCmdsStyle::RecentActions => {
+                assert_eq!(
+                    CaptureConfig::from_toml(&source)
+                        .expect_err("non-admitted replica_cmds style")
+                        .reason_code(),
+                    "capture_config.invalid_source_adapter"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -710,14 +750,6 @@ fn node_adapter_path_poll_interval_and_class_are_validated() {
         (
             "class = \"committed-block\"",
             "class = \"auxiliary-ledger\"",
-        ),
-        (
-            "replica_cmds_style = \"actions-and-responses\"",
-            "replica_cmds_style = \"actions\"",
-        ),
-        (
-            "replica_cmds_style = \"actions-and-responses\"",
-            "replica_cmds_style = \"recent-actions\"",
         ),
     ] {
         let error = CaptureConfig::from_toml(&replace_once(&valid_config(), from, to))
