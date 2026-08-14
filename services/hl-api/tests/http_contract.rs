@@ -634,6 +634,53 @@ async fn unknown_auxiliary_source_qualification_is_snapshot_invalid() {
     assert_eq!(body["reason_code"], "snapshot_invalid");
 }
 
+#[tokio::test]
+async fn non_object_auxiliary_source_item_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+    let known = value["auxiliary_sources"][0].clone();
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known object auxiliary source must stay 200");
+    assert!(body["auxiliary_sources"][0].is_object());
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    for item in [
+        serde_json::json!("not-an-object"),
+        serde_json::json!(1),
+        serde_json::json!(null),
+    ] {
+        value["auxiliary_sources"] = serde_json::json!([known.clone(), item]);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-object auxiliary item"),
+        )
+        .expect("write non-object auxiliary item");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{item} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(

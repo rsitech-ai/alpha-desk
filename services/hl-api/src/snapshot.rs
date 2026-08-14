@@ -345,8 +345,8 @@ fn require_auxiliary_source_closed_fields(
         return Ok(());
     };
     for source in sources {
-        let Some(source) = source.as_object() else {
-            continue;
+        let Value::Object(source) = source else {
+            return Err(SnapshotError::Invalid);
         };
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
@@ -1095,6 +1095,34 @@ mod tests {
             assert_eq!(
                 parse_capture_status_bytes(&bytes)
                     .expect_err("unknown auxiliary source qualification must not be a free string"),
+                SnapshotError::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn object_auxiliary_source_items_are_accepted() {
+        let value = parse_capture_status_bytes(&fixture("capture-status-v5.json")).expect("v5");
+        assert!(value["auxiliary_sources"][0].is_object());
+        assert_eq!(value["auxiliary_sources"][0]["health"], "starting");
+    }
+
+    #[test]
+    fn non_object_auxiliary_source_items_are_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        let known = value["auxiliary_sources"][0].clone();
+        for item in [
+            serde_json::json!("not-an-object"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            value["auxiliary_sources"] = serde_json::json!([known.clone(), item]);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-object auxiliary source item must not fail open"),
                 SnapshotError::Invalid
             );
         }
