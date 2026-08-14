@@ -31,7 +31,8 @@ impl SourceRequestContext {
         if self.cancellation.is_cancelled() {
             return Err(SourceError::Cancelled);
         }
-        if Instant::now() >= self.backpressure_deadline {
+        if tokio::time::Instant::now() >= tokio::time::Instant::from_std(self.backpressure_deadline)
+        {
             return Err(SourceError::BackpressureTimeout);
         }
         Ok(())

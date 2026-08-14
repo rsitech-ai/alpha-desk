@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use domain_types::{BlockHeight, ChainId, SourceId};
 use hl_protocol::{
@@ -10,6 +10,7 @@ use hl_protocol::{
 use storage_ports::{CaptureProgressStore, CursorPolicy, ProgressError};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::{
@@ -868,7 +869,7 @@ where
         } else {
             group_commit_deadline.unwrap_or(request_deadline)
         };
-        let context = SourceRequestContext::new(cancellation.child_token(), deadline);
+        let context = SourceRequestContext::new(cancellation.child_token(), deadline.into_std());
         let observation = match source.next_observation(&context).await {
             Ok(observation) => observation,
             Err(SourceError::Cancelled) => {
@@ -1443,7 +1444,7 @@ where
         let deadline = Instant::now()
             .checked_add(config.backpressure_timeout)
             .ok_or(SourceRuntimeError::InvalidConfig)?;
-        let context = SourceRequestContext::new(cancellation.child_token(), deadline);
+        let context = SourceRequestContext::new(cancellation.child_token(), deadline.into_std());
         let observation = match source.next_observation(&context).await {
             Ok(observation) => observation,
             Err(SourceError::Cancelled) => {
@@ -2096,7 +2097,7 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -2144,6 +2145,7 @@ mod tests {
     #[derive(Debug)]
     struct PendingRawArchive {
         started: Arc<Notify>,
+        flushed: Arc<AtomicBool>,
     }
 
     #[derive(Debug)]
@@ -2330,6 +2332,7 @@ mod tests {
             _segment: &crate::spool::CloseReceipt,
             _config: crate::RawSegmentArchiveConfig,
         ) -> Result<crate::RawSegmentArchiveSummary, crate::RawSegmentArchiveError> {
+            self.flushed.store(true, Ordering::SeqCst);
             self.started.notify_one();
             std::future::pending().await
         }
@@ -2647,6 +2650,7 @@ mod tests {
 
         let raw_archive = PendingRawArchive {
             started: Arc::new(Notify::new()),
+            flushed: Arc::new(AtomicBool::new(false)),
         };
         let error = append_auxiliary_observation(
             spool,
@@ -3631,6 +3635,7 @@ mod tests {
             config,
             Arc::new(PendingRawArchive {
                 started: Arc::clone(&archive_started),
+                flushed: Arc::new(AtomicBool::new(false)),
             }),
             Arc::clone(&health),
             cancellation.child_token(),
@@ -4006,6 +4011,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
         let started = Arc::new(Notify::new());
         let stalled_archive: Arc<dyn RawSegmentArchive> = Arc::new(PendingRawArchive {
             started: Arc::clone(&started),
+            flushed: Arc::new(AtomicBool::new(false)),
         });
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -4162,10 +4168,15 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
         assert!(!group_commit_due(
             1,
             128,
-            Some(std::time::Instant::now() + Duration::from_millis(50)),
-            std::time::Instant::now()
+            Some(tokio::time::Instant::now() + Duration::from_millis(50)),
+            tokio::time::Instant::now()
         ));
-        assert!(group_commit_due(128, 128, None, std::time::Instant::now()));
+        assert!(group_commit_due(
+            128,
+            128,
+            None,
+            tokio::time::Instant::now()
+        ));
     }
 
     #[tokio::test]
@@ -4226,7 +4237,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
         assert_eq!(inspect_spool(&config.spool_path).unwrap().records(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn auxiliary_group_commit_waits_for_configured_delay_despite_shorter_backpressure() {
         let root = TempDir::new().unwrap();
         let source_path = root.path().join("delayed-node-fills");
@@ -4243,6 +4254,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
         let archive_path = root.path().join("archive");
         fs::create_dir_all(&archive_path).unwrap();
         let archive_started = Arc::new(Notify::new());
+        let archive_flushed = Arc::new(AtomicBool::new(false));
         let config = AuxiliaryNodeSourceTaskConfig {
             chain_id: ChainId::new("mainnet").unwrap(),
             source_id: SourceId::new("delayed-node-fills").unwrap(),
@@ -4269,21 +4281,67 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             config,
             Arc::new(PendingRawArchive {
                 started: Arc::clone(&archive_started),
+                flushed: Arc::clone(&archive_flushed),
             }),
             Arc::clone(&health),
             cancellation.child_token(),
             |_| Ok(TestDiskSpaceProbe),
         ));
 
-        let early =
-            tokio::time::timeout(Duration::from_millis(70), archive_started.notified()).await;
+        let mut polls = 0_u32;
+        loop {
+            let spooled = health
+                .auxiliary_source_status("delayed-node-fills")
+                .is_some_and(|status| status.spool_records() > 0);
+            if spooled {
+                break;
+            }
+            assert!(
+                !acquisition.is_finished(),
+                "acquisition exited before spooling the first record"
+            );
+            polls += 1;
+            assert!(
+                polls < 10_000,
+                "first record was not spooled before the group-commit delay"
+            );
+            tokio::task::yield_now().await;
+        }
         assert!(
-            early.is_err(),
-            "group commit must not flush on a shorter backpressure timeout"
+            !archive_flushed.load(Ordering::SeqCst),
+            "group commit must not flush before the configured delay starts"
         );
-        tokio::time::timeout(Duration::from_millis(250), archive_started.notified())
-            .await
-            .expect("absolute group-commit delay still flushes the pending window");
+
+        tokio::time::advance(Duration::from_millis(70)).await;
+        for _ in 0..64 {
+            assert!(
+                !archive_flushed.load(Ordering::SeqCst),
+                "group commit must not flush on a shorter backpressure timeout"
+            );
+            assert!(
+                !acquisition.is_finished(),
+                "acquisition exited before the configured delay"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(Duration::from_millis(80)).await;
+        polls = 0;
+        loop {
+            if archive_flushed.load(Ordering::SeqCst) {
+                break;
+            }
+            assert!(
+                !acquisition.is_finished(),
+                "acquisition exited before the configured delay flushed"
+            );
+            polls += 1;
+            assert!(
+                polls < 10_000,
+                "absolute group-commit delay still flushes the pending window"
+            );
+            tokio::task::yield_now().await;
+        }
         let status = health
             .auxiliary_source_status("delayed-node-fills")
             .unwrap();
