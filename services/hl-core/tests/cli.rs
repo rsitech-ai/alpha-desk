@@ -106,13 +106,21 @@ fn check_config_rejects_non_loopback_status_listen() {
 }
 
 #[test]
-fn run_missing_store_fails_closed_before_nats() {
+fn run_connect_failure_fails_closed_without_opening_store() {
     let directory = tempdir().expect("temporary directory");
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
         .expect("private parent");
     let config_path = directory.path().join("core.toml");
     let missing_store = directory.path().join("missing-parent").join("state");
-    fs::write(&config_path, valid_toml(&missing_store)).expect("write config");
+    let missing_password = directory.path().join("missing-nats-password");
+    fs::write(
+        &config_path,
+        valid_toml(&missing_store).replace(
+            "password_path = \"/run/secrets/alpha-desk-nats-core-password\"",
+            &format!("password_path = \"{}\"", missing_password.display()),
+        ),
+    )
+    .expect("write config");
 
     let output = binary()
         .args(["run", "--config"])
@@ -123,8 +131,9 @@ fn run_missing_store_fails_closed_before_nats() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
-    assert!(stderr.contains("\"reason_code\":\"core_runtime.store\""));
-    assert!(!stderr.contains("alpha-desk-nats-core-password"));
+    assert!(stderr.contains("\"reason_code\":\"core.jetstream_transport\""));
+    assert!(!missing_store.exists());
+    assert!(!stderr.contains("missing-nats-password"));
     assert!(!stderr.contains("panicked"));
 }
 

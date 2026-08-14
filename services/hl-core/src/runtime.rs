@@ -7,6 +7,7 @@ use crate::{
     CanonicalPullSource, CoreConfig, CoreConfigError, CoreStatusHandle, DeadLetterError,
     DeadLetterSink, FileDeadLetterSink, JetStreamPullSource, JetStreamReplayError,
     JetStreamReplayReport, JetStreamReplaySession, StatusError,
+    consumer::persist_connect_fail_closed,
 };
 
 type CoreSession = JetStreamReplaySession<WatermarkOnlyReducerV1, SyncedWriteBatchStore>;
@@ -47,11 +48,6 @@ impl CoreRuntime {
         let status_task = self
             .spawn_status_server(status_cancellation.clone())
             .await?;
-        if let Err(error) = self.open_store() {
-            return self
-                .latch_fail_closed(error, cancellation, status_cancellation, status_task)
-                .await;
-        }
         let mut dead_letter = match FileDeadLetterSink::open(self.config.dead_letter_path()) {
             Ok(dead_letter) => dead_letter,
             Err(error) => {
@@ -60,17 +56,21 @@ impl CoreRuntime {
                     .await;
             }
         };
-        let connect_result = Self::opened(&self.session)
-            .connect_source(|| JetStreamPullSource::connect(jetstream), &mut dead_letter)
-            .await;
-        let mut source = match connect_result {
+        let durable_name = jetstream.durable_name().to_owned();
+        let mut source = match JetStreamPullSource::connect(jetstream).await {
             Ok(source) => source,
             Err(error) => {
+                let error = persist_connect_fail_closed(&mut dead_letter, &durable_name, error);
                 return self
                     .latch_fail_closed(error.into(), cancellation, status_cancellation, status_task)
                     .await;
             }
         };
+        if let Err(error) = self.open_store() {
+            return self
+                .latch_fail_closed(error, cancellation, status_cancellation, status_task)
+                .await;
+        }
         self.consume_with_status(
             &mut source,
             dead_letter,

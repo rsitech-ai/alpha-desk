@@ -16,7 +16,7 @@ use hl_core::{
 };
 use storage_ports::{ArchiveReceipt, AtomicStateStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -212,7 +212,7 @@ async fn connect_transport_failure_dlqs_then_latches_fail_closed_status() {
         &format!("password_path = \"{}\"", missing_password.display()),
     ))
     .expect("config");
-    let runtime = CoreRuntime::open(config).expect("runtime");
+    let runtime = CoreRuntime::from_config(config);
     let status = runtime.status().clone();
 
     let error = runtime
@@ -220,6 +220,10 @@ async fn connect_transport_failure_dlqs_then_latches_fail_closed_status() {
         .await
         .expect_err("connect transport");
     assert_eq!(error.reason_code(), "core.jetstream_transport");
+    assert!(
+        !store_path.exists(),
+        "connect failure must not open the file-store"
+    );
 
     let snapshot = status.snapshot();
     assert!(!snapshot.ready());
@@ -251,7 +255,7 @@ async fn connect_transport_failure_is_visible_on_loopback_status() {
         &format!("password_path = \"{}\"", missing_password.display()),
     ))
     .expect("config");
-    let runtime = CoreRuntime::open(config).expect("runtime");
+    let runtime = CoreRuntime::from_config(config);
     let status = runtime.status().clone();
     let cancellation = CancellationToken::new();
     let run = runtime.run_jetstream(cancellation.clone());
@@ -267,6 +271,10 @@ async fn connect_transport_failure_is_visible_on_loopback_status() {
         })
         .await
         .expect("fail_closed");
+        assert!(
+            !store_path.exists(),
+            "connect failure must not open the file-store"
+        );
         let (health_code, health_body) = http_get(addr, "/healthz").await;
         assert_eq!(health_code, 503);
         let health = json_from_http(&health_body);
@@ -301,7 +309,8 @@ async fn missing_store_parent_is_visible_on_loopback_status() {
     let runtime = CoreRuntime::from_config(config);
     let status = runtime.status().clone();
     let cancellation = CancellationToken::new();
-    let run = runtime.run_jetstream(cancellation.clone());
+    let mut source = InMemoryCanonicalSource::new([]);
+    let run = runtime.run_source(&mut source, cancellation.clone());
     let probe = async {
         let addr = wait_for_listen_addr(&status).await;
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -339,6 +348,84 @@ async fn missing_store_parent_is_visible_on_loopback_status() {
     assert!(!snapshot.live_qualified());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hung_connect_serves_starting_loopback_status_without_opening_store() {
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let password_path = write_protected_secret(root.path());
+    let nats_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("hung NATS listener");
+    let nats_addr = nats_listener.local_addr().expect("nats addr");
+    let _hold = tokio::spawn(hold_tcp_without_nats(nats_listener));
+    let config = CoreConfig::from_toml(&hung_connect_toml(
+        &store_path,
+        &password_path,
+        nats_addr,
+        2_500,
+        Some("127.0.0.1:0"),
+    ))
+    .expect("config");
+    let runtime = CoreRuntime::from_config(config);
+    let status = runtime.status().clone();
+    let cancellation = CancellationToken::new();
+    let run = runtime.run_jetstream(cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 503);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ok"], false);
+        assert_eq!(health["ready"], false);
+        assert_eq!(health["reason_code"], "core_status.not_ready");
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], false);
+        assert!(value.get("fail_closed_reason").is_none());
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        assert!(
+            !store_path.exists(),
+            "hung connect must not open the file-store"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if status.snapshot().fail_closed_reason() == Some("core.jetstream_transport") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fail_closed after hung connect");
+
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 503);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["reason_code"], "core.jetstream_transport");
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["fail_closed_reason"], "core.jetstream_transport");
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        assert!(
+            !store_path.exists(),
+            "connect failure must not open the file-store"
+        );
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(run, probe);
+    let error = result.expect_err("hung connect transport");
+    assert_eq!(error.reason_code(), "core.jetstream_transport");
+    assert!(!store_path.exists());
+}
+
 fn valid_toml(store_path: &std::path::Path, first_height: u64, listen: Option<&str>) -> String {
     let status = listen
         .map(|listen| format!("\n[status]\nlisten = \"{listen}\"\n"))
@@ -366,6 +453,49 @@ fetch_batch = 64
 "#,
         path = store_path.display()
     )
+}
+
+fn hung_connect_toml(
+    store_path: &std::path::Path,
+    password_path: &std::path::Path,
+    nats_addr: std::net::SocketAddr,
+    connect_timeout_millis: u64,
+    listen: Option<&str>,
+) -> String {
+    valid_toml(store_path, 200, listen)
+        .replace(
+            "server_url = \"nats://127.0.0.1:4222\"",
+            &format!("server_url = \"nats://{nats_addr}\""),
+        )
+        .replace(
+            "password_path = \"/run/secrets/alpha-desk-nats-core-password\"",
+            &format!("password_path = \"{}\"", password_path.display()),
+        )
+        .replace(
+            "connect_timeout_millis = 5000",
+            &format!("connect_timeout_millis = {connect_timeout_millis}"),
+        )
+}
+
+fn write_protected_secret(root: &std::path::Path) -> std::path::PathBuf {
+    let path = root.join("nats-password");
+    fs::write(&path, "hung-connect-test\n").expect("write secret");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("secret mode");
+    path
+}
+
+async fn hold_tcp_without_nats(listener: TcpListener) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(async move {
+                    let _stream = stream;
+                    std::future::pending::<()>().await;
+                });
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 fn private_root() -> tempfile::TempDir {

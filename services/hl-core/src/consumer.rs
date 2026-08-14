@@ -891,7 +891,11 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
     {
         match connect().await {
             Ok(source) => Ok(source),
-            Err(error) => Err(self.persist_connect_fail_closed(dead_letter, error)),
+            Err(error) => Err(persist_connect_fail_closed(
+                dead_letter,
+                &self.dead_letter_consumer,
+                error,
+            )),
         }
     }
 
@@ -1030,32 +1034,33 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
             Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
         }
     }
+}
 
-    fn persist_connect_fail_closed<Dlq: DeadLetterSink>(
-        &self,
-        dead_letter: &mut Dlq,
-        error: JetStreamReplayError,
-    ) -> JetStreamReplayError {
-        let record = match &error {
-            JetStreamReplayError::Transport => FetchPoison::connect_transport_sentinel()
-                .to_record(&self.dead_letter_consumer, failed_at_unix_micros()),
-            JetStreamReplayError::Config(_)
-            | JetStreamReplayError::Decode(_)
-            | JetStreamReplayError::HashMismatch
-            | JetStreamReplayError::IncompleteBlock
-            | JetStreamReplayError::PendingLimit
-            | JetStreamReplayError::FetchDecode(_)
-            | JetStreamReplayError::Replay(_)
-            | JetStreamReplayError::DeadLetter(_)
-            | JetStreamReplayError::Overflow => return error,
-        };
-        match record {
-            Ok(record) => match dead_letter.persist(&record) {
-                Ok(()) => error,
-                Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
-            },
-            Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+pub(crate) fn persist_connect_fail_closed<Dlq: DeadLetterSink>(
+    dead_letter: &mut Dlq,
+    consumer: &str,
+    error: JetStreamReplayError,
+) -> JetStreamReplayError {
+    let record = match &error {
+        JetStreamReplayError::Transport => {
+            FetchPoison::connect_transport_sentinel().to_record(consumer, failed_at_unix_micros())
         }
+        JetStreamReplayError::Config(_)
+        | JetStreamReplayError::Decode(_)
+        | JetStreamReplayError::HashMismatch
+        | JetStreamReplayError::IncompleteBlock
+        | JetStreamReplayError::PendingLimit
+        | JetStreamReplayError::FetchDecode(_)
+        | JetStreamReplayError::Replay(_)
+        | JetStreamReplayError::DeadLetter(_)
+        | JetStreamReplayError::Overflow => return error,
+    };
+    match record {
+        Ok(record) => match dead_letter.persist(&record) {
+            Ok(()) => error,
+            Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+        },
+        Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
     }
 }
 
