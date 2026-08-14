@@ -64,6 +64,21 @@ impl RawArchiveBackupReceipt {
         self.digest
     }
 
+    #[must_use]
+    pub fn root_sha256(&self) -> &str {
+        &self.root_sha256
+    }
+
+    #[must_use]
+    pub(super) fn chain_id(&self) -> &str {
+        &self.chain_id
+    }
+
+    #[must_use]
+    pub(super) fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
     pub fn files(&self) -> impl Iterator<Item = (&str, &str, u64)> {
         self.files.iter().map(|file| {
             (
@@ -184,9 +199,40 @@ pub fn backup_v2_import_originals(
         }
         fs::publish_immutable(&backup_root, &path, &bytes)?;
     }
+    write_backup_receipt_files(
+        archive,
+        chain,
+        source,
+        approved.v3_root_sha256,
+        files
+            .into_iter()
+            .map(|file| (file.relative_path, file.object_sha256, file.byte_len))
+            .collect(),
+        &backup_root,
+        Path::new("_manifests/raw-byte-v3/imports"),
+    )
+}
+
+pub(super) fn write_backup_receipt_files(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root_sha256: [u8; 32],
+    files: Vec<(String, String, u64)>,
+    backup_root: &Path,
+    relative_dir: &Path,
+) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+    let files = files
+        .into_iter()
+        .map(|(relative_path, object_sha256, byte_len)| ReclaimFile {
+            relative_path,
+            object_sha256,
+            byte_len,
+        })
+        .collect();
     let receipt = RawArchiveBackupReceipt {
         schema: RAW_BACKUP_RECEIPT_SCHEMA_V3.to_owned(),
-        root_sha256: hex::encode(approved.v3_root_sha256),
+        root_sha256: hex::encode(root_sha256),
         chain_id: chain.as_str().to_owned(),
         source_id: source.as_str().to_owned(),
         created_at_micros: archive.now()?.unix_micros(),
@@ -196,9 +242,9 @@ pub fn backup_v2_import_originals(
     let digest = backup_receipt_digest(&receipt)?;
     let receipt = RawArchiveBackupReceipt { digest, ..receipt };
     let bytes = manifest::canonical_json(&receipt)?;
-    let relative = backup_receipt_relative(digest);
+    let relative = relative_dir.join(format!("backup-receipt-{}.json", hex::encode(digest)));
     fs::publish_immutable(&archive.root, &relative, &bytes)?;
-    fs::publish_immutable(&backup_root, &relative, &bytes)?;
+    fs::publish_immutable(backup_root, &relative, &bytes)?;
     Ok(receipt)
 }
 
@@ -517,12 +563,24 @@ fn load_verified_backup_receipt(
     source: &SourceId,
     digest: [u8; 32],
 ) -> Result<RawArchiveBackupReceipt, ArchiveError> {
-    reject_zero_receipt(digest)?;
-    let Some(bytes) = fs::try_read_regular(
-        &archive.root,
+    load_verified_backup_receipt_at(
+        archive,
+        chain,
+        source,
+        digest,
         &backup_receipt_relative(digest),
-        MAX_BACKUP_RECEIPT_BYTES,
-    )?
+    )
+}
+
+pub(super) fn load_verified_backup_receipt_at(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    digest: [u8; 32],
+    relative: &Path,
+) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+    reject_zero_receipt(digest)?;
+    let Some(bytes) = fs::try_read_regular(&archive.root, relative, MAX_BACKUP_RECEIPT_BYTES)?
     else {
         return Err(ArchiveError::ManifestVerification(
             "GC backup receipt artifact is missing or invalid",
