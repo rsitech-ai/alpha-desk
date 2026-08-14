@@ -386,6 +386,44 @@ async fn amber_core_deadletter_health_is_snapshot_invalid_and_not_ready() {
 }
 
 #[tokio::test]
+async fn unknown_amber_deadletter_sibling_is_snapshot_invalid_and_not_ready() {
+    let directory = tempdir().expect("temporary directory");
+    const UNKNOWN_AMBER: &str = "core.deadletter_invented";
+    assert!(
+        !CORE_DEADLETTER_REASON_CODES.contains(&UNKNOWN_AMBER),
+        "HTTP unknown-AMBER coverage must use a sibling outside the frozen enum"
+    );
+    assert!(!is_core_deadletter_reason(UNKNOWN_AMBER));
+    let health_path = write_health_snapshot(
+        directory.path(),
+        "unknown-amber.json",
+        "HEALTH_STATE_AMBER",
+        UNKNOWN_AMBER,
+    );
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        Some(&health_path),
+        None,
+    );
+
+    let (status, body) = call(&state, "/v1/health", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+    assert_ne!(
+        body["state"], "HEALTH_STATE_AMBER",
+        "unknown AMBER sibling must not be serve-time accepted as typed AMBER"
+    );
+
+    let (status, body) = call(&state, "/readyz", &[]).await;
+    assert_eq!(status, 503, "unknown AMBER sibling must not become ready");
+    assert_eq!(body["state"], "HEALTH_STATE_RED");
+}
+
+#[tokio::test]
 async fn stream_paths_and_websocket_upgrades_are_typed_501() {
     let directory = tempdir().expect("temporary directory");
     let state = state_from(directory.path(), "loopback-dev", None, None, None);
