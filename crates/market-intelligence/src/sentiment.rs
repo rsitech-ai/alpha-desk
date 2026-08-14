@@ -79,7 +79,10 @@ impl ObservationStatus {
 
     #[must_use]
     pub const fn is_observed(self) -> bool {
-        matches!(self, Self::Observed)
+        match self {
+            Self::Observed => true,
+            Self::Missing(_) => false,
+        }
     }
 }
 

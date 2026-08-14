@@ -31,10 +31,15 @@ fn snapshot(state: HealthState, signed: i64) -> MarketFeatureSnapshot {
     let flow = market_feature_key("smart_flow_acceleration_milli").unwrap();
     let book = market_feature_key("book").unwrap();
     let fills = market_feature_key("fills").unwrap();
+    let inventory = market_feature_key("inventory").unwrap();
     if state == HealthState::Red {
         values.insert(flow, FeatureValue::Missing(MissingReason::RedDataHealth));
         values.insert(book, FeatureValue::Missing(MissingReason::RedDataHealth));
         values.insert(fills, FeatureValue::Missing(MissingReason::RedDataHealth));
+        values.insert(
+            inventory,
+            FeatureValue::Missing(MissingReason::RedDataHealth),
+        );
     } else {
         values.insert(flow, FeatureValue::SignedInteger(signed));
         values.insert(
@@ -45,6 +50,13 @@ fn snapshot(state: HealthState, signed: i64) -> MarketFeatureSnapshot {
             },
         );
         values.insert(fills, FeatureValue::Boolean(true));
+        values.insert(
+            inventory,
+            FeatureValue::Decimal {
+                raw: 100 * 100_000_000,
+                scale: 8,
+            },
+        );
     }
     MarketFeatureSnapshot::try_new(
         MarketId::new("BTC").unwrap(),
@@ -270,6 +282,13 @@ fn missing_book_or_fills_cannot_validate_or_go_live() {
         market_feature_key("fills").unwrap(),
         FeatureValue::Missing(MissingReason::NotObserved),
     );
+    values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Decimal {
+            raw: 100 * 100_000_000,
+            scale: 8,
+        },
+    );
     let missing = MarketFeatureSnapshot::try_new(
         MarketId::new("BTC").unwrap(),
         Horizon::MINUTES_5,
@@ -341,6 +360,13 @@ fn boolean_book_cannot_validate_or_go_live() {
         market_feature_key("fills").unwrap(),
         FeatureValue::Boolean(true),
     );
+    values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Decimal {
+            raw: 100 * 100_000_000,
+            scale: 8,
+        },
+    );
     let minted = MarketFeatureSnapshot::try_new(
         MarketId::new("BTC").unwrap(),
         Horizon::MINUTES_5,
@@ -394,6 +420,83 @@ fn boolean_book_cannot_validate_or_go_live() {
         ),
         Err(SignalError::IncompleteEvidence(_))
     ));
+}
+
+#[test]
+fn boolean_or_missing_inventory_cannot_validate_or_go_live() {
+    let decimal_book = FeatureValue::Decimal {
+        raw: 20_000 * 100_000_000,
+        scale: 8,
+    };
+    let true_fills = FeatureValue::Boolean(true);
+    for inventory in [
+        FeatureValue::Boolean(true),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    ] {
+        let mut values = BTreeMap::new();
+        values.insert(
+            market_feature_key("smart_flow_acceleration_milli").unwrap(),
+            FeatureValue::SignedInteger(10),
+        );
+        values.insert(market_feature_key("book").unwrap(), decimal_book.clone());
+        values.insert(market_feature_key("fills").unwrap(), true_fills.clone());
+        values.insert(market_feature_key("inventory").unwrap(), inventory);
+        let minted = MarketFeatureSnapshot::try_new(
+            MarketId::new("BTC").unwrap(),
+            Horizon::MINUTES_5,
+            FeatureSetVersion::new("market-v1").unwrap(),
+            time(1_000_000),
+            known(1_000_000),
+            BlockHeight::new(9),
+            values,
+            health(HealthState::Green),
+        )
+        .unwrap();
+        let bundle = EvidenceBundle::try_new(
+            SignalId::new("sig-1").unwrap(),
+            vec![event_ref()],
+            vec![(EntityId::new("e1").unwrap(), ProbabilityPpm::ONE)],
+            minted.clone(),
+            minted,
+            BlockHeight::new(12),
+            ProbabilityPpm::ONE,
+            [4_u8; 32],
+            "cc9faa2".to_owned(),
+            [5_u8; 32],
+            analogues(),
+            vec![InvalidationRule::DataHealthNotGreen],
+            UsdAmount::from_raw(1_000_000_000, 8).unwrap(),
+            Horizon::MINUTES_5,
+            vec!["synthetic_unqualified".to_owned()],
+        )
+        .unwrap();
+        let missing_inputs = bundle.missing_for_admission();
+        assert!(missing_inputs.contains(&"inventory".to_owned()));
+        assert!(!missing_inputs.contains(&"book".to_owned()));
+        assert!(!missing_inputs.contains(&"fills".to_owned()));
+        assert!(matches!(
+            transition_allowed(
+                Some(SignalLifecycleState::Candidate),
+                SignalLifecycleState::Validated,
+                &SignalType::IndependentSmartFlowAcceleration,
+                &bundle,
+                HealthState::Green,
+                true,
+            ),
+            Err(SignalError::IncompleteEvidence(_))
+        ));
+        assert!(matches!(
+            transition_allowed(
+                Some(SignalLifecycleState::Validated),
+                SignalLifecycleState::Live,
+                &SignalType::IndependentSmartFlowAcceleration,
+                &bundle,
+                HealthState::Green,
+                true,
+            ),
+            Err(SignalError::IncompleteEvidence(_))
+        ));
+    }
 }
 
 #[test]

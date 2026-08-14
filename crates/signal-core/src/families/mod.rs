@@ -1,8 +1,7 @@
 use domain_types::{BasisPoints, EntityId, ProbabilityPpm, UsdAmount};
 use feature_core::{FeatureValue, HealthAssessment, HealthState};
 use market_intelligence::{
-    FragilityResult, MarketFeatureSnapshot, ObservationMintKind, ObservationStatus,
-    RegimeAssessment, ScoredDimension,
+    FragilityResult, MarketFeatureSnapshot, ObservationMintKind, RegimeAssessment, ScoredDimension,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -89,11 +88,14 @@ pub fn suppress_missing_book_or_fills(
         Ok(status) => status,
         Err(_) => return Some(withheld()),
     };
-    match (book, fills) {
-        (ObservationStatus::Observed, ObservationStatus::Observed) => None,
-        (ObservationStatus::Observed, ObservationStatus::Missing(_))
-        | (ObservationStatus::Missing(_), ObservationStatus::Observed)
-        | (ObservationStatus::Missing(_), ObservationStatus::Missing(_)) => Some(withheld()),
+    let inventory = match snapshot.observation("inventory", ObservationMintKind::DecimalDepth) {
+        Ok(status) => status,
+        Err(_) => return Some(withheld()),
+    };
+    if book.is_observed() && fills.is_observed() && inventory.is_observed() {
+        None
+    } else {
+        Some(withheld())
     }
 }
 

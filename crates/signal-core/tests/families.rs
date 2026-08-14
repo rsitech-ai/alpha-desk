@@ -473,3 +473,62 @@ fn boolean_book_or_false_fills_cannot_emit_live_capable_families() {
         }
     }
 }
+
+#[test]
+fn boolean_or_missing_inventory_cannot_emit_live_capable_families() {
+    let trigger = snapshot(
+        HealthState::Green,
+        green_values(&[
+            (
+                "smart_flow_acceleration_milli",
+                FeatureValue::SignedInteger(400),
+            ),
+            ("historical_markout_bps", FeatureValue::SignedInteger(40)),
+            ("smart_flow_usd_milli", FeatureValue::SignedInteger(50)),
+            ("crowd_flow_usd_milli", FeatureValue::SignedInteger(-40)),
+            ("placeholder", FeatureValue::SignedInteger(1)),
+        ]),
+    );
+    let mut boolean_inventory = trigger.clone();
+    boolean_inventory.values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    let mut missing_inventory = trigger.clone();
+    missing_inventory.values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    boolean_inventory.provenance_hash = boolean_inventory.compute_provenance_hash();
+    missing_inventory.provenance_hash = missing_inventory.compute_provenance_hash();
+
+    let flow = flow_eval();
+    let crowd = SmartCrowdDivergenceEvaluator::from_toml(include_str!(
+        "../../../config/signals/v1/smart-crowd-divergence.toml"
+    ))
+    .unwrap();
+    let fragility = FragilityAsymmetryEvaluator::from_toml(include_str!(
+        "../../../config/signals/v1/liquidation-fragility-asymmetry.toml"
+    ))
+    .unwrap();
+    let ctx = context(4, false, false, 5, 100, false, false);
+    for snapshot in [&boolean_inventory, &missing_inventory] {
+        assert!(suppress_missing_book_or_fills(snapshot).is_some());
+        for evaluation in [
+            flow.evaluate(snapshot, &ctx).unwrap(),
+            crowd.evaluate(snapshot, &ctx).unwrap(),
+            fragility.evaluate(snapshot, &ctx).unwrap(),
+        ] {
+            match evaluation {
+                SignalEvaluation::Suppressed { reasons, .. } => {
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|reason| reason == "missing_book_or_fills")
+                    );
+                }
+                other => panic!("boolean or missing inventory must not emit {other:?}"),
+            }
+        }
+    }
+}
