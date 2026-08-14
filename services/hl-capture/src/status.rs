@@ -337,6 +337,11 @@ impl AuxiliarySourceStatus {
             AuxiliarySourceHealth::Latched => self.last_error_reason.is_none(),
             AuxiliarySourceHealth::Starting => false,
         };
+        let reconstruction_fields_invalid = match self.restart_reconstruction {
+            RestartReconstruction::NotRequired => false,
+            RestartReconstruction::Incomplete => !durable_fields[0],
+            RestartReconstruction::Complete => !durable_fields[0],
+        };
         if durable_fields
             .iter()
             .any(|present| *present != durable_fields[0])
@@ -346,10 +351,7 @@ impl AuxiliarySourceStatus {
             || self.spool_records.checked_sub(durable_sequence) != Some(self.unarchived_records)
             || self.last_durable_wall_micros.is_some_and(|value| value < 0)
             || health_fields_invalid
-            || matches!(
-                self.restart_reconstruction,
-                RestartReconstruction::Incomplete | RestartReconstruction::Complete
-            ) && !durable_fields[0]
+            || reconstruction_fields_invalid
         {
             return Err(StatusError::InvalidField);
         }
@@ -1099,6 +1101,54 @@ mod tests {
         source.health = health;
         source.quarantine_reason = quarantine_reason.map(ToOwned::to_owned);
         source.last_error_reason = last_error_reason.map(ToOwned::to_owned);
+        source
+    }
+
+    #[test]
+    fn restart_reconstruction_validate_covers_every_constructible_state() {
+        for reconstruction in [
+            RestartReconstruction::NotRequired,
+            RestartReconstruction::Incomplete,
+            RestartReconstruction::Complete,
+        ] {
+            match reconstruction {
+                RestartReconstruction::NotRequired => {
+                    auxiliary_reconstruction_status(reconstruction, false)
+                        .validate()
+                        .expect("not-required remains valid without durable fields");
+                    auxiliary_reconstruction_status(reconstruction, true)
+                        .validate()
+                        .expect("not-required remains valid with durable fields");
+                }
+                RestartReconstruction::Incomplete => {
+                    auxiliary_reconstruction_status(reconstruction, true)
+                        .validate()
+                        .expect("incomplete remains valid with durable fields");
+                    assert_eq!(
+                        auxiliary_reconstruction_status(reconstruction, false).validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                }
+                RestartReconstruction::Complete => {
+                    auxiliary_reconstruction_status(reconstruction, true)
+                        .validate()
+                        .expect("complete remains valid with durable fields");
+                    assert_eq!(
+                        auxiliary_reconstruction_status(reconstruction, false).validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                }
+            }
+        }
+    }
+
+    fn auxiliary_reconstruction_status(
+        restart_reconstruction: RestartReconstruction,
+        with_durable: bool,
+    ) -> AuxiliarySourceStatus {
+        let mut source =
+            auxiliary_health_status(AuxiliarySourceHealth::Starting, with_durable, None, None);
+        source.restart_reconstruction = restart_reconstruction;
         source
     }
 
