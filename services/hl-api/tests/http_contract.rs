@@ -12,7 +12,7 @@ use hl_api::{
     READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, ROUTER_PATHS,
     SNAPSHOT_UNAVAILABLE_REASON_CODES, auxiliary_source_cursor_epoch_is_optional_string,
     auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
-    auxiliary_source_id_is_required_string,
+    auxiliary_source_id_is_required_string, auxiliary_source_items_forbid_additional_properties,
     auxiliary_source_last_durable_wall_micros_is_optional_i64,
     auxiliary_source_last_error_reason_is_optional_string,
     auxiliary_source_local_sequence_is_optional_u64,
@@ -897,6 +897,50 @@ async fn duplicate_auxiliary_source_id_is_snapshot_invalid() {
     assert_eq!(
         status, 503,
         "duplicate present source_id must not fail open"
+    );
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+#[tokio::test]
+async fn unknown_auxiliary_source_property_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known auxiliary source object must stay 200");
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+    assert!(body["auxiliary_sources"][0].is_object());
+    assert!(body["auxiliary_sources"][0].get("fills").is_none());
+
+    value["auxiliary_sources"][0]["fills"] = serde_json::json!(true);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode extra nested key"),
+    )
+    .expect("write extra nested key");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 503,
+        "present unknown nested property must not fail open"
     );
     assert_eq!(body["schema_version"], "hl.api.error.v1");
     assert_eq!(body["code"], "data_unavailable");
@@ -2822,12 +2866,24 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
     );
     assert!(
+        auxiliary_source_items_forbid_additional_properties(document),
+        "OpenAPI must set CaptureStatusBase.auxiliary_sources.items.additionalProperties false"
+    );
+    assert!(
         document.contains("Duplicate present source_id"),
         "OpenAPI must describe source_id uniqueness without uniqueItems"
     );
     assert!(
         document.contains("strictly increasing"),
         "OpenAPI must describe source_id sort order without uniqueItems"
+    );
+    assert!(
+        document.contains("Present unknown nested properties"),
+        "OpenAPI must describe nested extra keys as snapshot_invalid"
+    );
+    assert!(
+        document.contains("not CaptureStatusBase additionalProperties"),
+        "OpenAPI must not close CaptureStatusBase extra keys in this leftover"
     );
     assert!(
         !document.contains("Sort order stays untyped"),
@@ -3033,12 +3089,24 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
     );
     assert!(
+        auxiliary_source_items_forbid_additional_properties(document),
+        "served OpenAPI must set CaptureStatusBase.auxiliary_sources.items.additionalProperties false"
+    );
+    assert!(
         document.contains("Duplicate present source_id"),
         "served OpenAPI must describe source_id uniqueness without uniqueItems"
     );
     assert!(
         document.contains("strictly increasing"),
         "served OpenAPI must describe source_id sort order without uniqueItems"
+    );
+    assert!(
+        document.contains("Present unknown nested properties"),
+        "served OpenAPI must describe nested extra keys as snapshot_invalid"
+    );
+    assert!(
+        document.contains("not CaptureStatusBase additionalProperties"),
+        "served OpenAPI must not close CaptureStatusBase extra keys in this leftover"
     );
     assert!(
         !document.contains("Sort order stays untyped"),

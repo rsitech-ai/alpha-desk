@@ -20,7 +20,7 @@ pub use openapi::{
     RESTART_RECONSTRUCTION, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
     auxiliary_source_cursor_epoch_is_optional_string,
     auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
-    auxiliary_source_id_is_required_string,
+    auxiliary_source_id_is_required_string, auxiliary_source_items_forbid_additional_properties,
     auxiliary_source_last_durable_wall_micros_is_optional_i64,
     auxiliary_source_last_error_reason_is_optional_string,
     auxiliary_source_local_sequence_is_optional_u64,
