@@ -965,13 +965,31 @@ fn file_dead_letter_sink_open_rejects_oversized_jsonl() {
     let root = private_root();
     let path = root.path().join("dead-letter.jsonl");
     // One byte over `MAX_DEAD_LETTER_FILE_BYTES` (256 * 4 KiB records).
-    let leftover = vec![b'x'; 1_048_576 + 1];
+    // Valid ExistingRecord jsonl, not `vec![b'x'; 1 MiB + 1]`: garbage of that
+    // size would still `Corrupt` via decode if the leftover cap were removed.
+    let leftover = valid_dead_letter_jsonl_of_len(1_048_576 + 1);
     fs::write(&path, &leftover).expect("seed oversized leftover");
 
     let error = FileDeadLetterSink::open(&path).expect_err("oversized leftover");
     assert_eq!(error, DeadLetterError::Corrupt);
     assert_eq!(error.reason_code(), "core.deadletter_corrupt");
     assert_eq!(fs::read(&path).expect("left in place"), leftover);
+}
+
+#[test]
+fn file_dead_letter_sink_open_reopens_valid_jsonl_at_file_cap() {
+    let root = private_root();
+    let path = root.path().join("dead-letter.jsonl");
+    let leftover = valid_dead_letter_jsonl_of_len(1_048_576);
+    fs::write(&path, &leftover).expect("seed at-cap leftover");
+
+    let mut sink = FileDeadLetterSink::open(&path).expect("reopen at cap");
+    sink.persist(&sample_dead_letter("after-cap"))
+        .expect("append after reopen");
+    drop(sink);
+    let encoded = fs::read(&path).expect("readable jsonl");
+    assert!(encoded.starts_with(&leftover));
+    assert!(encoded.len() > leftover.len());
 }
 
 #[test]
@@ -1201,6 +1219,43 @@ fn sample_dead_letter(message_id: &str) -> DeadLetterRecord {
         1,
     )
     .expect("sample dead-letter record")
+}
+
+fn valid_dead_letter_jsonl_of_len(total_bytes: usize) -> Vec<u8> {
+    const MAX_RECORD_FILE_BYTES: usize = 4_096 + 1;
+    let mut leftover = Vec::with_capacity(total_bytes);
+    let mut n = 0u32;
+    while leftover.len() < total_bytes {
+        let remaining = total_bytes - leftover.len();
+        let file_len = remaining.min(MAX_RECORD_FILE_BYTES);
+        leftover.extend(valid_dead_letter_line(&format!("cap-{n:08}"), file_len));
+        n += 1;
+    }
+    assert_eq!(leftover.len(), total_bytes);
+    leftover
+}
+
+fn valid_dead_letter_line(message_id: &str, file_len: usize) -> Vec<u8> {
+    let mut encoded = serde_json::to_vec(&serde_json::json!({
+        "schema_version": DEAD_LETTER_SCHEMA_V1,
+        "reason_code": "core.jetstream_transport",
+        "subject": "hl.v1.connect.transport",
+        "message_id": message_id,
+        "payload_sha256": hex::encode([0x11; 32]),
+        "block_hash": hex::encode([0x22; 32]),
+        "consumer": JetStreamReplayConfig::default_durable_name(),
+        "retry_count": 0,
+        "failed_at_unix_micros": 1,
+    }))
+    .expect("existing record json");
+    assert!(
+        file_len > encoded.len() && file_len - 1 <= 4_096,
+        "file_len {file_len} cannot hold a valid ExistingRecord line of {} bytes",
+        encoded.len()
+    );
+    encoded.resize(file_len - 1, b' ');
+    encoded.push(b'\n');
+    encoded
 }
 
 fn empty_block(height: u64, seed: u8) -> BlockEnvelope {
