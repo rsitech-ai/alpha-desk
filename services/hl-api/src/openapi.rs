@@ -156,10 +156,24 @@ pub fn readyz_200_description(document: &str) -> Option<String> {
     path_response_description(document, "/readyz", "200")
 }
 
+/// Frozen `/readyz` 503 path description after YAML folded-block join.
+///
+/// Exact path-item equality so substring `"Not ApiError"` plus
+/// `HealthAssessment` or `hl.health.v1` cannot pass after the prose is
+/// rewritten. Schema `$ref` stays `HealthAssessment`; this string is the
+/// description pin, not a whole-document search. `/v1/health` 503 stays
+/// named `Unavailable` / `ApiError`.
+pub const READYZ_503_DESCRIPTION: &str = concat!(
+    "Aggregate is not GREEN. Body is hl.health.v1 HealthAssessment, ",
+    "including typed AMBER lag. Not ApiError. Canonical snapshot ",
+    "validity is /v1/health 200; readiness is GREEN-only. This is ",
+    "not Stage 2 PASS.",
+);
+
 /// Folded or inline `/readyz` 503 description.
 ///
-/// Used so 503 cannot be documented as `ApiError` while the body stays
-/// `hl.health.v1`.
+/// Frozen by exact equality with [`READYZ_503_DESCRIPTION`] so 503 cannot
+/// be documented as `ApiError` while the body stays `hl.health.v1`.
 #[must_use]
 pub fn readyz_503_description(document: &str) -> Option<String> {
     path_response_description(document, "/readyz", "503")
@@ -403,10 +417,10 @@ fn unquote(value: &str) -> &str {
 mod tests {
     use super::{
         CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
-        health_reason_code_is_unrestricted_string, ledger_unsupported_event_reason_openapi_enum,
-        openapi_yaml, readyz_200_description, readyz_503_description, readyz_503_schema_ref,
-        unavailable_response_schema_ref,
+        READYZ_503_DESCRIPTION, core_deadletter_reason_openapi_enum, health_503_response_ref,
+        health_503_schema_ref, health_reason_code_is_unrestricted_string,
+        ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+        readyz_503_description, readyz_503_schema_ref, unavailable_response_schema_ref,
     };
 
     #[test]
@@ -583,14 +597,10 @@ components:
             description.contains("GREEN-only"),
             "/readyz 200 must name GREEN-only readiness, got {description}"
         );
-        let readyz_503 = readyz_503_description(document).expect("/readyz 503 description");
-        assert!(
-            readyz_503.contains("Not ApiError"),
-            "/readyz 503 prose must keep health-not-ApiError meaning, got {readyz_503}"
-        );
-        assert!(
-            readyz_503.contains("HealthAssessment") || readyz_503.contains("hl.health.v1"),
-            "/readyz 503 prose must name the health body, got {readyz_503}"
+        assert_eq!(
+            readyz_503_description(document).as_deref(),
+            Some(READYZ_503_DESCRIPTION),
+            "/readyz 503 path description must stay health-not-ApiError by exact equality"
         );
     }
 
@@ -704,16 +714,49 @@ paths:
         assert_eq!(
             readyz_503_schema_ref(document),
             Some("#/components/schemas/HealthAssessment"),
-            "schema freeze must not hide a /readyz 503 prose regression"
+            "schema freeze must not hide a /readyz 503 description rewrite"
+        );
+        assert_ne!(
+            readyz_503_description(document).as_deref(),
+            Some(READYZ_503_DESCRIPTION),
+            "rewriting /readyz 503 prose to ApiError must fail the path description freeze"
+        );
+    }
+
+    #[test]
+    fn readyz_503_substring_prose_fails_exact_path_description_freeze() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      responses:
+        "503":
+          description: >
+            Aggregate is not GREEN. Body is hl.health.v1 HealthAssessment,
+            including typed AMBER lag. Not ApiError. Canonical snapshot
+            validity is /v1/health 200; readiness is GREEN-only. This is
+            not Stage 2 PASS. Invented extra claim.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+"##;
+        assert_eq!(
+            readyz_503_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "schema freeze must not hide a /readyz 503 description rewrite"
         );
         let description = readyz_503_description(document).expect("/readyz 503 description");
         assert!(
-            !description.contains("Not ApiError"),
-            "ApiError-as-body prose must fail the health-not-ApiError freeze, got {description}"
+            description.contains("Not ApiError")
+                && (description.contains("HealthAssessment")
+                    || description.contains("hl.health.v1")),
+            "fixture must still satisfy the old substring checks, got {description}"
         );
-        assert!(
-            !description.contains("HealthAssessment") && !description.contains("hl.health.v1"),
-            "ApiError-as-body prose must not count as naming the health body, got {description}"
+        assert_ne!(
+            description.as_str(),
+            READYZ_503_DESCRIPTION,
+            "substring health-not-ApiError prose must not satisfy the exact path freeze, got {description}"
         );
     }
 }
