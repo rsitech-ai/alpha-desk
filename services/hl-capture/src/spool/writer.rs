@@ -261,10 +261,12 @@ impl SpoolWriter {
         closed_at_micros: i64,
         previous_manifest_blake3: Option<[u8; 32]>,
     ) -> Result<CloseReceipt, SpoolError> {
-        if self.header.cursor_policy() != CursorPolicy::ContiguousNativeOffset {
-            return Err(SpoolError::CursorPolicyMismatch);
+        match self.header.cursor_policy() {
+            CursorPolicy::ContiguousNativeOffset => {
+                self.close_with_manifest(closed_at_micros, previous_manifest_blake3, None)
+            }
+            CursorPolicy::MonotonicByteOffset => Err(SpoolError::CursorPolicyMismatch),
         }
-        self.close_with_manifest(closed_at_micros, previous_manifest_blake3, None)
     }
 
     pub fn close_with_local_sequence_span(
@@ -274,14 +276,14 @@ impl SpoolWriter {
         first_local_sequence: LocalRecordSequence,
         last_local_sequence: LocalRecordSequence,
     ) -> Result<CloseReceipt, SpoolError> {
-        if self.header.cursor_policy() != CursorPolicy::MonotonicByteOffset {
-            return Err(SpoolError::CursorPolicyMismatch);
+        match self.header.cursor_policy() {
+            CursorPolicy::MonotonicByteOffset => self.close_with_manifest(
+                closed_at_micros,
+                previous_manifest_blake3,
+                Some((first_local_sequence, last_local_sequence)),
+            ),
+            CursorPolicy::ContiguousNativeOffset => Err(SpoolError::CursorPolicyMismatch),
         }
-        self.close_with_manifest(
-            closed_at_micros,
-            previous_manifest_blake3,
-            Some((first_local_sequence, last_local_sequence)),
-        )
     }
 
     fn close_with_manifest(
