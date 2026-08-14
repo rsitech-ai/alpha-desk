@@ -341,8 +341,10 @@ fn require_enum(
 fn require_auxiliary_source_closed_fields(
     object: &Map<String, Value>,
 ) -> Result<(), SnapshotError> {
-    let Some(Value::Array(sources)) = object.get("auxiliary_sources") else {
-        return Ok(());
+    let sources = match object.get("auxiliary_sources") {
+        None => return Ok(()),
+        Some(Value::Array(sources)) => sources,
+        Some(_) => return Err(SnapshotError::Invalid),
     };
     for source in sources {
         let Value::Object(source) = source else {
@@ -1101,10 +1103,47 @@ mod tests {
     }
 
     #[test]
+    fn omitted_auxiliary_sources_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value
+            .as_object_mut()
+            .expect("status object")
+            .remove("auxiliary_sources");
+        let bytes = serde_json::to_vec(&value).expect("encode");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted auxiliary_sources");
+        assert!(parsed.get("auxiliary_sources").is_none());
+    }
+
+    #[test]
     fn object_auxiliary_source_items_are_accepted() {
         let value = parse_capture_status_bytes(&fixture("capture-status-v5.json")).expect("v5");
+        assert!(value["auxiliary_sources"].is_array());
         assert!(value["auxiliary_sources"][0].is_object());
         assert_eq!(value["auxiliary_sources"][0]["health"], "starting");
+    }
+
+    #[test]
+    fn present_non_array_auxiliary_sources_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for field in [
+            serde_json::json!("not-an-array"),
+            serde_json::json!({"not": "an-array"}),
+            serde_json::json!(null),
+            serde_json::json!(true),
+        ] {
+            value["auxiliary_sources"] = field.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-array auxiliary_sources must not fail open"),
+                SnapshotError::Invalid,
+                "{field} must be snapshot_invalid"
+            );
+        }
     }
 
     #[test]
