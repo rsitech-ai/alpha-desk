@@ -162,6 +162,12 @@ function classifyCoreStatus(
   return observedUnavailable(status, "core_status.not_ready")
 }
 
+export function captureHealthObservedReason(
+  reason_code: string | undefined
+): string {
+  return reason_code ?? "data_unavailable"
+}
+
 function classifyCaptureHealth(
   status: number,
   health: CaptureHealthBody
@@ -177,7 +183,7 @@ function classifyCaptureHealth(
         "HTTP 200 — this listener did not return typed hl.api.error.v1. Not a Stage PASS.",
     }
   }
-  return observedUnavailable(status, "capture_health.not_ready")
+  return observedUnavailable(status, captureHealthObservedReason(undefined))
 }
 
 function observedUnavailable(

@@ -39,7 +39,7 @@ import {
   type CoreHealth,
   type HealthBody,
 } from "@/lib/contracts"
-import { mapApiError } from "@/lib/fail-closed"
+import { captureHealthObservedReason, mapApiError } from "@/lib/fail-closed"
 
 export function App() {
   const state = useHlApi()
@@ -480,7 +480,7 @@ function CaptureHealthzChip({
   const view = mapApiError(status === 200 ? 503 : status, {
     schema_version: API_ERROR_SCHEMA_VERSION,
     code: "data_unavailable",
-    reason_code: health.reason_code ?? "capture_health.not_ready",
+    reason_code: captureHealthObservedReason(health.reason_code),
   })
   return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
 }
