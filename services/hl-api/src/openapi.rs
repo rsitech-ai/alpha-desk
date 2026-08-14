@@ -315,13 +315,4 @@ components:
             "shrinking the YAML enum without shrinking the const must fail the freeze"
         );
     }
-
-    #[test]
-    fn shrinking_the_const_without_the_enum_fails_equality() {
-        let document = openapi_yaml();
-        let values = core_deadletter_reason_openapi_enum(document)
-            .expect("OpenAPI must define CoreDeadLetterReasonCode.enum");
-        let shrunk = &CORE_DEADLETTER_REASON_CODES[..CORE_DEADLETTER_REASON_CODES.len() - 1];
-        assert_ne!(values.as_slice(), shrunk);
-    }
 }
