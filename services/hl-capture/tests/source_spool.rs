@@ -27,6 +27,38 @@ fn config(root: &TempDir, source_version: &str) -> SourceSpoolConfig {
     .unwrap()
 }
 
+fn recovered_writer_for_cursor_policy(cursor_policy: CursorPolicy) -> (TempDir, SpoolWriter) {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(
+        SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap(),
+        100,
+    )
+    .unwrap();
+    match cursor_policy {
+        CursorPolicy::ContiguousNativeOffset => {
+            spool.append(&observation(100), 101).unwrap();
+        }
+        CursorPolicy::MonotonicByteOffset => {
+            spool.append(&byte_observation(17), 101).unwrap();
+        }
+    }
+    let path = spool.active_segment_path().to_owned();
+    drop(spool);
+    let (writer, _) =
+        SpoolWriter::open_recovered(path, DurabilityPolicy::FsyncEveryRecord).unwrap();
+    (root, writer)
+}
+
 fn byte_config(root: &TempDir) -> SourceSpoolConfig {
     SourceSpoolConfig::try_new_with_cursor_policy(
         root.path().join("primary-node"),
@@ -1480,6 +1512,52 @@ fn open_segment_inspection_covers_every_constructible_cursor_policy() {
                         .get(),
                     1
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn writer_close_gates_cover_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let (_root, writer) = recovered_writer_for_cursor_policy(cursor_policy);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                let receipt = writer
+                    .close(102, None)
+                    .expect("legacy close still admits contiguous native offset");
+                assert!(receipt.manifest().first_local_sequence().is_none());
+                assert!(receipt.manifest().last_local_sequence().is_none());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                let error = writer
+                    .close(102, None)
+                    .expect_err("legacy close still rejects byte-offset policy");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+            }
+        }
+
+        let (_root, writer) = recovered_writer_for_cursor_policy(cursor_policy);
+        let first = LocalRecordSequence::try_new(1).unwrap();
+        let last = LocalRecordSequence::try_new(1).unwrap();
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                let receipt = writer
+                    .close_with_local_sequence_span(102, None, first, last)
+                    .expect("byte-offset close still admits a local-sequence span");
+                assert_eq!(receipt.manifest().first_local_sequence().unwrap().get(), 1);
+                assert_eq!(receipt.manifest().last_local_sequence().unwrap().get(), 1);
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                let error = writer
+                    .close_with_local_sequence_span(102, None, first, last)
+                    .expect_err("span close still rejects contiguous native offset");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
             }
         }
     }
