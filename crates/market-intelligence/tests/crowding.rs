@@ -223,7 +223,7 @@ fn caller_supplied_marks_with_not_observed_book_or_fills_cannot_produce_crowding
 }
 
 #[test]
-fn missing_book_or_fills_refuses_crowding_without_inventing_marks() {
+fn missing_inventory_refuses_crowding_without_inventing_marks() {
     let positions = vec![invented_mark_position()];
     let observed = observed_snapshot();
     assert!(matches!(
@@ -337,6 +337,31 @@ fn boolean_book_cannot_mint_crowding_proof() {
         crowding_components_from_snapshot(&boolean_book, &positions, usd(50)),
         Err(MarketError::Malformed {
             what: "book",
+            reason: "boolean cannot mint decimal depth",
+        })
+    ));
+}
+
+#[test]
+fn boolean_inventory_cannot_mint_crowding_proof() {
+    let positions = vec![invented_mark_position()];
+    let mut boolean_inventory = observed_snapshot();
+    boolean_inventory.values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    boolean_inventory.provenance_hash = boolean_inventory.compute_provenance_hash();
+    assert!(matches!(
+        boolean_inventory.require_observed_book_and_fills(),
+        Err(MarketError::Malformed {
+            what: "inventory",
+            reason: "boolean cannot mint decimal depth",
+        })
+    ));
+    assert!(matches!(
+        crowding_components_from_snapshot(&boolean_inventory, &positions, usd(50)),
+        Err(MarketError::Malformed {
+            what: "inventory",
             reason: "boolean cannot mint decimal depth",
         })
     ));
