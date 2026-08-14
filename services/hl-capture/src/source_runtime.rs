@@ -869,7 +869,7 @@ where
         } else {
             group_commit_deadline.unwrap_or(request_deadline)
         };
-        let context = SourceRequestContext::new(cancellation.child_token(), deadline.into_std());
+        let context = SourceRequestContext::new(cancellation.child_token(), deadline);
         let observation = match source.next_observation(&context).await {
             Ok(observation) => observation,
             Err(SourceError::Cancelled) => {
@@ -1444,7 +1444,7 @@ where
         let deadline = Instant::now()
             .checked_add(config.backpressure_timeout)
             .ok_or(SourceRuntimeError::InvalidConfig)?;
-        let context = SourceRequestContext::new(cancellation.child_token(), deadline.into_std());
+        let context = SourceRequestContext::new(cancellation.child_token(), deadline);
         let observation = match source.next_observation(&context).await {
             Ok(observation) => observation,
             Err(SourceError::Cancelled) => {

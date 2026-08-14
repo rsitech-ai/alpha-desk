@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use domain_types::SourceId;
 use hl_capture::adapters::{
@@ -15,6 +15,7 @@ use hl_protocol::{
     SourceRequestContext,
 };
 use tempfile::TempDir;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
