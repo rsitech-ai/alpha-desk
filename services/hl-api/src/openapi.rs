@@ -7,6 +7,7 @@
 /// auxiliary durable_offset, auxiliary local_sequence,
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
 /// auxiliary quarantine_reason, auxiliary_sources maxItems,
+/// auxiliary source_id uniqueness,
 /// auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
@@ -824,9 +825,11 @@ pub fn auxiliary_source_last_error_reason_is_optional_string(document: &str) -> 
 /// True when `CaptureStatusBase.properties.auxiliary_sources` is an array
 /// capped at capture writer [`MAX_AUXILIARY_SOURCES`]: `type: array`,
 /// `maxItems` equal to that constant, and no `minItems` or `uniqueItems`.
-/// Omitted and empty arrays stay valid. Duplicate ids and sort order stay
-/// untyped. HealthAssessment.reason_code stays a free string so unknown RED
-/// is not closed out.
+/// Omitted and empty arrays stay valid. Duplicate present `source_id` is
+/// parse `snapshot_invalid`; OpenAPI `uniqueItems` would type whole-item
+/// uniqueness, which is a different rule. Sort order stays untyped.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
 #[must_use]
 pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
     let Some(mapping) = yaml_mapping(
@@ -3551,7 +3554,7 @@ components:
 "#;
         assert!(
             !auxiliary_sources_max_items_is_writer_cap(unique_items),
-            "uniqueItems must not satisfy the writer-cap freeze; duplicate ids stay untyped"
+            "uniqueItems must not satisfy the writer-cap freeze; uniqueness is on source_id, not the whole item"
         );
 
         let writer_cap = r#"
