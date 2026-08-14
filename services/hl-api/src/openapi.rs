@@ -6,7 +6,7 @@
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
-/// auxiliary quarantine_reason,
+/// auxiliary quarantine_reason, auxiliary_sources maxItems,
 /// auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
@@ -19,7 +19,8 @@ pub fn openapi_yaml() -> &'static str {
 pub use crate::snapshot::{
     AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
     COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-    RESTART_RECONSTRUCTION, is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    MAX_AUXILIARY_SOURCES, RESTART_RECONSTRUCTION, is_core_deadletter_reason,
+    is_ledger_unsupported_event_reason,
 };
 
 pub const HEALTH_JSON_FIELDS: &[&str] = &[
@@ -820,6 +821,34 @@ pub fn auxiliary_source_last_error_reason_is_optional_string(document: &str) -> 
     .is_some_and(|required| required.contains(&"last_error_reason"))
 }
 
+/// True when `CaptureStatusBase.properties.auxiliary_sources` is an array
+/// capped at capture writer [`MAX_AUXILIARY_SOURCES`]: `type: array`,
+/// `maxItems` equal to that constant, and no `minItems` or `uniqueItems`.
+/// Omitted and empty arrays stay valid. Duplicate ids and sort order stay
+/// untyped. HealthAssessment.reason_code stays a free string so unknown RED
+/// is not closed out.
+#[must_use]
+pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+        ],
+    ) else {
+        return false;
+    };
+    mapping.scalar("type") == Some("array")
+        && mapping
+            .scalar("maxItems")
+            .is_some_and(|value| value.parse::<usize>().ok() == Some(MAX_AUXILIARY_SOURCES))
+        && !mapping.has_key("minItems")
+        && !mapping.has_key("uniqueItems")
+}
+
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
 /// no `$ref` (including `CoreDeadLetterReasonCode` or
 /// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
@@ -1226,12 +1255,13 @@ mod tests {
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
-        auxiliary_source_unread_bytes_is_optional_u64, capture_source_health_openapi_enum,
-        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-        health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
-        openapi_yaml, readyz_200_description, readyz_200_schema_ref, readyz_503_description,
-        readyz_503_schema_ref, readyz_get_description, restart_reconstruction_openapi_enum,
+        auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
+        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
+        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+        ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+        readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
+        readyz_get_description, restart_reconstruction_openapi_enum,
         unavailable_response_schema_ref,
     };
 
@@ -1314,6 +1344,10 @@ mod tests {
         assert!(
             auxiliary_source_last_error_reason_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
+        );
+        assert!(
+            auxiliary_sources_max_items_is_writer_cap(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -3448,6 +3482,92 @@ components:
         assert!(
             auxiliary_source_last_error_reason_is_optional_string(optional_string),
             "optional string last_error_reason must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_sources_max_items_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            maxItems 16 remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+"#;
+        assert!(
+            !auxiliary_sources_max_items_is_writer_cap(prose_only),
+            "prose mention of maxItems 16 must not satisfy the writer-cap freeze"
+        );
+
+        let wrong_cap = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          maxItems: 17
+          items:
+            type: object
+"#;
+        assert!(
+            !auxiliary_sources_max_items_is_writer_cap(wrong_cap),
+            "invented maxItems must not satisfy the writer-cap freeze"
+        );
+
+        let min_items = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          maxItems: 16
+          minItems: 1
+          items:
+            type: object
+"#;
+        assert!(
+            !auxiliary_sources_max_items_is_writer_cap(min_items),
+            "minItems must not satisfy the writer-cap freeze; empty arrays stay valid"
+        );
+
+        let unique_items = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: object
+"#;
+        assert!(
+            !auxiliary_sources_max_items_is_writer_cap(unique_items),
+            "uniqueItems must not satisfy the writer-cap freeze; duplicate ids stay untyped"
+        );
+
+        let writer_cap = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+"#;
+        assert!(
+            auxiliary_sources_max_items_is_writer_cap(writer_cap),
+            "array maxItems matching the capture writer cap must satisfy the freeze"
         );
     }
 

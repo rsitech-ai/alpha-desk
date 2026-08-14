@@ -71,6 +71,13 @@ pub const RESTART_RECONSTRUCTION: &[&str] = &["not-required", "incomplete", "com
 /// closed out.
 pub const AUXILIARY_SOURCE_QUALIFICATION: &[&str] = &["unqualified", "qualified"];
 
+/// Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
+/// are `snapshot_invalid`. Omitted and empty arrays stay valid. This crate
+/// does not vendor hl-capture and this is not a live capture or Stage PASS.
+/// `HealthAssessment.reason_code` stays a free string so unknown RED is not
+/// closed out. Duplicate ids and sort order stay untyped.
+pub const MAX_AUXILIARY_SOURCES: usize = 16;
+
 const MAINTENANCE_FIELDS: &[&str] = &[
     "enabled",
     "kill_switch",
@@ -346,6 +353,9 @@ fn require_auxiliary_source_closed_fields(
         Some(Value::Array(sources)) => sources,
         Some(_) => return Err(SnapshotError::Invalid),
     };
+    if sources.len() > MAX_AUXILIARY_SOURCES {
+        return Err(SnapshotError::Invalid);
+    }
     for source in sources {
         let Value::Object(source) = source else {
             return Err(SnapshotError::Invalid);
@@ -432,7 +442,7 @@ mod tests {
         AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
         CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, COMMITTED_SOURCE_CLASSES,
         CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS,
-        RESTART_RECONSTRUCTION, SnapshotError, is_core_deadletter_family,
+        MAX_AUXILIARY_SOURCES, RESTART_RECONSTRUCTION, SnapshotError, is_core_deadletter_family,
         is_core_deadletter_reason, is_ledger_unsupported_event_reason,
         parse_canonical_health_bytes, parse_capture_status_bytes,
     };
@@ -449,11 +459,11 @@ mod tests {
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
-        auxiliary_source_unread_bytes_is_optional_u64, capture_source_health_openapi_enum,
-        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
-        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
-        ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
-        restart_reconstruction_openapi_enum,
+        auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
+        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
+        core_deadletter_reason_openapi_enum, health_reason_code_is_unrestricted_string,
+        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
+        openapi_yaml, restart_reconstruction_openapi_enum,
     };
     use api_contracts::WireHealthState;
     use std::path::Path;
@@ -1215,6 +1225,24 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_caps_auxiliary_sources_at_writer_max() {
+        let document = openapi_yaml();
+        assert_eq!(MAX_AUXILIARY_SOURCES, 16);
+        assert!(
+            auxiliary_sources_max_items_is_writer_cap(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1389,6 +1417,51 @@ mod tests {
         assert_eq!(value["auxiliary_sources"][0]["spool_records"], 0);
         assert_eq!(value["auxiliary_sources"][0]["unarchived_records"], 0);
         assert_eq!(value["auxiliary_sources"][0]["partial_line"], false);
+    }
+
+    #[test]
+    fn empty_auxiliary_sources_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"] = serde_json::json!([]);
+        let bytes = serde_json::to_vec(&value).expect("encode empty auxiliary_sources");
+        let parsed = parse_capture_status_bytes(&bytes).expect("empty auxiliary_sources");
+        assert_eq!(parsed["auxiliary_sources"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn auxiliary_sources_at_writer_cap_are_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        let known = value["auxiliary_sources"][0].clone();
+        value["auxiliary_sources"] = serde_json::Value::Array(vec![known; MAX_AUXILIARY_SOURCES]);
+        let bytes = serde_json::to_vec(&value).expect("encode cap auxiliary_sources");
+        let parsed = parse_capture_status_bytes(&bytes).expect("writer-cap auxiliary_sources");
+        assert_eq!(
+            parsed["auxiliary_sources"]
+                .as_array()
+                .expect("auxiliary_sources array")
+                .len(),
+            MAX_AUXILIARY_SOURCES
+        );
+    }
+
+    #[test]
+    fn auxiliary_sources_above_writer_cap_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        let known = value["auxiliary_sources"][0].clone();
+        value["auxiliary_sources"] =
+            serde_json::Value::Array(vec![known; MAX_AUXILIARY_SOURCES + 1]);
+        let bytes = serde_json::to_vec(&value).expect("encode over-cap auxiliary_sources");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes)
+                .expect_err("over-cap auxiliary_sources must not fail open"),
+            SnapshotError::Invalid
+        );
     }
 
     #[test]

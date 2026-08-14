@@ -286,6 +286,9 @@ components:
         hl.capture.status.v4 and omit maintenance. Maintenance documents use
         hl.capture.status.v5 and require CaptureMaintenance. Extra snapshot
         fields such as auxiliary_sources are passed through when present.
+        Present auxiliary_sources arrays longer than 16 (capture writer
+        MAX_AUXILIARY_SOURCES) are snapshot_invalid. Omitted and empty
+        arrays stay valid.
         Nested source_id is a required non-empty string; present non-string,
         omitted, or empty object items are snapshot_invalid. Nested spool_records
         is a required u64 integer; present non-number or non-u64 values, and
@@ -382,7 +385,9 @@ components:
             - range-unavailable
         auxiliary_sources:
           description: >
-            Extra snapshot sources passed through when present. Nested source_id
+            Extra snapshot sources passed through when present. Present arrays
+            longer than 16 (capture writer MAX_AUXILIARY_SOURCES) are
+            snapshot_invalid. Omitted and empty arrays stay valid. Nested source_id
             is a required non-empty string; present non-string, omitted, or
             empty object items are snapshot_invalid. Nested spool_records is a
             required u64 integer; present non-number or non-u64 values, and
@@ -413,6 +418,7 @@ components:
             HealthAssessment.reason_code stays a free string so unknown RED is
             not closed out. This document does not claim Stage PASS.
           type: array
+          maxItems: 16
           items:
             type: object
             required:
