@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest"
 import type { FeedState } from "@/hooks/use-hl-api"
 import type { DeskFeed, EndpointOutcome } from "@/lib/api"
 import {
+  AUXILIARY_SOURCE_FIELD_ORDER,
   AUXILIARY_SOURCE_HEALTH,
   CAPTURE_HEALTH_NOT_READY_REASONS,
   CAPTURE_SOURCE_HEALTH,
@@ -359,7 +360,29 @@ describe("parseCaptureStatus extras", () => {
     expect(v5.value.extra_fields).toEqual({})
   })
 
-  it("still records nested auxiliary extras on a known payload without top-level extras", () => {
+  it("allowlists this web parse's known auxiliary-source fields", () => {
+    expect(AUXILIARY_SOURCE_FIELD_ORDER).toEqual([
+      "source_id",
+      "health",
+      "qualification",
+      "cursor_epoch",
+      "tail_cursor_epoch",
+      "durable_offset",
+      "local_sequence",
+      "spool_records",
+      "unarchived_records",
+      "unread_bytes",
+      "partial_line",
+      "last_durable_wall_micros",
+      "quarantine_reason",
+      "last_error_reason",
+      "restart_reconstruction",
+    ])
+    expect(AUXILIARY_SOURCE_FIELD_ORDER).toContain("restart_reconstruction")
+    expect(AUXILIARY_SOURCE_FIELD_ORDER).not.toContain("maintenance")
+  })
+
+  it("fail-closes present unknown nested auxiliary keys as invalid, not recorded extras", () => {
     const parsed = parseCaptureStatus(
       v4Status({
         schema_version: "hl.capture.status.v5",
@@ -377,6 +400,56 @@ describe("parseCaptureStatus extras", () => {
         ],
       })
     )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      "auxiliary_sources[0] unknown field: future_aux_flag"
+    )
+
+    const both = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          {
+            source_id: "node-line-a",
+            health: "starting",
+            qualification: "unqualified",
+            spool_records: 0,
+            unarchived_records: 0,
+            partial_line: false,
+            later_aux: true,
+            fills: 1,
+          },
+        ],
+      })
+    )
+    expect(both.ok).toBe(false)
+    if (both.ok) {
+      return
+    }
+    expect(both.detail).toBe(
+      "auxiliary_sources[0] unknown fields: fills, later_aux"
+    )
+  })
+
+  it("parses a known auxiliary source without extras", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        schema_version: "hl.capture.status.v5",
+        auxiliary_sources: [
+          {
+            source_id: "node-line-a",
+            health: "starting",
+            qualification: "unqualified",
+            spool_records: 0,
+            unarchived_records: 0,
+            partial_line: false,
+            restart_reconstruction: "complete",
+          },
+        ],
+      })
+    )
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) {
       return
@@ -384,9 +457,10 @@ describe("parseCaptureStatus extras", () => {
     expect(parsed.value.schema_version).toBe("hl.capture.status.v5")
     expect(parsed.value.extra_fields).toEqual({})
     const aux = parsed.value.auxiliary_sources?.[0]
+    expect(aux?.source_id).toBe("node-line-a")
     expect(aux?.qualification).toBe("unqualified")
     expect(aux?.restart_reconstruction).toBe("complete")
-    expect(aux?.extra_fields.future_aux_flag).toBe(true)
+    expect(aux?.extra_fields).toEqual({})
   })
 
   it("maps last-heartbeat throughput extras when present without inventing missing rates", () => {

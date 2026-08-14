@@ -213,7 +213,8 @@ export interface LastHeartbeatThroughput {
 /** Known top-level keys for this web `parseCaptureStatus`. Present unknown
  *  keys fail parse. This is this parse's typed field set, not OpenAPI
  *  `CaptureStatusBase` (`maintenance` is not typed here and fails as an extra).
- *  Nested `auxiliary_sources` extras stay recorded separately.
+ *  Nested `auxiliary_sources` item extras fail against
+ *  `AUXILIARY_SOURCE_FIELD_ORDER`.
  */
 export const CAPTURE_STATUS_FIELD_ORDER = [
   "schema_version",
@@ -247,6 +248,11 @@ export const HEALTH_FIELD_ORDER = [
   "suppresses",
 ] as const
 
+/** Known nested keys for this web `parseAuxiliarySource`. Present unknown
+ *  keys on an item fail parse. This is this parse's typed field set, not
+ *  OpenAPI items. Nested `restart_reconstruction` is already typed here;
+ *  top-level `maintenance` is not.
+ */
 export const AUXILIARY_SOURCE_FIELD_ORDER = [
   "source_id",
   "health",
@@ -776,8 +782,8 @@ function requireCaptureSchema(
   }
 }
 
-/** Keys outside `known`. Top-level CaptureStatus fail-closes when this is
- *  non-empty. Nested auxiliary sources still record extras.
+/** Keys outside `known`. Top-level CaptureStatus and nested auxiliary source
+ *  items fail-close when this is non-empty.
  */
 function collectExtraFields(
   object: Record<string, unknown>,
@@ -1032,6 +1038,17 @@ function parseAuxiliarySource(
   if (!restart_reconstruction.ok) {
     return { ok: false, detail: `${prefix}.${restart_reconstruction.detail}` }
   }
+  const extras = collectExtraFields(value, AUXILIARY_SOURCE_FIELD_ORDER)
+  const extraNames = Object.keys(extras).sort()
+  if (extraNames.length > 0) {
+    return {
+      ok: false,
+      detail:
+        extraNames.length === 1
+          ? `${prefix} unknown field: ${extraNames[0]}`
+          : `${prefix} unknown fields: ${extraNames.join(", ")}`,
+    }
+  }
   return {
     ok: true,
     value: {
@@ -1050,7 +1067,7 @@ function parseAuxiliarySource(
       quarantine_reason: quarantine_reason.value,
       last_error_reason: last_error_reason.value,
       restart_reconstruction: restart_reconstruction.value,
-      extra_fields: collectExtraFields(value, AUXILIARY_SOURCE_FIELD_ORDER),
+      extra_fields: extras,
     },
   }
 }
