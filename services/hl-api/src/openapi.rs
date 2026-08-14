@@ -202,6 +202,28 @@ pub fn readyz_503_description(document: &str) -> Option<String> {
     path_response_description(document, "/readyz", "503")
 }
 
+/// Frozen `/readyz` GET operation description after YAML folded-block join.
+///
+/// Exact path-item equality so substring `"not ApiError"` cannot pass after
+/// the operation prose is rewritten. Response 200/503 descriptions stay
+/// their own pins; this string is `paths./readyz.get.description`, not a
+/// whole-document search.
+pub const READYZ_GET_DESCRIPTION: &str = concat!(
+    "GREEN-only readiness as hl.health.v1. 200 is HEALTH_STATE_GREEN; ",
+    "non-GREEN including typed AMBER lag is 503 health, not ApiError. ",
+    "A valid /v1/health snapshot is not readiness. This is not Stage 2 ",
+    "PASS and not a live core.",
+);
+
+/// Folded or inline `/readyz` GET operation description.
+///
+/// Frozen by exact equality with [`READYZ_GET_DESCRIPTION`] so a rewrite
+/// that still contains `"not ApiError"` fails if this field drifted.
+#[must_use]
+pub fn readyz_get_description(document: &str) -> Option<String> {
+    path_operation_description(document, "/readyz")
+}
+
 fn path_response_schema_ref<'a>(document: &'a str, path: &str, status: &str) -> Option<&'a str> {
     yaml_mapping(
         document,
@@ -226,6 +248,10 @@ fn path_response_named_ref<'a>(document: &'a str, path: &str, status: &str) -> O
 fn path_response_description(document: &str, path: &str, status: &str) -> Option<String> {
     yaml_mapping(document, &["paths", path, "get", "responses", status])?
         .scalar_or_folded("description")
+}
+
+fn path_operation_description(document: &str, path: &str) -> Option<String> {
+    yaml_mapping(document, &["paths", path, "get"])?.scalar_or_folded("description")
 }
 
 struct YamlMapping<'a> {
@@ -440,11 +466,11 @@ fn unquote(value: &str) -> &str {
 mod tests {
     use super::{
         CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-        READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, core_deadletter_reason_openapi_enum,
-        health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-        ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
-        readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
-        unavailable_response_schema_ref,
+        READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION,
+        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+        health_reason_code_is_unrestricted_string, ledger_unsupported_event_reason_openapi_enum,
+        openapi_yaml, readyz_200_description, readyz_200_schema_ref, readyz_503_description,
+        readyz_503_schema_ref, readyz_get_description, unavailable_response_schema_ref,
     };
 
     #[test]
@@ -626,6 +652,11 @@ components:
             readyz_503_description(document).as_deref(),
             Some(READYZ_503_DESCRIPTION),
             "/readyz 503 path description must stay health-not-ApiError by exact equality"
+        );
+        assert_eq!(
+            readyz_get_description(document).as_deref(),
+            Some(READYZ_GET_DESCRIPTION),
+            "/readyz GET operation description must stay health-not-ApiError by exact equality"
         );
     }
 
@@ -874,6 +905,58 @@ paths:
             description.as_str(),
             READYZ_200_DESCRIPTION,
             "substring GREEN-only prose must not satisfy the exact path freeze, got {description}"
+        );
+    }
+
+    #[test]
+    fn readyz_get_substring_prose_fails_exact_operation_description_freeze() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      description: >
+        GREEN-only readiness as hl.health.v1. 200 is HEALTH_STATE_GREEN;
+        non-GREEN including typed AMBER lag is 503 health, not ApiError.
+        Invented extra claim.
+      responses:
+        "200":
+          description: >
+            Aggregate is HEALTH_STATE_GREEN. Readiness is GREEN-only and is
+            not implied by /v1/health 200. AMBER, including lag, is 503.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+        "503":
+          description: >
+            Aggregate is not GREEN. Body is hl.health.v1 HealthAssessment,
+            including typed AMBER lag. Not ApiError. Canonical snapshot
+            validity is /v1/health 200; readiness is GREEN-only. This is
+            not Stage 2 PASS.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+"##;
+        assert_eq!(
+            readyz_200_description(document).as_deref(),
+            Some(READYZ_200_DESCRIPTION),
+            "200 path freeze must not hide a /readyz GET description rewrite"
+        );
+        assert_eq!(
+            readyz_503_description(document).as_deref(),
+            Some(READYZ_503_DESCRIPTION),
+            "503 path freeze must not hide a /readyz GET description rewrite"
+        );
+        let description = readyz_get_description(document).expect("/readyz GET description");
+        assert!(
+            description.contains("not ApiError"),
+            "fixture must still satisfy the old substring check, got {description}"
+        );
+        assert_ne!(
+            description.as_str(),
+            READYZ_GET_DESCRIPTION,
+            "substring not-ApiError prose must not satisfy the exact GET freeze, got {description}"
         );
     }
 }
