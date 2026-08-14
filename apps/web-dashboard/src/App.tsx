@@ -27,9 +27,14 @@ import {
 } from "@/lib/api"
 import {
   API_ERROR_SCHEMA_VERSION,
+  CAPTURE_HEALTH_SCHEMA_VERSION,
+  CORE_HEALTH_SCHEMA_VERSION,
+  HEALTH_SCHEMA_VERSION,
   asTypedCoreFailClosedReason,
-  isCoreHealth,
+  assertNever,
+  healthReasonCode,
   type ApiError,
+  type CaptureHealthBody,
   type CaptureStatus,
   type CoreHealth,
   type HealthBody,
@@ -224,27 +229,36 @@ function typedCoreFailClosedReason(
   if (outcome.kind !== "ok") {
     return undefined
   }
-  if (isCoreHealth(outcome.data)) {
-    if (outcome.data.reason_code === null) {
-      return undefined
-    }
-    return asTypedCoreFailClosedReason(outcome.data.reason_code)
+  const reason = healthReasonCode(outcome.data)
+  if (reason === undefined) {
+    return undefined
   }
-  return asTypedCoreFailClosedReason(outcome.data.reason_code)
+  return asTypedCoreFailClosedReason(reason)
 }
 
 function healthBodyIsDegraded(status: number, body: HealthBody): boolean {
-  if (isCoreHealth(body)) {
-    return (
-      status === 503 ||
-      !body.ok ||
-      !body.ready ||
-      body.live_qualified ||
-      body.stage_2_qualified ||
-      body.reason_code !== null
-    )
+  switch (body.schema_version) {
+    case CORE_HEALTH_SCHEMA_VERSION:
+      return (
+        status === 503 ||
+        !body.ok ||
+        !body.ready ||
+        body.live_qualified ||
+        body.stage_2_qualified ||
+        body.reason_code !== null
+      )
+    case CAPTURE_HEALTH_SCHEMA_VERSION:
+      return (
+        status === 503 ||
+        !body.ok ||
+        body.ready !== true ||
+        body.reason_code !== undefined
+      )
+    case HEALTH_SCHEMA_VERSION:
+      return status === 503 || body.state !== "HEALTH_STATE_GREEN"
+    default:
+      return assertNever(body)
   }
-  return status === 503 || body.state !== "HEALTH_STATE_GREEN"
 }
 
 function StatusStrip({ feed }: { feed: DeskFeed | undefined }) {
@@ -298,39 +312,51 @@ function HealthChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
       return (
         <ToneBadge tone={view.tone}>
           {view.family === "core_deadletter" ||
-          view.family === "ledger_unsupported_event"
+          view.family === "ledger_unsupported_event" ||
+          view.family === "capture_health_not_ready"
             ? view.title
             : `${outcome.status} ${outcome.error.reason_code}`}
         </ToneBadge>
       )
     }
     case "ok":
-      if (isCoreHealth(outcome.data)) {
-        return <CoreHealthChip status={outcome.status} health={outcome.data} />
-      }
-      {
-        const typed = asTypedCoreFailClosedReason(outcome.data.reason_code)
-        if (typed !== undefined) {
-          const view = mapApiError(outcome.status, {
-            schema_version: API_ERROR_SCHEMA_VERSION,
-            code: "data_unavailable",
-            reason_code: outcome.data.reason_code,
-          })
-          return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
+      switch (outcome.data.schema_version) {
+        case CORE_HEALTH_SCHEMA_VERSION:
+          return (
+            <CoreHealthChip status={outcome.status} health={outcome.data} />
+          )
+        case CAPTURE_HEALTH_SCHEMA_VERSION:
+          return (
+            <CaptureHealthzChip status={outcome.status} health={outcome.data} />
+          )
+        case HEALTH_SCHEMA_VERSION: {
+          const typed = asTypedCoreFailClosedReason(outcome.data.reason_code)
+          if (typed !== undefined) {
+            const view = mapApiError(outcome.status, {
+              schema_version: API_ERROR_SCHEMA_VERSION,
+              code: "data_unavailable",
+              reason_code: outcome.data.reason_code,
+            })
+            return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
+          }
+          return (
+            <ToneBadge
+              tone={toneWithoutLiveOnHttpError(
+                outcome.status,
+                healthStateTone(outcome.data.state)
+              )}
+            >
+              {outcome.status === 503
+                ? `503 ${outcome.data.reason_code}`
+                : outcome.data.scope}
+            </ToneBadge>
+          )
+        }
+        default: {
+          const _exhaustive: never = outcome.data
+          return _exhaustive
         }
       }
-      return (
-        <ToneBadge
-          tone={toneWithoutLiveOnHttpError(
-            outcome.status,
-            healthStateTone(outcome.data.state)
-          )}
-        >
-          {outcome.status === 503
-            ? `503 ${outcome.data.reason_code}`
-            : outcome.data.scope}
-        </ToneBadge>
-      )
     default: {
       const _exhaustive: never = outcome
       return _exhaustive
@@ -349,34 +375,56 @@ function ReadyChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
       return (
         <ToneBadge tone={view.tone}>
           {view.family === "core_deadletter" ||
-          view.family === "ledger_unsupported_event"
+          view.family === "ledger_unsupported_event" ||
+          view.family === "capture_health_not_ready"
             ? view.title
             : `${outcome.status} ${outcome.error.reason_code}`}
         </ToneBadge>
       )
     }
     case "ok": {
-      if (isCoreHealth(outcome.data)) {
-        const unready =
-          outcome.status === 503 ||
-          !outcome.data.ok ||
-          !outcome.data.ready ||
-          outcome.data.live_qualified ||
-          outcome.data.stage_2_qualified ||
-          outcome.data.reason_code !== null
-        return (
-          <ToneBadge tone={unready ? "red" : "yellow"}>
-            {unready ? "unready" : "not live-qualified"}
-          </ToneBadge>
-        )
+      switch (outcome.data.schema_version) {
+        case CORE_HEALTH_SCHEMA_VERSION: {
+          const unready =
+            outcome.status === 503 ||
+            !outcome.data.ok ||
+            !outcome.data.ready ||
+            outcome.data.live_qualified ||
+            outcome.data.stage_2_qualified ||
+            outcome.data.reason_code !== null
+          return (
+            <ToneBadge tone={unready ? "red" : "yellow"}>
+              {unready ? "unready" : "not live-qualified"}
+            </ToneBadge>
+          )
+        }
+        case CAPTURE_HEALTH_SCHEMA_VERSION: {
+          const unready =
+            outcome.status === 503 ||
+            !outcome.data.ok ||
+            outcome.data.ready !== true ||
+            outcome.data.reason_code !== undefined
+          return (
+            <ToneBadge tone={unready ? "red" : "yellow"}>
+              {unready ? "unready" : "not live-qualified"}
+            </ToneBadge>
+          )
+        }
+        case HEALTH_SCHEMA_VERSION: {
+          const unready =
+            outcome.status === 503 ||
+            outcome.data.state !== "HEALTH_STATE_GREEN"
+          return (
+            <ToneBadge tone={unready ? "red" : "green"}>
+              {unready ? "unready" : "ready"}
+            </ToneBadge>
+          )
+        }
+        default: {
+          const _exhaustive: never = outcome.data
+          return _exhaustive
+        }
       }
-      const unready =
-        outcome.status === 503 || outcome.data.state !== "HEALTH_STATE_GREEN"
-      return (
-        <ToneBadge tone={unready ? "red" : "green"}>
-          {unready ? "unready" : "ready"}
-        </ToneBadge>
-      )
     }
     default: {
       const _exhaustive: never = outcome
@@ -414,6 +462,29 @@ function CoreHealthChip({
   return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
 }
 
+function CaptureHealthzChip({
+  status,
+  health,
+}: {
+  status: number
+  health: CaptureHealthBody
+}) {
+  const failClosed =
+    status === 503 ||
+    !health.ok ||
+    health.ready !== true ||
+    health.reason_code !== undefined
+  if (!failClosed) {
+    return <ToneBadge tone="yellow">not live-qualified</ToneBadge>
+  }
+  const view = mapApiError(status === 200 ? 503 : status, {
+    schema_version: API_ERROR_SCHEMA_VERSION,
+    code: "data_unavailable",
+    reason_code: health.reason_code ?? "capture_health.not_ready",
+  })
+  return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
+}
+
 function CaptureChip({ outcome }: { outcome: EndpointOutcome<CaptureStatus> }) {
   switch (outcome.kind) {
     case "network":
@@ -424,7 +495,11 @@ function CaptureChip({ outcome }: { outcome: EndpointOutcome<CaptureStatus> }) {
       const view = mapApiError(outcome.status, outcome.error)
       return (
         <ToneBadge tone={view.tone}>
-          {outcome.status} {outcome.error.reason_code}
+          {view.family === "core_deadletter" ||
+          view.family === "ledger_unsupported_event" ||
+          view.family === "capture_health_not_ready"
+            ? view.title
+            : `${outcome.status} ${outcome.error.reason_code}`}
         </ToneBadge>
       )
     }

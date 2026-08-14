@@ -1,12 +1,15 @@
 import {
   API_ERROR_SCHEMA_VERSION,
+  asCaptureHealthNotReadyReason,
   asCoreDeadletterReason,
   asLedgerUnsupportedEventReason,
   assertNever,
   parseApiError,
+  parseCaptureHealth,
   parseCoreHealth,
   parseCoreStatus,
   type ApiError,
+  type CaptureHealthBody,
   type CoreHealth,
   type CoreStatus,
 } from "@/lib/contracts"
@@ -22,6 +25,7 @@ export type FailClosedFamily =
   | "data_unavailable"
   | "core_deadletter"
   | "ledger_unsupported_event"
+  | "capture_health_not_ready"
   | "typed_other"
 
 export interface FailClosedView {
@@ -66,6 +70,10 @@ export function classifyHttpBody(status: number, body: unknown): ProbeOutcome {
   if (coreStatus.ok) {
     return classifyCoreStatus(status, coreStatus.value)
   }
+  const captureHealth = parseCaptureHealth(body)
+  if (captureHealth.ok) {
+    return classifyCaptureHealth(status, captureHealth.value)
+  }
   if (status === 200) {
     return {
       kind: "not_observed",
@@ -105,6 +113,9 @@ export function familyOf(status: number, error: ApiError): FailClosedFamily {
   }
   if (asLedgerUnsupportedEventReason(error.reason_code)) {
     return "ledger_unsupported_event"
+  }
+  if (asCaptureHealthNotReadyReason(error.reason_code)) {
+    return "capture_health_not_ready"
   }
   if (status === 503 || error.code === "data_unavailable") {
     return "data_unavailable"
@@ -151,6 +162,24 @@ function classifyCoreStatus(
   return observedUnavailable(status, "core_status.not_ready")
 }
 
+function classifyCaptureHealth(
+  status: number,
+  health: CaptureHealthBody
+): ProbeOutcome {
+  if (health.reason_code !== undefined) {
+    return observedUnavailable(status, health.reason_code)
+  }
+  if (status === 200 && health.ok && health.ready === true) {
+    return {
+      kind: "not_observed",
+      status,
+      detail:
+        "HTTP 200 — this listener did not return typed hl.api.error.v1. Not a Stage PASS.",
+    }
+  }
+  return observedUnavailable(status, "capture_health.not_ready")
+}
+
 function observedUnavailable(
   status: number,
   reason_code: string
@@ -189,6 +218,8 @@ function titleOf(
       return titleOfDeadletter(reasonCode)
     case "ledger_unsupported_event":
       return titleOfLedgerUnsupported(reasonCode)
+    case "capture_health_not_ready":
+      return titleOfCaptureHealthNotReady(reasonCode)
     case "typed_other":
       return `HTTP ${status}`
     default:
@@ -230,6 +261,19 @@ function titleOfLedgerUnsupported(reasonCode: string): string {
   }
 }
 
+function titleOfCaptureHealthNotReady(reasonCode: string): string {
+  const reason = asCaptureHealthNotReadyReason(reasonCode)
+  if (!reason) {
+    return "503 data unavailable"
+  }
+  switch (reason) {
+    case "capture_health.not_ready":
+      return "503 capture health not ready"
+    default:
+      return assertNever(reason)
+  }
+}
+
 function detailOf(family: FailClosedFamily, error: ApiError): string {
   switch (family) {
     case "snapshot_missing":
@@ -250,6 +294,8 @@ function detailOf(family: FailClosedFamily, error: ApiError): string {
       return detailOfDeadletter(error.reason_code)
     case "ledger_unsupported_event":
       return detailOfLedgerUnsupported(error.reason_code)
+    case "capture_health_not_ready":
+      return detailOfCaptureHealthNotReady(error.reason_code)
     case "typed_other":
       return `${error.code} · ${error.reason_code}`
     default:
@@ -291,6 +337,19 @@ function detailOfLedgerUnsupported(reasonCode: string): string {
   }
 }
 
+function detailOfCaptureHealthNotReady(reasonCode: string): string {
+  const reason = asCaptureHealthNotReadyReason(reasonCode)
+  if (!reason) {
+    return `${reasonCode} · fail-closed`
+  }
+  switch (reason) {
+    case "capture_health.not_ready":
+      return "Capture /healthz is leftover v4 or not live-ready. Fail-closed; not ready. Not live-source qualification."
+    default:
+      return assertNever(reason)
+  }
+}
+
 function toneOf(family: FailClosedFamily): Tone {
   switch (family) {
     case "stream_unspecified":
@@ -303,6 +362,7 @@ function toneOf(family: FailClosedFamily): Tone {
     case "data_unavailable":
     case "core_deadletter":
     case "ledger_unsupported_event":
+    case "capture_health_not_ready":
     case "typed_other":
       return "red"
     default:

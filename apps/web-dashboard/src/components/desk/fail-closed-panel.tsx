@@ -26,6 +26,7 @@ import {
 } from "@/lib/api"
 import {
   API_ERROR_SCHEMA_VERSION,
+  healthReasonCode,
   type ApiError,
   type CaptureStatus,
   type HealthBody,
@@ -49,14 +50,15 @@ export function FailClosedCard({
         <CardTitle>Fail-closed API states</CardTitle>
         <CardDescription>
           Typed 503 / 429 / 400 / 501 from hl-api, including hl-core
-          dead-letter and ledger.unsupported_event consume-poison fail-closed
-          reasons. Empty is not green. This is not Stage 6 and not
-          live-qualified.
+          dead-letter, ledger.unsupported_event consume-poison, and
+          capture_health.not_ready leftover v4 / not live-ready capture healthz.
+          Empty is not green. This is not Stage 6 and not live-qualified.
         </CardDescription>
       </CardHeader>
       <CardContent>
         {loading || !feed ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+            <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
@@ -71,6 +73,12 @@ export function FailClosedCard({
               path="/v1/capture/status"
               expected="snapshot_missing"
               body={captureLane(feed.captureStatus)}
+            />
+            <Lane
+              label="503 capture health not ready"
+              path="/healthz"
+              expected="capture_health_not_ready"
+              body={captureHealthNotReadyLane(feed)}
             />
             <Lane
               label="503 core dead-letter"
@@ -281,6 +289,18 @@ function ledgerUnsupportedLane(feed: DeskFeed): LaneBody {
   }
 }
 
+function captureHealthNotReadyLane(feed: DeskFeed): LaneBody {
+  const live = liveTypedCoreView(feed, "capture_health_not_ready")
+  if (live) {
+    return { kind: "observed", view: live }
+  }
+  return {
+    kind: "not_observed",
+    detail:
+      "capture /healthz leftover v4 / not live-ready was not returned this poll. Not a PASS.",
+  }
+}
+
 function liveTypedCoreView(
   feed: DeskFeed,
   family: FailClosedFamily
@@ -319,8 +339,8 @@ function typedViewFromHealth(
   if (outcome.kind !== "ok") {
     return undefined
   }
-  const reason_code = outcome.data.reason_code
-  if (reason_code === null) {
+  const reason_code = healthReasonCode(outcome.data)
+  if (reason_code === undefined) {
     return undefined
   }
   const view = mapApiError(outcome.status, {
