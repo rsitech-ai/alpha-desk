@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest"
 import {
   lastHeartbeatThroughput,
   parseCaptureStatus,
+  parseCoreHealth,
+  parseCoreStatus,
   type ApiError,
   type CaptureStatus,
 } from "@/lib/contracts"
@@ -96,6 +98,39 @@ describe("mapApiError", () => {
     expect(view.family).toBe("stream_unspecified")
     expect(view.title).toBe("501 stream unspecified")
     expect(view.tone).toBe("yellow")
+  })
+
+  it.each([
+    ["core.deadletter_unsafe_path", "503 dead-letter unsafe path"],
+    ["core.deadletter_io", "503 dead-letter I/O"],
+    ["core.deadletter_invalid_record", "503 dead-letter invalid record"],
+    ["core.deadletter_serialization", "503 dead-letter serialization"],
+  ] as const)(
+    "maps 503 %s as typed dead-letter fail-closed, not generic data_unavailable",
+    (reason_code, title) => {
+      const view = mapApiError(503, errorBody("data_unavailable", reason_code))
+      expect(view.family).toBe("core_deadletter")
+      expect(view.title).toBe(title)
+      expect(view.tone).toBe("red")
+      expect(view.tone).not.toBe("green")
+      expect(view.detail).not.toMatch(/live-qualified|Stage 6|Stage PASS/i)
+      expect(view.reasonCode).toBe(reason_code)
+      expect(familyOf(503, errorBody("data_unavailable", reason_code))).toBe(
+        "core_deadletter"
+      )
+    }
+  )
+
+  it("does not treat unknown core.deadletter_* as ready or as a known dead-letter family", () => {
+    const view = mapApiError(
+      503,
+      errorBody("data_unavailable", "core.deadletter_corrupt")
+    )
+    expect(view.family).not.toBe("core_deadletter")
+    expect(view.family).toBe("data_unavailable")
+    expect(view.tone).toBe("red")
+    expect(view.tone).not.toBe("green")
+    expect(view.title).not.toMatch(/ready/i)
   })
 })
 
@@ -302,5 +337,182 @@ describe("parseCaptureStatus extras", () => {
     expect(
       parsed.value.auxiliary_sources?.[0]?.restart_reconstruction
     ).toBeUndefined()
+  })
+})
+
+const CORE_DEADLETTER_REASONS = [
+  "core.deadletter_unsafe_path",
+  "core.deadletter_io",
+  "core.deadletter_invalid_record",
+  "core.deadletter_serialization",
+] as const
+
+function coreHealth503(reason_code: string): Record<string, unknown> {
+  return {
+    schema_version: "hl.core.health.v1",
+    ok: false,
+    ready: false,
+    reason_code,
+    live_qualified: false,
+    stage_2_qualified: false,
+  }
+}
+
+function coreStatusFailClosed(
+  reason: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    schema_version: "hl.core.status.v1",
+    ready: false,
+    fail_closed_reason: reason,
+    live_qualified: false,
+    stage_2_qualified: false,
+    ...overrides,
+  }
+}
+
+describe("hl-core dead-letter health and status", () => {
+  it.each(CORE_DEADLETTER_REASONS)(
+    "classifies /healthz 503 %s as typed fail-closed, not invalid or ready",
+    (reason_code) => {
+      const outcome = classifyHttpBody(503, coreHealth503(reason_code))
+      expect(outcome.kind).toBe("observed")
+      if (outcome.kind !== "observed") {
+        return
+      }
+      expect(outcome.view.family).toBe("core_deadletter")
+      expect(outcome.view.httpStatus).toBe(503)
+      expect(outcome.view.reasonCode).toBe(reason_code)
+      expect(outcome.view.tone).toBe("red")
+      expect(outcome.view.tone).not.toBe("green")
+      expect(outcome.view.title).toMatch(/^503 dead-letter /)
+      expect(outcome.view.detail).not.toMatch(/live-qualified|Stage PASS/i)
+    }
+  )
+
+  it.each(CORE_DEADLETTER_REASONS)(
+    "classifies /status HTTP 200 with fail_closed_reason %s as typed 503, not ready",
+    (reason_code) => {
+      const outcome = classifyHttpBody(200, coreStatusFailClosed(reason_code))
+      expect(outcome.kind).toBe("observed")
+      if (outcome.kind !== "observed") {
+        return
+      }
+      expect(outcome.view.family).toBe("core_deadletter")
+      expect(outcome.view.reasonCode).toBe(reason_code)
+      expect(outcome.view.tone).toBe("red")
+      expect(outcome.view.title).toMatch(/^503 dead-letter /)
+      expect(outcome.view.detail).toMatch(/fail_closed_reason/)
+    }
+  )
+
+  it("keeps omitted fail_closed_reason and last_applied_watermark omitted, not 0", () => {
+    const parsed = parseCoreStatus({
+      schema_version: "hl.core.status.v1",
+      ready: true,
+      live_qualified: false,
+      stage_2_qualified: false,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.fail_closed_reason).toBeUndefined()
+    expect(parsed.value.last_applied_watermark).toBeUndefined()
+
+    const classified = classifyHttpBody(200, {
+      schema_version: "hl.core.status.v1",
+      ready: true,
+      live_qualified: false,
+      stage_2_qualified: false,
+    })
+    expect(classified.kind).toBe("not_observed")
+    if (classified.kind === "not_observed") {
+      expect(classified.detail).toMatch(/Not a Stage PASS/)
+      expect(classified.detail).not.toMatch(/ready and live-qualified/i)
+    }
+  })
+
+  it("preserves last_applied_watermark 0 when present and still omits missing rates", () => {
+    const parsed = parseCoreStatus(
+      coreStatusFailClosed("core.deadletter_unsafe_path", {
+        last_applied_watermark: 0,
+      })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.last_applied_watermark).toBe(0)
+    expect(parsed.value.fail_closed_reason).toBe("core.deadletter_unsafe_path")
+
+    const missingThroughput = parseCaptureStatus(v4Status())
+    expect(missingThroughput.ok).toBe(true)
+    if (!missingThroughput.ok) {
+      return
+    }
+    expect(missingThroughput.value.throughput_records_per_sec).toBeUndefined()
+    expect(missingThroughput.value.throughput_blocks_per_sec).toBeUndefined()
+  })
+
+  it("fail-closes unknown /healthz reason codes instead of showing ready", () => {
+    const outcome = classifyHttpBody(
+      503,
+      coreHealth503("core.deadletter_corrupt")
+    )
+    expect(outcome.kind).toBe("observed")
+    if (outcome.kind !== "observed") {
+      return
+    }
+    expect(outcome.view.family).not.toBe("core_deadletter")
+    expect(outcome.view.tone).toBe("red")
+    expect(outcome.view.tone).not.toBe("green")
+    expect(outcome.view.title).not.toMatch(/ready/i)
+  })
+
+  it("fail-closes qualification claims on core health rather than painting green", () => {
+    const outcome = classifyHttpBody(200, {
+      schema_version: "hl.core.health.v1",
+      ok: true,
+      ready: true,
+      reason_code: null,
+      live_qualified: true,
+      stage_2_qualified: false,
+    })
+    expect(outcome.kind).toBe("observed")
+    if (outcome.kind !== "observed") {
+      return
+    }
+    expect(outcome.view.tone).toBe("red")
+    expect(outcome.view.tone).not.toBe("green")
+    expect(outcome.view.family).not.toBe("core_deadletter")
+  })
+
+  it("parses ready core /healthz without inventing a dead-letter reason", () => {
+    const parsed = parseCoreHealth({
+      schema_version: "hl.core.health.v1",
+      ok: true,
+      ready: true,
+      reason_code: null,
+      live_qualified: false,
+      stage_2_qualified: false,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.reason_code).toBeNull()
+    expect(parsed.value.ready).toBe(true)
+
+    const classified = classifyHttpBody(200, {
+      schema_version: "hl.core.health.v1",
+      ok: true,
+      ready: true,
+      reason_code: null,
+      live_qualified: false,
+      stage_2_qualified: false,
+    })
+    expect(classified.kind).toBe("not_observed")
   })
 })

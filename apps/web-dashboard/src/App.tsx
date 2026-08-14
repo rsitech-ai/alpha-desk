@@ -25,7 +25,15 @@ import {
   type DeskFeed,
   type EndpointOutcome,
 } from "@/lib/api"
-import type { ApiError, CaptureStatus, HealthAssessment } from "@/lib/contracts"
+import {
+  API_ERROR_SCHEMA_VERSION,
+  asCoreDeadletterReason,
+  isCoreHealth,
+  type ApiError,
+  type CaptureStatus,
+  type CoreHealth,
+  type HealthBody,
+} from "@/lib/contracts"
 import { mapApiError } from "@/lib/fail-closed"
 
 export function App() {
@@ -146,7 +154,10 @@ function deriveConnection(state: FeedState): {
     feed.canonicalHealth.kind === "http-error" ||
     feed.captureStatus.kind === "http-error" ||
     feed.canonicalHealth.kind === "invalid" ||
-    feed.captureStatus.kind === "invalid"
+    feed.captureStatus.kind === "invalid" ||
+    isDeadletterFailClosed(feed.healthz) ||
+    isDeadletterFailClosed(feed.readyz) ||
+    isDeadletterFailClosed(feed.canonicalHealth)
   ) {
     const reason = unavailableReason(feed)
     return {
@@ -160,11 +171,10 @@ function deriveConnection(state: FeedState): {
       !feed.captureStatus.data.ready)
   const healthDegraded =
     feed.canonicalHealth.kind === "ok" &&
-    feed.canonicalHealth.data.state !== "HEALTH_STATE_GREEN"
+    healthBodyIsDegraded(feed.canonicalHealth.status, feed.canonicalHealth.data)
   const readyDegraded =
     feed.readyz.kind === "ok" &&
-    (feed.readyz.status === 503 ||
-      feed.readyz.data.state !== "HEALTH_STATE_GREEN")
+    healthBodyIsDegraded(feed.readyz.status, feed.readyz.data)
   if (captureDegraded || healthDegraded || readyDegraded) {
     return {
       kind: "degraded",
@@ -185,6 +195,13 @@ function unavailableReason(feed: DeskFeed): string {
   if (feed.canonicalHealth.kind === "http-error") {
     return feed.canonicalHealth.error.reason_code
   }
+  const healthReason =
+    deadletterReason(feed.healthz) ??
+    deadletterReason(feed.readyz) ??
+    deadletterReason(feed.canonicalHealth)
+  if (healthReason !== undefined) {
+    return healthReason
+  }
   if (feed.captureStatus.kind === "invalid") {
     return feed.captureStatus.detail
   }
@@ -192,6 +209,42 @@ function unavailableReason(feed: DeskFeed): string {
     return feed.canonicalHealth.detail
   }
   return "data_unavailable"
+}
+
+function isDeadletterFailClosed(outcome: EndpointOutcome<HealthBody>): boolean {
+  return deadletterReason(outcome) !== undefined
+}
+
+function deadletterReason(
+  outcome: EndpointOutcome<HealthBody>
+): string | undefined {
+  if (outcome.kind === "http-error") {
+    return asCoreDeadletterReason(outcome.error.reason_code)
+  }
+  if (outcome.kind !== "ok") {
+    return undefined
+  }
+  if (isCoreHealth(outcome.data)) {
+    if (outcome.data.reason_code === null) {
+      return undefined
+    }
+    return asCoreDeadletterReason(outcome.data.reason_code)
+  }
+  return asCoreDeadletterReason(outcome.data.reason_code)
+}
+
+function healthBodyIsDegraded(status: number, body: HealthBody): boolean {
+  if (isCoreHealth(body)) {
+    return (
+      status === 503 ||
+      !body.ok ||
+      !body.ready ||
+      body.live_qualified ||
+      body.stage_2_qualified ||
+      body.reason_code !== null
+    )
+  }
+  return status === 503 || body.state !== "HEALTH_STATE_GREEN"
 }
 
 function StatusStrip({ feed }: { feed: DeskFeed | undefined }) {
@@ -234,11 +287,7 @@ function Chip({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-function HealthChip({
-  outcome,
-}: {
-  outcome: EndpointOutcome<HealthAssessment>
-}) {
+function HealthChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
   switch (outcome.kind) {
     case "network":
       return <ToneBadge tone="red">disconnected</ToneBadge>
@@ -248,11 +297,27 @@ function HealthChip({
       const view = mapApiError(outcome.status, outcome.error)
       return (
         <ToneBadge tone={view.tone}>
-          {outcome.status} {outcome.error.reason_code}
+          {view.family === "core_deadletter"
+            ? view.title
+            : `${outcome.status} ${outcome.error.reason_code}`}
         </ToneBadge>
       )
     }
     case "ok":
+      if (isCoreHealth(outcome.data)) {
+        return <CoreHealthChip status={outcome.status} health={outcome.data} />
+      }
+      {
+        const deadletter = asCoreDeadletterReason(outcome.data.reason_code)
+        if (deadletter !== undefined) {
+          const view = mapApiError(outcome.status, {
+            schema_version: API_ERROR_SCHEMA_VERSION,
+            code: "data_unavailable",
+            reason_code: outcome.data.reason_code,
+          })
+          return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
+        }
+      }
       return (
         <ToneBadge
           tone={toneWithoutLiveOnHttpError(
@@ -272,11 +337,7 @@ function HealthChip({
   }
 }
 
-function ReadyChip({
-  outcome,
-}: {
-  outcome: EndpointOutcome<HealthAssessment>
-}) {
+function ReadyChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
   switch (outcome.kind) {
     case "network":
       return <ToneBadge tone="red">disconnected</ToneBadge>
@@ -286,11 +347,27 @@ function ReadyChip({
       const view = mapApiError(outcome.status, outcome.error)
       return (
         <ToneBadge tone={view.tone}>
-          {outcome.status} {outcome.error.reason_code}
+          {view.family === "core_deadletter"
+            ? view.title
+            : `${outcome.status} ${outcome.error.reason_code}`}
         </ToneBadge>
       )
     }
     case "ok": {
+      if (isCoreHealth(outcome.data)) {
+        const unready =
+          outcome.status === 503 ||
+          !outcome.data.ok ||
+          !outcome.data.ready ||
+          outcome.data.live_qualified ||
+          outcome.data.stage_2_qualified ||
+          outcome.data.reason_code !== null
+        return (
+          <ToneBadge tone={unready ? "red" : "yellow"}>
+            {unready ? "unready" : "not live-qualified"}
+          </ToneBadge>
+        )
+      }
       const unready =
         outcome.status === 503 || outcome.data.state !== "HEALTH_STATE_GREEN"
       return (
@@ -304,6 +381,35 @@ function ReadyChip({
       return _exhaustive
     }
   }
+}
+
+function CoreHealthChip({
+  status,
+  health,
+}: {
+  status: number
+  health: CoreHealth
+}) {
+  const failClosed =
+    status === 503 ||
+    !health.ok ||
+    !health.ready ||
+    health.live_qualified ||
+    health.stage_2_qualified ||
+    health.reason_code !== null
+  if (!failClosed) {
+    return <ToneBadge tone="yellow">not live-qualified</ToneBadge>
+  }
+  const view = mapApiError(status === 200 ? 503 : status, {
+    schema_version: API_ERROR_SCHEMA_VERSION,
+    code: "data_unavailable",
+    reason_code:
+      health.reason_code ??
+      (health.live_qualified || health.stage_2_qualified
+        ? "core_status.qualification_claim"
+        : "core_status.not_ready"),
+  })
+  return <ToneBadge tone={view.tone}>{view.title}</ToneBadge>
 }
 
 function CaptureChip({ outcome }: { outcome: EndpointOutcome<CaptureStatus> }) {

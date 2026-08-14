@@ -1,10 +1,11 @@
 import {
   parseApiError,
   parseCaptureStatus,
+  parseCoreHealth,
   parseHealthAssessment,
   type ApiError,
   type CaptureStatus,
-  type HealthAssessment,
+  type HealthBody,
 } from "@/lib/contracts"
 import { classifyHttpBody, type ProbeOutcome } from "@/lib/fail-closed"
 
@@ -25,9 +26,9 @@ export type EndpointOutcome<T> =
 
 export interface DeskFeed {
   fetchedAt: number
-  healthz: EndpointOutcome<HealthAssessment>
-  readyz: EndpointOutcome<HealthAssessment>
-  canonicalHealth: EndpointOutcome<HealthAssessment>
+  healthz: EndpointOutcome<HealthBody>
+  readyz: EndpointOutcome<HealthBody>
+  canonicalHealth: EndpointOutcome<HealthBody>
   captureStatus: EndpointOutcome<CaptureStatus>
   stream: EndpointOutcome<ApiError>
   invalidQuery: ProbeOutcome
@@ -114,7 +115,7 @@ async function fetchJson(
 async function fetchHealth(
   path: string,
   signal: AbortSignal
-): Promise<EndpointOutcome<HealthAssessment>> {
+): Promise<EndpointOutcome<HealthBody>> {
   const result = await fetchJson(path, signal)
   if (result.kind === "network") {
     return result
@@ -122,7 +123,7 @@ async function fetchHealth(
   if (result.status === 401 || result.status === 501) {
     return asHttpError(result.status, result.value)
   }
-  if (result.status === 503) {
+  if (result.status === 503 || result.status === 200) {
     const health = parseHealthAssessment(result.value)
     if (health.ok) {
       return {
@@ -132,19 +133,19 @@ async function fetchHealth(
         raw: result.value,
       }
     }
-    return asHttpError(result.status, result.value)
-  }
-  if (result.status === 200) {
-    const health = parseHealthAssessment(result.value)
-    if (!health.ok) {
-      return { kind: "invalid", status: result.status, detail: health.detail }
+    const core = parseCoreHealth(result.value)
+    if (core.ok) {
+      return {
+        kind: "ok",
+        status: result.status,
+        data: core.value,
+        raw: result.value,
+      }
     }
-    return {
-      kind: "ok",
-      status: result.status,
-      data: health.value,
-      raw: result.value,
+    if (result.status === 503) {
+      return asHttpError(result.status, result.value)
     }
+    return { kind: "invalid", status: result.status, detail: health.detail }
   }
   return asHttpError(result.status, result.value)
 }
