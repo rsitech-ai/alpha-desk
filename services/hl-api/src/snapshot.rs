@@ -375,6 +375,9 @@ fn require_auxiliary_source_closed_fields(
         if source.contains_key("quarantine_reason") {
             require_string(source, "quarantine_reason", None)?;
         }
+        if source.contains_key("last_error_reason") {
+            require_string(source, "last_error_reason", None)?;
+        }
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -438,6 +441,7 @@ mod tests {
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string,
         auxiliary_source_last_durable_wall_micros_is_optional_i64,
+        auxiliary_source_last_error_reason_is_optional_string,
         auxiliary_source_local_sequence_is_optional_u64,
         auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
@@ -1182,6 +1186,23 @@ mod tests {
         assert!(
             auxiliary_source_quarantine_reason_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.quarantine_reason as an optional string"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_auxiliary_last_error_reason_optional_string() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_last_error_reason_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
@@ -2037,6 +2058,79 @@ mod tests {
                     .expect_err("present non-string or empty quarantine_reason must not fail open"),
                 SnapshotError::Invalid,
                 "{quarantine_reason} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_auxiliary_last_error_reason_string_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"][0]["last_error_reason"] =
+            serde_json::json!("source.temporary_disconnect");
+        let bytes = serde_json::to_vec(&value).expect("encode known last_error_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("known string last_error_reason");
+        assert_eq!(
+            parsed["auxiliary_sources"][0]["last_error_reason"],
+            "source.temporary_disconnect"
+        );
+    }
+
+    #[test]
+    fn omitted_auxiliary_last_error_reason_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        assert!(
+            value["auxiliary_sources"][0]
+                .get("last_error_reason")
+                .is_none(),
+            "v5 fixture must omit optional last_error_reason"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted last_error_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted last_error_reason");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("last_error_reason")
+                .is_none()
+        );
+
+        value["auxiliary_sources"][0]["last_error_reason"] =
+            serde_json::json!("source.temporary_disconnect");
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("last_error_reason");
+        let bytes = serde_json::to_vec(&value).expect("encode removed last_error_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed last_error_reason");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("last_error_reason")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn present_non_string_auxiliary_last_error_reason_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for last_error_reason in [
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-string"}),
+            serde_json::json!(["not-a-string"]),
+            serde_json::json!(""),
+        ] {
+            value["auxiliary_sources"][0]["last_error_reason"] = last_error_reason.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-string or empty last_error_reason must not fail open"),
+                SnapshotError::Invalid,
+                "{last_error_reason} must be snapshot_invalid"
             );
         }
     }

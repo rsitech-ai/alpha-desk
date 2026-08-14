@@ -304,7 +304,10 @@ components:
         is an optional i64 integer; present non-number or non-i64 values are
         snapshot_invalid. Omitted stays omitted. Nested quarantine_reason is
         an optional string; present non-string values, and empty present
-        strings, are snapshot_invalid. Omitted stays omitted. Nested health,
+        strings, are snapshot_invalid. Omitted stays omitted. Nested
+        last_error_reason is an optional string; present non-string values,
+        and empty present strings, are snapshot_invalid. Omitted stays
+        omitted. Nested health,
         restart_reconstruction, and qualification, when present, use closed
         kebab-case sets; unknown values are snapshot_invalid. Omitted optional
         nested fields stay omitted.
@@ -400,7 +403,10 @@ components:
             is an optional i64 integer; present non-number or non-i64 values
             are snapshot_invalid. Omitted stays omitted. Nested quarantine_reason
             is an optional string; present non-string values, and empty present
-            strings, are snapshot_invalid. Omitted stays omitted. Nested health,
+            strings, are snapshot_invalid. Omitted stays omitted. Nested
+            last_error_reason is an optional string; present non-string values,
+            and empty present strings, are snapshot_invalid. Omitted stays
+            omitted. Nested health,
             restart_reconstruction, and qualification are optional; present
             values use closed kebab-case sets. Unknown values are
             snapshot_invalid. Omitted optional nested fields stay omitted.
@@ -560,6 +566,16 @@ components:
                   non-string values are snapshot_invalid. Empty present
                   strings are snapshot_invalid. Omitted stays omitted. This
                   document does not claim a closed enum of quarantine reasons.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+              last_error_reason:
+                description: >
+                  Optional capture writer last error reason string. Present
+                  non-string values are snapshot_invalid. Empty present
+                  strings are snapshot_invalid. Omitted stays omitted. This
+                  document does not claim a closed enum of error reasons.
                   HealthAssessment.reason_code stays a free string so unknown
                   RED is not closed out. This document does not claim Stage
                   PASS.
