@@ -608,8 +608,8 @@ impl CaptureStatus {
         self.schema_version == STATUS_SCHEMA_V5 && self.maintenance.is_some()
     }
 
-    /// Operator `/healthz` may report ready only for v5 with fail-closed
-    /// maintenance. Dual-read v4 leftovers are never live-ready.
+    /// True when `/healthz` may return HTTP 200: v5 with fail-closed
+    /// `maintenance` and `ready: true`. Leftover v4 and not-ready v5 are false.
     #[must_use]
     pub fn live_ready(&self) -> bool {
         self.has_fail_closed_maintenance() && self.ready
@@ -1364,6 +1364,27 @@ mod tests {
         assert_eq!(status.health(), CaptureHealth::Green);
         assert!(status.maintenance().is_none());
         assert!(!status.has_fail_closed_maintenance());
+        assert!(!status.live_ready());
+    }
+
+    #[test]
+    fn v5_idle_maintenance_is_not_live_ready_until_ready() {
+        let status = CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Green,
+        )
+        .with_source_state(
+            CommittedSourceClass::LocallyVerifiedCommitted,
+            CaptureSourceHealth::Healthy,
+            None,
+            None,
+            None,
+        );
+        status.validate().unwrap();
+        assert!(status.has_fail_closed_maintenance());
+        assert!(!status.ready());
         assert!(!status.live_ready());
     }
 

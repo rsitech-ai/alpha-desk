@@ -116,21 +116,20 @@ async fn handle_connection(
 
 async fn write_health(stream: &mut TcpStream, status_path: &Path) -> Result<(), OperatorError> {
     match read_status(status_path) {
-        Ok(status) if status.has_fail_closed_maintenance() => {
+        Ok(status) if status.live_ready() => {
             let health = match status.health() {
                 CaptureHealth::Green => "green",
                 CaptureHealth::Yellow => "yellow",
                 CaptureHealth::Red => "red",
             };
             let body = format!(
-                "{{\"schema_version\":\"{HEALTH_SCHEMA}\",\"ok\":true,\"health\":\"{health}\",\"ready\":{}}}",
-                status.live_ready()
+                "{{\"schema_version\":\"{HEALTH_SCHEMA}\",\"ok\":true,\"health\":\"{health}\",\"ready\":true}}"
             );
             write_response(stream, 200, "application/json", body.as_bytes()).await
         }
         Ok(_) => {
             let body = format!(
-                "{{\"schema_version\":\"{HEALTH_SCHEMA}\",\"ok\":false,\"reason_code\":\"{}\"}}",
+                "{{\"schema_version\":\"{HEALTH_SCHEMA}\",\"ok\":false,\"reason_code\":\"{}\",\"ready\":false}}",
                 OperatorError::NotReady.reason_code()
             );
             write_response(stream, 503, "application/json", body.as_bytes()).await

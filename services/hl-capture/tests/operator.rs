@@ -134,10 +134,12 @@ async fn operator_status_serves_written_v5_json_health_and_sse() {
     ));
 
     let (health_status, health_body) = http_get(addr, "/healthz").await;
-    assert_eq!(health_status, 200);
-    assert!(health_body.contains("\"schema_version\":\"hl.capture.health.v1\""));
-    assert!(health_body.contains("\"health\":\"yellow\""));
-    assert!(health_body.contains("\"ready\":false"));
+    assert_eq!(health_status, 503);
+    let health = json_from_http(&health_body);
+    assert_eq!(health["schema_version"], "hl.capture.health.v1");
+    assert_eq!(health["ok"], false);
+    assert_eq!(health["reason_code"], "capture_health.not_ready");
+    assert_eq!(health["ready"], false);
 
     let (status_code, status_body) = http_get(addr, "/status").await;
     assert_eq!(status_code, 200);
@@ -326,7 +328,34 @@ async fn operator_status_serves_v4_and_v5_fixtures_as_read() {
     let v4_health = json_from_http(&v4_health_body);
     assert_eq!(v4_health["ok"], false);
     assert_eq!(v4_health["reason_code"], "capture_health.not_ready");
-    assert_ne!(v4_health.get("ready"), Some(&serde_json::json!(true)));
+    assert_eq!(v4_health["ready"], false);
+
+    let mut events = TcpStream::connect(v4_addr).await.expect("sse connect");
+    events
+        .write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("sse request");
+    events.flush().await.expect("sse flush");
+    let mut sse_body = Vec::new();
+    let mut buffer = [0_u8; 1_024];
+    let mut expected = b"event: status\ndata: ".to_vec();
+    expected.extend_from_slice(&capture_fixture("status-v4.json"));
+    expected.extend_from_slice(b"\n\n");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let read = events.read(&mut buffer).await.expect("sse read");
+            assert_ne!(read, 0, "sse closed before the first status event");
+            sse_body.extend_from_slice(&buffer[..read]);
+            if sse_body
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice())
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("SSE /events leftover v4 bytes as-read");
     v4_cancel.cancel();
     v4_server.await.expect("join").expect("serve stops");
 
@@ -348,6 +377,57 @@ async fn operator_status_serves_v4_and_v5_fixtures_as_read() {
     assert!(health_body.contains("\"ready\":true"));
     v5_cancel.cancel();
     v5_server.await.expect("join").expect("serve stops");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operator_healthz_rejects_valid_v5_when_not_ready() {
+    let directory = tempdir().expect("temp directory");
+    let status_path = directory.path().join("capture-status.json");
+    let status = CaptureStatus::new(
+        KnownTime::from_unix_micros(1_000).expect("time"),
+        "build-operator",
+        ChainId::new("mainnet").expect("chain"),
+        CaptureHealth::Green,
+    )
+    .with_readiness(false)
+    .with_source_state(
+        CommittedSourceClass::LocallyVerifiedCommitted,
+        CaptureSourceHealth::Healthy,
+        None,
+        None,
+        None,
+    );
+    StatusWriter::new(status_path.clone())
+        .expect("status writer")
+        .write(&status)
+        .expect("write status");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let cancellation = CancellationToken::new();
+    let server = tokio::spawn(accept_operator_status(
+        listener,
+        status_path,
+        cancellation.child_token(),
+    ));
+
+    let (status_code, status_body) = http_get(addr, "/status").await;
+    assert_eq!(status_code, 200);
+    let value = json_from_http(&status_body);
+    assert_eq!(value["schema_version"], "hl.capture.status.v5");
+    assert_eq!(value["maintenance"]["enabled"], false);
+    assert_eq!(value["ready"], false);
+
+    let (health_status, health_body) = http_get(addr, "/healthz").await;
+    assert_eq!(health_status, 503);
+    let health = json_from_http(&health_body);
+    assert_eq!(health["ok"], false);
+    assert_eq!(health["reason_code"], "capture_health.not_ready");
+    assert_eq!(health["ready"], false);
+
+    cancellation.cancel();
+    server.await.expect("join").expect("serve stops");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
