@@ -21,6 +21,8 @@ use hl_core::{
 use sha2::{Digest as _, Sha256};
 use storage_ports::ArchiveReceipt;
 
+mod common;
+
 #[tokio::test]
 async fn empty_committed_block_from_the_bus_applies_atomically_and_survives_restart() {
     let root = private_root();
@@ -967,7 +969,7 @@ fn file_dead_letter_sink_open_rejects_oversized_jsonl() {
     // One byte over `MAX_DEAD_LETTER_FILE_BYTES` (256 * 4 KiB records).
     // Valid ExistingRecord jsonl, not `vec![b'x'; 1 MiB + 1]`: garbage of that
     // size would still `Corrupt` via decode if the leftover cap were removed.
-    let leftover = valid_dead_letter_jsonl_of_len(1_048_576 + 1);
+    let leftover = common::valid_dead_letter_jsonl_of_len(1_048_576 + 1);
     fs::write(&path, &leftover).expect("seed oversized leftover");
 
     let error = FileDeadLetterSink::open(&path).expect_err("oversized leftover");
@@ -980,7 +982,7 @@ fn file_dead_letter_sink_open_rejects_oversized_jsonl() {
 fn file_dead_letter_sink_open_reopens_valid_jsonl_at_file_cap() {
     let root = private_root();
     let path = root.path().join("dead-letter.jsonl");
-    let leftover = valid_dead_letter_jsonl_of_len(1_048_576);
+    let leftover = common::valid_dead_letter_jsonl_of_len(1_048_576);
     fs::write(&path, &leftover).expect("seed at-cap leftover");
 
     // Leftover-open at the cap still succeeds; persist must not grow past it.
@@ -1001,7 +1003,7 @@ fn file_dead_letter_sink_persist_refuses_record_that_would_exceed_file_cap() {
     let path = root.path().join("dead-letter.jsonl");
     let record = sample_dead_letter("would-exceed");
     let record_len = persist_probe_len(root.path(), "would-exceed");
-    let leftover = valid_dead_letter_jsonl_of_len(1_048_576 - record_len + 1);
+    let leftover = common::valid_dead_letter_jsonl_of_len(1_048_576 - record_len + 1);
     fs::write(&path, &leftover).expect("seed leftover that cannot fit one more record");
     let previous_len = leftover.len();
 
@@ -1025,7 +1027,7 @@ fn file_dead_letter_sink_persist_writes_up_to_file_cap() {
     let path = root.path().join("dead-letter.jsonl");
     let record = sample_dead_letter("under-cap");
     let record_len = persist_probe_len(root.path(), "under-cap");
-    let leftover = valid_dead_letter_jsonl_of_len(1_048_576 - record_len);
+    let leftover = common::valid_dead_letter_jsonl_of_len(1_048_576 - record_len);
     fs::write(&path, &leftover).expect("seed leftover that fits one more record");
 
     let mut sink = FileDeadLetterSink::open(&path).expect("reopen under cap");
@@ -1282,43 +1284,6 @@ fn persist_probe_len(parent: &std::path::Path, message_id: &str) -> usize {
         .expect("probe persist");
     drop(sink);
     usize::try_from(fs::metadata(&path).expect("probe metadata").len()).expect("probe len")
-}
-
-fn valid_dead_letter_jsonl_of_len(total_bytes: usize) -> Vec<u8> {
-    const MAX_RECORD_FILE_BYTES: usize = 4_096 + 1;
-    let mut leftover = Vec::with_capacity(total_bytes);
-    let mut n = 0u32;
-    while leftover.len() < total_bytes {
-        let remaining = total_bytes - leftover.len();
-        let file_len = remaining.min(MAX_RECORD_FILE_BYTES);
-        leftover.extend(valid_dead_letter_line(&format!("cap-{n:08}"), file_len));
-        n += 1;
-    }
-    assert_eq!(leftover.len(), total_bytes);
-    leftover
-}
-
-fn valid_dead_letter_line(message_id: &str, file_len: usize) -> Vec<u8> {
-    let mut encoded = serde_json::to_vec(&serde_json::json!({
-        "schema_version": DEAD_LETTER_SCHEMA_V1,
-        "reason_code": "core.jetstream_transport",
-        "subject": "hl.v1.connect.transport",
-        "message_id": message_id,
-        "payload_sha256": hex::encode([0x11; 32]),
-        "block_hash": hex::encode([0x22; 32]),
-        "consumer": JetStreamReplayConfig::default_durable_name(),
-        "retry_count": 0,
-        "failed_at_unix_micros": 1,
-    }))
-    .expect("existing record json");
-    assert!(
-        file_len > encoded.len() && file_len - 1 <= 4_096,
-        "file_len {file_len} cannot hold a valid ExistingRecord line of {} bytes",
-        encoded.len()
-    );
-    encoded.resize(file_len - 1, b' ');
-    encoded.push(b'\n');
-    encoded
 }
 
 fn empty_block(height: u64, seed: u8) -> BlockEnvelope {
