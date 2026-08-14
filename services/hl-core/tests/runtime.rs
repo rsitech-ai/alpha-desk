@@ -426,6 +426,103 @@ async fn hung_connect_serves_starting_loopback_status_without_opening_store() {
     assert!(!store_path.exists());
 }
 
+#[tokio::test]
+async fn dead_letter_open_after_store_fails_closed_with_typed_reason() {
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let dead_letter_path = root.path().join("dead-letter.jsonl");
+    fs::create_dir(&dead_letter_path).expect("dead-letter path occupied by a directory");
+    let config = CoreConfig::from_toml(&valid_toml(&store_path, 200, None)).expect("config");
+    let runtime = CoreRuntime::open(config).expect("store open");
+    assert!(
+        store_path.exists(),
+        "file-store must already be in play before dead-letter open"
+    );
+
+    let error = runtime
+        .run_source(
+            &mut InMemoryCanonicalSource::new([]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("dead-letter open");
+    assert_eq!(error.reason_code(), "core.deadletter_unsafe_path");
+    assert!(
+        store_path.exists(),
+        "dead-letter open must not unwind the store"
+    );
+    assert!(
+        dead_letter_path.is_dir(),
+        "occupied dead-letter path must remain a directory"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_letter_open_after_store_is_visible_on_loopback_status() {
+    // Store-then-DLQ-open is the `run_source` path. `run_jetstream` cannot open
+    // the store without live NATS; live Term / HL_DEADLETTER remains unproven.
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let dead_letter_path = root.path().join("dead-letter.jsonl");
+    fs::create_dir(&dead_letter_path).expect("dead-letter path occupied by a directory");
+    let config =
+        CoreConfig::from_toml(&valid_toml(&store_path, 200, Some("127.0.0.1:0"))).expect("config");
+    let runtime = CoreRuntime::open(config).expect("store open");
+    let status = runtime.status().clone();
+    assert!(
+        store_path.exists(),
+        "file-store must already be in play before dead-letter open"
+    );
+    let cancellation = CancellationToken::new();
+    let mut source = InMemoryCanonicalSource::new([]);
+    let run = runtime.run_source(&mut source, cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.snapshot().fail_closed_reason() == Some("core.deadletter_unsafe_path") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fail_closed");
+        assert!(
+            store_path.exists(),
+            "file-store must stay in play after dead-letter open fails"
+        );
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 503);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ok"], false);
+        assert_eq!(health["ready"], false);
+        assert_eq!(health["reason_code"], "core.deadletter_unsafe_path");
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["fail_closed_reason"], "core.deadletter_unsafe_path");
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        let (metrics_code, metrics_body) = http_get(addr, "/metrics").await;
+        assert_eq!(metrics_code, 200);
+        assert!(metrics_body.contains("hl_core_ready 0"));
+        assert!(metrics_body.contains("hl_core_live_qualified 0"));
+        assert!(metrics_body.contains("hl_core_stage_2_qualified 0"));
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(run, probe);
+    let error = result.expect_err("dead-letter open");
+    assert_eq!(error.reason_code(), "core.deadletter_unsafe_path");
+    let snapshot = status.snapshot();
+    assert!(!snapshot.ready());
+    assert!(!snapshot.live_qualified());
+    assert!(!snapshot.stage_2_qualified());
+}
+
 fn valid_toml(store_path: &std::path::Path, first_height: u64, listen: Option<&str>) -> String {
     let status = listen
         .map(|listen| format!("\n[status]\nlisten = \"{listen}\"\n"))
