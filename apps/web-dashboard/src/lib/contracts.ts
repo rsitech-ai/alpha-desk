@@ -251,11 +251,12 @@ export const HEALTH_FIELD_ORDER = [
 /** Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
  *  fail parse. Omitted and null stay omitted (this web optional-array
  *  pattern). Empty arrays still parse. Duplicate present `source_id` fails
- *  parse. Distinct ids stay valid, including unsorted / descending order
- *  (sort order stays untyped). This is uniqueness of `source_id`, not
- *  OpenAPI uniqueItems on whole aux objects, not a live capture, and not
- *  Stage PASS. `HealthAssessment.reason_code` stays a free string so
- *  unknown RED is not closed out.
+ *  parse via a Set. Distinct ids stay valid when strictly increasing
+ *  (`previous >= source_id` is invalid). This is uniqueness plus adjacent
+ *  sort order of `source_id`, not OpenAPI uniqueItems on whole aux objects,
+ *  not a live capture, and not Stage PASS.
+ *  `HealthAssessment.reason_code` stays a free string so unknown RED is
+ *  not closed out.
  */
 export const MAX_AUXILIARY_SOURCES = 16
 
@@ -964,11 +965,19 @@ function optionalAuxiliarySources(
   }
   const parsed: AuxiliarySourceStatus[] = []
   const seenSourceIds = new Set<string>()
+  let previous: string | undefined
   for (const [index, item] of value.entries()) {
     const result = parseAuxiliarySource(item, index, seenSourceIds)
     if (!result.ok) {
       return result
     }
+    if (previous !== undefined && previous >= result.value.source_id) {
+      return {
+        ok: false,
+        detail: "auxiliary_sources source_id must be strictly increasing",
+      }
+    }
+    previous = result.value.source_id
     parsed.push(result.value)
   }
   return { ok: true, value: parsed }
