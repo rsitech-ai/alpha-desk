@@ -314,7 +314,9 @@ components:
         present non-number or non-u64 values are snapshot_invalid. Omitted
         stays omitted. Top-level failover_reason is an optional kebab-case
         string enum; present unknown or non-string values, and empty present
-        strings, are snapshot_invalid. Omitted stays omitted. Top-level last_error_reason is an optional string; present
+        strings, are snapshot_invalid. Omitted stays omitted. Top-level
+        durable_height is an optional u64 integer; present non-number or
+        non-u64 values are snapshot_invalid. Omitted stays omitted. Top-level last_error_reason is an optional string; present
         non-string values, and empty present strings, are snapshot_invalid.
         Omitted stays omitted. Present unknown nested properties are snapshot_invalid.
         Known objects without extras stay valid. This is nested item extra
@@ -416,6 +418,17 @@ components:
           type: string
           enum:
             - primary-range-unavailable
+        durable_height:
+          description: >
+            Optional capture writer durable height. Present non-number or
+            non-u64 values are snapshot_invalid. Omitted stays omitted. This
+            is the top-level field. Capture writer emits Option<u64> with
+            skip_serializing_if. This document does not invent extra numeric
+            bounds. HealthAssessment.reason_code stays a free string so
+            unknown RED is not closed out. This document does not claim
+            Stage PASS.
+          type: integer
+          minimum: 0
         last_error_reason:
           description: >
             Optional capture writer last error reason string. Present

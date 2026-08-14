@@ -23,7 +23,8 @@ use hl_api::{
     auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64,
     auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-    capture_source_health_openapi_enum, capture_status_failover_height_is_optional_u64,
+    capture_source_health_openapi_enum, capture_status_durable_height_is_optional_u64,
+    capture_status_failover_height_is_optional_u64,
     capture_status_failover_reason_is_optional_enum, capture_status_failover_reason_openapi_enum,
     capture_status_last_error_reason_is_optional_string, committed_source_class_openapi_enum,
     core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
@@ -2456,6 +2457,109 @@ async fn top_level_capture_failover_reason_is_optional_enum() {
     }
 }
 
+#[tokio::test]
+async fn top_level_capture_durable_height_is_optional_u64() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level durable_height must stay 200"
+    );
+    assert!(body.get("durable_height").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v4");
+
+    for durable_height in [0_u64, 47, u64::MAX] {
+        value["durable_height"] = serde_json::json!(durable_height);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known u64 durable_height"),
+        )
+        .expect("write known u64 durable_height");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{durable_height} must stay 200");
+        assert_eq!(body["durable_height"], durable_height);
+        assert!(
+            body.get("failover_height").is_none(),
+            "typing durable_height must not couple it to failover_height"
+        );
+        assert!(
+            body.get("failover_reason").is_none(),
+            "typing durable_height must not couple it to failover_reason"
+        );
+    }
+
+    value
+        .as_object_mut()
+        .expect("capture status object")
+        .remove("durable_height");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted durable_height"),
+    )
+    .expect("write omitted durable_height");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level durable_height after removal must stay 200"
+    );
+    assert!(body.get("durable_height").is_none());
+
+    for durable_height in [
+        serde_json::json!("0"),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-u64"}),
+        serde_json::json!(["not-a-u64"]),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+    ] {
+        value["durable_height"] = durable_height.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-u64 durable_height"),
+        )
+        .expect("write non-u64 durable_height");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{durable_height} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -3174,6 +3278,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "OpenAPI must define CaptureStatusBase.failover_reason as an optional kebab-case enum"
     );
     assert!(
+        capture_status_durable_height_is_optional_u64(document),
+        "OpenAPI must define CaptureStatusBase.durable_height as an optional u64 integer"
+    );
+    assert!(
         auxiliary_sources_max_items_is_writer_cap(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
     );
@@ -3413,6 +3521,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         capture_status_failover_reason_is_optional_enum(document),
         "served OpenAPI must define CaptureStatusBase.failover_reason as an optional kebab-case enum"
+    );
+    assert!(
+        capture_status_durable_height_is_optional_u64(document),
+        "served OpenAPI must define CaptureStatusBase.durable_height as an optional u64 integer"
     );
     assert!(
         auxiliary_sources_max_items_is_writer_cap(document),
