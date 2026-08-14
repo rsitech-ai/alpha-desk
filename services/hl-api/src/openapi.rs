@@ -619,6 +619,58 @@ pub fn auxiliary_source_local_sequence_is_optional_u64(document: &str) -> bool {
 }
 
 /// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.unread_bytes`
+/// is an optional u64 integer: `type: integer`, `minimum: 0`, not listed on
+/// `items.required`, and no `$ref`, `enum`, `format`, `pattern`, or
+/// `maximum`. Capture writer emits `unread_bytes` as `Option<u64>` with
+/// `skip_serializing_if`; this crate does not invent extra numeric bounds.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
+#[must_use]
+pub fn auxiliary_source_unread_bytes_is_optional_u64(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "unread_bytes",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("integer")
+        || mapping.scalar("minimum") != Some("0")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("maximum")
+        || mapping.has_key("exclusiveMinimum")
+        || mapping.has_key("exclusiveMaximum")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"unread_bytes"))
+}
+
+/// True when nested
 /// `CaptureStatusBase.properties.auxiliary_sources.items.properties.last_durable_wall_micros`
 /// is an optional i64 integer: `type: integer`, not listed on
 /// `items.required`, and no `$ref`, `enum`, `format`, `pattern`,
@@ -1074,7 +1126,8 @@ mod tests {
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_tail_cursor_epoch_is_optional_string,
-        auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
+        auxiliary_source_unarchived_records_is_required_u64,
+        auxiliary_source_unread_bytes_is_optional_u64, capture_source_health_openapi_enum,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
         health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
         independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
@@ -1146,6 +1199,10 @@ mod tests {
         assert!(
             auxiliary_source_local_sequence_is_optional_u64(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.local_sequence as an optional u64 integer"
+        );
+        assert!(
+            auxiliary_source_unread_bytes_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.unread_bytes as an optional u64 integer"
         );
         assert!(
             auxiliary_source_last_durable_wall_micros_is_optional_i64(document),
@@ -2619,6 +2676,169 @@ components:
         assert!(
             auxiliary_source_local_sequence_is_optional_u64(optional_integer),
             "optional u64 local_sequence must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_unread_bytes_optional_u64_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            unread_bytes remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_unread_bytes_is_optional_u64(prose_only),
+            "prose mention of unread_bytes must not satisfy the optional-u64 freeze"
+        );
+
+        let required_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - unread_bytes
+            properties:
+              unread_bytes:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !auxiliary_source_unread_bytes_is_optional_u64(required_integer),
+            "required unread_bytes must not satisfy the optional-u64 freeze"
+        );
+
+        let string_unread = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              unread_bytes:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_unread_bytes_is_optional_u64(string_unread),
+            "optional non-integer unread_bytes must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              unread_bytes:
+                type: integer
+                minimum: 0
+                format: int64
+"#;
+        assert!(
+            !auxiliary_source_unread_bytes_is_optional_u64(formatted),
+            "invented unread_bytes format must not satisfy the freeze"
+        );
+
+        let bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              unread_bytes:
+                type: integer
+                minimum: 0
+                maximum: 100
+"#;
+        assert!(
+            !auxiliary_source_unread_bytes_is_optional_u64(bounded),
+            "invented unread_bytes maximum must not satisfy the freeze"
+        );
+
+        let optional_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              unread_bytes:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            auxiliary_source_unread_bytes_is_optional_u64(optional_integer),
+            "optional u64 unread_bytes must satisfy the freeze"
         );
     }
 
