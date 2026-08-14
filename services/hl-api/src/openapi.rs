@@ -76,6 +76,63 @@ pub fn health_reason_code_is_unrestricted_string(document: &str) -> bool {
     mapping.scalar("type") == Some("string") && !mapping.has_key("$ref")
 }
 
+/// Schema `$ref` for `/readyz` 503.
+///
+/// Returns `None` when that status is a named `components.responses` `$ref`
+/// (for example `Unavailable`) instead of an inline JSON schema. Switching
+/// the body back to `ApiError` while the handler still writes `hl.health.v1`
+/// fails the freeze that requires `HealthAssessment`.
+#[must_use]
+pub fn readyz_503_schema_ref(document: &str) -> Option<&str> {
+    path_response_schema_ref(document, "/readyz", "503")
+}
+
+/// Schema `$ref` for the shared `Unavailable` response (`/v1/health` 503).
+///
+/// Must stay `ApiError`. Retargeting this named response at health would
+/// silently retype `/v1/health` 503.
+#[must_use]
+pub fn unavailable_response_schema_ref(document: &str) -> Option<&str> {
+    yaml_mapping(
+        document,
+        &[
+            "components",
+            "responses",
+            "Unavailable",
+            "content",
+            "application/json",
+            "schema",
+        ],
+    )?
+    .scalar("$ref")
+}
+
+/// Folded or inline `/readyz` 200 description.
+///
+/// Used so "present and valid" cannot be restored as GREEN-ready prose.
+#[must_use]
+pub fn readyz_200_description(document: &str) -> Option<String> {
+    yaml_mapping(document, &["paths", "/readyz", "get", "responses", "200"])?
+        .scalar_or_folded("description")
+}
+
+fn path_response_schema_ref<'a>(document: &'a str, path: &str, status: &str) -> Option<&'a str> {
+    yaml_mapping(
+        document,
+        &[
+            "paths",
+            path,
+            "get",
+            "responses",
+            status,
+            "content",
+            "application/json",
+            "schema",
+        ],
+    )?
+    .scalar("$ref")
+}
+
 struct YamlMapping<'a> {
     lines: Vec<&'a str>,
     begin: usize,
@@ -91,6 +148,15 @@ impl<'a> YamlMapping<'a> {
     fn scalar(&self, key: &str) -> Option<&'a str> {
         let (index, _) = self.find_key(key)?;
         mapping_inline_value(self.lines[index].trim())
+    }
+
+    fn scalar_or_folded(&self, key: &str) -> Option<String> {
+        let (index, children_end) = self.find_key(key)?;
+        if let Some(value) = mapping_inline_value(self.lines[index].trim()) {
+            return Some(value.to_owned());
+        }
+        mapping_block_indicator(self.lines[index].trim())?;
+        folded_block(&self.lines, index + 1, children_end)
     }
 
     fn find_key(&self, key: &str) -> Option<(usize, usize)> {
@@ -205,6 +271,7 @@ fn mapping_key(trimmed: &str) -> Option<&str> {
         return None;
     }
     let (key, _) = trimmed.split_once(':')?;
+    let key = unquote(key);
     if is_simple_yaml_key(key) {
         Some(key)
     } else {
@@ -214,7 +281,7 @@ fn mapping_key(trimmed: &str) -> Option<&str> {
 
 fn mapping_inline_value(trimmed: &str) -> Option<&str> {
     let (key, rest) = trimmed.split_once(':')?;
-    if !is_simple_yaml_key(key) {
+    if !is_simple_yaml_key(unquote(key)) {
         return None;
     }
     let value = rest.trim();
@@ -234,10 +301,31 @@ fn sequence_scalar(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn mapping_block_indicator(trimmed: &str) -> Option<&str> {
+    let (_, rest) = trimmed.split_once(':')?;
+    let value = rest.trim();
+    matches!(value, ">" | "|" | ">-" | "|-" | ">+" | "|+").then_some(value)
+}
+
+fn folded_block(lines: &[&str], begin: usize, end: usize) -> Option<String> {
+    let mut parts = Vec::new();
+    for line in &lines[begin..end] {
+        let Some((_, trimmed)) = significant_line(line) else {
+            continue;
+        };
+        parts.push(trimmed);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 fn is_simple_yaml_key(key: &str) -> bool {
     !key.is_empty()
         && key.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '$')
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '$' | '/' | '.')
         })
 }
 
@@ -257,7 +345,8 @@ fn unquote(value: &str) -> &str {
 mod tests {
     use super::{
         CORE_DEADLETTER_REASON_CODES, core_deadletter_reason_openapi_enum,
-        health_reason_code_is_unrestricted_string, openapi_yaml,
+        health_reason_code_is_unrestricted_string, openapi_yaml, readyz_200_description,
+        readyz_503_schema_ref, unavailable_response_schema_ref,
     };
 
     #[test]
@@ -313,6 +402,81 @@ components:
             values.as_slice(),
             CORE_DEADLETTER_REASON_CODES,
             "shrinking the YAML enum without shrinking the const must fail the freeze"
+        );
+    }
+
+    #[test]
+    fn readyz_503_openapi_is_health_not_api_error() {
+        let document = openapi_yaml();
+        assert_eq!(
+            readyz_503_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "/readyz 503 must document hl.health.v1, not ApiError"
+        );
+        assert_eq!(
+            unavailable_response_schema_ref(document),
+            Some("#/components/schemas/ApiError"),
+            "shared Unavailable must stay ApiError for /v1/health 503"
+        );
+        let description = readyz_200_description(document).expect("/readyz 200 description");
+        assert!(
+            !description.contains("present and valid"),
+            "/readyz 200 must not read as GREEN-ready merely because snapshots are valid, got {description}"
+        );
+        assert!(
+            description.contains("GREEN-only"),
+            "/readyz 200 must name GREEN-only readiness, got {description}"
+        );
+    }
+
+    #[test]
+    fn named_unavailable_ref_does_not_count_as_readyz_health_schema() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      responses:
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  responses:
+    Unavailable:
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+"##;
+        assert!(
+            readyz_503_schema_ref(document).is_none(),
+            "named Unavailable $ref must not satisfy the /readyz 503 health freeze"
+        );
+        assert_eq!(
+            unavailable_response_schema_ref(document),
+            Some("#/components/schemas/ApiError")
+        );
+    }
+
+    #[test]
+    fn inlined_readyz_503_api_error_fails_health_schema_freeze() {
+        let document = r##"
+paths:
+  /readyz:
+    get:
+      responses:
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+"##;
+        assert_eq!(
+            readyz_503_schema_ref(document),
+            Some("#/components/schemas/ApiError")
+        );
+        assert_ne!(
+            readyz_503_schema_ref(document),
+            Some("#/components/schemas/HealthAssessment"),
+            "inlining ApiError on /readyz 503 must fail the health freeze"
         );
     }
 }
