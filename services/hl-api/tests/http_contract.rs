@@ -8,8 +8,9 @@ use hl_api::{
     ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, CORE_DEADLETTER_REASON_CODES,
     HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, ROUTER_PATHS,
     SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
-    health_reason_code_is_unrestricted_string, is_core_deadletter_reason, openapi_yaml,
-    readyz_200_description, readyz_503_schema_ref, spawn_local, unavailable_response_schema_ref,
+    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
+    is_core_deadletter_reason, openapi_yaml, readyz_200_description, readyz_503_description,
+    readyz_503_schema_ref, spawn_local, unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -103,9 +104,33 @@ async fn healthz_returns_proto_health_without_inventing_canonical_data() {
     let (status, body) = call(&state, "/v1/health", &[]).await;
     assert_eq!(status, 503);
     assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_ne!(
+        body["schema_version"], "hl.health.v1",
+        "/v1/health 503 must stay hl.api.error.v1, not HealthAssessment"
+    );
     assert_eq!(body["code"], "data_unavailable");
     assert_eq!(body["reason_code"], "snapshot_missing");
     assert!(body.get("state").is_none());
+    let document = openapi_yaml();
+    assert_eq!(
+        health_503_response_ref(document),
+        Some("#/components/responses/Unavailable"),
+        "/v1/health 503 must $ref Unavailable while the handler returns hl.api.error.v1"
+    );
+    assert!(
+        health_503_schema_ref(document).is_none(),
+        "/v1/health 503 must not inline HealthAssessment while the handler returns hl.api.error.v1"
+    );
+    assert_ne!(
+        health_503_schema_ref(document),
+        Some("#/components/schemas/HealthAssessment"),
+        "switching /v1/health 503 to HealthAssessment must fail while the handler returns hl.api.error.v1"
+    );
+    assert_eq!(
+        unavailable_response_schema_ref(document),
+        Some("#/components/schemas/ApiError"),
+        "shared Unavailable must stay ApiError for /v1/health 503"
+    );
 }
 
 #[tokio::test]
@@ -638,6 +663,20 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "/readyz 503 must $ref HealthAssessment, not ApiError"
     );
     assert_eq!(
+        health_503_response_ref(document),
+        Some("#/components/responses/Unavailable"),
+        "/v1/health 503 must $ref named Unavailable, not HealthAssessment"
+    );
+    assert!(
+        health_503_schema_ref(document).is_none(),
+        "/v1/health 503 must stay a named Unavailable $ref, not an inline schema"
+    );
+    assert_ne!(
+        health_503_schema_ref(document),
+        Some("#/components/schemas/HealthAssessment"),
+        "/v1/health 503 must not switch to HealthAssessment while the handler returns hl.api.error.v1"
+    );
+    assert_eq!(
         unavailable_response_schema_ref(document),
         Some("#/components/schemas/ApiError"),
         "shared Unavailable must stay ApiError for /v1/health 503"
@@ -650,6 +689,15 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     assert!(
         readyz_200.contains("GREEN-only"),
         "/readyz 200 must name GREEN-only readiness"
+    );
+    let readyz_503 = readyz_503_description(document).expect("/readyz 503 description");
+    assert!(
+        readyz_503.contains("Not ApiError"),
+        "/readyz 503 prose must keep health-not-ApiError meaning, got {readyz_503}"
+    );
+    assert!(
+        readyz_503.contains("HealthAssessment") || readyz_503.contains("hl.health.v1"),
+        "/readyz 503 prose must name the health body, got {readyz_503}"
     );
 }
 
@@ -705,6 +753,20 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         "served /readyz 503 must $ref HealthAssessment, not ApiError"
     );
     assert_eq!(
+        health_503_response_ref(document),
+        Some("#/components/responses/Unavailable"),
+        "served /v1/health 503 must $ref named Unavailable, not HealthAssessment"
+    );
+    assert!(
+        health_503_schema_ref(document).is_none(),
+        "served /v1/health 503 must stay a named Unavailable $ref, not an inline schema"
+    );
+    assert_ne!(
+        health_503_schema_ref(document),
+        Some("#/components/schemas/HealthAssessment"),
+        "served /v1/health 503 must not switch to HealthAssessment while the handler returns hl.api.error.v1"
+    );
+    assert_eq!(
         unavailable_response_schema_ref(document),
         Some("#/components/schemas/ApiError"),
         "served Unavailable must stay ApiError for /v1/health 503"
@@ -717,6 +779,15 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         readyz_200.contains("GREEN-only"),
         "served /readyz 200 must name GREEN-only readiness"
+    );
+    let readyz_503 = readyz_503_description(document).expect("served /readyz 503 description");
+    assert!(
+        readyz_503.contains("Not ApiError"),
+        "served /readyz 503 prose must keep health-not-ApiError meaning, got {readyz_503}"
+    );
+    assert!(
+        readyz_503.contains("HealthAssessment") || readyz_503.contains("hl.health.v1"),
+        "served /readyz 503 prose must name the health body, got {readyz_503}"
     );
 }
 
