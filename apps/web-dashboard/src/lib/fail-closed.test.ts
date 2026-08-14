@@ -12,7 +12,12 @@ import {
   type ApiError,
   type CaptureStatus,
 } from "@/lib/contracts"
-import { classifyHttpBody, familyOf, mapApiError } from "@/lib/fail-closed"
+import {
+  captureHealthObservedReason,
+  classifyHttpBody,
+  familyOf,
+  mapApiError,
+} from "@/lib/fail-closed"
 
 const ERROR_SCHEMA = "hl.api.error.v1" as const
 
@@ -736,6 +741,7 @@ describe("capture leftover v4 / not live-ready healthz", () => {
       expect(outcome.view.title).not.toBe("503 data unavailable")
       expect(outcome.view.detail).toMatch(/leftover v4 or not live-ready/)
       expect(outcome.view.detail).not.toMatch(/Stage 6|Stage PASS/i)
+      expect(captureHealthObservedReason(reason_code)).toBe(reason_code)
     }
   )
 
@@ -823,6 +829,73 @@ describe("capture leftover v4 / not live-ready healthz", () => {
     expect(outcome.view.tone).toBe("red")
     expect(outcome.view.tone).not.toBe("green")
     expect(outcome.view.title).not.toMatch(/ready/i)
+  })
+
+  it("fail-closes omitted capture healthz reason_code as unknown data_unavailable, not leftover v4", () => {
+    const parsed = parseCaptureHealth({
+      schema_version: "hl.capture.health.v1",
+      ok: false,
+      ready: false,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.reason_code).toBeUndefined()
+    expect(parsed.value.reason_code).not.toBe("capture_health.not_ready")
+    expect(parsed.value.health).toBeUndefined()
+    expect(captureHealthObservedReason(parsed.value.reason_code)).toBe(
+      "data_unavailable"
+    )
+    expect(captureHealthObservedReason(parsed.value.reason_code)).not.toBe(
+      "capture_health.not_ready"
+    )
+
+    const outcome = classifyHttpBody(503, {
+      schema_version: "hl.capture.health.v1",
+      ok: false,
+      ready: false,
+    })
+    expect(outcome.kind).toBe("observed")
+    if (outcome.kind !== "observed") {
+      return
+    }
+    expect(outcome.view.family).toBe("data_unavailable")
+    expect(outcome.view.family).not.toBe("capture_health_not_ready")
+    expect(outcome.view.family).not.toBe("core_deadletter")
+    expect(outcome.view.family).not.toBe("ledger_unsupported_event")
+    expect(outcome.view.reasonCode).toBe("data_unavailable")
+    expect(outcome.view.reasonCode).not.toBe("capture_health.not_ready")
+    expect(outcome.view.tone).toBe("red")
+    expect(outcome.view.tone).not.toBe("green")
+    expect(outcome.view.title).toBe("503 data unavailable")
+    expect(outcome.view.title).not.toBe("503 capture health not ready")
+    expect(outcome.view.title).not.toMatch(/ready/i)
+    expect(outcome.view.detail).not.toMatch(/leftover v4/)
+    expect(outcome.view.detail).not.toMatch(/Stage 6|Stage PASS/i)
+
+    const nullReason = classifyHttpBody(503, {
+      schema_version: "hl.capture.health.v1",
+      ok: false,
+      ready: false,
+      reason_code: null,
+    })
+    expect(nullReason.kind).toBe("observed")
+    if (nullReason.kind === "observed") {
+      expect(nullReason.view.family).toBe("data_unavailable")
+      expect(nullReason.view.family).not.toBe("capture_health_not_ready")
+      expect(nullReason.view.reasonCode).not.toBe("capture_health.not_ready")
+      expect(nullReason.view.tone).toBe("red")
+      expect(nullReason.view.tone).not.toBe("green")
+    }
+
+    const leftoverV4 = parseCaptureStatus(v4Status())
+    expect(leftoverV4.ok).toBe(true)
+    if (!leftoverV4.ok) {
+      return
+    }
+    expect(leftoverV4.value.throughput_records_per_sec).toBeUndefined()
+    expect(leftoverV4.value.throughput_blocks_per_sec).toBeUndefined()
   })
 
   it("fail-closes unknown capture_health.* /healthz codes instead of showing ready", () => {

@@ -33,7 +33,7 @@ import {
   type CoreHealth,
   type HealthBody,
 } from "@/lib/contracts"
-import { mapApiError } from "@/lib/fail-closed"
+import { captureHealthObservedReason, mapApiError } from "@/lib/fail-closed"
 import { formatUnixMicros } from "@/lib/format"
 
 export function DataHealthCard({
@@ -317,7 +317,7 @@ function CaptureHealthBlock({
     ? mapApiError(status === 200 ? 503 : status, {
         schema_version: API_ERROR_SCHEMA_VERSION,
         code: "data_unavailable",
-        reason_code: health.reason_code ?? "capture_health.not_ready",
+        reason_code: captureHealthObservedReason(health.reason_code),
       })
     : undefined
   const rows = CAPTURE_HEALTH_FIELD_ORDER.map((field) => {

@@ -364,16 +364,6 @@ export function healthReasonCode(body: HealthBody): string | undefined {
   }
 }
 
-export function isCoreHealth(value: HealthBody): value is CoreHealth {
-  return value.schema_version === CORE_HEALTH_SCHEMA_VERSION
-}
-
-export function isCaptureHealthBody(
-  value: HealthBody
-): value is CaptureHealthBody {
-  return value.schema_version === CAPTURE_HEALTH_SCHEMA_VERSION
-}
-
 export function parseCoreHealth(value: unknown): ParseResult<CoreHealth> {
   if (!isRecord(value)) {
     return { ok: false, detail: "core health body is not an object" }

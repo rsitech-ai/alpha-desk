@@ -57,7 +57,7 @@ export function FailClosedCard({
       </CardHeader>
       <CardContent>
         {loading || !feed ? (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
             <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
@@ -67,7 +67,7 @@ export function FailClosedCard({
             <Skeleton className="h-36 w-full" />
           </div>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
             <Lane
               label="503 capture status"
               path="/v1/capture/status"
