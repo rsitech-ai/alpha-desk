@@ -180,6 +180,107 @@ async fn consume_poison_after_dlq_open_is_visible_on_loopback_status() {
     assert!(record.get("stage_2_qualified").is_none());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consume_persist_at_cap_after_dlq_open_is_visible_on_loopback_status() {
+    // Store-then-DLQ-open-then-consume is the `run_source` path. Leftover-open
+    // at the 1 MiB cap still succeeds; the next persist must fail closed as
+    // `core.deadletter_corrupt` and stay scrapeable. Live NATS Term /
+    // HL_DEADLETTER remains unproven. No second writer: the file is filled
+    // before `run_source` opens the sink.
+    let root = private_root();
+    let store_path = root.path().join("state");
+    let dead_letter_path = root.path().join("dead-letter.jsonl");
+    let leftover = valid_dead_letter_jsonl_of_len(1_048_576);
+    let config =
+        CoreConfig::from_toml(&valid_toml(&store_path, 200, Some("127.0.0.1:0"))).expect("config");
+    let runtime = CoreRuntime::open(config).expect("store open");
+    let status = runtime.status().clone();
+    assert!(
+        store_path.exists(),
+        "file-store must already be in play before consume"
+    );
+    fs::write(&dead_letter_path, &leftover).expect("seed at-cap leftover");
+    let block = trade_block(200);
+    let receipt = archive_receipt(&block);
+    let marker = committed_block_delivery(&block, &receipt).expect("marker");
+    let event = committed_event_delivery(&block.events()[0], &block, &receipt).expect("event");
+    let event_id = event.message_id.clone();
+    let marker_id = marker.message_id.clone();
+    let mut source = InMemoryCanonicalSource::new([event, marker]);
+    let cancellation = CancellationToken::new();
+    let run = runtime.run_source(&mut source, cancellation.clone());
+    let probe = async {
+        let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.snapshot().fail_closed_reason() == Some("core.deadletter_corrupt") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fail_closed");
+        assert!(
+            store_path.exists(),
+            "file-store must stay in play after persist-at-cap"
+        );
+        assert_eq!(
+            fs::read(&dead_letter_path).expect("history not truncated"),
+            leftover.as_slice()
+        );
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 503);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ok"], false);
+        assert_eq!(health["ready"], false);
+        assert_eq!(health["reason_code"], "core.deadletter_corrupt");
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["fail_closed_reason"], "core.deadletter_corrupt");
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        assert!(value.get("last_applied_watermark").is_none());
+        let (metrics_code, metrics_body) = http_get(addr, "/metrics").await;
+        assert_eq!(metrics_code, 200);
+        assert!(metrics_body.contains("hl_core_ready 0"));
+        assert!(metrics_body.contains("hl_core_live_qualified 0"));
+        assert!(metrics_body.contains("hl_core_stage_2_qualified 0"));
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(run, probe);
+    let error = result.expect_err("persist past file cap");
+    assert_eq!(error.reason_code(), "core.deadletter_corrupt");
+    assert!(!source.acked().contains(&event_id));
+    assert!(!source.acked().contains(&marker_id));
+    let snapshot = status.snapshot();
+    assert!(!snapshot.ready());
+    assert_eq!(
+        snapshot.fail_closed_reason(),
+        Some("core.deadletter_corrupt")
+    );
+    assert!(snapshot.last_applied_watermark().is_none());
+    assert!(!snapshot.live_qualified());
+    assert!(!snapshot.stage_2_qualified());
+    assert!(store_path.exists());
+    let store =
+        SyncedWriteBatchStore::open(&store_path, StateImageLimits::production()).expect("reopen");
+    assert!(
+        store
+            .load_latest(StateImageLimits::production())
+            .expect("load")
+            .is_none()
+    );
+    assert_eq!(
+        fs::read(&dead_letter_path).expect("history not truncated"),
+        leftover.as_slice()
+    );
+}
+
 #[tokio::test]
 async fn empty_source_shuts_down_cleanly_without_qualification_claims() {
     let root = private_root();
@@ -1080,6 +1181,43 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
 fn json_from_http(body: &str) -> serde_json::Value {
     let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
     serde_json::from_str(&body[json_start..]).expect("JSON body")
+}
+
+fn valid_dead_letter_jsonl_of_len(total_bytes: usize) -> Vec<u8> {
+    const MAX_RECORD_FILE_BYTES: usize = 4_096 + 1;
+    let mut leftover = Vec::with_capacity(total_bytes);
+    let mut n = 0u32;
+    while leftover.len() < total_bytes {
+        let remaining = total_bytes - leftover.len();
+        let file_len = remaining.min(MAX_RECORD_FILE_BYTES);
+        leftover.extend(valid_dead_letter_line(&format!("cap-{n:08}"), file_len));
+        n += 1;
+    }
+    assert_eq!(leftover.len(), total_bytes);
+    leftover
+}
+
+fn valid_dead_letter_line(message_id: &str, file_len: usize) -> Vec<u8> {
+    let mut encoded = serde_json::to_vec(&serde_json::json!({
+        "schema_version": DEAD_LETTER_SCHEMA_V1,
+        "reason_code": "core.jetstream_transport",
+        "subject": "hl.v1.connect.transport",
+        "message_id": message_id,
+        "payload_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "block_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "consumer": "hl-core-file-replay",
+        "retry_count": 0,
+        "failed_at_unix_micros": 1,
+    }))
+    .expect("existing record json");
+    assert!(
+        file_len > encoded.len() && file_len - 1 <= 4_096,
+        "file_len {file_len} cannot hold a valid ExistingRecord line of {} bytes",
+        encoded.len()
+    );
+    encoded.resize(file_len - 1, b' ');
+    encoded.push(b'\n');
+    encoded
 }
 
 fn archive_receipt(block: &BlockEnvelope) -> ArchiveReceipt {
