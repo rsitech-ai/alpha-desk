@@ -24,6 +24,7 @@ pub use openapi::{
     auxiliary_source_last_durable_wall_micros_is_optional_i64,
     auxiliary_source_local_sequence_is_optional_u64,
     auxiliary_source_partial_line_is_required_bool, auxiliary_source_qualification_openapi_enum,
+    auxiliary_source_quarantine_reason_is_optional_string,
     auxiliary_source_spool_records_is_required_u64,
     auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64,

@@ -5,7 +5,7 @@
 /// identity, auxiliary spool_records, auxiliary unarchived_records,
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
-/// auxiliary last_durable_wall_micros,
+/// auxiliary last_durable_wall_micros, auxiliary quarantine_reason,
 /// auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
@@ -723,6 +723,54 @@ pub fn auxiliary_source_last_durable_wall_micros_is_optional_i64(document: &str)
     .is_some_and(|required| required.contains(&"last_durable_wall_micros"))
 }
 
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.quarantine_reason`
+/// is an optional free string: `type: string`, not listed on `items.required`,
+/// and no `$ref`, `enum`, `format`, or `pattern`. Capture writer emits
+/// `quarantine_reason` as a string (`Option` + `skip_serializing_if`); this
+/// crate does not invent a closed enum of quarantine reasons.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
+#[must_use]
+pub fn auxiliary_source_quarantine_reason_is_optional_string(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "quarantine_reason",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("string")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"quarantine_reason"))
+}
+
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
 /// no `$ref` (including `CoreDeadLetterReasonCode` or
 /// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
@@ -1124,6 +1172,7 @@ mod tests {
         auxiliary_source_local_sequence_is_optional_u64,
         auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
+        auxiliary_source_quarantine_reason_is_optional_string,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
@@ -1207,6 +1256,10 @@ mod tests {
         assert!(
             auxiliary_source_last_durable_wall_micros_is_optional_i64(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_durable_wall_micros as an optional i64 integer"
+        );
+        assert!(
+            auxiliary_source_quarantine_reason_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.quarantine_reason as an optional string"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -3021,6 +3074,166 @@ components:
         assert!(
             auxiliary_source_last_durable_wall_micros_is_optional_i64(optional_integer),
             "optional i64 last_durable_wall_micros must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_quarantine_reason_optional_string_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            quarantine_reason remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_quarantine_reason_is_optional_string(prose_only),
+            "prose mention of quarantine_reason must not satisfy the optional-string freeze"
+        );
+
+        let required_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - quarantine_reason
+            properties:
+              quarantine_reason:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_quarantine_reason_is_optional_string(required_string),
+            "required quarantine_reason must not satisfy the optional-string freeze"
+        );
+
+        let integer_reason = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              quarantine_reason:
+                type: integer
+"#;
+        assert!(
+            !auxiliary_source_quarantine_reason_is_optional_string(integer_reason),
+            "optional non-string quarantine_reason must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              quarantine_reason:
+                type: string
+                format: uuid
+"#;
+        assert!(
+            !auxiliary_source_quarantine_reason_is_optional_string(formatted),
+            "invented quarantine_reason format must not satisfy the freeze"
+        );
+
+        let closed_enum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              quarantine_reason:
+                type: string
+                enum:
+                  - source.schema_drift
+"#;
+        assert!(
+            !auxiliary_source_quarantine_reason_is_optional_string(closed_enum),
+            "invented quarantine_reason enum must not satisfy the freeze"
+        );
+
+        let optional_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              quarantine_reason:
+                type: string
+"#;
+        assert!(
+            auxiliary_source_quarantine_reason_is_optional_string(optional_string),
+            "optional string quarantine_reason must satisfy the freeze"
         );
     }
 
