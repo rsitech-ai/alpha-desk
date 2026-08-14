@@ -41,6 +41,15 @@ export type HealthState =
 
 export type CaptureHealth = "green" | "yellow" | "red"
 
+export type CommittedSourceClass =
+  | "locally-verified-committed"
+  | "independent-committed"
+
+export const COMMITTED_SOURCE_CLASS = [
+  "locally-verified-committed",
+  "independent-committed",
+] as const satisfies readonly CommittedSourceClass[]
+
 export type CaptureSourceHealth = "starting" | "healthy" | "range-unavailable"
 
 export const CAPTURE_SOURCE_HEALTH = [
@@ -157,7 +166,7 @@ export interface CaptureStatus {
   health: CaptureHealth
   ready: boolean
   last_error_reason?: string
-  active_committed_source: string
+  active_committed_source: CommittedSourceClass
   primary_source_health: CaptureSourceHealth
   independent_source_health?: CaptureSourceHealth
   failover_height?: number
@@ -540,9 +549,10 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   if (!ready.ok) {
     return ready
   }
-  const active_committed_source = requireNonEmptyString(
+  const active_committed_source = requireEnum(
     value,
-    "active_committed_source"
+    "active_committed_source",
+    COMMITTED_SOURCE_CLASS
   )
   if (!active_committed_source.ok) {
     return active_committed_source
