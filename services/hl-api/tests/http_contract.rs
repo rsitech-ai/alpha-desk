@@ -7,11 +7,12 @@ use bytes::Bytes;
 use hl_api::{
     ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, CORE_DEADLETTER_REASON_CODES,
     HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-    ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
-    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
-    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
-    readyz_503_description, readyz_503_schema_ref, spawn_local, unavailable_response_schema_ref,
+    READYZ_503_DESCRIPTION, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
+    core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+    health_reason_code_is_unrestricted_string, is_core_deadletter_reason,
+    is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
+    readyz_200_description, readyz_503_description, readyz_503_schema_ref, spawn_local,
+    unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -878,14 +879,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         readyz_200.contains("GREEN-only"),
         "/readyz 200 must name GREEN-only readiness"
     );
-    let readyz_503 = readyz_503_description(document).expect("/readyz 503 description");
-    assert!(
-        readyz_503.contains("Not ApiError"),
-        "/readyz 503 prose must keep health-not-ApiError meaning, got {readyz_503}"
-    );
-    assert!(
-        readyz_503.contains("HealthAssessment") || readyz_503.contains("hl.health.v1"),
-        "/readyz 503 prose must name the health body, got {readyz_503}"
+    assert_eq!(
+        readyz_503_description(document).as_deref(),
+        Some(READYZ_503_DESCRIPTION),
+        "/readyz 503 path description must stay health-not-ApiError by exact equality"
     );
 }
 
@@ -979,14 +976,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         readyz_200.contains("GREEN-only"),
         "served /readyz 200 must name GREEN-only readiness"
     );
-    let readyz_503 = readyz_503_description(document).expect("served /readyz 503 description");
-    assert!(
-        readyz_503.contains("Not ApiError"),
-        "served /readyz 503 prose must keep health-not-ApiError meaning, got {readyz_503}"
-    );
-    assert!(
-        readyz_503.contains("HealthAssessment") || readyz_503.contains("hl.health.v1"),
-        "served /readyz 503 prose must name the health body, got {readyz_503}"
+    assert_eq!(
+        readyz_503_description(document).as_deref(),
+        Some(READYZ_503_DESCRIPTION),
+        "served /readyz 503 path description must stay health-not-ApiError by exact equality"
     );
 }
 
