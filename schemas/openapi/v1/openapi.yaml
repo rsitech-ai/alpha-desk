@@ -323,7 +323,15 @@ components:
         ready:
           type: boolean
         active_committed_source:
+          description: >
+            Capture writer kebab-case committed source class. Unknown values
+            are snapshot_invalid. HealthAssessment.reason_code stays a free
+            string so unknown RED is not closed out. This document does not
+            claim Stage PASS.
           type: string
+          enum:
+            - locally-verified-committed
+            - independent-committed
         primary_source_health:
           type: string
         pending_blocks:

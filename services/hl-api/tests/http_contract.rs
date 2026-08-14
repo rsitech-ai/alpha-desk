@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hl_api::{
-    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, CORE_DEADLETTER_REASON_CODES,
-    HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-    READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, ROUTER_PATHS,
-    SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
+    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, COMMITTED_SOURCE_CLASSES,
+    CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS,
+    LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
+    READYZ_GET_DESCRIPTION, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
+    committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
     is_core_deadletter_reason, is_ledger_unsupported_event_reason,
     ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
@@ -245,6 +246,54 @@ async fn capture_status_serves_v5_maintenance_and_rejects_v4_smuggled_maintenanc
         None,
         None,
         Some(&smuggled),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+#[tokio::test]
+async fn unknown_active_committed_source_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    for source in COMMITTED_SOURCE_CLASSES {
+        value["active_committed_source"] = serde_json::json!(source);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known source"),
+        )
+        .expect("write known source");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{source} must remain a typed capture status");
+        assert_eq!(body["active_committed_source"], *source);
+        assert_eq!(body["schema_version"], "hl.capture.status.v4");
+    }
+
+    value["active_committed_source"] = serde_json::json!("primary");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode unknown source"),
+    )
+    .expect("write unknown source");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
     );
     let (status, body) = call(&state, "/v1/capture/status", &[]).await;
     assert_eq!(status, 503);
@@ -838,6 +887,15 @@ fn openapi_document_covers_router_paths_and_health_fields() {
             "OpenAPI must list {reason_code}"
         );
     }
+    let committed_enum = committed_source_class_openapi_enum(document)
+        .expect("OpenAPI must define CaptureStatusBase.active_committed_source.enum");
+    assert_eq!(
+        committed_enum, COMMITTED_SOURCE_CLASSES,
+        "YAML enum must match the frozen const; prose mentions do not count"
+    );
+    for source in COMMITTED_SOURCE_CLASSES {
+        assert!(document.contains(source), "OpenAPI must list {source}");
+    }
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -940,6 +998,12 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         .expect("served OpenAPI must define LedgerUnsupportedEventReasonCode.enum");
     assert_eq!(
         ledger_enum, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+        "served YAML enum must match the frozen const; prose mentions do not count"
+    );
+    let committed_enum = committed_source_class_openapi_enum(document)
+        .expect("served OpenAPI must define CaptureStatusBase.active_committed_source.enum");
+    assert_eq!(
+        committed_enum, COMMITTED_SOURCE_CLASSES,
         "served YAML enum must match the frozen const; prose mentions do not count"
     );
     assert!(
