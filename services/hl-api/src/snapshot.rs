@@ -92,14 +92,15 @@ pub const MAX_AUXILIARY_SOURCES: usize = 16;
 /// already-typed optional `restart_reconstruction`. Present unknown nested
 /// properties are `snapshot_invalid`. Known objects without extras stay
 /// valid. This is not CaptureStatusBase extra keys: top-level writer fields
-/// such as `oldest_pending_capture_height`, `disk_free_basis_points`, and
-/// `archive_manifest_id` stay untyped, and last-heartbeat throughput still
-/// passes through. Top-level `failover_height` is an optional u64. Top-level
-/// `failover_reason` is an optional kebab-case enum. Top-level
-/// `durable_height` is an optional u64. Top-level `capture_backlog_records`
-/// is a required u64. Top-level `last_error_reason` is an optional non-empty
-/// string. `HealthAssessment.reason_code` stays a free string so unknown RED
-/// is not closed out.
+/// such as `disk_free_basis_points` and `archive_manifest_id` stay untyped,
+/// and last-heartbeat throughput still passes through. Top-level
+/// `failover_height` is an optional u64. Top-level `failover_reason` is an
+/// optional kebab-case enum. Top-level `durable_height` is an optional u64.
+/// Top-level `capture_backlog_records` is a required u64. Top-level
+/// `oldest_pending_capture_height` is an optional u64. Top-level
+/// `last_error_reason` is an optional non-empty string.
+/// `HealthAssessment.reason_code` stays a free string so unknown RED is not
+/// closed out.
 const AUXILIARY_SOURCE_FIELDS: &[&str] = &[
     "source_id",
     "health",
@@ -296,6 +297,9 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     require_auxiliary_source_closed_fields(object)?;
     require_non_negative_int(object, "pending_blocks")?;
     require_u64(object, "capture_backlog_records")?;
+    if object.contains_key("oldest_pending_capture_height") {
+        require_u64(object, "oldest_pending_capture_height")?;
+    }
     match schema {
         CaptureStatusSchema::V4 => {
             if object.contains_key("maintenance") {
@@ -533,10 +537,12 @@ mod tests {
         capture_status_failover_height_is_optional_u64,
         capture_status_failover_reason_is_optional_enum,
         capture_status_failover_reason_openapi_enum,
-        capture_status_last_error_reason_is_optional_string, committed_source_class_openapi_enum,
-        core_deadletter_reason_openapi_enum, health_reason_code_is_unrestricted_string,
-        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
-        openapi_yaml, restart_reconstruction_openapi_enum,
+        capture_status_last_error_reason_is_optional_string,
+        capture_status_oldest_pending_capture_height_is_optional_u64,
+        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
+        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+        ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
+        restart_reconstruction_openapi_enum,
     };
     use api_contracts::WireHealthState;
     use std::path::Path;
@@ -1390,6 +1396,23 @@ mod tests {
         assert!(
             capture_status_capture_backlog_records_is_required_u64(document),
             "OpenAPI must define CaptureStatusBase.capture_backlog_records as a required u64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_top_level_oldest_pending_capture_height_optional_u64() {
+        let document = openapi_yaml();
+        assert!(
+            capture_status_oldest_pending_capture_height_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.oldest_pending_capture_height as an optional u64 integer"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
@@ -2870,6 +2893,97 @@ mod tests {
                     .expect_err("present non-u64 capture_backlog_records must not fail open"),
                 SnapshotError::Invalid,
                 "{capture_backlog_records} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_top_level_oldest_pending_capture_height_u64_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("oldest_pending_capture_height").is_none(),
+            "v4 fixture must omit optional top-level oldest_pending_capture_height"
+        );
+        for oldest_pending_capture_height in [0_u64, 47, u64::MAX] {
+            value["oldest_pending_capture_height"] =
+                serde_json::json!(oldest_pending_capture_height);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes).unwrap_or_else(|error| {
+                panic!("{oldest_pending_capture_height} should parse: {error}")
+            });
+            assert_eq!(
+                parsed["oldest_pending_capture_height"],
+                oldest_pending_capture_height
+            );
+            assert_eq!(
+                parsed["capture_backlog_records"], 0,
+                "typing oldest_pending_capture_height must not couple it to capture_backlog_records"
+            );
+            assert!(
+                parsed.get("durable_height").is_none(),
+                "typing oldest_pending_capture_height must not couple it to durable_height"
+            );
+            assert!(
+                parsed.get("failover_height").is_none(),
+                "typing oldest_pending_capture_height must not couple it to failover_height"
+            );
+            assert!(
+                parsed.get("failover_reason").is_none(),
+                "typing oldest_pending_capture_height must not couple it to failover_reason"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_top_level_oldest_pending_capture_height_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("oldest_pending_capture_height").is_none(),
+            "v4 fixture must omit optional oldest_pending_capture_height"
+        );
+        let bytes =
+            serde_json::to_vec(&value).expect("encode omitted oldest_pending_capture_height");
+        let parsed =
+            parse_capture_status_bytes(&bytes).expect("omitted oldest_pending_capture_height");
+        assert!(parsed.get("oldest_pending_capture_height").is_none());
+
+        value["oldest_pending_capture_height"] = serde_json::json!(47_u64);
+        value
+            .as_object_mut()
+            .expect("capture status object")
+            .remove("oldest_pending_capture_height");
+        let bytes =
+            serde_json::to_vec(&value).expect("encode removed oldest_pending_capture_height");
+        let parsed =
+            parse_capture_status_bytes(&bytes).expect("removed oldest_pending_capture_height");
+        assert!(parsed.get("oldest_pending_capture_height").is_none());
+    }
+
+    #[test]
+    fn present_non_u64_top_level_oldest_pending_capture_height_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for oldest_pending_capture_height in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-u64"}),
+            serde_json::json!(["not-a-u64"]),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            value["oldest_pending_capture_height"] = oldest_pending_capture_height.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-u64 oldest_pending_capture_height must not fail open"),
+                SnapshotError::Invalid,
+                "{oldest_pending_capture_height} must be snapshot_invalid"
             );
         }
     }
