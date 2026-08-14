@@ -103,6 +103,21 @@ fn observation_with(epoch: &str, offset: u64, payload: impl Into<Bytes>) -> Sour
     .unwrap()
 }
 
+fn observation_with_class(class: ObservationClass, offset: u64) -> SourceObservation {
+    SourceObservation::new(
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        class,
+        SourceCursor::new("node-directory-epoch", offset).unwrap(),
+        ReceiveTimestamps::new(1_785_240_000_000_000 + offset as i64, offset).unwrap(),
+        "node-v1",
+        Bytes::from(format!("payload-{offset}")),
+        Vec::new(),
+        1024,
+    )
+    .unwrap()
+}
+
 fn byte_observation(offset: u64) -> SourceObservation {
     byte_observation_with("node-directory-epoch", offset, format!("payload-{offset}"))
 }
@@ -869,6 +884,83 @@ fn append_covers_every_constructible_cursor_policy() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn observation_policy_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                for class in [
+                    ObservationClass::CommittedBlock,
+                    ObservationClass::HistoricalBlock,
+                ] {
+                    let error = spool
+                        .append(&observation_with_class(class, 17), 101)
+                        .expect_err("block heights are not byte offsets");
+                    assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                    assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+                }
+                assert!(spool.last_local_sequence().is_none());
+
+                let appended = spool
+                    .append(&byte_observation(17), 101)
+                    .expect("non-block observations remain admitted under byte-offset policy");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                let committed = spool
+                    .append(
+                        &observation_with_class(ObservationClass::CommittedBlock, 100),
+                        101,
+                    )
+                    .expect("contiguous native offset still admits committed block observations");
+                assert_eq!(committed.local_sequence().get(), 1);
+                assert_eq!(
+                    committed.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+
+                let historical = spool
+                    .append(
+                        &observation_with_class(ObservationClass::HistoricalBlock, 101),
+                        102,
+                    )
+                    .expect("contiguous native offset still admits historical block observations");
+                assert_eq!(historical.local_sequence().get(), 2);
+                assert_eq!(
+                    historical.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+            }
+        }
+
+        drop(spool);
+        SourceSpool::open(config, 200).expect(
+            "recovery still applies today's observation-policy admission for this cursor policy",
+        );
     }
 }
 
