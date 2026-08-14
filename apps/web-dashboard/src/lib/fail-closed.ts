@@ -1,5 +1,8 @@
 import {
   API_ERROR_SCHEMA_VERSION,
+  CAPTURE_HEALTH_SCHEMA_VERSION,
+  CORE_HEALTH_SCHEMA_VERSION,
+  HEALTH_SCHEMA_VERSION,
   asCaptureHealthNotReadyReason,
   asCoreDeadletterReason,
   asLedgerUnsupportedEventReason,
@@ -12,6 +15,8 @@ import {
   type CaptureHealthBody,
   type CoreHealth,
   type CoreStatus,
+  type HealthAssessment,
+  type HealthBody,
 } from "@/lib/contracts"
 import type { Tone } from "@/lib/tone"
 
@@ -199,6 +204,53 @@ export function captureHealthOmittedReasonUnready(
   return status === 503 || !health.ok || health.ready !== true
 }
 
+export function captureHealthIsFailClosed(
+  status: number,
+  health: CaptureHealthBody
+): boolean {
+  return (
+    health.reason_code !== undefined ||
+    captureHealthOmittedReasonUnready(status, health)
+  )
+}
+
+export function coreHealthIsFailClosed(
+  status: number,
+  health: CoreHealth
+): boolean {
+  return (
+    status === 503 ||
+    !health.ok ||
+    !health.ready ||
+    health.live_qualified ||
+    health.stage_2_qualified ||
+    health.reason_code !== null
+  )
+}
+
+function leftoverHealthIsFailClosed(
+  status: number,
+  health: HealthAssessment
+): boolean {
+  return status === 503 || health.state !== "HEALTH_STATE_GREEN"
+}
+
+export function healthBodyIsFailClosed(
+  status: number,
+  body: HealthBody
+): boolean {
+  switch (body.schema_version) {
+    case CORE_HEALTH_SCHEMA_VERSION:
+      return coreHealthIsFailClosed(status, body)
+    case CAPTURE_HEALTH_SCHEMA_VERSION:
+      return captureHealthIsFailClosed(status, body)
+    case HEALTH_SCHEMA_VERSION:
+      return leftoverHealthIsFailClosed(status, body)
+    default:
+      return assertNever(body)
+  }
+}
+
 function watchDisplayStatus(status: number): number {
   // Chips/data-health already fail-close unready HTTP 200 (red, not ok).
   // Coerce the display status so the numeric title cannot look like the
@@ -210,12 +262,7 @@ export function captureHealthWatchView(
   status: number,
   health: CaptureHealthBody
 ): FailClosedView | undefined {
-  const failClosed =
-    status === 503 ||
-    !health.ok ||
-    health.ready !== true ||
-    health.reason_code !== undefined
-  if (!failClosed) {
+  if (!captureHealthIsFailClosed(status, health)) {
     return undefined
   }
   return mapApiError(watchDisplayStatus(status), {
@@ -229,14 +276,7 @@ export function coreHealthWatchView(
   status: number,
   health: CoreHealth
 ): FailClosedView | undefined {
-  const failClosed =
-    status === 503 ||
-    !health.ok ||
-    !health.ready ||
-    health.live_qualified ||
-    health.stage_2_qualified ||
-    health.reason_code !== null
-  if (!failClosed) {
+  if (!coreHealthIsFailClosed(status, health)) {
     return undefined
   }
   return mapApiError(watchDisplayStatus(status), {
