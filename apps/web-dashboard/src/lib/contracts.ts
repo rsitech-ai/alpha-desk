@@ -1,7 +1,22 @@
 export const HEALTH_SCHEMA_VERSION = "hl.health.v1" as const
+export const CORE_HEALTH_SCHEMA_VERSION = "hl.core.health.v1" as const
+export const CORE_STATUS_SCHEMA_VERSION = "hl.core.status.v1" as const
 export const CAPTURE_STATUS_SCHEMA_VERSION = "hl.capture.status.v4" as const
 export const CAPTURE_STATUS_SCHEMA_V5 = "hl.capture.status.v5" as const
 export const API_ERROR_SCHEMA_VERSION = "hl.api.error.v1" as const
+
+export type CoreDeadletterReason =
+  | "core.deadletter_unsafe_path"
+  | "core.deadletter_io"
+  | "core.deadletter_invalid_record"
+  | "core.deadletter_serialization"
+
+export const CORE_DEADLETTER_REASONS = [
+  "core.deadletter_unsafe_path",
+  "core.deadletter_io",
+  "core.deadletter_invalid_record",
+  "core.deadletter_serialization",
+] as const satisfies readonly CoreDeadletterReason[]
 
 export type CaptureStatusSchema =
   typeof CAPTURE_STATUS_SCHEMA_VERSION | typeof CAPTURE_STATUS_SCHEMA_V5
@@ -32,6 +47,44 @@ export interface ApiError {
   code: string
   reason_code: string
 }
+
+export interface CoreHealth {
+  schema_version: typeof CORE_HEALTH_SCHEMA_VERSION
+  ok: boolean
+  ready: boolean
+  reason_code: string | null
+  live_qualified: boolean
+  stage_2_qualified: boolean
+}
+
+export interface CoreStatus {
+  schema_version: typeof CORE_STATUS_SCHEMA_VERSION
+  ready: boolean
+  last_applied_watermark?: number
+  fail_closed_reason?: string
+  live_qualified: boolean
+  stage_2_qualified: boolean
+}
+
+export type HealthBody = HealthAssessment | CoreHealth
+
+export const CORE_HEALTH_FIELD_ORDER = [
+  "schema_version",
+  "ok",
+  "ready",
+  "reason_code",
+  "live_qualified",
+  "stage_2_qualified",
+] as const
+
+export const CORE_STATUS_FIELD_ORDER = [
+  "schema_version",
+  "ready",
+  "last_applied_watermark",
+  "fail_closed_reason",
+  "live_qualified",
+  "stage_2_qualified",
+] as const
 
 export interface AuxiliarySourceStatus {
   source_id: string
@@ -212,6 +265,117 @@ export function parseApiError(value: unknown): ParseResult<ApiError> {
       schema_version: schema_version.value,
       code: code.value,
       reason_code: reason_code.value,
+    },
+  }
+}
+
+export function asCoreDeadletterReason(
+  value: string
+): CoreDeadletterReason | undefined {
+  switch (value) {
+    case "core.deadletter_unsafe_path":
+    case "core.deadletter_io":
+    case "core.deadletter_invalid_record":
+    case "core.deadletter_serialization":
+      return value
+    default:
+      return undefined
+  }
+}
+
+export function isCoreHealth(value: HealthBody): value is CoreHealth {
+  return value.schema_version === CORE_HEALTH_SCHEMA_VERSION
+}
+
+export function parseCoreHealth(value: unknown): ParseResult<CoreHealth> {
+  if (!isRecord(value)) {
+    return { ok: false, detail: "core health body is not an object" }
+  }
+  const schema_version = requireConst(
+    value,
+    "schema_version",
+    CORE_HEALTH_SCHEMA_VERSION
+  )
+  if (!schema_version.ok) {
+    return schema_version
+  }
+  const ok = requireBool(value, "ok")
+  if (!ok.ok) {
+    return ok
+  }
+  const ready = requireBool(value, "ready")
+  if (!ready.ok) {
+    return ready
+  }
+  const reason_code = requireNullOrNonEmptyString(value, "reason_code")
+  if (!reason_code.ok) {
+    return reason_code
+  }
+  const live_qualified = requireBool(value, "live_qualified")
+  if (!live_qualified.ok) {
+    return live_qualified
+  }
+  const stage_2_qualified = requireBool(value, "stage_2_qualified")
+  if (!stage_2_qualified.ok) {
+    return stage_2_qualified
+  }
+  return {
+    ok: true,
+    value: {
+      schema_version: schema_version.value,
+      ok: ok.value,
+      ready: ready.value,
+      reason_code: reason_code.value,
+      live_qualified: live_qualified.value,
+      stage_2_qualified: stage_2_qualified.value,
+    },
+  }
+}
+
+export function parseCoreStatus(value: unknown): ParseResult<CoreStatus> {
+  if (!isRecord(value)) {
+    return { ok: false, detail: "core status body is not an object" }
+  }
+  const schema_version = requireConst(
+    value,
+    "schema_version",
+    CORE_STATUS_SCHEMA_VERSION
+  )
+  if (!schema_version.ok) {
+    return schema_version
+  }
+  const ready = requireBool(value, "ready")
+  if (!ready.ok) {
+    return ready
+  }
+  const last_applied_watermark = optionalNonNegativeInt(
+    value,
+    "last_applied_watermark"
+  )
+  if (!last_applied_watermark.ok) {
+    return last_applied_watermark
+  }
+  const fail_closed_reason = optionalNonEmptyString(value, "fail_closed_reason")
+  if (!fail_closed_reason.ok) {
+    return fail_closed_reason
+  }
+  const live_qualified = requireBool(value, "live_qualified")
+  if (!live_qualified.ok) {
+    return live_qualified
+  }
+  const stage_2_qualified = requireBool(value, "stage_2_qualified")
+  if (!stage_2_qualified.ok) {
+    return stage_2_qualified
+  }
+  return {
+    ok: true,
+    value: {
+      schema_version: schema_version.value,
+      ready: ready.value,
+      last_applied_watermark: last_applied_watermark.value,
+      fail_closed_reason: fail_closed_reason.value,
+      live_qualified: live_qualified.value,
+      stage_2_qualified: stage_2_qualified.value,
     },
   }
 }
@@ -493,6 +657,19 @@ function optionalNonEmptyString(
 ): ParseResult<string | undefined> {
   if (!(field in object) || object[field] === null) {
     return { ok: true, value: undefined }
+  }
+  return requireNonEmptyString(object, field)
+}
+
+function requireNullOrNonEmptyString(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<string | null> {
+  if (!(field in object)) {
+    return { ok: false, detail: `${field} must be a string or null` }
+  }
+  if (object[field] === null) {
+    return { ok: true, value: null }
   }
   return requireNonEmptyString(object, field)
 }

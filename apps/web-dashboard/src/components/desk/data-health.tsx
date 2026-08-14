@@ -20,10 +20,15 @@ import { ToneBadge } from "@/components/desk/chips"
 import { healthStateTone, toneWithoutLiveOnHttpError } from "@/lib/tone"
 import type { EndpointOutcome } from "@/lib/api"
 import {
+  API_ERROR_SCHEMA_VERSION,
+  CORE_HEALTH_FIELD_ORDER,
   HEALTH_FIELD_ORDER,
   HEALTH_SCHEMA_VERSION,
+  asCoreDeadletterReason,
   assertNever,
-  type HealthAssessment,
+  isCoreHealth,
+  type CoreHealth,
+  type HealthBody,
 } from "@/lib/contracts"
 import { mapApiError } from "@/lib/fail-closed"
 import { formatUnixMicros } from "@/lib/format"
@@ -35,9 +40,9 @@ export function DataHealthCard({
   readyz,
 }: {
   loading: boolean
-  canonical: EndpointOutcome<HealthAssessment> | undefined
-  healthz: EndpointOutcome<HealthAssessment> | undefined
-  readyz: EndpointOutcome<HealthAssessment> | undefined
+  canonical: EndpointOutcome<HealthBody> | undefined
+  healthz: EndpointOutcome<HealthBody> | undefined
+  readyz: EndpointOutcome<HealthBody> | undefined
 }) {
   return (
     <Card size="sm" className="h-full">
@@ -70,7 +75,7 @@ function HealthBlock({
   outcome,
 }: {
   title: string
-  outcome: EndpointOutcome<HealthAssessment> | undefined
+  outcome: EndpointOutcome<HealthBody> | undefined
 }) {
   if (!outcome) {
     return null
@@ -130,7 +135,17 @@ function HealthBlock({
       )
     }
     case "ok": {
+      if (isCoreHealth(outcome.data)) {
+        return (
+          <CoreHealthBlock
+            title={title}
+            status={outcome.status}
+            health={outcome.data}
+          />
+        )
+      }
       const assessment = outcome.data
+      const deadletter = asCoreDeadletterReason(assessment.reason_code)
       const rows = HEALTH_FIELD_ORDER.map((field) => {
         switch (field) {
           case "schema_version":
@@ -157,20 +172,31 @@ function HealthBlock({
             return assertNever(field)
         }
       })
+      const typed =
+        deadletter !== undefined
+          ? mapApiError(outcome.status, {
+              schema_version: API_ERROR_SCHEMA_VERSION,
+              code: "data_unavailable",
+              reason_code: assessment.reason_code,
+            })
+          : undefined
       return (
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="font-mono text-xs text-muted-foreground">{title}</p>
             <div className="flex flex-wrap items-center gap-2">
               <ToneBadge
-                tone={toneWithoutLiveOnHttpError(
-                  outcome.status,
-                  healthStateTone(assessment.state)
-                )}
+                tone={
+                  typed?.tone ??
+                  toneWithoutLiveOnHttpError(
+                    outcome.status,
+                    healthStateTone(assessment.state)
+                  )
+                }
               >
-                {assessment.state}
+                {typed?.title ?? assessment.state}
               </ToneBadge>
-              {outcome.status === 503 ? (
+              {outcome.status === 503 && typed === undefined ? (
                 <ToneBadge tone="red">HTTP 503</ToneBadge>
               ) : null}
             </div>
@@ -184,4 +210,69 @@ function HealthBlock({
       return _exhaustive
     }
   }
+}
+
+function CoreHealthBlock({
+  title,
+  status,
+  health,
+}: {
+  title: string
+  status: number
+  health: CoreHealth
+}) {
+  const failClosed =
+    status === 503 ||
+    !health.ok ||
+    !health.ready ||
+    health.live_qualified ||
+    health.stage_2_qualified ||
+    health.reason_code !== null
+  const view = failClosed
+    ? mapApiError(status === 200 ? 503 : status, {
+        schema_version: API_ERROR_SCHEMA_VERSION,
+        code: "data_unavailable",
+        reason_code:
+          health.reason_code ??
+          (health.live_qualified || health.stage_2_qualified
+            ? "core_status.qualification_claim"
+            : "core_status.not_ready"),
+      })
+    : undefined
+  const rows = CORE_HEALTH_FIELD_ORDER.map((field) => {
+    switch (field) {
+      case "schema_version":
+        return { field, value: health.schema_version, omitted: false }
+      case "ok":
+        return { field, value: health.ok, omitted: false }
+      case "ready":
+        return { field, value: health.ready, omitted: false }
+      case "reason_code":
+        return {
+          field,
+          value: health.reason_code,
+          omitted: health.reason_code === null,
+        }
+      case "live_qualified":
+        return { field, value: health.live_qualified, omitted: false }
+      case "stage_2_qualified":
+        return { field, value: health.stage_2_qualified, omitted: false }
+      default:
+        return assertNever(field)
+    }
+  })
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-mono text-xs text-muted-foreground">{title}</p>
+        <ToneBadge tone={view?.tone ?? "yellow"}>
+          {view?.title ?? "not live-qualified"}
+        </ToneBadge>
+      </div>
+      {view ? (
+        <p className="text-xs text-muted-foreground">{view.detail}</p>
+      ) : null}
+      <FieldTable caption={title} rows={rows} />
+    </div>
+  )
 }

@@ -1,4 +1,14 @@
-import { assertNever, parseApiError, type ApiError } from "@/lib/contracts"
+import {
+  API_ERROR_SCHEMA_VERSION,
+  asCoreDeadletterReason,
+  assertNever,
+  parseApiError,
+  parseCoreHealth,
+  parseCoreStatus,
+  type ApiError,
+  type CoreHealth,
+  type CoreStatus,
+} from "@/lib/contracts"
 import type { Tone } from "@/lib/tone"
 
 export type FailClosedFamily =
@@ -9,6 +19,7 @@ export type FailClosedFamily =
   | "stream_unspecified"
   | "unauthorized"
   | "data_unavailable"
+  | "core_deadletter"
   | "typed_other"
 
 export interface FailClosedView {
@@ -34,7 +45,7 @@ export function mapApiError(status: number, error: ApiError): FailClosedView {
     httpStatus: status,
     code: error.code,
     reasonCode: error.reason_code,
-    title: titleOf(family, status),
+    title: titleOf(family, status, error.reason_code),
     detail: detailOf(family, error),
     tone: toneOf(family),
   }
@@ -44,6 +55,14 @@ export function classifyHttpBody(status: number, body: unknown): ProbeOutcome {
   const parsed = parseApiError(body)
   if (parsed.ok) {
     return { kind: "observed", view: mapApiError(status, parsed.value) }
+  }
+  const coreHealth = parseCoreHealth(body)
+  if (coreHealth.ok) {
+    return classifyCoreHealth(status, coreHealth.value)
+  }
+  const coreStatus = parseCoreStatus(body)
+  if (coreStatus.ok) {
+    return classifyCoreStatus(status, coreStatus.value)
   }
   if (status === 200) {
     return {
@@ -79,13 +98,73 @@ export function familyOf(status: number, error: ApiError): FailClosedFamily {
   if (status === 503 && error.reason_code === "snapshot_invalid") {
     return "snapshot_invalid"
   }
+  if (asCoreDeadletterReason(error.reason_code)) {
+    return "core_deadletter"
+  }
   if (status === 503 || error.code === "data_unavailable") {
     return "data_unavailable"
   }
   return "typed_other"
 }
 
-function titleOf(family: FailClosedFamily, status: number): string {
+function classifyCoreHealth(status: number, health: CoreHealth): ProbeOutcome {
+  if (health.live_qualified || health.stage_2_qualified) {
+    return observedUnavailable(status, "core_status.qualification_claim")
+  }
+  if (health.reason_code !== null) {
+    return observedUnavailable(status, health.reason_code)
+  }
+  if (status === 200 && health.ok && health.ready) {
+    return {
+      kind: "not_observed",
+      status,
+      detail:
+        "HTTP 200 — this listener did not return typed hl.api.error.v1. Not a Stage PASS.",
+    }
+  }
+  return observedUnavailable(status, "core_status.not_ready")
+}
+
+function classifyCoreStatus(
+  status: number,
+  snapshot: CoreStatus
+): ProbeOutcome {
+  if (snapshot.live_qualified || snapshot.stage_2_qualified) {
+    return observedUnavailable(status, "core_status.qualification_claim")
+  }
+  if (snapshot.fail_closed_reason !== undefined) {
+    return observedUnavailable(status, snapshot.fail_closed_reason)
+  }
+  if (status === 200 && snapshot.ready) {
+    return {
+      kind: "not_observed",
+      status,
+      detail:
+        "HTTP 200 — this listener did not return typed hl.api.error.v1. Not a Stage PASS.",
+    }
+  }
+  return observedUnavailable(status, "core_status.not_ready")
+}
+
+function observedUnavailable(
+  status: number,
+  reason_code: string
+): ProbeOutcome {
+  return {
+    kind: "observed",
+    view: mapApiError(status, {
+      schema_version: API_ERROR_SCHEMA_VERSION,
+      code: "data_unavailable",
+      reason_code,
+    }),
+  }
+}
+
+function titleOf(
+  family: FailClosedFamily,
+  status: number,
+  reasonCode: string
+): string {
   switch (family) {
     case "snapshot_missing":
       return "503 snapshot missing"
@@ -101,10 +180,31 @@ function titleOf(family: FailClosedFamily, status: number): string {
       return `${status} unauthorized`
     case "data_unavailable":
       return `${status} data unavailable`
+    case "core_deadletter":
+      return titleOfDeadletter(reasonCode)
     case "typed_other":
       return `HTTP ${status}`
     default:
       return assertNever(family)
+  }
+}
+
+function titleOfDeadletter(reasonCode: string): string {
+  const reason = asCoreDeadletterReason(reasonCode)
+  if (!reason) {
+    return "503 data unavailable"
+  }
+  switch (reason) {
+    case "core.deadletter_unsafe_path":
+      return "503 dead-letter unsafe path"
+    case "core.deadletter_io":
+      return "503 dead-letter I/O"
+    case "core.deadletter_invalid_record":
+      return "503 dead-letter invalid record"
+    case "core.deadletter_serialization":
+      return "503 dead-letter serialization"
+    default:
+      return assertNever(reason)
   }
 }
 
@@ -124,10 +224,31 @@ function detailOf(family: FailClosedFamily, error: ApiError): string {
       return "Bearer rejected. This is not live-source qualification."
     case "data_unavailable":
       return "Typed data_unavailable. Empty panels are not a green snapshot."
+    case "core_deadletter":
+      return detailOfDeadletter(error.reason_code)
     case "typed_other":
       return `${error.code} · ${error.reason_code}`
     default:
       return assertNever(family)
+  }
+}
+
+function detailOfDeadletter(reasonCode: string): string {
+  const reason = asCoreDeadletterReason(reasonCode)
+  if (!reason) {
+    return `${reasonCode} · fail-closed`
+  }
+  switch (reason) {
+    case "core.deadletter_unsafe_path":
+      return "hl-core dead-letter path is unsafe. Fail-closed; not ready. /status fail_closed_reason is latched."
+    case "core.deadletter_io":
+      return "hl-core dead-letter I/O failed. Fail-closed; not ready. /status fail_closed_reason is latched."
+    case "core.deadletter_invalid_record":
+      return "hl-core dead-letter record is invalid. Fail-closed; not ready. /status fail_closed_reason is latched."
+    case "core.deadletter_serialization":
+      return "hl-core dead-letter record could not be serialized. Fail-closed; not ready. /status fail_closed_reason is latched."
+    default:
+      return assertNever(reason)
   }
 }
 
@@ -141,6 +262,7 @@ function toneOf(family: FailClosedFamily): Tone {
     case "query_budget":
     case "unauthorized":
     case "data_unavailable":
+    case "core_deadletter":
     case "typed_other":
       return "red"
     default:
