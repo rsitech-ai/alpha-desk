@@ -289,7 +289,9 @@ components:
         Nested source_id is a required non-empty string; present non-string,
         omitted, or empty object items are snapshot_invalid. Nested spool_records
         is a required u64 integer; present non-number or non-u64 values, and
-        omitted, are snapshot_invalid. Nested health,
+        omitted, are snapshot_invalid. Nested unarchived_records is a required
+        u64 integer; present non-number or non-u64 values, and omitted, are
+        snapshot_invalid. Nested health,
         restart_reconstruction, and qualification, when present, use closed
         kebab-case sets; unknown values are snapshot_invalid. Omitted optional
         nested fields stay omitted.
@@ -368,6 +370,8 @@ components:
             is a required non-empty string; present non-string, omitted, or
             empty object items are snapshot_invalid. Nested spool_records is a
             required u64 integer; present non-number or non-u64 values, and
+            omitted, are snapshot_invalid. Nested unarchived_records is a
+            required u64 integer; present non-number or non-u64 values, and
             omitted, are snapshot_invalid. Nested health,
             restart_reconstruction, and qualification are optional; present
             values use closed kebab-case sets. Unknown values are
@@ -380,6 +384,7 @@ components:
             required:
               - source_id
               - spool_records
+              - unarchived_records
             properties:
               source_id:
                 description: >
@@ -399,6 +404,16 @@ components:
                   HealthAssessment.reason_code stays a free string so unknown
                   RED is not closed out. This document does not claim Stage
                   PASS.
+                type: integer
+                minimum: 0
+              unarchived_records:
+                description: >
+                  Capture writer fsynced records not yet acknowledged as
+                  archived. Required u64 integer. Present non-number or
+                  non-u64 values are snapshot_invalid. Omitted is
+                  snapshot_invalid. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
                 type: integer
                 minimum: 0
               health:
