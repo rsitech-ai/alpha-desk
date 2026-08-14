@@ -5,6 +5,7 @@ mod pipeline;
 
 pub use error::IntelligenceReplayError;
 pub use pipeline::{
-    IntelligenceReplayReport, MaterializeRequest, QualificationClaim, materialize_committed_node,
-    materialize_synthetic_replay, qualification_what_for_withhold, refuse_leaked_withheld_emission,
+    IntelligenceReplayReport, MaterializeRequest, QualificationClaim, fold_withhold_reason,
+    materialize_committed_node, materialize_synthetic_replay, qualification_what_for_withhold,
+    refuse_leaked_withheld_emission,
 };

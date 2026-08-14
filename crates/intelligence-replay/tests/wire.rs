@@ -14,9 +14,9 @@ use domain_types::{
 use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use hl_protocol::node::v1::{parse_node_record, NodeStreamKind};
 use intelligence_replay::{
-    materialize_committed_node, materialize_synthetic_replay, qualification_what_for_withhold,
-    refuse_leaked_withheld_emission, IntelligenceReplayError, IntelligenceReplayReport,
-    MaterializeRequest, QualificationClaim,
+    fold_withhold_reason, materialize_committed_node, materialize_synthetic_replay,
+    qualification_what_for_withhold, refuse_leaked_withheld_emission, IntelligenceReplayError,
+    IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
 };
 use market_intelligence::{
     CrowdingPosition, FragilityScenario, MarketError, MarketFeatureSnapshot,
@@ -798,6 +798,158 @@ fn replay_qualification_pins_book_fills_and_inventory_families_separately() {
             }
         }
     }
+}
+
+#[test]
+fn mixed_snapshot_fold_prefers_book_fills_then_missing_inventory() {
+    let missing_book_and_inventory = constructed_market_snapshot(
+        FeatureValue::Missing(MissingReason::NotObserved),
+        FeatureValue::Boolean(true),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    let missing_inventory = constructed_market_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    let boolean_inventory = constructed_market_snapshot(
+        FeatureValue::Decimal {
+            raw: 20_000 * 100_000_000,
+            scale: 8,
+        },
+        FeatureValue::Boolean(true),
+        FeatureValue::Boolean(true),
+    );
+
+    assert_eq!(
+        proof_withhold_reason(&missing_book_and_inventory),
+        Some(ProofWithholdReason::MissingBookOrFills)
+    );
+    assert_eq!(
+        proof_withhold_reason(&missing_inventory),
+        Some(ProofWithholdReason::MissingInventory)
+    );
+    assert_eq!(
+        proof_withhold_reason(&boolean_inventory),
+        Some(ProofWithholdReason::MalformedInventory)
+    );
+
+    let book_over_missing = fold_withhold_reason(
+        proof_withhold_reason(&missing_book_and_inventory),
+        proof_withhold_reason(&missing_inventory),
+    );
+    assert_eq!(
+        book_over_missing,
+        Some(ProofWithholdReason::MissingBookOrFills)
+    );
+    assert_book_or_fills_qualification_is_not_inventory(
+        book_over_missing.expect("mixed book/inventory fold"),
+    );
+
+    let missing_over_book = fold_withhold_reason(
+        proof_withhold_reason(&missing_inventory),
+        proof_withhold_reason(&missing_book_and_inventory),
+    );
+    assert_eq!(
+        missing_over_book,
+        Some(ProofWithholdReason::MissingBookOrFills)
+    );
+    assert_book_or_fills_qualification_is_not_inventory(
+        missing_over_book.expect("mixed inventory/book fold"),
+    );
+
+    let missing_over_malformed = fold_withhold_reason(
+        proof_withhold_reason(&missing_inventory),
+        proof_withhold_reason(&boolean_inventory),
+    );
+    assert_eq!(
+        missing_over_malformed,
+        Some(ProofWithholdReason::MissingInventory)
+    );
+    assert_inventory_qualification_is_not_invented_fills(
+        missing_over_malformed.expect("missing vs malformed fold"),
+    );
+
+    let malformed_over_missing = fold_withhold_reason(
+        proof_withhold_reason(&boolean_inventory),
+        proof_withhold_reason(&missing_inventory),
+    );
+    assert_eq!(
+        malformed_over_missing,
+        Some(ProofWithholdReason::MissingInventory)
+    );
+    assert_inventory_qualification_is_not_invented_fills(
+        malformed_over_missing.expect("malformed vs missing fold"),
+    );
+
+    assert_eq!(
+        fold_withhold_reason(None, proof_withhold_reason(&boolean_inventory)),
+        Some(ProofWithholdReason::MalformedInventory)
+    );
+    assert_inventory_qualification_is_not_invented_fills(ProofWithholdReason::MalformedInventory);
+}
+
+#[test]
+fn fold_withhold_reason_covers_every_proof_family_pair() {
+    let reasons = [
+        ProofWithholdReason::MissingBookOrFills,
+        ProofWithholdReason::MissingInventory,
+        ProofWithholdReason::MalformedInventory,
+    ];
+    for current in reasons {
+        for next in reasons {
+            let folded = fold_withhold_reason(Some(current), Some(next))
+                .expect("present reasons fold to a reason");
+            match (current, next) {
+                (
+                    ProofWithholdReason::MissingBookOrFills,
+                    ProofWithholdReason::MissingBookOrFills,
+                )
+                | (
+                    ProofWithholdReason::MissingBookOrFills,
+                    ProofWithholdReason::MissingInventory,
+                )
+                | (
+                    ProofWithholdReason::MissingBookOrFills,
+                    ProofWithholdReason::MalformedInventory,
+                )
+                | (
+                    ProofWithholdReason::MissingInventory,
+                    ProofWithholdReason::MissingBookOrFills,
+                )
+                | (
+                    ProofWithholdReason::MalformedInventory,
+                    ProofWithholdReason::MissingBookOrFills,
+                ) => {
+                    assert_eq!(folded, ProofWithholdReason::MissingBookOrFills);
+                    assert_book_or_fills_qualification_is_not_inventory(folded);
+                }
+                (ProofWithholdReason::MissingInventory, ProofWithholdReason::MissingInventory)
+                | (
+                    ProofWithholdReason::MissingInventory,
+                    ProofWithholdReason::MalformedInventory,
+                )
+                | (
+                    ProofWithholdReason::MalformedInventory,
+                    ProofWithholdReason::MissingInventory,
+                ) => {
+                    assert_eq!(folded, ProofWithholdReason::MissingInventory);
+                    assert_inventory_qualification_is_not_invented_fills(folded);
+                }
+                (
+                    ProofWithholdReason::MalformedInventory,
+                    ProofWithholdReason::MalformedInventory,
+                ) => {
+                    assert_eq!(folded, ProofWithholdReason::MalformedInventory);
+                    assert_inventory_qualification_is_not_invented_fills(folded);
+                }
+            }
+        }
+    }
+    assert_eq!(fold_withhold_reason(None, None), None);
 }
 
 fn assert_book_or_fills_qualification_is_not_inventory(reason: ProofWithholdReason) {
