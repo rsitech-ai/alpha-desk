@@ -248,6 +248,15 @@ export const HEALTH_FIELD_ORDER = [
   "suppresses",
 ] as const
 
+/** Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
+ *  fail parse. Omitted and null stay omitted (this web optional-array
+ *  pattern). Empty arrays still parse. This is not OpenAPI uniqueItems on
+ *  whole aux objects, not duplicate `source_id`, not sort order, not a live
+ *  capture, and not Stage PASS. `HealthAssessment.reason_code` stays a free
+ *  string so unknown RED is not closed out.
+ */
+export const MAX_AUXILIARY_SOURCES = 16
+
 /** Known nested keys for this web `parseAuxiliarySource`. Present unknown
  *  keys on an item fail parse. This is this parse's typed field set, not
  *  OpenAPI items. Nested `restart_reconstruction` is already typed here;
@@ -944,6 +953,12 @@ function optionalAuxiliarySources(
   const value = object.auxiliary_sources
   if (!Array.isArray(value)) {
     return { ok: false, detail: "auxiliary_sources must be an array" }
+  }
+  if (value.length > MAX_AUXILIARY_SOURCES) {
+    return {
+      ok: false,
+      detail: `auxiliary_sources must have at most ${MAX_AUXILIARY_SOURCES} items`,
+    }
   }
   const parsed: AuxiliarySourceStatus[] = []
   for (const [index, item] of value.entries()) {
