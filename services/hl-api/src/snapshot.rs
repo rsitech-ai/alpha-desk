@@ -85,9 +85,12 @@ pub const MAX_AUXILIARY_SOURCES: usize = 16;
 /// already-typed optional `restart_reconstruction`. Present unknown nested
 /// properties are `snapshot_invalid`. Known objects without extras stay
 /// valid. This is not CaptureStatusBase extra keys: top-level writer fields
-/// such as `last_error_reason` stay untyped, and last-heartbeat throughput
-/// still passes through. `HealthAssessment.reason_code` stays a free string
-/// so unknown RED is not closed out.
+/// such as `failover_height`, `failover_reason`, `durable_height`,
+/// `capture_backlog_records`, `oldest_pending_capture_height`,
+/// `disk_free_basis_points`, and `archive_manifest_id` stay untyped, and
+/// last-heartbeat throughput still passes through. Top-level
+/// `last_error_reason` is an optional non-empty string. `HealthAssessment.reason_code`
+/// stays a free string so unknown RED is not closed out.
 const AUXILIARY_SOURCE_FIELDS: &[&str] = &[
     "source_id",
     "health",
@@ -268,6 +271,9 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     require_enum(object, "primary_source_health", CAPTURE_SOURCE_HEALTH)?;
     if object.contains_key("independent_source_health") {
         require_enum(object, "independent_source_health", CAPTURE_SOURCE_HEALTH)?;
+    }
+    if object.contains_key("last_error_reason") {
+        require_string(object, "last_error_reason", None)?;
     }
     require_auxiliary_source_closed_fields(object)?;
     require_non_negative_int(object, "pending_blocks")?;
@@ -503,10 +509,11 @@ mod tests {
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
-        core_deadletter_reason_openapi_enum, health_reason_code_is_unrestricted_string,
-        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
-        openapi_yaml, restart_reconstruction_openapi_enum,
+        capture_source_health_openapi_enum, capture_status_last_error_reason_is_optional_string,
+        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
+        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
+        ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
+        restart_reconstruction_openapi_enum,
     };
     use api_contracts::WireHealthState;
     use std::path::Path;
@@ -1269,6 +1276,23 @@ mod tests {
         assert!(
             auxiliary_source_last_error_reason_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
+    fn openapi_document_types_top_level_last_error_reason_optional_string() {
+        let document = openapi_yaml();
+        assert!(
+            capture_status_last_error_reason_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.last_error_reason as an optional string"
         );
         assert!(
             health_reason_code_is_unrestricted_string(document),
@@ -2387,6 +2411,69 @@ mod tests {
             serde_json::json!(""),
         ] {
             value["auxiliary_sources"][0]["last_error_reason"] = last_error_reason.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-string or empty last_error_reason must not fail open"),
+                SnapshotError::Invalid,
+                "{last_error_reason} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_top_level_last_error_reason_string_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("last_error_reason").is_none(),
+            "v4 fixture must omit optional top-level last_error_reason"
+        );
+        value["last_error_reason"] = serde_json::json!("capture_bus.unavailable");
+        let bytes = serde_json::to_vec(&value).expect("encode known last_error_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("known string last_error_reason");
+        assert_eq!(parsed["last_error_reason"], "capture_bus.unavailable");
+        assert!(parsed.get("auxiliary_sources").is_none());
+    }
+
+    #[test]
+    fn omitted_top_level_last_error_reason_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        assert!(
+            value.get("last_error_reason").is_none(),
+            "v4 fixture must omit optional last_error_reason"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted last_error_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted last_error_reason");
+        assert!(parsed.get("last_error_reason").is_none());
+
+        value["last_error_reason"] = serde_json::json!("capture_bus.unavailable");
+        value
+            .as_object_mut()
+            .expect("capture status object")
+            .remove("last_error_reason");
+        let bytes = serde_json::to_vec(&value).expect("encode removed last_error_reason");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed last_error_reason");
+        assert!(parsed.get("last_error_reason").is_none());
+    }
+
+    #[test]
+    fn present_non_string_top_level_last_error_reason_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        for last_error_reason in [
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-string"}),
+            serde_json::json!(["not-a-string"]),
+            serde_json::json!(""),
+        ] {
+            value["last_error_reason"] = last_error_reason.clone();
             let bytes = serde_json::to_vec(&value).expect("encode");
             assert_eq!(
                 parse_capture_status_bytes(&bytes)

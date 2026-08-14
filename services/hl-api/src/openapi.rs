@@ -6,7 +6,8 @@
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
-/// auxiliary quarantine_reason, auxiliary_sources maxItems,
+/// top-level last_error_reason, auxiliary quarantine_reason,
+/// auxiliary_sources maxItems,
 /// auxiliary source_id uniqueness, auxiliary source_id sort order,
 /// auxiliary source extra keys, auxiliary source health, auxiliary restart
 /// reconstruction, auxiliary source qualification, core dead-letter and
@@ -822,6 +823,44 @@ pub fn auxiliary_source_last_error_reason_is_optional_string(document: &str) -> 
     .is_some_and(|required| required.contains(&"last_error_reason"))
 }
 
+/// True when top-level `CaptureStatusBase.properties.last_error_reason` is an
+/// optional free string: `type: string`, not listed on
+/// `CaptureStatusBase.required`, and no `$ref`, `enum`, `format`, or
+/// `pattern`. Capture writer emits top-level `last_error_reason` as a string
+/// (`Option` + `skip_serializing_if`); this crate does not invent a closed
+/// enum of error reasons. Nested `auxiliary_sources[].last_error_reason` is a
+/// different property. HealthAssessment.reason_code stays a free string so
+/// unknown RED is not closed out.
+#[must_use]
+pub fn capture_status_last_error_reason_is_optional_string(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "last_error_reason",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("string")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &["components", "schemas", "CaptureStatusBase"],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"last_error_reason"))
+}
+
 /// True when `CaptureStatusBase.properties.auxiliary_sources` is an array
 /// capped at capture writer [`MAX_AUXILIARY_SOURCES`]: `type: array`,
 /// `maxItems` equal to that constant, and no `minItems` or `uniqueItems`.
@@ -859,8 +898,12 @@ pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
 /// properties are parse `snapshot_invalid`. Known objects without extras
 /// stay valid. CaptureStatusBase itself does not set
 /// `additionalProperties: false` (top-level writer fields such as
-/// `last_error_reason` stay untyped). HealthAssessment.reason_code stays a
-/// free string so unknown RED is not closed out.
+/// `failover_height`, `failover_reason`, `durable_height`,
+/// `capture_backlog_records`, `oldest_pending_capture_height`,
+/// `disk_free_basis_points`, and `archive_manifest_id` stay untyped).
+/// Top-level `last_error_reason` is an optional string.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
 #[must_use]
 pub fn auxiliary_source_items_forbid_additional_properties(document: &str) -> bool {
     let Some(mapping) = yaml_mapping(
@@ -1288,12 +1331,12 @@ mod tests {
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-        capture_source_health_openapi_enum, committed_source_class_openapi_enum,
-        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
-        health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
-        ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
-        readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
-        readyz_get_description, restart_reconstruction_openapi_enum,
+        capture_source_health_openapi_enum, capture_status_last_error_reason_is_optional_string,
+        committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
+        health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
+        independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
+        openapi_yaml, readyz_200_description, readyz_200_schema_ref, readyz_503_description,
+        readyz_503_schema_ref, readyz_get_description, restart_reconstruction_openapi_enum,
         unavailable_response_schema_ref,
     };
 
@@ -1376,6 +1419,10 @@ mod tests {
         assert!(
             auxiliary_source_last_error_reason_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
+        );
+        assert!(
+            capture_status_last_error_reason_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.last_error_reason as an optional string"
         );
         assert!(
             auxiliary_source_items_forbid_additional_properties(document),
@@ -3537,6 +3584,146 @@ components:
 "#;
         assert!(
             auxiliary_source_last_error_reason_is_optional_string(optional_string),
+            "optional string last_error_reason must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_top_level_last_error_reason_optional_string_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        pending_blocks:
+          description: >
+            last_error_reason remains in prose after the YAML property drops it.
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_last_error_reason_is_optional_string(prose_only),
+            "prose mention of last_error_reason must not satisfy the optional-string freeze"
+        );
+
+        let nested_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - pending_blocks
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              last_error_reason:
+                type: string
+"#;
+        assert!(
+            !capture_status_last_error_reason_is_optional_string(nested_only),
+            "nested last_error_reason must not satisfy the top-level optional-string freeze"
+        );
+
+        let required_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - last_error_reason
+      properties:
+        last_error_reason:
+          type: string
+"#;
+        assert!(
+            !capture_status_last_error_reason_is_optional_string(required_string),
+            "required last_error_reason must not satisfy the optional-string freeze"
+        );
+
+        let integer_reason = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        last_error_reason:
+          type: integer
+"#;
+        assert!(
+            !capture_status_last_error_reason_is_optional_string(integer_reason),
+            "optional non-string last_error_reason must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        last_error_reason:
+          type: string
+          format: uuid
+"#;
+        assert!(
+            !capture_status_last_error_reason_is_optional_string(formatted),
+            "invented last_error_reason format must not satisfy the freeze"
+        );
+
+        let closed_enum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        last_error_reason:
+          type: string
+          enum:
+            - capture_bus.unavailable
+"#;
+        assert!(
+            !capture_status_last_error_reason_is_optional_string(closed_enum),
+            "invented last_error_reason enum must not satisfy the freeze"
+        );
+
+        let optional_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - schema_version
+        - pending_blocks
+      properties:
+        last_error_reason:
+          type: string
+"#;
+        assert!(
+            capture_status_last_error_reason_is_optional_string(optional_string),
             "optional string last_error_reason must satisfy the freeze"
         );
     }
