@@ -357,6 +357,9 @@ fn require_auxiliary_source_closed_fields(
         if source.contains_key("cursor_epoch") {
             require_string(source, "cursor_epoch", None)?;
         }
+        if source.contains_key("durable_offset") {
+            require_u64(source, "durable_offset")?;
+        }
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -407,8 +410,8 @@ mod tests {
     };
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_cursor_epoch_is_optional_string,
-        auxiliary_source_health_openapi_enum, auxiliary_source_id_is_required_string,
-        auxiliary_source_partial_line_is_required_bool,
+        auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
+        auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
@@ -1058,6 +1061,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_types_auxiliary_durable_offset_optional_u64() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_durable_offset_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.durable_offset as an optional u64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1466,6 +1486,81 @@ mod tests {
                     .expect_err("present non-string or empty cursor_epoch must not fail open"),
                 SnapshotError::Invalid,
                 "{cursor_epoch} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_auxiliary_durable_offset_u64_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for durable_offset in [0_u64, 47, u64::MAX] {
+            value["auxiliary_sources"][0]["durable_offset"] = serde_json::json!(durable_offset);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{durable_offset} should parse: {error}"));
+            assert_eq!(
+                parsed["auxiliary_sources"][0]["durable_offset"],
+                durable_offset
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_auxiliary_durable_offset_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        assert!(
+            value["auxiliary_sources"][0]
+                .get("durable_offset")
+                .is_none(),
+            "v5 fixture must omit optional durable_offset"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted durable_offset");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted durable_offset");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("durable_offset")
+                .is_none()
+        );
+
+        value["auxiliary_sources"][0]["durable_offset"] = serde_json::json!(47_u64);
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("durable_offset");
+        let bytes = serde_json::to_vec(&value).expect("encode removed durable_offset");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed durable_offset");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("durable_offset")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn present_non_u64_auxiliary_durable_offset_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for durable_offset in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-u64"}),
+            serde_json::json!(["not-a-u64"]),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            value["auxiliary_sources"][0]["durable_offset"] = durable_offset.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-u64 durable_offset must not fail open"),
+                SnapshotError::Invalid,
+                "{durable_offset} must be snapshot_invalid"
             );
         }
     }
