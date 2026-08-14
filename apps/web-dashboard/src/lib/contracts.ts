@@ -239,6 +239,11 @@ export const CAPTURE_STATUS_FIELD_ORDER = [
   ...LAST_HEARTBEAT_THROUGHPUT_FIELDS,
 ] as const
 
+/** Known keys for this web `parseHealthAssessment`. Present unknown keys
+ *  fail parse. This matches OpenAPI `HealthAssessment additionalProperties:
+ *  false` and hl-api `HealthDocument` `deny_unknown_fields`. `reason_code`
+ *  stays a free string so unknown RED is not closed out.
+ */
 export const HEALTH_FIELD_ORDER = [
   "schema_version",
   "scope",
@@ -319,6 +324,17 @@ export function parseHealthAssessment(
   const suppresses = requireStringArray(value, "suppresses")
   if (!suppresses.ok) {
     return suppresses
+  }
+  const extras = collectExtraFields(value, HEALTH_FIELD_ORDER)
+  const extraNames = Object.keys(extras).sort()
+  if (extraNames.length > 0) {
+    return {
+      ok: false,
+      detail:
+        extraNames.length === 1
+          ? `unknown health field: ${extraNames[0]}`
+          : `unknown health fields: ${extraNames.join(", ")}`,
+    }
   }
   return {
     ok: true,
@@ -794,8 +810,8 @@ function requireCaptureSchema(
   }
 }
 
-/** Keys outside `known`. Top-level CaptureStatus and nested auxiliary source
- *  items fail-close when this is non-empty.
+/** Keys outside `known`. Top-level CaptureStatus, nested auxiliary source
+ *  items, and HealthAssessment fail-close when this is non-empty.
  */
 function collectExtraFields(
   object: Record<string, unknown>,
