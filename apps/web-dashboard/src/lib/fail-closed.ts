@@ -203,6 +203,8 @@ function titleOfDeadletter(reasonCode: string): string {
       return "503 dead-letter invalid record"
     case "core.deadletter_serialization":
       return "503 dead-letter serialization"
+    case "core.deadletter_corrupt":
+      return "503 dead-letter corrupt"
     default:
       return assertNever(reason)
   }
@@ -247,6 +249,8 @@ function detailOfDeadletter(reasonCode: string): string {
       return "hl-core dead-letter record is invalid. Fail-closed; not ready. /status fail_closed_reason is latched."
     case "core.deadletter_serialization":
       return "hl-core dead-letter record could not be serialized. Fail-closed; not ready. /status fail_closed_reason is latched."
+    case "core.deadletter_corrupt":
+      return "hl-core dead-letter file is truncated or corrupt. Fail-closed; not ready. /status fail_closed_reason is latched."
     default:
       return assertNever(reason)
   }

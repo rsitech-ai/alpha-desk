@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  CORE_DEADLETTER_REASONS,
   lastHeartbeatThroughput,
   parseCaptureStatus,
   parseCoreHealth,
@@ -105,12 +106,15 @@ describe("mapApiError", () => {
     ["core.deadletter_io", "503 dead-letter I/O"],
     ["core.deadletter_invalid_record", "503 dead-letter invalid record"],
     ["core.deadletter_serialization", "503 dead-letter serialization"],
+    ["core.deadletter_corrupt", "503 dead-letter corrupt"],
   ] as const)(
     "maps 503 %s as typed dead-letter fail-closed, not generic data_unavailable",
     (reason_code, title) => {
       const view = mapApiError(503, errorBody("data_unavailable", reason_code))
       expect(view.family).toBe("core_deadletter")
+      expect(view.family).not.toBe("data_unavailable")
       expect(view.title).toBe(title)
+      expect(view.title).not.toBe("503 data unavailable")
       expect(view.tone).toBe("red")
       expect(view.tone).not.toBe("green")
       expect(view.detail).not.toMatch(/live-qualified|Stage 6|Stage PASS/i)
@@ -124,7 +128,7 @@ describe("mapApiError", () => {
   it("does not treat unknown core.deadletter_* as ready or as a known dead-letter family", () => {
     const view = mapApiError(
       503,
-      errorBody("data_unavailable", "core.deadletter_corrupt")
+      errorBody("data_unavailable", "core.deadletter_unspecified_future")
     )
     expect(view.family).not.toBe("core_deadletter")
     expect(view.family).toBe("data_unavailable")
@@ -340,13 +344,6 @@ describe("parseCaptureStatus extras", () => {
   })
 })
 
-const CORE_DEADLETTER_REASONS = [
-  "core.deadletter_unsafe_path",
-  "core.deadletter_io",
-  "core.deadletter_invalid_record",
-  "core.deadletter_serialization",
-] as const
-
 function coreHealth503(reason_code: string): Record<string, unknown> {
   return {
     schema_version: "hl.core.health.v1",
@@ -382,11 +379,13 @@ describe("hl-core dead-letter health and status", () => {
         return
       }
       expect(outcome.view.family).toBe("core_deadletter")
+      expect(outcome.view.family).not.toBe("data_unavailable")
       expect(outcome.view.httpStatus).toBe(503)
       expect(outcome.view.reasonCode).toBe(reason_code)
       expect(outcome.view.tone).toBe("red")
       expect(outcome.view.tone).not.toBe("green")
       expect(outcome.view.title).toMatch(/^503 dead-letter /)
+      expect(outcome.view.title).not.toBe("503 data unavailable")
       expect(outcome.view.detail).not.toMatch(/live-qualified|Stage PASS/i)
     }
   )
@@ -400,9 +399,11 @@ describe("hl-core dead-letter health and status", () => {
         return
       }
       expect(outcome.view.family).toBe("core_deadletter")
+      expect(outcome.view.family).not.toBe("data_unavailable")
       expect(outcome.view.reasonCode).toBe(reason_code)
       expect(outcome.view.tone).toBe("red")
       expect(outcome.view.title).toMatch(/^503 dead-letter /)
+      expect(outcome.view.title).not.toBe("503 data unavailable")
       expect(outcome.view.detail).toMatch(/fail_closed_reason/)
     }
   )
@@ -459,13 +460,14 @@ describe("hl-core dead-letter health and status", () => {
   it("fail-closes unknown /healthz reason codes instead of showing ready", () => {
     const outcome = classifyHttpBody(
       503,
-      coreHealth503("core.deadletter_corrupt")
+      coreHealth503("core.deadletter_unspecified_future")
     )
     expect(outcome.kind).toBe("observed")
     if (outcome.kind !== "observed") {
       return
     }
     expect(outcome.view.family).not.toBe("core_deadletter")
+    expect(outcome.view.family).toBe("data_unavailable")
     expect(outcome.view.tone).toBe("red")
     expect(outcome.view.tone).not.toBe("green")
     expect(outcome.view.title).not.toMatch(/ready/i)

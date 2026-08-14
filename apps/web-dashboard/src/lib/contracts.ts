@@ -10,12 +10,14 @@ export type CoreDeadletterReason =
   | "core.deadletter_io"
   | "core.deadletter_invalid_record"
   | "core.deadletter_serialization"
+  | "core.deadletter_corrupt"
 
 export const CORE_DEADLETTER_REASONS = [
   "core.deadletter_unsafe_path",
   "core.deadletter_io",
   "core.deadletter_invalid_record",
   "core.deadletter_serialization",
+  "core.deadletter_corrupt",
 ] as const satisfies readonly CoreDeadletterReason[]
 
 export type CaptureStatusSchema =
@@ -277,6 +279,7 @@ export function asCoreDeadletterReason(
     case "core.deadletter_io":
     case "core.deadletter_invalid_record":
     case "core.deadletter_serialization":
+    case "core.deadletter_corrupt":
       return value
     default:
       return undefined
