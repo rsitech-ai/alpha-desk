@@ -352,6 +352,7 @@ fn require_auxiliary_source_closed_fields(
         };
         require_string(source, "source_id", None)?;
         require_u64(source, "spool_records")?;
+        require_u64(source, "unarchived_records")?;
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -403,7 +404,8 @@ mod tests {
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string, auxiliary_source_qualification_openapi_enum,
-        auxiliary_source_spool_records_is_required_u64, capture_source_health_openapi_enum,
+        auxiliary_source_spool_records_is_required_u64,
+        auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
         health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
         ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
@@ -999,6 +1001,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_requires_auxiliary_unarchived_records_u64() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_unarchived_records_is_required_u64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.unarchived_records as a required u64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1171,6 +1190,7 @@ mod tests {
         );
         assert_eq!(value["auxiliary_sources"][0]["health"], "starting");
         assert_eq!(value["auxiliary_sources"][0]["spool_records"], 0);
+        assert_eq!(value["auxiliary_sources"][0]["unarchived_records"], 0);
     }
 
     #[test]
@@ -1228,6 +1248,66 @@ mod tests {
         assert_eq!(
             parse_capture_status_bytes(&bytes)
                 .expect_err("omitted nested spool_records must not fail open"),
+            SnapshotError::Invalid
+        );
+    }
+
+    #[test]
+    fn known_auxiliary_unarchived_records_u64_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for unarchived_records in [0_u64, 3, u64::MAX] {
+            value["auxiliary_sources"][0]["unarchived_records"] =
+                serde_json::json!(unarchived_records);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{unarchived_records} should parse: {error}"));
+            assert_eq!(
+                parsed["auxiliary_sources"][0]["unarchived_records"],
+                unarchived_records
+            );
+        }
+    }
+
+    #[test]
+    fn present_non_u64_auxiliary_unarchived_records_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for unarchived_records in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-u64"}),
+            serde_json::json!(["not-a-u64"]),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            value["auxiliary_sources"][0]["unarchived_records"] = unarchived_records.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-u64 unarchived_records must not fail open"),
+                SnapshotError::Invalid,
+                "{unarchived_records} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_auxiliary_unarchived_records_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("unarchived_records");
+        let bytes = serde_json::to_vec(&value).expect("encode omitted unarchived_records");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes)
+                .expect_err("omitted nested unarchived_records must not fail open"),
             SnapshotError::Invalid
         );
     }

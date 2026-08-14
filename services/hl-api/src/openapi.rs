@@ -2,7 +2,8 @@
 /// capture-status v4 (inactive) / v5 (maintenance) required keys, optional
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
 /// committed source class, committed source health, auxiliary source
-/// identity, auxiliary spool_records, auxiliary source health, auxiliary restart reconstruction,
+/// identity, auxiliary spool_records, auxiliary unarchived_records,
+/// auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
 /// availability, or SLO contract, it does not invent fills or mark sources
@@ -315,6 +316,57 @@ pub fn auxiliary_source_spool_records_is_required_u64(document: &str) -> bool {
         "required",
     )
     .is_some_and(|required| required.contains(&"spool_records"))
+}
+
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.unarchived_records`
+/// is a required u64 integer: `type: integer`, `minimum: 0`, listed on
+/// `items.required`, and no `$ref`, `enum`, `format`, `pattern`, or
+/// `maximum`. Capture writer always emits `unarchived_records` as u64; this
+/// crate does not invent extra numeric bounds. HealthAssessment.reason_code
+/// stays a free string so unknown RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_unarchived_records_is_required_u64(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "unarchived_records",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("integer")
+        || mapping.scalar("minimum") != Some("0")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("maximum")
+        || mapping.has_key("exclusiveMinimum")
+        || mapping.has_key("exclusiveMaximum")
+    {
+        return false;
+    }
+    yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"unarchived_records"))
 }
 
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
@@ -712,7 +764,8 @@ mod tests {
         LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
         READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string, auxiliary_source_qualification_openapi_enum,
-        auxiliary_source_spool_records_is_required_u64, capture_source_health_openapi_enum,
+        auxiliary_source_spool_records_is_required_u64,
+        auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
         health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
         independent_source_health_openapi_enum, ledger_unsupported_event_reason_openapi_enum,
@@ -760,6 +813,10 @@ mod tests {
         assert!(
             auxiliary_source_spool_records_is_required_u64(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.spool_records as a required u64 integer"
+        );
+        assert!(
+            auxiliary_source_unarchived_records_is_required_u64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.unarchived_records as a required u64 integer"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -1309,6 +1366,141 @@ components:
         assert!(
             !auxiliary_source_spool_records_is_required_u64(bounded),
             "invented spool_records maximum must not satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_unarchived_records_required_u64_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            unarchived_records remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !auxiliary_source_unarchived_records_is_required_u64(prose_only),
+            "prose mention of unarchived_records must not satisfy the required-u64 freeze"
+        );
+
+        let optional_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+            properties:
+              unarchived_records:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !auxiliary_source_unarchived_records_is_required_u64(optional_integer),
+            "optional unarchived_records must not satisfy the required-u64 freeze"
+        );
+
+        let string_count = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - unarchived_records
+            properties:
+              unarchived_records:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_unarchived_records_is_required_u64(string_count),
+            "required non-integer unarchived_records must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - unarchived_records
+            properties:
+              unarchived_records:
+                type: integer
+                minimum: 0
+                format: int64
+"#;
+        assert!(
+            !auxiliary_source_unarchived_records_is_required_u64(formatted),
+            "invented unarchived_records format must not satisfy the freeze"
+        );
+
+        let bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - unarchived_records
+            properties:
+              unarchived_records:
+                type: integer
+                minimum: 0
+                maximum: 100
+"#;
+        assert!(
+            !auxiliary_source_unarchived_records_is_required_u64(bounded),
+            "invented unarchived_records maximum must not satisfy the freeze"
         );
     }
 
