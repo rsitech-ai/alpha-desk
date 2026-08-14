@@ -147,9 +147,11 @@ This is a watch surface for `hl.capture.status.v4` (maintenance omitted) and
 `hl.capture.status.v5` (maintenance required). `hl-capture run` writes V5 with
 fail-closed inactive maintenance when packing is not configured. Missing last-
 heartbeat rates stay omitted, not zero. Missing or invalid snapshots fail
-closed. `GET /healthz` is not ready from a leftover V4 snapshot; `GET /status`
-may still return V4 as-read. It is not live-source qualification, Stage 1
-PASS, or a production desk.
+closed. `GET /healthz` returns HTTP 200 only for a live-ready V5 snapshot
+(fail-closed `maintenance` and `ready: true`). A valid V5 with `ready: false`
+and a leftover V4 snapshot are both 503. `GET /status` may still return V4
+as-read. It is not live-source qualification, Stage 1 PASS, or a production
+desk.
 
 For focused commands and development conventions, read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
