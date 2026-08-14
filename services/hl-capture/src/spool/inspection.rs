@@ -376,36 +376,41 @@ fn verify_local_sequence_chain(
     record_count: u64,
     previous: Option<LocalRecordSequence>,
 ) -> Result<Option<LocalRecordSequence>, SpoolError> {
-    if policy == CursorPolicy::ContiguousNativeOffset {
-        if manifest.first_local_sequence().is_some() || manifest.last_local_sequence().is_some() {
-            return Err(SpoolError::ManifestContentMismatch);
+    match policy {
+        CursorPolicy::ContiguousNativeOffset => {
+            if manifest.first_local_sequence().is_some() || manifest.last_local_sequence().is_some()
+            {
+                return Err(SpoolError::ManifestContentMismatch);
+            }
+            Ok(None)
         }
-        return Ok(None);
+        CursorPolicy::MonotonicByteOffset => {
+            let expected_first = match previous {
+                Some(previous) => previous
+                    .checked_next()
+                    .map_err(|_| SpoolError::SizeOverflow)?,
+                None => LocalRecordSequence::try_new(1).map_err(|_| SpoolError::SizeOverflow)?,
+            };
+            if let Some(declared_first) = manifest.first_local_sequence()
+                && declared_first != expected_first
+            {
+                return Err(SpoolError::ManifestChainBroken);
+            }
+            let expected_last = expected_first
+                .checked_advance_by(
+                    record_count
+                        .checked_sub(1)
+                        .ok_or(SpoolError::ManifestContentMismatch)?,
+                )
+                .map_err(|_| SpoolError::SizeOverflow)?;
+            if let Some(declared_last) = manifest.last_local_sequence()
+                && declared_last != expected_last
+            {
+                return Err(SpoolError::ManifestChainBroken);
+            }
+            Ok(Some(expected_last))
+        }
     }
-    let expected_first = match previous {
-        Some(previous) => previous
-            .checked_next()
-            .map_err(|_| SpoolError::SizeOverflow)?,
-        None => LocalRecordSequence::try_new(1).map_err(|_| SpoolError::SizeOverflow)?,
-    };
-    if let Some(declared_first) = manifest.first_local_sequence()
-        && declared_first != expected_first
-    {
-        return Err(SpoolError::ManifestChainBroken);
-    }
-    let expected_last = expected_first
-        .checked_advance_by(
-            record_count
-                .checked_sub(1)
-                .ok_or(SpoolError::ManifestContentMismatch)?,
-        )
-        .map_err(|_| SpoolError::SizeOverflow)?;
-    if let Some(declared_last) = manifest.last_local_sequence()
-        && declared_last != expected_last
-    {
-        return Err(SpoolError::ManifestChainBroken);
-    }
-    Ok(Some(expected_last))
 }
 
 fn hash_file(path: &Path) -> Result<[u8; 32], SpoolError> {
