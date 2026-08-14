@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -72,10 +73,11 @@ pub const RESTART_RECONSTRUCTION: &[&str] = &["not-required", "incomplete", "com
 pub const AUXILIARY_SOURCE_QUALIFICATION: &[&str] = &["unqualified", "qualified"];
 
 /// Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
-/// are `snapshot_invalid`. Omitted and empty arrays stay valid. This crate
-/// does not vendor hl-capture and this is not a live capture or Stage PASS.
-/// `HealthAssessment.reason_code` stays a free string so unknown RED is not
-/// closed out. Duplicate ids and sort order stay untyped.
+/// are `snapshot_invalid`. Omitted and empty arrays stay valid. Duplicate
+/// present `source_id` is `snapshot_invalid`. Distinct ids stay valid. Sort
+/// order stays untyped. This crate does not vendor hl-capture and this is
+/// not a live capture or Stage PASS. `HealthAssessment.reason_code` stays a
+/// free string so unknown RED is not closed out.
 pub const MAX_AUXILIARY_SOURCES: usize = 16;
 
 const MAINTENANCE_FIELDS: &[&str] = &[
@@ -356,11 +358,18 @@ fn require_auxiliary_source_closed_fields(
     if sources.len() > MAX_AUXILIARY_SOURCES {
         return Err(SnapshotError::Invalid);
     }
+    let mut seen_source_ids = HashSet::with_capacity(sources.len());
     for source in sources {
         let Value::Object(source) = source else {
             return Err(SnapshotError::Invalid);
         };
         require_string(source, "source_id", None)?;
+        let Some(Value::String(source_id)) = source.get("source_id") else {
+            return Err(SnapshotError::Invalid);
+        };
+        if !seen_source_ids.insert(source_id.as_str()) {
+            return Err(SnapshotError::Invalid);
+        }
         require_u64(source, "spool_records")?;
         require_u64(source, "unarchived_records")?;
         require_bool(source, "partial_line")?;
@@ -752,6 +761,19 @@ mod tests {
                 .join(name),
         )
         .unwrap_or_else(|error| panic!("read fixture {name}: {error}"))
+    }
+
+    fn auxiliary_sources_with_distinct_ids(
+        known: &serde_json::Value,
+        count: usize,
+    ) -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|index| {
+                let mut item = known.clone();
+                item["source_id"] = serde_json::json!(format!("aux-source-{index}"));
+                item
+            })
+            .collect()
     }
 
     #[test]
@@ -1233,6 +1255,10 @@ mod tests {
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
         );
         assert!(
+            document.contains("Duplicate present source_id"),
+            "OpenAPI must describe source_id uniqueness without uniqueItems"
+        );
+        assert!(
             health_reason_code_is_unrestricted_string(document),
             "reason_code must stay a free string so unknown RED codes fail closed"
         );
@@ -1436,7 +1462,10 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
                 .expect("v5 json");
         let known = value["auxiliary_sources"][0].clone();
-        value["auxiliary_sources"] = serde_json::Value::Array(vec![known; MAX_AUXILIARY_SOURCES]);
+        value["auxiliary_sources"] = serde_json::Value::Array(auxiliary_sources_with_distinct_ids(
+            &known,
+            MAX_AUXILIARY_SOURCES,
+        ));
         let bytes = serde_json::to_vec(&value).expect("encode cap auxiliary_sources");
         let parsed = parse_capture_status_bytes(&bytes).expect("writer-cap auxiliary_sources");
         assert_eq!(
@@ -1454,12 +1483,47 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
                 .expect("v5 json");
         let known = value["auxiliary_sources"][0].clone();
-        value["auxiliary_sources"] =
-            serde_json::Value::Array(vec![known; MAX_AUXILIARY_SOURCES + 1]);
+        value["auxiliary_sources"] = serde_json::Value::Array(auxiliary_sources_with_distinct_ids(
+            &known,
+            MAX_AUXILIARY_SOURCES + 1,
+        ));
         let bytes = serde_json::to_vec(&value).expect("encode over-cap auxiliary_sources");
         assert_eq!(
             parse_capture_status_bytes(&bytes)
                 .expect_err("over-cap auxiliary_sources must not fail open"),
+            SnapshotError::Invalid
+        );
+    }
+
+    #[test]
+    fn distinct_auxiliary_source_ids_are_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        let known = value["auxiliary_sources"][0].clone();
+        let mut other = known.clone();
+        other["source_id"] = serde_json::json!("node-fills");
+        value["auxiliary_sources"] = serde_json::json!([known, other]);
+        let bytes = serde_json::to_vec(&value).expect("encode distinct source_id");
+        let parsed = parse_capture_status_bytes(&bytes).expect("distinct source_id");
+        assert_eq!(
+            parsed["auxiliary_sources"][0]["source_id"],
+            "node-misc-events"
+        );
+        assert_eq!(parsed["auxiliary_sources"][1]["source_id"], "node-fills");
+    }
+
+    #[test]
+    fn duplicate_auxiliary_source_id_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        let known = value["auxiliary_sources"][0].clone();
+        value["auxiliary_sources"] = serde_json::json!([known.clone(), known]);
+        let bytes = serde_json::to_vec(&value).expect("encode duplicate source_id");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes)
+                .expect_err("duplicate present source_id must not fail open"),
             SnapshotError::Invalid
         );
     }
