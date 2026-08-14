@@ -912,14 +912,17 @@ fn validate_observation_policy(
     policy: CursorPolicy,
     observation_class: ObservationClass,
 ) -> Result<(), SpoolError> {
-    if policy == CursorPolicy::MonotonicByteOffset
-        && matches!(
-            observation_class,
-            ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock
-        )
-    {
-        Err(SpoolError::CursorPolicyMismatch)
-    } else {
-        Ok(())
+    match policy {
+        CursorPolicy::MonotonicByteOffset => {
+            if matches!(
+                observation_class,
+                ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock
+            ) {
+                Err(SpoolError::CursorPolicyMismatch)
+            } else {
+                Ok(())
+            }
+        }
+        CursorPolicy::ContiguousNativeOffset => Ok(()),
     }
 }
