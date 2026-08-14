@@ -279,10 +279,6 @@ fn wait_for_http(addr: SocketAddr, path: &str) -> (u16, String) {
     panic!("serve-status did not accept HTTP at {addr}: {last_error:?}");
 }
 
-fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
-    try_http_get(addr, path).unwrap_or_else(|error| panic!("http get {path}: {error}"))
-}
-
 #[test]
 fn serve_status_cli_serves_written_v5_json_and_fails_closed_on_a_missing_file() {
     let directory = tempdir().expect("temporary directory");
@@ -329,7 +325,7 @@ fn serve_status_cli_serves_written_v5_json_and_fails_closed_on_a_missing_file() 
         )
         .expect("write status");
 
-    let (status, body) = http_get(addr, "/status");
+    let (status, body) = wait_for_http(addr, "/status");
     assert_eq!(status, 200);
     let json_start = body.find("\r\n\r\n").expect("header terminator") + 4;
     let value: serde_json::Value = serde_json::from_str(&body[json_start..]).expect("status JSON");
