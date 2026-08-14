@@ -1,5 +1,6 @@
 import {
   parseApiError,
+  parseCaptureHealth,
   parseCaptureStatus,
   parseCoreHealth,
   parseHealthAssessment,
@@ -139,6 +140,15 @@ async function fetchHealth(
         kind: "ok",
         status: result.status,
         data: core.value,
+        raw: result.value,
+      }
+    }
+    const captureHealth = parseCaptureHealth(result.value)
+    if (captureHealth.ok) {
+      return {
+        kind: "ok",
+        status: result.status,
+        data: captureHealth.value,
         raw: result.value,
       }
     }

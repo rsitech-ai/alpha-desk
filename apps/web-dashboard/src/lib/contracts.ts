@@ -1,6 +1,7 @@
 export const HEALTH_SCHEMA_VERSION = "hl.health.v1" as const
 export const CORE_HEALTH_SCHEMA_VERSION = "hl.core.health.v1" as const
 export const CORE_STATUS_SCHEMA_VERSION = "hl.core.status.v1" as const
+export const CAPTURE_HEALTH_SCHEMA_VERSION = "hl.capture.health.v1" as const
 export const CAPTURE_STATUS_SCHEMA_VERSION = "hl.capture.status.v4" as const
 export const CAPTURE_STATUS_SCHEMA_V5 = "hl.capture.status.v5" as const
 export const API_ERROR_SCHEMA_VERSION = "hl.api.error.v1" as const
@@ -25,6 +26,12 @@ export type LedgerUnsupportedEventReason = "ledger.unsupported_event"
 export const LEDGER_UNSUPPORTED_EVENT_REASONS = [
   "ledger.unsupported_event",
 ] as const satisfies readonly LedgerUnsupportedEventReason[]
+
+export type CaptureHealthNotReadyReason = "capture_health.not_ready"
+
+export const CAPTURE_HEALTH_NOT_READY_REASONS = [
+  "capture_health.not_ready",
+] as const satisfies readonly CaptureHealthNotReadyReason[]
 
 export type CaptureStatusSchema =
   typeof CAPTURE_STATUS_SCHEMA_VERSION | typeof CAPTURE_STATUS_SCHEMA_V5
@@ -65,6 +72,14 @@ export interface CoreHealth {
   stage_2_qualified: boolean
 }
 
+export interface CaptureHealthBody {
+  schema_version: typeof CAPTURE_HEALTH_SCHEMA_VERSION
+  ok: boolean
+  health?: CaptureHealth
+  ready?: boolean
+  reason_code?: string
+}
+
 export interface CoreStatus {
   schema_version: typeof CORE_STATUS_SCHEMA_VERSION
   ready: boolean
@@ -74,7 +89,7 @@ export interface CoreStatus {
   stage_2_qualified: boolean
 }
 
-export type HealthBody = HealthAssessment | CoreHealth
+export type HealthBody = HealthAssessment | CoreHealth | CaptureHealthBody
 
 export const CORE_HEALTH_FIELD_ORDER = [
   "schema_version",
@@ -92,6 +107,14 @@ export const CORE_STATUS_FIELD_ORDER = [
   "fail_closed_reason",
   "live_qualified",
   "stage_2_qualified",
+] as const
+
+export const CAPTURE_HEALTH_FIELD_ORDER = [
+  "schema_version",
+  "ok",
+  "health",
+  "ready",
+  "reason_code",
 ] as const
 
 export interface AuxiliarySourceStatus {
@@ -303,14 +326,52 @@ export function asLedgerUnsupportedEventReason(
   }
 }
 
+export function asCaptureHealthNotReadyReason(
+  value: string
+): CaptureHealthNotReadyReason | undefined {
+  switch (value) {
+    case "capture_health.not_ready":
+      return value
+    default:
+      return undefined
+  }
+}
+
 export function asTypedCoreFailClosedReason(
   value: string
-): CoreDeadletterReason | LedgerUnsupportedEventReason | undefined {
-  return asCoreDeadletterReason(value) ?? asLedgerUnsupportedEventReason(value)
+):
+  | CoreDeadletterReason
+  | LedgerUnsupportedEventReason
+  | CaptureHealthNotReadyReason
+  | undefined {
+  return (
+    asCoreDeadletterReason(value) ??
+    asLedgerUnsupportedEventReason(value) ??
+    asCaptureHealthNotReadyReason(value)
+  )
+}
+
+export function healthReasonCode(body: HealthBody): string | undefined {
+  switch (body.schema_version) {
+    case HEALTH_SCHEMA_VERSION:
+      return body.reason_code
+    case CORE_HEALTH_SCHEMA_VERSION:
+      return body.reason_code === null ? undefined : body.reason_code
+    case CAPTURE_HEALTH_SCHEMA_VERSION:
+      return body.reason_code
+    default:
+      return assertNever(body)
+  }
 }
 
 export function isCoreHealth(value: HealthBody): value is CoreHealth {
   return value.schema_version === CORE_HEALTH_SCHEMA_VERSION
+}
+
+export function isCaptureHealthBody(
+  value: HealthBody
+): value is CaptureHealthBody {
+  return value.schema_version === CAPTURE_HEALTH_SCHEMA_VERSION
 }
 
 export function parseCoreHealth(value: unknown): ParseResult<CoreHealth> {
@@ -354,6 +415,48 @@ export function parseCoreHealth(value: unknown): ParseResult<CoreHealth> {
       reason_code: reason_code.value,
       live_qualified: live_qualified.value,
       stage_2_qualified: stage_2_qualified.value,
+    },
+  }
+}
+
+export function parseCaptureHealth(
+  value: unknown
+): ParseResult<CaptureHealthBody> {
+  if (!isRecord(value)) {
+    return { ok: false, detail: "capture health body is not an object" }
+  }
+  const schema_version = requireConst(
+    value,
+    "schema_version",
+    CAPTURE_HEALTH_SCHEMA_VERSION
+  )
+  if (!schema_version.ok) {
+    return schema_version
+  }
+  const ok = requireBool(value, "ok")
+  if (!ok.ok) {
+    return ok
+  }
+  const health = optionalEnum(value, "health", CAPTURE_HEALTH)
+  if (!health.ok) {
+    return health
+  }
+  const ready = optionalBool(value, "ready")
+  if (!ready.ok) {
+    return ready
+  }
+  const reason_code = optionalNonEmptyString(value, "reason_code")
+  if (!reason_code.ok) {
+    return reason_code
+  }
+  return {
+    ok: true,
+    value: {
+      schema_version: schema_version.value,
+      ok: ok.value,
+      health: health.value,
+      ready: ready.value,
+      reason_code: reason_code.value,
     },
   }
 }
@@ -738,6 +841,27 @@ function optionalNonNegativeInt(
     return { ok: true, value: undefined }
   }
   return requireNonNegativeInt(object, field)
+}
+
+function optionalBool(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<boolean | undefined> {
+  if (!(field in object) || object[field] === null) {
+    return { ok: true, value: undefined }
+  }
+  return requireBool(object, field)
+}
+
+function optionalEnum<T extends string>(
+  object: Record<string, unknown>,
+  field: string,
+  allowed: readonly T[]
+): ParseResult<T | undefined> {
+  if (!(field in object) || object[field] === null) {
+    return { ok: true, value: undefined }
+  }
+  return requireEnum(object, field, allowed)
 }
 
 function requireEnum<T extends string>(
