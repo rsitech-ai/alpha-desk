@@ -320,13 +320,13 @@ impl SpoolConfig {
         }
         self.committed_durability.validate()?;
         self.provisional_durability.validate()?;
-        if !matches!(
-            self.committed_durability,
-            DurabilityPolicy::FsyncEveryRecord
-        ) {
-            return Err(ConfigError::InvalidDurabilityPolicy);
+        match self.committed_durability {
+            DurabilityPolicy::FsyncEveryRecord => Ok(()),
+            DurabilityPolicy::Batched {
+                max_records: _,
+                max_delay_millis: _,
+            } => Err(ConfigError::InvalidDurabilityPolicy),
         }
-        Ok(())
     }
 
     #[must_use]
