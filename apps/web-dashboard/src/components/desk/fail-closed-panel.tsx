@@ -26,8 +26,6 @@ import {
 } from "@/lib/api"
 import {
   API_ERROR_SCHEMA_VERSION,
-  asCoreDeadletterReason,
-  isCoreHealth,
   type ApiError,
   type CaptureStatus,
   type HealthBody,
@@ -50,14 +48,16 @@ export function FailClosedCard({
       <CardHeader className="border-b">
         <CardTitle>Fail-closed API states</CardTitle>
         <CardDescription>
-          Typed 503 / 429 / 400 / 501 from hl-api, including hl-core dead-letter
-          fail-closed reasons. Empty is not green. This is not Stage 6 and not
+          Typed 503 / 429 / 400 / 501 from hl-api, including hl-core
+          dead-letter and ledger.unsupported_event consume-poison fail-closed
+          reasons. Empty is not green. This is not Stage 6 and not
           live-qualified.
         </CardDescription>
       </CardHeader>
       <CardContent>
         {loading || !feed ? (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+            <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
             <Skeleton className="h-36 w-full" />
@@ -65,7 +65,7 @@ export function FailClosedCard({
             <Skeleton className="h-36 w-full" />
           </div>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
             <Lane
               label="503 capture status"
               path="/v1/capture/status"
@@ -77,6 +77,12 @@ export function FailClosedCard({
               path="/healthz · /status"
               expected="core_deadletter"
               body={deadletterLane(feed)}
+            />
+            <Lane
+              label="503 ledger unsupported event"
+              path="/healthz · /status"
+              expected="ledger_unsupported_event"
+              body={ledgerUnsupportedLane(feed)}
             />
             <Lane
               label="400 invalid query"
@@ -252,7 +258,7 @@ function budgetLane(feed: DeskFeed): LaneBody {
 }
 
 function deadletterLane(feed: DeskFeed): LaneBody {
-  const live = liveDeadletterView(feed)
+  const live = liveTypedCoreView(feed, "core_deadletter")
   if (live) {
     return { kind: "observed", view: live }
   }
@@ -263,14 +269,29 @@ function deadletterLane(feed: DeskFeed): LaneBody {
   }
 }
 
-function liveDeadletterView(feed: DeskFeed): FailClosedView | undefined {
+function ledgerUnsupportedLane(feed: DeskFeed): LaneBody {
+  const live = liveTypedCoreView(feed, "ledger_unsupported_event")
+  if (live) {
+    return { kind: "observed", view: live }
+  }
+  return {
+    kind: "not_observed",
+    detail:
+      "hl-core ledger.unsupported_event consume-poison was not returned this poll. Not a PASS.",
+  }
+}
+
+function liveTypedCoreView(
+  feed: DeskFeed,
+  family: FailClosedFamily
+): FailClosedView | undefined {
   const healthOutcomes: EndpointOutcome<HealthBody>[] = [
     feed.healthz,
     feed.readyz,
     feed.canonicalHealth,
   ]
   for (const outcome of healthOutcomes) {
-    const view = deadletterViewFromHealth(outcome)
+    const view = typedViewFromHealth(outcome, family)
     if (view) {
       return view
     }
@@ -280,49 +301,34 @@ function liveDeadletterView(feed: DeskFeed): FailClosedView | undefined {
       feed.captureStatus.status,
       feed.captureStatus.error
     )
-    if (view.family === "core_deadletter") {
+    if (view.family === family) {
       return view
     }
   }
   return undefined
 }
 
-function deadletterViewFromHealth(
-  outcome: EndpointOutcome<HealthBody>
+function typedViewFromHealth(
+  outcome: EndpointOutcome<HealthBody>,
+  family: FailClosedFamily
 ): FailClosedView | undefined {
   if (outcome.kind === "http-error") {
     const view = mapApiError(outcome.status, outcome.error)
-    if (view.family === "core_deadletter") {
-      return view
-    }
-    return undefined
+    return view.family === family ? view : undefined
   }
   if (outcome.kind !== "ok") {
     return undefined
   }
-  if (isCoreHealth(outcome.data)) {
-    if (outcome.data.reason_code === null) {
-      return undefined
-    }
-    const view = mapApiError(outcome.status, {
-      schema_version: API_ERROR_SCHEMA_VERSION,
-      code: "data_unavailable",
-      reason_code: outcome.data.reason_code,
-    })
-    if (view.family === "core_deadletter") {
-      return view
-    }
+  const reason_code = outcome.data.reason_code
+  if (reason_code === null) {
     return undefined
   }
-  const known = asCoreDeadletterReason(outcome.data.reason_code)
-  if (!known) {
-    return undefined
-  }
-  return mapApiError(outcome.status, {
+  const view = mapApiError(outcome.status, {
     schema_version: API_ERROR_SCHEMA_VERSION,
     code: "data_unavailable",
-    reason_code: outcome.data.reason_code,
+    reason_code,
   })
+  return view.family === family ? view : undefined
 }
 
 function liveBudgetView(feed: DeskFeed): FailClosedView | undefined {
