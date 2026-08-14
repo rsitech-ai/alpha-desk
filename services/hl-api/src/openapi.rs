@@ -6,7 +6,7 @@
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
-/// top-level last_error_reason, top-level failover_height, top-level failover_reason, top-level durable_height, auxiliary quarantine_reason,
+/// top-level last_error_reason, top-level failover_height, top-level failover_reason, top-level durable_height, top-level capture_backlog_records, auxiliary quarantine_reason,
 /// auxiliary_sources maxItems,
 /// auxiliary source_id uniqueness, auxiliary source_id sort order,
 /// auxiliary source extra keys, auxiliary source health, auxiliary restart
@@ -1008,6 +1008,47 @@ pub fn capture_status_durable_height_is_optional_u64(document: &str) -> bool {
     .is_some_and(|required| required.contains(&"durable_height"))
 }
 
+/// True when top-level `CaptureStatusBase.properties.capture_backlog_records`
+/// is a required u64 integer: `type: integer`, `minimum: 0`, listed on
+/// `CaptureStatusBase.required`, and no `$ref`, `enum`, `format`, `pattern`,
+/// or `maximum`. Capture writer always emits `capture_backlog_records` as
+/// u64; this crate does not invent extra numeric bounds or treat omitted as
+/// valid. HealthAssessment.reason_code stays a free string so unknown RED is
+/// not closed out.
+#[must_use]
+pub fn capture_status_capture_backlog_records_is_required_u64(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "capture_backlog_records",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("integer")
+        || mapping.scalar("minimum") != Some("0")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("maximum")
+        || mapping.has_key("exclusiveMinimum")
+        || mapping.has_key("exclusiveMaximum")
+    {
+        return false;
+    }
+    yaml_string_sequence(
+        document,
+        &["components", "schemas", "CaptureStatusBase"],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"capture_backlog_records"))
+}
+
 /// True when `CaptureStatusBase.properties.auxiliary_sources` is an array
 /// capped at capture writer [`MAX_AUXILIARY_SOURCES`]: `type: array`,
 /// `maxItems` equal to that constant, and no `minItems` or `uniqueItems`.
@@ -1045,11 +1086,11 @@ pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
 /// properties are parse `snapshot_invalid`. Known objects without extras
 /// stay valid. CaptureStatusBase itself does not set
 /// `additionalProperties: false` (top-level writer fields such as
-/// `capture_backlog_records`, `oldest_pending_capture_height`,
-/// `disk_free_basis_points`, and `archive_manifest_id` stay untyped).
-/// Top-level `failover_height` is an optional u64. Top-level
-/// `failover_reason` is an optional kebab-case enum. Top-level
-/// `durable_height` is an optional u64. Top-level
+/// `oldest_pending_capture_height`, `disk_free_basis_points`, and
+/// `archive_manifest_id` stay untyped). Top-level `failover_height` is an
+/// optional u64. Top-level `failover_reason` is an optional kebab-case enum.
+/// Top-level `durable_height` is an optional u64. Top-level
+/// `capture_backlog_records` is a required u64. Top-level
 /// `last_error_reason` is an optional string.
 /// HealthAssessment.reason_code stays a free string so unknown RED is not
 /// closed out.
@@ -1480,7 +1521,8 @@ mod tests {
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-        capture_source_health_openapi_enum, capture_status_durable_height_is_optional_u64,
+        capture_source_health_openapi_enum, capture_status_capture_backlog_records_is_required_u64,
+        capture_status_durable_height_is_optional_u64,
         capture_status_failover_height_is_optional_u64,
         capture_status_failover_reason_is_optional_enum,
         capture_status_failover_reason_openapi_enum,
@@ -1591,6 +1633,10 @@ mod tests {
         assert!(
             capture_status_durable_height_is_optional_u64(document),
             "OpenAPI must define CaptureStatusBase.durable_height as an optional u64 integer"
+        );
+        assert!(
+            capture_status_capture_backlog_records_is_required_u64(document),
+            "OpenAPI must define CaptureStatusBase.capture_backlog_records as a required u64 integer"
         );
         assert!(
             auxiliary_source_items_forbid_additional_properties(document),
@@ -4391,6 +4437,164 @@ components:
         assert!(
             capture_status_durable_height_is_optional_u64(optional_integer),
             "optional u64 durable_height must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_top_level_capture_backlog_records_required_u64_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - pending_blocks
+      properties:
+        pending_blocks:
+          description: >
+            capture_backlog_records remains in prose after the YAML property drops it.
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_capture_backlog_records_is_required_u64(prose_only),
+            "prose mention of capture_backlog_records must not satisfy the required-u64 freeze"
+        );
+
+        let optional_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - pending_blocks
+      properties:
+        capture_backlog_records:
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_capture_backlog_records_is_required_u64(optional_integer),
+            "optional capture_backlog_records must not satisfy the required-u64 freeze"
+        );
+
+        let nested_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - pending_blocks
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - spool_records
+            properties:
+              spool_records:
+                type: integer
+                minimum: 0
+              capture_backlog_records:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !capture_status_capture_backlog_records_is_required_u64(nested_only),
+            "nested capture_backlog_records must not satisfy the top-level required-u64 freeze"
+        );
+
+        let string_count = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - capture_backlog_records
+      properties:
+        capture_backlog_records:
+          type: string
+"#;
+        assert!(
+            !capture_status_capture_backlog_records_is_required_u64(string_count),
+            "required non-integer capture_backlog_records must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - capture_backlog_records
+      properties:
+        capture_backlog_records:
+          type: integer
+          minimum: 0
+          format: int64
+"#;
+        assert!(
+            !capture_status_capture_backlog_records_is_required_u64(formatted),
+            "invented capture_backlog_records format must not satisfy the freeze"
+        );
+
+        let bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - capture_backlog_records
+      properties:
+        capture_backlog_records:
+          type: integer
+          minimum: 0
+          maximum: 100
+"#;
+        assert!(
+            !capture_status_capture_backlog_records_is_required_u64(bounded),
+            "invented capture_backlog_records maximum must not satisfy the freeze"
+        );
+
+        let required_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - schema_version
+        - pending_blocks
+        - capture_backlog_records
+      properties:
+        capture_backlog_records:
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            capture_status_capture_backlog_records_is_required_u64(required_integer),
+            "required u64 capture_backlog_records must satisfy the freeze"
         );
     }
 
