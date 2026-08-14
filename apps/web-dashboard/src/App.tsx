@@ -31,7 +31,6 @@ import {
   CORE_HEALTH_SCHEMA_VERSION,
   HEALTH_SCHEMA_VERSION,
   asTypedCoreFailClosedReason,
-  assertNever,
   healthReasonCode,
   type ApiError,
   type CaptureHealthBody,
@@ -42,6 +41,7 @@ import {
 import {
   captureHealthWatchView,
   coreHealthWatchView,
+  healthBodyIsFailClosed,
   mapApiError,
 } from "@/lib/fail-closed"
 
@@ -178,13 +178,12 @@ function deriveConnection(state: FeedState): {
     feed.captureStatus.kind === "ok" &&
     (feed.captureStatus.data.health !== "green" ||
       !feed.captureStatus.data.ready)
-  const healthDegraded =
-    feed.canonicalHealth.kind === "ok" &&
-    healthBodyIsDegraded(feed.canonicalHealth.status, feed.canonicalHealth.data)
-  const readyDegraded =
-    feed.readyz.kind === "ok" &&
-    healthBodyIsDegraded(feed.readyz.status, feed.readyz.data)
-  if (captureDegraded || healthDegraded || readyDegraded) {
+  const healthDegraded = [feed.healthz, feed.readyz, feed.canonicalHealth].some(
+    (outcome) =>
+      outcome.kind === "ok" &&
+      healthBodyIsFailClosed(outcome.status, outcome.data)
+  )
+  if (captureDegraded || healthDegraded) {
     return {
       kind: "degraded",
       detail: "API reachable; health, ready, or capture is not green/ready.",
@@ -238,31 +237,6 @@ function typedCoreFailClosedReason(
     return undefined
   }
   return asTypedCoreFailClosedReason(reason)
-}
-
-function healthBodyIsDegraded(status: number, body: HealthBody): boolean {
-  switch (body.schema_version) {
-    case CORE_HEALTH_SCHEMA_VERSION:
-      return (
-        status === 503 ||
-        !body.ok ||
-        !body.ready ||
-        body.live_qualified ||
-        body.stage_2_qualified ||
-        body.reason_code !== null
-      )
-    case CAPTURE_HEALTH_SCHEMA_VERSION:
-      return (
-        status === 503 ||
-        !body.ok ||
-        body.ready !== true ||
-        body.reason_code !== undefined
-      )
-    case HEALTH_SCHEMA_VERSION:
-      return status === 503 || body.state !== "HEALTH_STATE_GREEN"
-    default:
-      return assertNever(body)
-  }
 }
 
 function StatusStrip({ feed }: { feed: DeskFeed | undefined }) {
@@ -388,18 +362,9 @@ function ReadyChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
     }
     case "ok": {
       switch (outcome.data.schema_version) {
-        case CORE_HEALTH_SCHEMA_VERSION: {
-          const unready =
-            coreHealthWatchView(outcome.status, outcome.data) !== undefined
-          return (
-            <ToneBadge tone={unready ? "red" : "yellow"}>
-              {unready ? "unready" : "not live-qualified"}
-            </ToneBadge>
-          )
-        }
+        case CORE_HEALTH_SCHEMA_VERSION:
         case CAPTURE_HEALTH_SCHEMA_VERSION: {
-          const unready =
-            captureHealthWatchView(outcome.status, outcome.data) !== undefined
+          const unready = healthBodyIsFailClosed(outcome.status, outcome.data)
           return (
             <ToneBadge tone={unready ? "red" : "yellow"}>
               {unready ? "unready" : "not live-qualified"}
@@ -407,9 +372,7 @@ function ReadyChip({ outcome }: { outcome: EndpointOutcome<HealthBody> }) {
           )
         }
         case HEALTH_SCHEMA_VERSION: {
-          const unready =
-            outcome.status === 503 ||
-            outcome.data.state !== "HEALTH_STATE_GREEN"
+          const unready = healthBodyIsFailClosed(outcome.status, outcome.data)
           return (
             <ToneBadge tone={unready ? "red" : "green"}>
               {unready ? "unready" : "ready"}
