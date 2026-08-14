@@ -25,6 +25,7 @@ pub use openapi::{
     auxiliary_source_local_sequence_is_optional_u64,
     auxiliary_source_partial_line_is_required_bool, auxiliary_source_qualification_openapi_enum,
     auxiliary_source_spool_records_is_required_u64,
+    auxiliary_source_tail_cursor_epoch_is_optional_string,
     auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
     committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,

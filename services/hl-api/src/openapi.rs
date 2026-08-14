@@ -3,8 +3,9 @@
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
 /// committed source class, committed source health, auxiliary source
 /// identity, auxiliary spool_records, auxiliary unarchived_records,
-/// auxiliary partial_line, auxiliary cursor_epoch, auxiliary durable_offset,
-/// auxiliary local_sequence, auxiliary last_durable_wall_micros,
+/// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
+/// auxiliary durable_offset, auxiliary local_sequence,
+/// auxiliary last_durable_wall_micros,
 /// auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
@@ -464,6 +465,53 @@ pub fn auxiliary_source_cursor_epoch_is_optional_string(document: &str) -> bool 
         "required",
     )
     .is_some_and(|required| required.contains(&"cursor_epoch"))
+}
+
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.tail_cursor_epoch`
+/// is an optional free string: `type: string`, not listed on `items.required`,
+/// and no `$ref`, `enum`, `format`, or `pattern`. Capture writer emits
+/// `tail_cursor_epoch` as a string (`Option` + `skip_serializing_if`); this
+/// crate does not invent extra identity formats. HealthAssessment.reason_code
+/// stays a free string so unknown RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_tail_cursor_epoch_is_optional_string(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "tail_cursor_epoch",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("string")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"tail_cursor_epoch"))
 }
 
 /// True when nested
@@ -1025,6 +1073,7 @@ mod tests {
         auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
+        auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
         health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
@@ -1085,6 +1134,10 @@ mod tests {
         assert!(
             auxiliary_source_cursor_epoch_is_optional_string(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.cursor_epoch as an optional string"
+        );
+        assert!(
+            auxiliary_source_tail_cursor_epoch_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.tail_cursor_epoch as an optional string"
         );
         assert!(
             auxiliary_source_durable_offset_is_optional_u64(document),
@@ -2080,6 +2133,166 @@ components:
         assert!(
             auxiliary_source_cursor_epoch_is_optional_string(optional_string),
             "optional string cursor_epoch must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_tail_cursor_epoch_optional_string_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            tail_cursor_epoch remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_tail_cursor_epoch_is_optional_string(prose_only),
+            "prose mention of tail_cursor_epoch must not satisfy the optional-string freeze"
+        );
+
+        let required_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - tail_cursor_epoch
+            properties:
+              tail_cursor_epoch:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_tail_cursor_epoch_is_optional_string(required_string),
+            "required tail_cursor_epoch must not satisfy the optional-string freeze"
+        );
+
+        let integer_epoch = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              tail_cursor_epoch:
+                type: integer
+"#;
+        assert!(
+            !auxiliary_source_tail_cursor_epoch_is_optional_string(integer_epoch),
+            "optional non-string tail_cursor_epoch must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              tail_cursor_epoch:
+                type: string
+                format: uuid
+"#;
+        assert!(
+            !auxiliary_source_tail_cursor_epoch_is_optional_string(formatted),
+            "invented tail_cursor_epoch format must not satisfy the freeze"
+        );
+
+        let closed_enum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              tail_cursor_epoch:
+                type: string
+                enum:
+                  - node-file-v1:epoch
+"#;
+        assert!(
+            !auxiliary_source_tail_cursor_epoch_is_optional_string(closed_enum),
+            "invented tail_cursor_epoch enum must not satisfy the freeze"
+        );
+
+        let optional_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              tail_cursor_epoch:
+                type: string
+"#;
+        assert!(
+            auxiliary_source_tail_cursor_epoch_is_optional_string(optional_string),
+            "optional string tail_cursor_epoch must satisfy the freeze"
         );
     }
 
