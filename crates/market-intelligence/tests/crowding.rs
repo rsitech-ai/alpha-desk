@@ -329,14 +329,14 @@ fn boolean_book_cannot_mint_crowding_proof() {
     assert!(matches!(
         boolean_book.require_observed_book_and_fills(),
         Err(MarketError::Malformed {
-            what: "observation",
+            what: "book",
             reason: "boolean cannot mint decimal depth",
         })
     ));
     assert!(matches!(
         crowding_components_from_snapshot(&boolean_book, &positions, usd(50)),
         Err(MarketError::Malformed {
-            what: "observation",
+            what: "book",
             reason: "boolean cannot mint decimal depth",
         })
     ));

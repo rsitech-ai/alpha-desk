@@ -38,8 +38,52 @@ pub enum BooleanObservationPurpose {
     Ready,
 }
 
+/// Admission outcome for a named snapshot observation.
+///
+/// Missing and cross-kind malformed are distinct. Callers must not fold
+/// inventory `Malformed` into a book/fills missing reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationAdmission {
+    Observed,
+    Missing,
+    Malformed {
+        what: &'static str,
+        reason: &'static str,
+    },
+}
+
+impl ObservationAdmission {
+    fn from_error(name: &'static str, error: MarketError) -> Self {
+        match error {
+            MarketError::MissingInput { .. } => Self::Missing,
+            MarketError::Malformed { what, reason } => Self::Malformed { what, reason },
+            MarketError::EmptyIdentifier { .. }
+            | MarketError::Unsupported { .. }
+            | MarketError::InsufficientHistory { .. }
+            | MarketError::RedDataHealth { .. }
+            | MarketError::EmptyDenominator
+            | MarketError::ScaleMismatch
+            | MarketError::Overflow
+            | MarketError::DivisionByZero
+            | MarketError::OutOfRange
+            | MarketError::Feature(_) => Self::Malformed {
+                what: name,
+                reason: "unusable observation",
+            },
+        }
+    }
+}
+
 impl ObservationStatus {
     pub fn from_typed_feature(
+        value: Option<&FeatureValue>,
+        kind: ObservationMintKind,
+    ) -> Result<Self, MarketError> {
+        Self::from_named_typed_feature("observation", value, kind)
+    }
+
+    fn from_named_typed_feature(
+        what: &'static str,
         value: Option<&FeatureValue>,
         kind: ObservationMintKind,
     ) -> Result<Self, MarketError> {
@@ -51,7 +95,7 @@ impl ObservationStatus {
             (ObservationMintKind::DecimalDepth, FeatureValue::Decimal { .. }) => Ok(Self::Observed),
             (ObservationMintKind::DecimalDepth, FeatureValue::Boolean(_)) => {
                 Err(MarketError::Malformed {
-                    what: "observation",
+                    what,
                     reason: "boolean cannot mint decimal depth",
                 })
             }
@@ -63,7 +107,7 @@ impl ObservationStatus {
             }
             (ObservationMintKind::BooleanPresence, FeatureValue::Decimal { .. }) => {
                 Err(MarketError::Malformed {
-                    what: "observation",
+                    what,
                     reason: "decimal depth cannot mint boolean presence",
                 })
             }
@@ -73,7 +117,7 @@ impl ObservationStatus {
                 | FeatureValue::UnsignedInteger(_)
                 | FeatureValue::ProbabilityPpm(_)
                 | FeatureValue::Category(_),
-            ) => Err(unsupported_observation_value(value)),
+            ) => Err(unsupported_observation_value(what, value)),
         }
     }
 
@@ -86,7 +130,7 @@ impl ObservationStatus {
     }
 }
 
-fn unsupported_observation_value(value: &FeatureValue) -> MarketError {
+fn unsupported_observation_value(what: &'static str, value: &FeatureValue) -> MarketError {
     match value {
         FeatureValue::Decimal { .. }
         | FeatureValue::SignedInteger(_)
@@ -95,7 +139,7 @@ fn unsupported_observation_value(value: &FeatureValue) -> MarketError {
         | FeatureValue::Category(_)
         | FeatureValue::Boolean(_)
         | FeatureValue::Missing(_) => MarketError::Malformed {
-            what: "observation",
+            what,
             reason: "unsupported observation value for mint kind",
         },
     }
@@ -355,28 +399,42 @@ impl MarketFeatureSnapshot {
         kind: ObservationMintKind,
     ) -> Result<ObservationStatus, MarketError> {
         let key = market_feature_key(name)?;
-        ObservationStatus::from_typed_feature(self.values.get(&key), kind)
+        ObservationStatus::from_named_typed_feature(name, self.values.get(&key), kind)
+    }
+
+    #[must_use]
+    pub fn admit_observation(
+        &self,
+        name: &'static str,
+        kind: ObservationMintKind,
+    ) -> ObservationAdmission {
+        match self.observation(name, kind) {
+            Ok(status) => match status {
+                ObservationStatus::Observed => ObservationAdmission::Observed,
+                ObservationStatus::Missing(_) => ObservationAdmission::Missing,
+            },
+            Err(error) => ObservationAdmission::from_error(name, error),
+        }
+    }
+
+    fn require_named_observation(
+        &self,
+        name: &'static str,
+        kind: ObservationMintKind,
+    ) -> Result<(), MarketError> {
+        match self.admit_observation(name, kind) {
+            ObservationAdmission::Observed => Ok(()),
+            ObservationAdmission::Missing => Err(MarketError::MissingInput { name }),
+            ObservationAdmission::Malformed { what, reason } => {
+                Err(MarketError::Malformed { what, reason })
+            }
+        }
     }
 
     pub fn require_observed_book_and_fills(&self) -> Result<ObservedBookAndFills<'_>, MarketError> {
-        match self.observation("book", ObservationMintKind::DecimalDepth)? {
-            ObservationStatus::Observed => {}
-            ObservationStatus::Missing(_) => {
-                return Err(MarketError::MissingInput { name: "book" });
-            }
-        }
-        match self.observation("fills", ObservationMintKind::BooleanPresence)? {
-            ObservationStatus::Observed => {}
-            ObservationStatus::Missing(_) => {
-                return Err(MarketError::MissingInput { name: "fills" });
-            }
-        }
-        match self.observation("inventory", ObservationMintKind::DecimalDepth)? {
-            ObservationStatus::Observed => {}
-            ObservationStatus::Missing(_) => {
-                return Err(MarketError::MissingInput { name: "inventory" });
-            }
-        }
+        self.require_named_observation("book", ObservationMintKind::DecimalDepth)?;
+        self.require_named_observation("fills", ObservationMintKind::BooleanPresence)?;
+        self.require_named_observation("inventory", ObservationMintKind::DecimalDepth)?;
         let book_key = market_feature_key("book")?;
         let book = self
             .values

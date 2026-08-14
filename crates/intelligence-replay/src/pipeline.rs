@@ -14,16 +14,16 @@ use domain_types::{
 };
 use entity_graph::{EntityGraph, GraphNodeId, LinkEvidence, LinkKind};
 use feature_core::{
-    EvidenceKind, EvidenceRef, FeatureCalculator, FeatureContext, FeatureDelta, FeatureKey,
-    FeatureSnapshot, FeatureSubject, FeatureValue, HealthAssessment, HealthState, MissingReason,
-    PitSnapshotCalculator, require_asof,
+    require_asof, EvidenceKind, EvidenceRef, FeatureCalculator, FeatureContext, FeatureDelta,
+    FeatureKey, FeatureSnapshot, FeatureSubject, FeatureValue, HealthAssessment, HealthState,
+    MissingReason, PitSnapshotCalculator,
 };
 use hl_protocol::node::v1::NodeRecordV1;
 use market_intelligence::{
     FragilityScenario, MarketError, MarketFeatureSnapshot, crowding_components_from_snapshot,
     market_feature_key, simulate_fragility_from_snapshot,
 };
-use signal_core::{SignalConfirmationClass, suppress_missing_book_or_fills};
+use signal_core::{ProofWithholdReason, SignalConfirmationClass, proof_withhold_reason};
 use wallet_intelligence::{
     DEFAULT_RETURN_SCALE, DEFAULT_USD_SCALE, IntelligenceError, IntelligenceSubject,
     PerformanceLedger,
@@ -563,16 +563,19 @@ fn assess_market_emissions(
     let mut crowding_emitted = 0_u64;
     let mut fragility_emitted = 0_u64;
     let mut missing_book_or_fills = false;
+    let mut inventory_withheld = false;
     for snapshot in snapshots {
-        if suppress_missing_book_or_fills(snapshot).is_some() {
-            missing_book_or_fills = true;
+        match proof_withhold_reason(snapshot) {
+            Some(ProofWithholdReason::MissingBookOrFills) => missing_book_or_fills = true,
+            Some(ProofWithholdReason::MissingInventory)
+            | Some(ProofWithholdReason::MalformedInventory) => {
+                inventory_withheld = true;
+            }
+            None => {}
         }
         match crowding_components_from_snapshot(snapshot, &[], remaining_capacity) {
             Ok(_) => crowding_emitted = crowding_emitted.saturating_add(1),
-            Err(MarketError::MissingInput {
-                name: "book" | "fills" | "inventory",
-            }) => {}
-            Err(MarketError::InsufficientHistory { .. }) => {}
+            Err(error) if withheld_market_emission(&error) => {}
             Err(error) => return Err(error.into()),
         }
         match simulate_fragility_from_snapshot(snapshot, &scenario, &[], 0) {
@@ -584,15 +587,12 @@ fn assess_market_emissions(
                     fragility_emitted = fragility_emitted.saturating_add(1);
                 }
             }
-            Err(MarketError::MissingInput {
-                name: "book" | "fills" | "inventory",
-            }) => {}
-            Err(MarketError::InsufficientHistory { .. }) => {}
+            Err(error) if withheld_market_emission(&error) => {}
             Err(error) => return Err(error.into()),
         }
     }
     let live_signal_count = 0_u64;
-    if missing_book_or_fills
+    if (missing_book_or_fills || inventory_withheld)
         && (crowding_emitted > 0 || fragility_emitted > 0 || live_signal_count > 0)
     {
         return Err(IntelligenceReplayError::QualificationClaim {
@@ -600,4 +600,27 @@ fn assess_market_emissions(
         });
     }
     Ok((crowding_emitted, fragility_emitted, live_signal_count))
+}
+
+fn withheld_market_emission(error: &MarketError) -> bool {
+    match error {
+        MarketError::MissingInput {
+            name: "book" | "fills" | "inventory",
+        } => true,
+        MarketError::Malformed {
+            what: "inventory", ..
+        } => true,
+        MarketError::InsufficientHistory { .. } => true,
+        MarketError::MissingInput { .. }
+        | MarketError::Malformed { .. }
+        | MarketError::EmptyIdentifier { .. }
+        | MarketError::Unsupported { .. }
+        | MarketError::RedDataHealth { .. }
+        | MarketError::EmptyDenominator
+        | MarketError::ScaleMismatch
+        | MarketError::Overflow
+        | MarketError::DivisionByZero
+        | MarketError::OutOfRange
+        | MarketError::Feature(_) => false,
+    }
 }

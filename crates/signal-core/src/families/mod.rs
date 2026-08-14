@@ -1,7 +1,8 @@
 use domain_types::{BasisPoints, EntityId, ProbabilityPpm, UsdAmount};
 use feature_core::{FeatureValue, HealthAssessment, HealthState};
 use market_intelligence::{
-    FragilityResult, MarketFeatureSnapshot, ObservationMintKind, RegimeAssessment, ScoredDimension,
+    FragilityResult, MarketFeatureSnapshot, ObservationAdmission, ObservationMintKind,
+    RegimeAssessment, ScoredDimension,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -73,30 +74,53 @@ impl FamilyThresholds {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofWithholdReason {
+    MissingBookOrFills,
+    MissingInventory,
+    MalformedInventory,
+}
+
+impl ProofWithholdReason {
+    #[must_use]
+    pub const fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::MissingBookOrFills => "missing_book_or_fills",
+            Self::MissingInventory => "missing_inventory",
+            Self::MalformedInventory => "malformed_inventory",
+        }
+    }
+}
+
+#[must_use]
+pub fn proof_withhold_reason(snapshot: &MarketFeatureSnapshot) -> Option<ProofWithholdReason> {
+    match snapshot.admit_observation("book", ObservationMintKind::DecimalDepth) {
+        ObservationAdmission::Observed => {}
+        ObservationAdmission::Missing | ObservationAdmission::Malformed { .. } => {
+            return Some(ProofWithholdReason::MissingBookOrFills);
+        }
+    }
+    match snapshot.admit_observation("fills", ObservationMintKind::BooleanPresence) {
+        ObservationAdmission::Observed => {}
+        ObservationAdmission::Missing | ObservationAdmission::Malformed { .. } => {
+            return Some(ProofWithholdReason::MissingBookOrFills);
+        }
+    }
+    match snapshot.admit_observation("inventory", ObservationMintKind::DecimalDepth) {
+        ObservationAdmission::Observed => None,
+        ObservationAdmission::Missing => Some(ProofWithholdReason::MissingInventory),
+        ObservationAdmission::Malformed { .. } => Some(ProofWithholdReason::MalformedInventory),
+    }
+}
+
 pub fn suppress_missing_book_or_fills(
     snapshot: &MarketFeatureSnapshot,
 ) -> Option<SignalEvaluation> {
-    let withheld = || SignalEvaluation::Suppressed {
+    let reason = proof_withhold_reason(snapshot)?;
+    Some(SignalEvaluation::Suppressed {
         health: snapshot.health.clone(),
-        reasons: vec!["missing_book_or_fills".to_owned()],
-    };
-    let book = match snapshot.observation("book", ObservationMintKind::DecimalDepth) {
-        Ok(status) => status,
-        Err(_) => return Some(withheld()),
-    };
-    let fills = match snapshot.observation("fills", ObservationMintKind::BooleanPresence) {
-        Ok(status) => status,
-        Err(_) => return Some(withheld()),
-    };
-    let inventory = match snapshot.observation("inventory", ObservationMintKind::DecimalDepth) {
-        Ok(status) => status,
-        Err(_) => return Some(withheld()),
-    };
-    if book.is_observed() && fills.is_observed() && inventory.is_observed() {
-        None
-    } else {
-        Some(withheld())
-    }
+        reasons: vec![reason.as_wire_name().to_owned()],
+    })
 }
 
 pub fn suppress_if_red(

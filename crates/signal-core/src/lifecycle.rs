@@ -3,9 +3,9 @@ use feature_core::HealthState;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    SignalError,
     evidence::EvidenceBundle,
     signal::{SignalActor, SignalLifecycleState, SignalType},
+    SignalError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +78,9 @@ pub fn transition_allowed(
         let missing = evidence.missing_for_admission();
         if !missing.is_empty() {
             return Err(SignalError::IncompleteEvidence(missing));
+        }
+        if let Some((what, reason)) = evidence.malformed_for_admission() {
+            return Err(SignalError::Malformed { what, reason });
         }
         if health == HealthState::Red {
             return Err(SignalError::UnsupportedHealth);
