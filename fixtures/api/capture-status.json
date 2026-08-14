@@ -7,5 +7,6 @@
   "ready": true,
   "active_committed_source": "locally-verified-committed",
   "primary_source_health": "healthy",
-  "pending_blocks": 0
+  "pending_blocks": 0,
+  "capture_backlog_records": 0
 }

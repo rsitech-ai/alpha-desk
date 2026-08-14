@@ -8,6 +8,7 @@
   "active_committed_source": "locally-verified-committed",
   "primary_source_health": "healthy",
   "pending_blocks": 0,
+  "capture_backlog_records": 0,
   "maintenance": {
     "enabled": true,
     "kill_switch": false,
