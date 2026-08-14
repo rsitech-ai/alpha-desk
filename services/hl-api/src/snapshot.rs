@@ -366,6 +366,9 @@ fn require_auxiliary_source_closed_fields(
         if source.contains_key("local_sequence") {
             require_u64(source, "local_sequence")?;
         }
+        if source.contains_key("unread_bytes") {
+            require_u64(source, "unread_bytes")?;
+        }
         if source.contains_key("last_durable_wall_micros") {
             require_i64(source, "last_durable_wall_micros")?;
         }
@@ -437,7 +440,8 @@ mod tests {
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_tail_cursor_epoch_is_optional_string,
-        auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
+        auxiliary_source_unarchived_records_is_required_u64,
+        auxiliary_source_unread_bytes_is_optional_u64, capture_source_health_openapi_enum,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
         health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
         ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
@@ -1135,6 +1139,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_types_auxiliary_unread_bytes_optional_u64() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_unread_bytes_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.unread_bytes as an optional u64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn openapi_document_types_auxiliary_last_durable_wall_micros_optional_i64() {
         let document = openapi_yaml();
         assert!(
@@ -1783,6 +1804,68 @@ mod tests {
                     .expect_err("present non-u64 local_sequence must not fail open"),
                 SnapshotError::Invalid,
                 "{local_sequence} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_auxiliary_unread_bytes_u64_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for unread_bytes in [0_u64, 47, u64::MAX] {
+            value["auxiliary_sources"][0]["unread_bytes"] = serde_json::json!(unread_bytes);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{unread_bytes} should parse: {error}"));
+            assert_eq!(parsed["auxiliary_sources"][0]["unread_bytes"], unread_bytes);
+        }
+    }
+
+    #[test]
+    fn omitted_auxiliary_unread_bytes_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        assert!(
+            value["auxiliary_sources"][0].get("unread_bytes").is_none(),
+            "v5 fixture must omit optional unread_bytes"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted unread_bytes");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted unread_bytes");
+        assert!(parsed["auxiliary_sources"][0].get("unread_bytes").is_none());
+
+        value["auxiliary_sources"][0]["unread_bytes"] = serde_json::json!(47_u64);
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("unread_bytes");
+        let bytes = serde_json::to_vec(&value).expect("encode removed unread_bytes");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed unread_bytes");
+        assert!(parsed["auxiliary_sources"][0].get("unread_bytes").is_none());
+    }
+
+    #[test]
+    fn present_non_u64_auxiliary_unread_bytes_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for unread_bytes in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-u64"}),
+            serde_json::json!(["not-a-u64"]),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            value["auxiliary_sources"][0]["unread_bytes"] = unread_bytes.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-u64 unread_bytes must not fail open"),
+                SnapshotError::Invalid,
+                "{unread_bytes} must be snapshot_invalid"
             );
         }
     }

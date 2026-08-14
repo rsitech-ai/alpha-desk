@@ -529,6 +529,16 @@ components:
                   not claim Stage PASS.
                 type: integer
                 minimum: 0
+              unread_bytes:
+                description: >
+                  Optional capture writer adapter unread byte count.
+                  Present non-number or non-u64 values are snapshot_invalid.
+                  Omitted stays omitted. This document does not invent extra
+                  numeric bounds. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
+                type: integer
+                minimum: 0
               last_durable_wall_micros:
                 description: >
                   Optional capture writer durable cluster last-durable receive
