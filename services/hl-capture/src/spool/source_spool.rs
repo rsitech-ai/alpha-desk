@@ -351,19 +351,27 @@ impl SourceSpool {
                                 first_in_segment,
                             )?;
                         }
-                        let local_sequence = if first_in_segment
-                            && config.cursor_policy == CursorPolicy::MonotonicByteOffset
-                        {
-                            match closed_manifest.and_then(|value| value.first_local_sequence()) {
-                                Some(first) => {
-                                    if last_local_sequence.is_some()
-                                        && next_local_sequence(last_local_sequence)? != first
+                        let local_sequence = if first_in_segment {
+                            match config.cursor_policy {
+                                CursorPolicy::MonotonicByteOffset => {
+                                    match closed_manifest
+                                        .and_then(|value| value.first_local_sequence())
                                     {
-                                        return Err(SpoolError::ManifestChainBroken);
+                                        Some(first) => {
+                                            if last_local_sequence.is_some()
+                                                && next_local_sequence(last_local_sequence)?
+                                                    != first
+                                            {
+                                                return Err(SpoolError::ManifestChainBroken);
+                                            }
+                                            first
+                                        }
+                                        None => next_local_sequence(last_local_sequence)?,
                                     }
-                                    first
                                 }
-                                None => next_local_sequence(last_local_sequence)?,
+                                CursorPolicy::ContiguousNativeOffset => {
+                                    next_local_sequence(last_local_sequence)?
+                                }
                             }
                         } else {
                             next_local_sequence(last_local_sequence)?

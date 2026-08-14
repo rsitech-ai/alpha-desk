@@ -1208,6 +1208,91 @@ fn with_baseline_covers_every_constructible_cursor_policy() {
 }
 
 #[test]
+fn recovery_first_in_segment_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                spool.append(&observation(101), 102).unwrap();
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                spool.append(&byte_observation(49), 102).unwrap();
+            }
+        }
+        spool
+            .shutdown(103)
+            .unwrap()
+            .expect("recovery fixture still closes the second segment");
+
+        let mut recovered = SourceSpool::open(config, 200).expect(
+            "recovery still assigns first-in-segment local sequences for this constructible cursor policy",
+        );
+        assert_eq!(recovered.closed_segments().len(), 2);
+        assert_eq!(recovered.last_local_sequence().unwrap().get(), 2);
+
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .is_none()
+                );
+                assert!(
+                    recovered.closed_segments()[1]
+                        .manifest()
+                        .first_local_sequence()
+                        .is_none()
+                );
+                let continued = recovered
+                    .append(&observation(102), 201)
+                    .expect("contiguous recovery still continues from next_local_sequence");
+                assert_eq!(continued.local_sequence().get(), 3);
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .unwrap()
+                        .get(),
+                    1
+                );
+                assert_eq!(
+                    recovered.closed_segments()[1]
+                        .manifest()
+                        .first_local_sequence()
+                        .unwrap()
+                        .get(),
+                    2
+                );
+                let continued = recovered
+                    .append(&byte_observation(81), 201)
+                    .expect("byte-offset recovery still continues from closed-manifest first_local_sequence");
+                assert_eq!(continued.local_sequence().get(), 3);
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
     let root = TempDir::new().unwrap();
     let error = SourceSpoolConfig::try_new_with_cursor_policy(
