@@ -1,10 +1,14 @@
 import {
   assertNever,
+  type AuxiliarySourceHealth,
   type CaptureHealth,
+  type CaptureSourceHealth,
   type HealthState,
 } from "@/lib/contracts"
 
 export type Tone = "green" | "yellow" | "red" | "neutral"
+
+export type SourceHealth = CaptureSourceHealth | AuxiliarySourceHealth
 
 export function healthStateTone(state: HealthState): Tone {
   switch (state) {
@@ -32,7 +36,7 @@ export function captureHealthTone(health: CaptureHealth): Tone {
   }
 }
 
-export function sourceHealthTone(health: string): Tone {
+export function sourceHealthTone(health: SourceHealth): Tone {
   switch (health) {
     case "healthy":
       return "green"
@@ -43,7 +47,7 @@ export function sourceHealthTone(health: string): Tone {
     case "latched":
       return "red"
     default:
-      return "neutral"
+      return assertNever(health)
   }
 }
 

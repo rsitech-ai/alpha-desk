@@ -7,7 +7,9 @@ import { describe, expect, it } from "vitest"
 import type { FeedState } from "@/hooks/use-hl-api"
 import type { DeskFeed, EndpointOutcome } from "@/lib/api"
 import {
+  AUXILIARY_SOURCE_HEALTH,
   CAPTURE_HEALTH_NOT_READY_REASONS,
+  CAPTURE_SOURCE_HEALTH,
   CORE_DEADLETTER_REASONS,
   LEDGER_UNSUPPORTED_EVENT_REASONS,
   lastHeartbeatThroughput,
@@ -439,6 +441,99 @@ describe("parseCaptureStatus extras", () => {
     expect(
       parsed.value.auxiliary_sources?.[0]?.restart_reconstruction
     ).toBeUndefined()
+  })
+})
+
+describe("parseCaptureStatus source health", () => {
+  it("accepts every constructible committed source health", () => {
+    for (const health of CAPTURE_SOURCE_HEALTH) {
+      const parsed = parseCaptureStatus(
+        v4Status({ primary_source_health: health })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.primary_source_health).toBe(health)
+    }
+  })
+
+  it("fail-closes unknown primary_source_health as invalid, not a quiet chip", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ primary_source_health: "degraded" })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(/primary_source_health must be one of/)
+    expect(parsed.detail).toMatch(/starting/)
+    expect(parsed.detail).toMatch(/healthy/)
+    expect(parsed.detail).toMatch(/range-unavailable/)
+    expect(parsed.detail).not.toMatch(/degraded/)
+  })
+
+  it("fail-closes auxiliary health strings on the committed source field", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ primary_source_health: "latched" })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(/primary_source_health must be one of/)
+  })
+
+  it("accepts every constructible independent source health and rejects unknown", () => {
+    for (const health of CAPTURE_SOURCE_HEALTH) {
+      const parsed = parseCaptureStatus(
+        v4Status({ independent_source_health: health })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.independent_source_health).toBe(health)
+    }
+
+    const unknown = parseCaptureStatus(
+      v4Status({ independent_source_health: "latched" })
+    )
+    expect(unknown.ok).toBe(false)
+    if (unknown.ok) {
+      return
+    }
+    expect(unknown.detail).toMatch(/independent_source_health must be one of/)
+  })
+
+  it("still fail-closes unknown auxiliary source health", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          {
+            source_id: "node-line-a",
+            health: "range-unavailable",
+            qualification: "unqualified",
+            spool_records: 0,
+            unarchived_records: 0,
+            partial_line: false,
+          },
+        ],
+      })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(
+      /auxiliary_sources\[0\]\.health must be one of/
+    )
+    expect(AUXILIARY_SOURCE_HEALTH).toEqual([
+      "starting",
+      "healthy",
+      "quarantined",
+      "latched",
+    ])
   })
 })
 

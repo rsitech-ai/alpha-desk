@@ -43,8 +43,21 @@ export type CaptureHealth = "green" | "yellow" | "red"
 
 export type CaptureSourceHealth = "starting" | "healthy" | "range-unavailable"
 
+export const CAPTURE_SOURCE_HEALTH = [
+  "starting",
+  "healthy",
+  "range-unavailable",
+] as const satisfies readonly CaptureSourceHealth[]
+
 export type AuxiliarySourceHealth =
   "starting" | "healthy" | "quarantined" | "latched"
+
+export const AUXILIARY_SOURCE_HEALTH = [
+  "starting",
+  "healthy",
+  "quarantined",
+  "latched",
+] as const satisfies readonly AuxiliarySourceHealth[]
 
 export type AuxiliaryQualification = "unqualified" | "qualified"
 
@@ -145,8 +158,8 @@ export interface CaptureStatus {
   ready: boolean
   last_error_reason?: string
   active_committed_source: string
-  primary_source_health: string
-  independent_source_health?: string
+  primary_source_health: CaptureSourceHealth
+  independent_source_health?: CaptureSourceHealth
   failover_height?: number
   failover_reason?: string
   durable_height?: number
@@ -534,9 +547,10 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   if (!active_committed_source.ok) {
     return active_committed_source
   }
-  const primary_source_health = requireNonEmptyString(
+  const primary_source_health = requireEnum(
     value,
-    "primary_source_health"
+    "primary_source_health",
+    CAPTURE_SOURCE_HEALTH
   )
   if (!primary_source_health.ok) {
     return primary_source_health
@@ -550,9 +564,10 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   if (!last_error_reason.ok) {
     return last_error_reason
   }
-  const independent_source_health = optionalNonEmptyString(
+  const independent_source_health = optionalEnum(
     value,
-    "independent_source_health"
+    "independent_source_health",
+    CAPTURE_SOURCE_HEALTH
   )
   if (!independent_source_health.ok) {
     return independent_source_health
@@ -686,13 +701,6 @@ const CAPTURE_HEALTH = [
   "yellow",
   "red",
 ] as const satisfies readonly CaptureHealth[]
-
-const AUXILIARY_HEALTH = [
-  "starting",
-  "healthy",
-  "quarantined",
-  "latched",
-] as const satisfies readonly AuxiliarySourceHealth[]
 
 const AUXILIARY_QUALIFICATION = [
   "unqualified",
@@ -916,7 +924,7 @@ function parseAuxiliarySource(
   if (!source_id.ok) {
     return { ok: false, detail: `${prefix}.${source_id.detail}` }
   }
-  const health = requireEnum(value, "health", AUXILIARY_HEALTH)
+  const health = requireEnum(value, "health", AUXILIARY_SOURCE_HEALTH)
   if (!health.ok) {
     return { ok: false, detail: `${prefix}.${health.detail}` }
   }
