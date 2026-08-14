@@ -33,9 +33,16 @@ paths:
     get:
       operationId: getReadyz
       summary: Readiness aggregate as hl.health.v1
+      description: >
+        GREEN-only readiness as hl.health.v1. 200 is HEALTH_STATE_GREEN;
+        non-GREEN including typed AMBER lag is 503 health, not ApiError.
+        A valid /v1/health snapshot is not readiness. This is not Stage 2
+        PASS and not a live core.
       responses:
         "200":
-          description: Configured snapshots are present and valid
+          description: >
+            Aggregate is HEALTH_STATE_GREEN. Readiness is GREEN-only and is
+            not implied by /v1/health 200. AMBER, including lag, is 503.
           content:
             application/json:
               schema:
@@ -43,7 +50,15 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "503":
-          $ref: "#/components/responses/Unavailable"
+          description: >
+            Aggregate is not GREEN. Body is hl.health.v1 HealthAssessment,
+            including typed AMBER lag. Not ApiError. Canonical snapshot
+            validity is /v1/health 200; readiness is GREEN-only. This is
+            not Stage 2 PASS.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
   /v1/health:
     get:
       operationId: getCanonicalHealth

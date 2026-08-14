@@ -9,7 +9,7 @@ use hl_api::{
     HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, ROUTER_PATHS,
     SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
     health_reason_code_is_unrestricted_string, is_core_deadletter_reason, openapi_yaml,
-    spawn_local,
+    readyz_200_description, readyz_503_schema_ref, spawn_local, unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -421,6 +421,19 @@ async fn amber_lag_health_is_typed_and_does_not_become_ready() {
 
     let (status, body) = call(&state, "/readyz", &[]).await;
     assert_eq!(status, 503, "AMBER lag must not become ready");
+    assert_ne!(status, 200, "AMBER lag must not be /readyz 200");
+    assert_eq!(
+        body["schema_version"], "hl.health.v1",
+        "AMBER lag /readyz 503 must stay typed health, not ApiError"
+    );
+    assert_ne!(
+        body["schema_version"], "hl.api.error.v1",
+        "AMBER lag /readyz 503 must not be hl.api.error.v1"
+    );
+    assert!(
+        body.get("code").is_none(),
+        "health body must not carry ApiError code, got {body}"
+    );
     assert_ne!(
         body["state"], "HEALTH_STATE_GREEN",
         "lag must not be treated as GREEN-ready"
@@ -619,6 +632,25 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         document.contains("Unknown HEALTH_STATE_RED codes stay 200 typed"),
         "OpenAPI must name unknown RED as 200 typed fail-closed"
     );
+    assert_eq!(
+        readyz_503_schema_ref(document),
+        Some("#/components/schemas/HealthAssessment"),
+        "/readyz 503 must $ref HealthAssessment, not ApiError"
+    );
+    assert_eq!(
+        unavailable_response_schema_ref(document),
+        Some("#/components/schemas/ApiError"),
+        "shared Unavailable must stay ApiError for /v1/health 503"
+    );
+    let readyz_200 = readyz_200_description(document).expect("/readyz 200 description");
+    assert!(
+        !readyz_200.contains("present and valid"),
+        "/readyz 200 must not read as GREEN-ready merely because snapshots are valid"
+    );
+    assert!(
+        readyz_200.contains("GREEN-only"),
+        "/readyz 200 must name GREEN-only readiness"
+    );
 }
 
 #[tokio::test]
@@ -666,6 +698,25 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         document.contains("Unknown HEALTH_STATE_RED codes stay 200 typed"),
         "served OpenAPI must name unknown RED as 200 typed fail-closed"
+    );
+    assert_eq!(
+        readyz_503_schema_ref(document),
+        Some("#/components/schemas/HealthAssessment"),
+        "served /readyz 503 must $ref HealthAssessment, not ApiError"
+    );
+    assert_eq!(
+        unavailable_response_schema_ref(document),
+        Some("#/components/schemas/ApiError"),
+        "served Unavailable must stay ApiError for /v1/health 503"
+    );
+    let readyz_200 = readyz_200_description(document).expect("served /readyz 200 description");
+    assert!(
+        !readyz_200.contains("present and valid"),
+        "served /readyz 200 must not read as GREEN-ready merely because snapshots are valid"
+    );
+    assert!(
+        readyz_200.contains("GREEN-only"),
+        "served /readyz 200 must name GREEN-only readiness"
     );
 }
 
