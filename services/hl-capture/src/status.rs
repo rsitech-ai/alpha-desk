@@ -691,20 +691,20 @@ impl CaptureStatus {
             return Err(StatusError::InvalidField);
         }
         match self.active_committed_source {
-            CommittedSourceClass::LocallyVerifiedCommitted
-                if self.failover_height.is_some() || self.failover_reason.is_some() =>
-            {
-                return Err(StatusError::InvalidField);
+            CommittedSourceClass::LocallyVerifiedCommitted => {
+                if self.failover_height.is_some() || self.failover_reason.is_some() {
+                    return Err(StatusError::InvalidField);
+                }
             }
-            CommittedSourceClass::IndependentCommitted
+            CommittedSourceClass::IndependentCommitted => {
                 if self.independent_source_health.is_none()
                     || self.failover_height.is_none()
                     || self.failover_reason.is_none()
-                    || self.health == CaptureHealth::Green =>
-            {
-                return Err(StatusError::InvalidField);
+                    || self.health == CaptureHealth::Green
+                {
+                    return Err(StatusError::InvalidField);
+                }
             }
-            _ => {}
         }
         let active_source_health = match self.active_committed_source {
             CommittedSourceClass::LocallyVerifiedCommitted => self.primary_source_health,
@@ -873,7 +873,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use domain_types::{ChainId, KnownTime};
+    use domain_types::{BlockHeight, ChainId, KnownTime};
     use tempfile::TempDir;
 
     use super::{
@@ -881,6 +881,7 @@ mod tests {
         CaptureMaintenanceStatus, CaptureSourceHealth, CaptureStatus, CommittedSourceClass,
         RestartReconstruction, StatusError, read_status,
     };
+    use crate::FailoverReason;
 
     #[test]
     fn auxiliary_status_exposes_durable_cursor_lag_quarantine_and_qualification() {
@@ -1410,6 +1411,130 @@ mod tests {
         assert!(!maintenance.retention_authorized());
         assert!(status.has_fail_closed_maintenance());
         assert!(status.live_ready());
+    }
+
+    #[test]
+    fn committed_source_class_validate_covers_every_constructible_class() {
+        for class in [
+            CommittedSourceClass::LocallyVerifiedCommitted,
+            CommittedSourceClass::IndependentCommitted,
+        ] {
+            match class {
+                CommittedSourceClass::LocallyVerifiedCommitted => {
+                    committed_source_status(class, CaptureHealth::Yellow, None, None, None)
+                        .validate()
+                        .expect("locally verified remains valid without failover fields");
+                    assert_eq!(
+                        committed_source_status(
+                            class,
+                            CaptureHealth::Yellow,
+                            None,
+                            Some(42),
+                            None,
+                        )
+                        .validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                    assert_eq!(
+                        committed_source_status(
+                            class,
+                            CaptureHealth::Yellow,
+                            None,
+                            None,
+                            Some(FailoverReason::PrimaryRangeUnavailable),
+                        )
+                        .validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                }
+                CommittedSourceClass::IndependentCommitted => {
+                    committed_source_status(
+                        class,
+                        CaptureHealth::Yellow,
+                        Some(CaptureSourceHealth::Healthy),
+                        Some(42),
+                        Some(FailoverReason::PrimaryRangeUnavailable),
+                    )
+                    .validate()
+                    .expect("independent remains valid with failover fields and non-green health");
+                    committed_source_status(
+                        class,
+                        CaptureHealth::Red,
+                        Some(CaptureSourceHealth::Healthy),
+                        Some(42),
+                        Some(FailoverReason::PrimaryRangeUnavailable),
+                    )
+                    .validate()
+                    .expect("independent remains valid when health is red");
+                    assert_eq!(
+                        committed_source_status(
+                            class,
+                            CaptureHealth::Yellow,
+                            None,
+                            Some(42),
+                            Some(FailoverReason::PrimaryRangeUnavailable),
+                        )
+                        .validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                    assert_eq!(
+                        committed_source_status(
+                            class,
+                            CaptureHealth::Yellow,
+                            Some(CaptureSourceHealth::Healthy),
+                            None,
+                            Some(FailoverReason::PrimaryRangeUnavailable),
+                        )
+                        .validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                    assert_eq!(
+                        committed_source_status(
+                            class,
+                            CaptureHealth::Yellow,
+                            Some(CaptureSourceHealth::Healthy),
+                            Some(42),
+                            None,
+                        )
+                        .validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                    assert_eq!(
+                        committed_source_status(
+                            class,
+                            CaptureHealth::Green,
+                            Some(CaptureSourceHealth::Healthy),
+                            Some(42),
+                            Some(FailoverReason::PrimaryRangeUnavailable),
+                        )
+                        .validate(),
+                        Err(StatusError::InvalidField)
+                    );
+                }
+            }
+        }
+    }
+
+    fn committed_source_status(
+        class: CommittedSourceClass,
+        health: CaptureHealth,
+        independent_health: Option<CaptureSourceHealth>,
+        failover_height: Option<u64>,
+        failover_reason: Option<FailoverReason>,
+    ) -> CaptureStatus {
+        CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            health,
+        )
+        .with_source_state(
+            class,
+            CaptureSourceHealth::Starting,
+            independent_health,
+            failover_height.map(BlockHeight::new),
+            failover_reason,
+        )
     }
 
     #[test]
