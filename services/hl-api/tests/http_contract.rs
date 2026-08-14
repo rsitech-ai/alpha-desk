@@ -7,11 +7,12 @@ use bytes::Bytes;
 use hl_api::{
     ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, CORE_DEADLETTER_REASON_CODES,
     HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-    READYZ_503_DESCRIPTION, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
-    core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
-    health_reason_code_is_unrestricted_string, is_core_deadletter_reason,
-    is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
-    readyz_200_description, readyz_503_description, readyz_503_schema_ref, spawn_local,
+    READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, ROUTER_PATHS,
+    SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
+    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
+    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+    readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref, spawn_local,
     unavailable_response_schema_ref,
 };
 use http::Request;
@@ -870,14 +871,15 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         Some("#/components/schemas/ApiError"),
         "shared Unavailable must stay ApiError for /v1/health 503"
     );
-    let readyz_200 = readyz_200_description(document).expect("/readyz 200 description");
-    assert!(
-        !readyz_200.contains("present and valid"),
-        "/readyz 200 must not read as GREEN-ready merely because snapshots are valid"
+    assert_eq!(
+        readyz_200_schema_ref(document),
+        Some("#/components/schemas/HealthAssessment"),
+        "/readyz 200 must $ref HealthAssessment, not ApiError"
     );
-    assert!(
-        readyz_200.contains("GREEN-only"),
-        "/readyz 200 must name GREEN-only readiness"
+    assert_eq!(
+        readyz_200_description(document).as_deref(),
+        Some(READYZ_200_DESCRIPTION),
+        "/readyz 200 path description must stay GREEN-only by exact equality"
     );
     assert_eq!(
         readyz_503_description(document).as_deref(),
@@ -967,14 +969,15 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         Some("#/components/schemas/ApiError"),
         "served Unavailable must stay ApiError for /v1/health 503"
     );
-    let readyz_200 = readyz_200_description(document).expect("served /readyz 200 description");
-    assert!(
-        !readyz_200.contains("present and valid"),
-        "served /readyz 200 must not read as GREEN-ready merely because snapshots are valid"
+    assert_eq!(
+        readyz_200_schema_ref(document),
+        Some("#/components/schemas/HealthAssessment"),
+        "served /readyz 200 must $ref HealthAssessment, not ApiError"
     );
-    assert!(
-        readyz_200.contains("GREEN-only"),
-        "served /readyz 200 must name GREEN-only readiness"
+    assert_eq!(
+        readyz_200_description(document).as_deref(),
+        Some(READYZ_200_DESCRIPTION),
+        "served /readyz 200 path description must stay GREEN-only by exact equality"
     );
     assert_eq!(
         readyz_503_description(document).as_deref(),
