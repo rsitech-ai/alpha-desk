@@ -8,14 +8,15 @@ use hl_api::{
     ApiConfig, AppState, AuthMode, CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_IDS,
     COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS,
     LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-    READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, ROUTER_PATHS,
-    SNAPSHOT_UNAVAILABLE_REASON_CODES, capture_source_health_openapi_enum,
+    READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
+    ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES, capture_source_health_openapi_enum,
     committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
     independent_source_health_openapi_enum, is_core_deadletter_reason,
     is_ledger_unsupported_event_reason, ledger_unsupported_event_reason_openapi_enum, openapi_yaml,
     readyz_200_description, readyz_200_schema_ref, readyz_503_description, readyz_503_schema_ref,
-    readyz_get_description, spawn_local, unavailable_response_schema_ref,
+    readyz_get_description, restart_reconstruction_openapi_enum, spawn_local,
+    unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -387,6 +388,87 @@ async fn unknown_independent_source_health_is_snapshot_invalid() {
         serde_json::to_vec(&value).expect("encode unknown independent health"),
     )
     .expect("write unknown independent health");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+#[tokio::test]
+async fn unknown_restart_reconstruction_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    for reconstruction in RESTART_RECONSTRUCTION {
+        value["auxiliary_sources"][0]["restart_reconstruction"] = serde_json::json!(reconstruction);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known reconstruction"),
+        )
+        .expect("write known reconstruction");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(
+            status, 200,
+            "{reconstruction} must remain a typed capture status"
+        );
+        assert_eq!(
+            body["auxiliary_sources"][0]["restart_reconstruction"],
+            *reconstruction
+        );
+        assert_eq!(body["schema_version"], "hl.capture.status.v5");
+    }
+
+    value["auxiliary_sources"][0]
+        .as_object_mut()
+        .expect("auxiliary source object")
+        .remove("restart_reconstruction");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted reconstruction"),
+    )
+    .expect("write omitted reconstruction");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted restart_reconstruction must stay valid"
+    );
+    assert!(
+        body["auxiliary_sources"][0]
+            .get("restart_reconstruction")
+            .is_none()
+    );
+
+    value["auxiliary_sources"][0]["restart_reconstruction"] = serde_json::json!("NotRequired");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode unknown reconstruction"),
+    )
+    .expect("write unknown reconstruction");
     let state = state_from(
         directory.path(),
         "loopback-dev",
@@ -1010,6 +1092,19 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     for health in CAPTURE_SOURCE_HEALTH {
         assert!(document.contains(health), "OpenAPI must list {health}");
     }
+    let reconstruction_enum = restart_reconstruction_openapi_enum(document).expect(
+        "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.restart_reconstruction.enum",
+    );
+    assert_eq!(
+        reconstruction_enum, RESTART_RECONSTRUCTION,
+        "YAML enum must match the frozen const; prose mentions do not count"
+    );
+    for reconstruction in RESTART_RECONSTRUCTION {
+        assert!(
+            document.contains(reconstruction),
+            "OpenAPI must list {reconstruction}"
+        );
+    }
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -1131,6 +1226,13 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert_eq!(
         independent_health_enum, CAPTURE_SOURCE_HEALTH,
         "served optional independent_source_health must freeze the same closed set"
+    );
+    let reconstruction_enum = restart_reconstruction_openapi_enum(document).expect(
+        "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.restart_reconstruction.enum",
+    );
+    assert_eq!(
+        reconstruction_enum, RESTART_RECONSTRUCTION,
+        "served YAML enum must match the frozen const; prose mentions do not count"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),
