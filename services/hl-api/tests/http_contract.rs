@@ -273,6 +273,54 @@ async fn canonical_health_types_core_deadletter_reasons_and_does_not_become_read
 }
 
 #[tokio::test]
+async fn unknown_red_reason_stays_typed_fail_closed_and_does_not_become_ready() {
+    let directory = tempdir().expect("temporary directory");
+    const UNKNOWN_RED: &str = "core.deadletter_invented";
+    assert!(
+        !CORE_DEADLETTER_REASON_CODES.contains(&UNKNOWN_RED),
+        "HTTP unknown-RED coverage must use a sibling outside the frozen enum"
+    );
+    assert!(!is_core_deadletter_reason(UNKNOWN_RED));
+    let health_path = write_health_snapshot(
+        directory.path(),
+        "unknown-red.json",
+        "HEALTH_STATE_RED",
+        UNKNOWN_RED,
+    );
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        Some(&health_path),
+        None,
+    );
+
+    let (status, body) = call(&state, "/v1/health", &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["schema_version"], "hl.health.v1");
+    assert_eq!(body["state"], "HEALTH_STATE_RED");
+    assert_eq!(body["reason_code"], UNKNOWN_RED);
+    assert_ne!(
+        body["reason_code"], "snapshot_invalid",
+        "production serves unknown RED as typed fail-closed, not snapshot_invalid"
+    );
+    assert_ne!(body["code"], "data_unavailable");
+
+    let (status, body) = call(&state, "/readyz", &[]).await;
+    assert_eq!(status, 503, "unknown RED must not become ready");
+    assert_eq!(body["state"], "HEALTH_STATE_RED");
+    let aggregate = body["reason_code"].as_str().expect("aggregate reason");
+    assert!(
+        aggregate.contains(UNKNOWN_RED),
+        "readyz must surface typed {UNKNOWN_RED}, got {aggregate}"
+    );
+    assert!(
+        !aggregate.contains("snapshot_invalid"),
+        "unknown RED must not be rewritten as snapshot_invalid, got {aggregate}"
+    );
+}
+
+#[tokio::test]
 async fn green_deadletter_or_unknown_health_fails_closed() {
     let directory = tempdir().expect("temporary directory");
     let health_path = write_health_snapshot(
