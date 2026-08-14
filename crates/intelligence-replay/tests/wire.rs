@@ -11,15 +11,15 @@ use domain_types::{
     FeatureSetVersion, Horizon, KnownTime, MarketId, Price, ProbabilityPpm, ProtocolTime, Quantity,
     QuoteAmount, ScenarioId, SignalId, SourceId, TransactionId, UsdAmount, VaultId,
 };
-use feature_core::{FeatureValue, HealthState, MissingReason};
+use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
 use intelligence_replay::{
     IntelligenceReplayError, IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
     materialize_committed_node, materialize_synthetic_replay,
 };
 use market_intelligence::{
-    CrowdingPosition, FragilityScenario, MarketError, crowding_components_from_snapshot,
-    simulate_fragility_from_snapshot,
+    CrowdingPosition, FragilityScenario, MarketError, MarketFeatureSnapshot,
+    crowding_components_from_snapshot, market_feature_key, simulate_fragility_from_snapshot,
 };
 use signal_core::{
     Signal, SignalConfirmationClass, SignalError, SignalLifecycleState, SignalType,
@@ -614,12 +614,7 @@ fn synthetic_confirmation_cannot_enter_live() {
         Horizon::MINUTES_5,
         ProbabilityPpm::from_ppm(100_000).unwrap(),
         domain_types::BasisPoints::from_raw(10, 0).unwrap(),
-        feature_core::HealthAssessment::try_new(
-            "signal",
-            HealthState::Amber,
-            "synthetic_unassessed",
-        )
-        .unwrap(),
+        HealthAssessment::try_new("signal", HealthState::Amber, "synthetic_unassessed").unwrap(),
         domain_types::ModelVersion::new("signal-v1").unwrap(),
         FeatureSetVersion::new("synthetic-replay-v1").unwrap(),
         [1_u8; 32],
@@ -676,4 +671,85 @@ fn missing_book_or_fills_cannot_emit_crowding_fragility_or_live_signals() {
             other => panic!("expected suppression, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn boolean_or_missing_inventory_cannot_emit_live_signals_with_decimal_book() {
+    let remaining = UsdAmount::from_raw(0, 8).unwrap();
+    let invented_marks = vec![CrowdingPosition {
+        entity_id: EntityId::new("invented-mark").unwrap(),
+        independence_weight: ProbabilityPpm::ONE,
+        is_follower: false,
+        post_originator: false,
+        exposure: UsdAmount::from_raw(100_000_000, 8).unwrap(),
+        entry_bps_from_mark: 12,
+        funding_percentile: ProbabilityPpm::from_ppm(500_000).unwrap(),
+        leverage_milli: 200_000,
+    }];
+    let scenario = FragilityScenario::default_grid(ScenarioId::new("replay-deny").unwrap());
+    let decimal_book = FeatureValue::Decimal {
+        raw: 20_000 * 100_000_000,
+        scale: 8,
+    };
+    let true_fills = FeatureValue::Boolean(true);
+    for inventory in [
+        FeatureValue::Boolean(true),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    ] {
+        let snapshot =
+            constructed_market_snapshot(decimal_book.clone(), true_fills.clone(), inventory);
+        assert!(matches!(
+            snapshot.require_observed_book_and_fills(),
+            Err(MarketError::Malformed {
+                what: "observation",
+                reason: "boolean cannot mint decimal depth",
+            }) | Err(MarketError::MissingInput { name: "inventory" })
+        ));
+        assert!(matches!(
+            crowding_components_from_snapshot(&snapshot, &invented_marks, remaining),
+            Err(MarketError::Malformed {
+                what: "observation",
+                reason: "boolean cannot mint decimal depth",
+            }) | Err(MarketError::MissingInput { name: "inventory" })
+        ));
+        assert!(matches!(
+            simulate_fragility_from_snapshot(&snapshot, &scenario, &[], -100),
+            Err(MarketError::Malformed {
+                what: "observation",
+                reason: "boolean cannot mint decimal depth",
+            }) | Err(MarketError::MissingInput { name: "inventory" })
+        ));
+        match suppress_missing_book_or_fills(&snapshot) {
+            Some(signal_core::SignalEvaluation::Suppressed { reasons, .. }) => {
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|reason| reason == "missing_book_or_fills")
+                );
+            }
+            other => panic!("expected inventory suppression, got {other:?}"),
+        }
+    }
+}
+
+fn constructed_market_snapshot(
+    book: FeatureValue,
+    fills: FeatureValue,
+    inventory: FeatureValue,
+) -> MarketFeatureSnapshot {
+    let mut values = BTreeMap::new();
+    values.insert(market_feature_key("book").unwrap(), book);
+    values.insert(market_feature_key("fills").unwrap(), fills);
+    values.insert(market_feature_key("inventory").unwrap(), inventory);
+    MarketFeatureSnapshot::try_new(
+        MarketId::new("BTC").unwrap(),
+        Horizon::MINUTES_5,
+        FeatureSetVersion::new("market-v1").unwrap(),
+        time(1),
+        known(1),
+        BlockHeight::new(1),
+        values,
+        HealthAssessment::try_new("market", HealthState::Green, "synthetic").unwrap(),
+    )
+    .unwrap()
 }

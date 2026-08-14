@@ -141,6 +141,17 @@ impl EvidenceBundle {
         ) {
             missing.push("fills".to_owned());
         }
+        if snapshot_lacks_observation(
+            &self.feature_before,
+            "inventory",
+            ObservationMintKind::DecimalDepth,
+        ) || snapshot_lacks_observation(
+            &self.feature_after,
+            "inventory",
+            ObservationMintKind::DecimalDepth,
+        ) {
+            missing.push("inventory".to_owned());
+        }
         missing
     }
 }
@@ -150,8 +161,9 @@ fn snapshot_lacks_observation(
     name: &'static str,
     kind: ObservationMintKind,
 ) -> bool {
-    !matches!(
-        snapshot.observation(name, kind),
-        Ok(ObservationStatus::Observed)
-    )
+    match snapshot.observation(name, kind) {
+        Ok(ObservationStatus::Observed) => false,
+        Ok(ObservationStatus::Missing(_)) => true,
+        Err(_) => true,
+    }
 }
