@@ -10,6 +10,7 @@ import {
   AUXILIARY_SOURCE_HEALTH,
   CAPTURE_HEALTH_NOT_READY_REASONS,
   CAPTURE_SOURCE_HEALTH,
+  COMMITTED_SOURCE_CLASS,
   CORE_DEADLETTER_REASONS,
   LEDGER_UNSUPPORTED_EVENT_REASONS,
   lastHeartbeatThroughput,
@@ -534,6 +535,50 @@ describe("parseCaptureStatus source health", () => {
       "quarantined",
       "latched",
     ])
+  })
+})
+
+describe("parseCaptureStatus committed source class", () => {
+  it("accepts every constructible committed source class", () => {
+    expect(COMMITTED_SOURCE_CLASS).toEqual([
+      "locally-verified-committed",
+      "independent-committed",
+    ])
+    for (const source of COMMITTED_SOURCE_CLASS) {
+      const parsed = parseCaptureStatus(
+        v4Status({ active_committed_source: source })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.active_committed_source).toBe(source)
+    }
+  })
+
+  it("fail-closes unknown active_committed_source as invalid, not a quiet chip", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ active_committed_source: "primary" })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(/active_committed_source must be one of/)
+    expect(parsed.detail).toMatch(/locally-verified-committed/)
+    expect(parsed.detail).toMatch(/independent-committed/)
+    expect(parsed.detail).not.toMatch(/primary/)
+  })
+
+  it("fail-closes empty active_committed_source instead of admitting a free string", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ active_committed_source: "" })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(/active_committed_source must be one of/)
   })
 })
 
