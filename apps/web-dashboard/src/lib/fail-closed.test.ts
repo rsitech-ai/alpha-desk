@@ -12,6 +12,7 @@ import {
   CAPTURE_SOURCE_HEALTH,
   COMMITTED_SOURCE_CLASS,
   CORE_DEADLETTER_REASONS,
+  FAILOVER_REASONS,
   LEDGER_UNSUPPORTED_EVENT_REASONS,
   RESTART_RECONSTRUCTION,
   lastHeartbeatThroughput,
@@ -555,6 +556,72 @@ describe("parseCaptureStatus committed source class", () => {
       return
     }
     expect(parsed.detail).toMatch(/active_committed_source must be one of/)
+  })
+})
+
+describe("parseCaptureStatus failover reason", () => {
+  it("accepts every constructible failover reason", () => {
+    expect(FAILOVER_REASONS).toEqual(["primary-range-unavailable"])
+    for (const reason of FAILOVER_REASONS) {
+      const parsed = parseCaptureStatus(
+        v4Status({ failover_reason: reason })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.failover_reason).toBe(reason)
+      expect(parsed.value.failover_height).toBeUndefined()
+    }
+  })
+
+  it("keeps omitted and null failover_reason omitted", () => {
+    const omitted = parseCaptureStatus(v4Status())
+    expect(omitted.ok).toBe(true)
+    if (!omitted.ok) {
+      return
+    }
+    expect(omitted.value.failover_reason).toBeUndefined()
+    expect(omitted.value.failover_height).toBeUndefined()
+
+    const nulled = parseCaptureStatus(v4Status({ failover_reason: null }))
+    expect(nulled.ok).toBe(true)
+    if (!nulled.ok) {
+      return
+    }
+    expect(nulled.value.failover_reason).toBeUndefined()
+    expect(nulled.value.failover_height).toBeUndefined()
+  })
+
+  it("fail-closes unknown failover_reason as invalid, not a quiet chip", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ failover_reason: "manual-failover" })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      "failover_reason must be one of primary-range-unavailable"
+    )
+  })
+
+  it("fail-closes empty failover_reason instead of admitting a free string", () => {
+    const parsed = parseCaptureStatus(v4Status({ failover_reason: "" }))
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(/failover_reason must be one of/)
+  })
+
+  it("fail-closes malformed failover_reason instead of admitting a free string", () => {
+    const parsed = parseCaptureStatus(v4Status({ failover_reason: 12 }))
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toMatch(/failover_reason must be one of/)
   })
 })
 

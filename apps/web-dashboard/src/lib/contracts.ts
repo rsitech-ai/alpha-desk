@@ -58,6 +58,12 @@ export const CAPTURE_SOURCE_HEALTH = [
   "range-unavailable",
 ] as const satisfies readonly CaptureSourceHealth[]
 
+export type FailoverReason = "primary-range-unavailable"
+
+export const FAILOVER_REASONS = [
+  "primary-range-unavailable",
+] as const satisfies readonly FailoverReason[]
+
 export type AuxiliarySourceHealth =
   "starting" | "healthy" | "quarantined" | "latched"
 
@@ -181,7 +187,7 @@ export interface CaptureStatus {
   primary_source_health: CaptureSourceHealth
   independent_source_health?: CaptureSourceHealth
   failover_height?: number
-  failover_reason?: string
+  failover_reason?: FailoverReason
   durable_height?: number
   pending_blocks: number
   capture_backlog_records?: number
@@ -597,7 +603,11 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   if (!failover_height.ok) {
     return failover_height
   }
-  const failover_reason = optionalNonEmptyString(value, "failover_reason")
+  const failover_reason = optionalEnum(
+    value,
+    "failover_reason",
+    FAILOVER_REASONS
+  )
   if (!failover_reason.ok) {
     return failover_reason
   }
