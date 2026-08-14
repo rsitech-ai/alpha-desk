@@ -382,29 +382,12 @@ describe("parseCaptureStatus extras", () => {
     expect("throughput_blocks_per_sec" in missing.value.extra_fields).toBe(
       false
     )
-    expect(
-      lastHeartbeatThroughput(missing.value.extra_fields)
-        .throughput_records_per_sec
-    ).toBeUndefined()
-  })
-
-  it("keeps malformed throughput extras without rejecting or inventing rates", () => {
-    const parsed = parseCaptureStatus(
-      v4Status({
-        throughput_records_per_sec: -1,
-        throughput_blocks_per_sec: "fast",
-        later_unknown: "still-ignored",
-      })
-    )
-    expect(parsed.ok).toBe(true)
-    if (!parsed.ok) {
+    const mapped = lastHeartbeatThroughput(missing.value.extra_fields)
+    expect(mapped.ok).toBe(true)
+    if (!mapped.ok) {
       return
     }
-    expect(parsed.value.throughput_records_per_sec).toBeUndefined()
-    expect(parsed.value.throughput_blocks_per_sec).toBeUndefined()
-    expect(parsed.value.extra_fields.throughput_records_per_sec).toBe(-1)
-    expect(parsed.value.extra_fields.throughput_blocks_per_sec).toBe("fast")
-    expect(parsed.value.extra_fields.later_unknown).toBe("still-ignored")
+    expect(mapped.value.throughput_records_per_sec).toBeUndefined()
   })
 
   it("maps a single present throughput field without inventing the other", () => {
@@ -556,6 +539,152 @@ describe("parseCaptureStatus committed source class", () => {
       return
     }
     expect(parsed.detail).toMatch(/active_committed_source must be one of/)
+  })
+})
+
+describe("parseCaptureStatus last-heartbeat throughput", () => {
+  it("accepts known integer throughput including 0", () => {
+    for (const throughput_records_per_sec of [0, 3]) {
+      const parsed = parseCaptureStatus(
+        v4Status({ throughput_records_per_sec })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.throughput_records_per_sec).toBe(
+        throughput_records_per_sec
+      )
+      expect(parsed.value.throughput_blocks_per_sec).toBeUndefined()
+    }
+    for (const throughput_blocks_per_sec of [0, 1]) {
+      const parsed = parseCaptureStatus(
+        v4Status({ throughput_blocks_per_sec })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.throughput_blocks_per_sec).toBe(
+        throughput_blocks_per_sec
+      )
+      expect(parsed.value.throughput_records_per_sec).toBeUndefined()
+    }
+  })
+
+  it("keeps omitted and null throughput omitted", () => {
+    const omitted = parseCaptureStatus(v4Status())
+    expect(omitted.ok).toBe(true)
+    if (!omitted.ok) {
+      return
+    }
+    expect(omitted.value.throughput_records_per_sec).toBeUndefined()
+    expect(omitted.value.throughput_blocks_per_sec).toBeUndefined()
+
+    const nulled = parseCaptureStatus(
+      v4Status({
+        throughput_records_per_sec: null,
+        throughput_blocks_per_sec: null,
+      })
+    )
+    expect(nulled.ok).toBe(true)
+    if (!nulled.ok) {
+      return
+    }
+    expect(nulled.value.throughput_records_per_sec).toBeUndefined()
+    expect(nulled.value.throughput_blocks_per_sec).toBeUndefined()
+  })
+
+  it("fail-closes present non-integer throughput as invalid, not a dropped rate", () => {
+    for (const throughput_records_per_sec of [
+      "0",
+      true,
+      { not: "a-u64" },
+      ["not-a-u64"],
+    ]) {
+      const parsed = parseCaptureStatus(
+        v4Status({
+          throughput_records_per_sec,
+          throughput_blocks_per_sec: 1,
+          later_unknown: "still-ignored",
+        })
+      )
+      expect(parsed.ok).toBe(false)
+      if (parsed.ok) {
+        return
+      }
+      expect(parsed.detail).toBe(
+        "throughput_records_per_sec must be a non-negative integer"
+      )
+    }
+    for (const throughput_blocks_per_sec of [
+      "fast",
+      false,
+      { not: "a-u64" },
+      ["not-a-u64"],
+    ]) {
+      const parsed = parseCaptureStatus(
+        v4Status({
+          throughput_records_per_sec: 7,
+          throughput_blocks_per_sec,
+        })
+      )
+      expect(parsed.ok).toBe(false)
+      if (parsed.ok) {
+        return
+      }
+      expect(parsed.detail).toBe(
+        "throughput_blocks_per_sec must be a non-negative integer"
+      )
+    }
+  })
+
+  it("fail-closes negative throughput instead of dropping to undefined", () => {
+    const records = parseCaptureStatus(
+      v4Status({ throughput_records_per_sec: -1 })
+    )
+    expect(records.ok).toBe(false)
+    if (records.ok) {
+      return
+    }
+    expect(records.detail).toBe(
+      "throughput_records_per_sec must be a non-negative integer"
+    )
+
+    const blocks = parseCaptureStatus(
+      v4Status({ throughput_blocks_per_sec: -1 })
+    )
+    expect(blocks.ok).toBe(false)
+    if (blocks.ok) {
+      return
+    }
+    expect(blocks.detail).toBe(
+      "throughput_blocks_per_sec must be a non-negative integer"
+    )
+  })
+
+  it("fail-closes fractional throughput instead of dropping to undefined", () => {
+    const records = parseCaptureStatus(
+      v4Status({ throughput_records_per_sec: 1.5 })
+    )
+    expect(records.ok).toBe(false)
+    if (records.ok) {
+      return
+    }
+    expect(records.detail).toBe(
+      "throughput_records_per_sec must be a non-negative integer"
+    )
+
+    const blocks = parseCaptureStatus(
+      v4Status({ throughput_blocks_per_sec: 0.5 })
+    )
+    expect(blocks.ok).toBe(false)
+    if (blocks.ok) {
+      return
+    }
+    expect(blocks.detail).toBe(
+      "throughput_blocks_per_sec must be a non-negative integer"
+    )
   })
 })
 
