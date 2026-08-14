@@ -1,13 +1,13 @@
 use std::io::{ErrorKind, Write as _};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::Bytes;
 use hl_api::{
-    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, HEALTH_JSON_FIELDS,
-    LAST_HEARTBEAT_THROUGHPUT_FIELDS, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
-    openapi_yaml, spawn_local,
+    ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, CORE_DEADLETTER_REASON_CODES,
+    HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, ROUTER_PATHS,
+    SNAPSHOT_UNAVAILABLE_REASON_CODES, is_core_deadletter_reason, openapi_yaml, spawn_local,
 };
 use http::Request;
 use serde_json::Value;
@@ -223,6 +223,91 @@ async fn capture_status_serves_v5_maintenance_and_rejects_v4_smuggled_maintenanc
     assert_eq!(body["reason_code"], "snapshot_invalid");
 }
 
+fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
+    let path = directory.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"schema_version":"hl.health.v1","scope":"canonical","state":"{state}","reason_code":"{reason_code}","observed_at_micros":1,"suppresses":[]}}"#
+        ),
+    )
+    .expect("write health snapshot");
+    path
+}
+
+#[tokio::test]
+async fn canonical_health_types_core_deadletter_reasons_and_does_not_become_ready() {
+    let directory = tempdir().expect("temporary directory");
+    for reason_code in CORE_DEADLETTER_REASON_CODES {
+        let health_path = write_health_snapshot(
+            directory.path(),
+            &format!("{reason_code}.json"),
+            "HEALTH_STATE_RED",
+            reason_code,
+        );
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            Some(&health_path),
+            None,
+        );
+        let (status, body) = call(&state, "/v1/health", &[]).await;
+        assert_eq!(status, 200, "{reason_code}");
+        assert_eq!(body["schema_version"], "hl.health.v1");
+        assert_eq!(body["state"], "HEALTH_STATE_RED");
+        assert_eq!(body["reason_code"], *reason_code);
+        assert!(is_core_deadletter_reason(reason_code));
+
+        let (status, body) = call(&state, "/readyz", &[]).await;
+        assert_eq!(status, 503, "{reason_code} must not become ready");
+        assert_eq!(body["state"], "HEALTH_STATE_RED");
+        let aggregate = body["reason_code"].as_str().expect("aggregate reason");
+        assert!(
+            aggregate.contains(reason_code),
+            "readyz must surface typed {reason_code}, got {aggregate}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn green_deadletter_or_unknown_health_fails_closed() {
+    let directory = tempdir().expect("temporary directory");
+    let health_path = write_health_snapshot(
+        directory.path(),
+        "green-deadletter.json",
+        "HEALTH_STATE_GREEN",
+        "core.deadletter_unsafe_path",
+    );
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        Some(&health_path),
+        None,
+    );
+    let (status, body) = call(&state, "/v1/health", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+    let (status, body) = call(&state, "/readyz", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["state"], "HEALTH_STATE_RED");
+
+    let unknown = write_health_snapshot(
+        directory.path(),
+        "green-unknown.json",
+        "HEALTH_STATE_GREEN",
+        "not.a.documented.reason",
+    );
+    let state = state_from(directory.path(), "loopback-dev", None, Some(&unknown), None);
+    let (status, body) = call(&state, "/v1/health", &[]).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+    let (status, _) = call(&state, "/readyz", &[]).await;
+    assert_eq!(status, 503);
+}
+
 #[tokio::test]
 async fn stream_paths_and_websocket_upgrades_are_typed_501() {
     let directory = tempdir().expect("temporary directory");
@@ -345,6 +430,18 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     );
     assert!(document.contains("not invent fills"));
     assert!(document.contains("not a fills feed"));
+    assert!(document.contains("CoreDeadLetterReasonCode"));
+    for reason_code in CORE_DEADLETTER_REASON_CODES {
+        assert!(
+            document.contains(reason_code),
+            "missing dead-letter reason {reason_code}"
+        );
+        assert!(
+            is_core_deadletter_reason(reason_code),
+            "helper must accept {reason_code}"
+        );
+    }
+    assert!(document.contains("Unknown codes fail closed"));
 }
 
 #[tokio::test]
@@ -377,6 +474,13 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     }
     assert!(document.contains("not live-qualified"));
     assert!(document.contains("501"));
+    assert!(document.contains("CoreDeadLetterReasonCode"));
+    for reason_code in CORE_DEADLETTER_REASON_CODES {
+        assert!(
+            document.contains(reason_code),
+            "served OpenAPI missing {reason_code}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

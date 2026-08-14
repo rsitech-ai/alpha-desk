@@ -9,7 +9,20 @@ use thiserror::Error;
 pub const HEALTH_SCHEMA_VERSION: &str = "hl.health.v1";
 pub const CAPTURE_STATUS_SCHEMA_V4: &str = "hl.capture.status.v4";
 pub const CAPTURE_STATUS_SCHEMA_V5: &str = "hl.capture.status.v5";
+const READY_REASON_CODE: &str = "healthy";
 const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024;
+
+/// Frozen hl-core file dead-letter fail-closed reason codes. Documented on
+/// OpenAPI so clients type them instead of treating them as a generic 500.
+/// Unknown codes still fail closed and must not become ready. This crate does
+/// not vendor hl-core and this is not a live core or Stage 2 PASS.
+pub const CORE_DEADLETTER_REASON_CODES: &[&str] = &[
+    "core.deadletter_unsafe_path",
+    "core.deadletter_io",
+    "core.deadletter_invalid_record",
+    "core.deadletter_serialization",
+    "core.deadletter_corrupt",
+];
 
 const MAINTENANCE_FIELDS: &[&str] = &[
     "enabled",
@@ -77,12 +90,17 @@ pub fn load_canonical_health(path: Option<&Path>) -> Result<WireHealthAssessment
         return Err(SnapshotError::Missing);
     };
     let bytes = read_bounded(path)?;
+    parse_canonical_health_bytes(&bytes)
+}
+
+fn parse_canonical_health_bytes(bytes: &[u8]) -> Result<WireHealthAssessment, SnapshotError> {
     let document: HealthDocument =
-        serde_json::from_slice(&bytes).map_err(|_| SnapshotError::Invalid)?;
+        serde_json::from_slice(bytes).map_err(|_| SnapshotError::Invalid)?;
     if document.schema_version != HEALTH_SCHEMA_VERSION {
         return Err(SnapshotError::Invalid);
     }
     let state = WireHealthState::parse(&document.state).map_err(|_| SnapshotError::Invalid)?;
+    reject_inconsistent_ready_reason(state, &document.reason_code)?;
     let assessment = WireHealthAssessment::try_new(
         document.scope,
         state,
@@ -92,6 +110,35 @@ pub fn load_canonical_health(path: Option<&Path>) -> Result<WireHealthAssessment
     )
     .map_err(|_| SnapshotError::Invalid)?;
     WireHealthAssessment::decode(&assessment.encode_to_vec()).map_err(|_| SnapshotError::Invalid)
+}
+
+fn reject_inconsistent_ready_reason(
+    state: WireHealthState,
+    reason_code: &str,
+) -> Result<(), SnapshotError> {
+    let deadletter = is_core_deadletter_reason(reason_code);
+    match state {
+        WireHealthState::Green => {
+            if reason_code == READY_REASON_CODE {
+                Ok(())
+            } else {
+                Err(SnapshotError::Invalid)
+            }
+        }
+        WireHealthState::Amber => {
+            if deadletter {
+                Err(SnapshotError::Invalid)
+            } else {
+                Ok(())
+            }
+        }
+        WireHealthState::Red => Ok(()),
+    }
+}
+
+#[must_use]
+pub fn is_core_deadletter_reason(reason_code: &str) -> bool {
+    CORE_DEADLETTER_REASON_CODES.contains(&reason_code)
 }
 
 pub fn load_capture_status(path: Option<&Path>) -> Result<Value, SnapshotError> {
@@ -243,10 +290,12 @@ fn require_non_negative_int(object: &Map<String, Value>, field: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, MAINTENANCE_FIELDS, SnapshotError,
+        CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, CORE_DEADLETTER_REASON_CODES,
+        MAINTENANCE_FIELDS, SnapshotError, is_core_deadletter_reason, parse_canonical_health_bytes,
         parse_capture_status_bytes,
     };
     use crate::openapi::{LAST_HEARTBEAT_THROUGHPUT_FIELDS, openapi_yaml};
+    use api_contracts::WireHealthState;
     use std::path::Path;
 
     fn assert_openapi_does_not_claim_live_qualified(document: &str) {
@@ -292,6 +341,95 @@ mod tests {
         assert_openapi_does_not_claim_live_qualified(document);
         assert!(document.contains("not invent fills"));
         assert!(document.contains("not a fills feed"));
+    }
+
+    #[test]
+    fn openapi_document_lists_core_deadletter_fail_closed_reasons() {
+        let document = openapi_yaml();
+        assert!(document.contains("CoreDeadLetterReasonCode"));
+        for reason_code in CORE_DEADLETTER_REASON_CODES {
+            assert!(
+                document.contains(reason_code),
+                "OpenAPI missing dead-letter reason {reason_code}"
+            );
+            assert!(
+                is_core_deadletter_reason(reason_code),
+                "helper must accept documented dead-letter reason {reason_code}"
+            );
+        }
+        assert!(
+            !is_core_deadletter_reason("healthy"),
+            "healthy must not be classified as a dead-letter fail-closed reason"
+        );
+        assert!(
+            !is_core_deadletter_reason("core.deadletter_unknown"),
+            "undocumented sibling codes must not be treated as ready"
+        );
+        assert!(document.contains("Unknown codes fail closed"));
+        assert_openapi_does_not_claim_live_qualified(document);
+    }
+
+    fn health_bytes(state: &str, reason_code: &str) -> Vec<u8> {
+        format!(
+            r#"{{"schema_version":"hl.health.v1","scope":"canonical","state":"{state}","reason_code":"{reason_code}","observed_at_micros":1,"suppresses":[]}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn green_healthy_canonical_health_remains_ready() {
+        let assessment =
+            parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_GREEN", "healthy"))
+                .expect("healthy green");
+        assert_eq!(assessment.state, WireHealthState::Green);
+        assert_eq!(assessment.reason_code, "healthy");
+    }
+
+    #[test]
+    fn red_core_deadletter_health_is_accepted_as_typed_fail_closed() {
+        for reason_code in CORE_DEADLETTER_REASON_CODES {
+            let assessment =
+                parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_RED", reason_code))
+                    .unwrap_or_else(|error| panic!("{reason_code} should parse: {error}"));
+            assert_eq!(assessment.state, WireHealthState::Red);
+            assert_eq!(assessment.reason_code, *reason_code);
+        }
+    }
+
+    #[test]
+    fn green_or_amber_core_deadletter_health_is_rejected() {
+        for reason_code in CORE_DEADLETTER_REASON_CODES {
+            assert_eq!(
+                parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_GREEN", reason_code))
+                    .expect_err("green dead-letter must not become ready"),
+                SnapshotError::Invalid
+            );
+            assert_eq!(
+                parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_AMBER", reason_code))
+                    .expect_err("amber dead-letter must fail closed"),
+                SnapshotError::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_green_reason_fails_closed_and_does_not_become_ready() {
+        assert_eq!(
+            parse_canonical_health_bytes(&health_bytes(
+                "HEALTH_STATE_GREEN",
+                "core.deadletter_invented"
+            ))
+            .expect_err("unknown green reason must fail closed"),
+            SnapshotError::Invalid
+        );
+        let assessment = parse_canonical_health_bytes(&health_bytes(
+            "HEALTH_STATE_RED",
+            "core.deadletter_invented",
+        ))
+        .expect("unknown red remains typed fail-closed, not ready");
+        assert_eq!(assessment.state, WireHealthState::Red);
+        assert_eq!(assessment.reason_code, "core.deadletter_invented");
+        assert!(!is_core_deadletter_reason(&assessment.reason_code));
     }
 
     fn fixture(name: &str) -> Vec<u8> {

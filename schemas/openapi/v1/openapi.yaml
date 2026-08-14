@@ -48,6 +48,14 @@ paths:
     get:
       operationId: getCanonicalHealth
       summary: Canonical health snapshot
+      description: >
+        Fail-closed read of the configured canonical health snapshot.
+        HEALTH_STATE_GREEN is accepted only with reason_code healthy.
+        Typed fail-closed reasons include CoreDeadLetterReasonCode values
+        such as core.deadletter_unsafe_path and core.deadletter_corrupt;
+        those documents are HEALTH_STATE_RED and must not become ready.
+        Unknown reason codes fail closed. Missing or invalid snapshots
+        return 503. This is not a live core and not Stage 2 PASS.
       parameters:
         - $ref: "#/components/parameters/Limit"
       responses:
@@ -200,6 +208,14 @@ components:
             - HEALTH_STATE_RED
         reason_code:
           type: string
+          description: >
+            Ready only when this is healthy. Known fail-closed codes include
+            snapshot_missing, snapshot_invalid, and CoreDeadLetterReasonCode
+            (core.deadletter_unsafe_path, core.deadletter_io,
+            core.deadletter_invalid_record, core.deadletter_serialization,
+            core.deadletter_corrupt). Unknown codes fail closed and must not
+            be treated as ready or as a generic 500. This is not a live core
+            and not Stage 2 PASS.
         observed_at_micros:
           type: integer
           minimum: 0
@@ -207,6 +223,19 @@ components:
           type: array
           items:
             type: string
+    CoreDeadLetterReasonCode:
+      description: >
+        Frozen hl-core file dead-letter fail-closed reasons. Documented so
+        clients type them instead of treating them as a generic 500. Unknown
+        codes fail closed and must not become ready. This document does not
+        vendor hl-core, implement a live core, or claim Stage 2 PASS.
+      type: string
+      enum:
+        - core.deadletter_unsafe_path
+        - core.deadletter_io
+        - core.deadletter_invalid_record
+        - core.deadletter_serialization
+        - core.deadletter_corrupt
     CaptureStatus:
       description: >
         Fail-closed capture operator snapshot. Inactive documents use
