@@ -250,10 +250,12 @@ export const HEALTH_FIELD_ORDER = [
 
 /** Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
  *  fail parse. Omitted and null stay omitted (this web optional-array
- *  pattern). Empty arrays still parse. This is not OpenAPI uniqueItems on
- *  whole aux objects, not duplicate `source_id`, not sort order, not a live
- *  capture, and not Stage PASS. `HealthAssessment.reason_code` stays a free
- *  string so unknown RED is not closed out.
+ *  pattern). Empty arrays still parse. Duplicate present `source_id` fails
+ *  parse. Distinct ids stay valid, including unsorted / descending order
+ *  (sort order stays untyped). This is uniqueness of `source_id`, not
+ *  OpenAPI uniqueItems on whole aux objects, not a live capture, and not
+ *  Stage PASS. `HealthAssessment.reason_code` stays a free string so
+ *  unknown RED is not closed out.
  */
 export const MAX_AUXILIARY_SOURCES = 16
 
@@ -961,8 +963,9 @@ function optionalAuxiliarySources(
     }
   }
   const parsed: AuxiliarySourceStatus[] = []
+  const seenSourceIds = new Set<string>()
   for (const [index, item] of value.entries()) {
-    const result = parseAuxiliarySource(item, index)
+    const result = parseAuxiliarySource(item, index, seenSourceIds)
     if (!result.ok) {
       return result
     }
@@ -973,7 +976,8 @@ function optionalAuxiliarySources(
 
 function parseAuxiliarySource(
   value: unknown,
-  index: number
+  index: number,
+  seenSourceIds: Set<string>
 ): ParseResult<AuxiliarySourceStatus> {
   if (!isRecord(value)) {
     return {
@@ -986,6 +990,13 @@ function parseAuxiliarySource(
   if (!source_id.ok) {
     return { ok: false, detail: `${prefix}.${source_id.detail}` }
   }
+  if (seenSourceIds.has(source_id.value)) {
+    return {
+      ok: false,
+      detail: "auxiliary_sources source_id must be unique",
+    }
+  }
+  seenSourceIds.add(source_id.value)
   const health = requireEnum(value, "health", AUXILIARY_SOURCE_HEALTH)
   if (!health.ok) {
     return { ok: false, detail: `${prefix}.${health.detail}` }

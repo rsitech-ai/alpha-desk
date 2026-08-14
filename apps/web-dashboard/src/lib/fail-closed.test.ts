@@ -546,12 +546,36 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
     }
   }
 
+  // Distinct ids already valid on this web parse (existing fixture / capture
+  // test identities). Not an invented aux-source-{index} helper; writer charset
+  // is not copied. Sort order stays untyped.
+  const DISTINCT_AUX_SOURCE_IDS = [
+    "node-line-a",
+    "node-fills",
+    "primary-node",
+    "independent-node",
+    "node-fills-exit",
+    "node-fills-panic",
+    "node-fills-duplicate",
+    "node-fills-archive-lineage",
+    "node-fills-rotation",
+    "node-fills-partial",
+    "node-fills-oversized",
+    "node-fills-first-error",
+    "node-fills-drain-error",
+    "primary-node-fills",
+    "primary-node-blocks",
+    "fixture-node-trades",
+  ] as const
+
   function auxiliarySources(count: number): Record<string, unknown>[] {
     return Array.from({ length: count }, () => knownAuxiliarySource())
   }
 
   it("matches capture writer MAX_AUXILIARY_SOURCES", () => {
     expect(MAX_AUXILIARY_SOURCES).toBe(16)
+    expect(DISTINCT_AUX_SOURCE_IDS).toHaveLength(MAX_AUXILIARY_SOURCES)
+    expect(new Set(DISTINCT_AUX_SOURCE_IDS).size).toBe(MAX_AUXILIARY_SOURCES)
   })
 
   it("keeps omitted and null auxiliary_sources omitted", () => {
@@ -592,15 +616,24 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
     expect(parsed.value.auxiliary_sources?.[0]?.extra_fields).toEqual({})
   })
 
-  it("parses auxiliary_sources at the writer cap", () => {
+  it("parses auxiliary_sources at the writer cap with distinct source_id", () => {
     const parsed = parseCaptureStatus(
-      v4Status({ auxiliary_sources: auxiliarySources(MAX_AUXILIARY_SOURCES) })
+      v4Status({
+        auxiliary_sources: DISTINCT_AUX_SOURCE_IDS.map((source_id) =>
+          knownAuxiliarySource({ source_id })
+        ),
+      })
     )
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) {
       return
     }
     expect(parsed.value.auxiliary_sources).toHaveLength(MAX_AUXILIARY_SOURCES)
+    expect(
+      new Set(
+        parsed.value.auxiliary_sources?.map((source) => source.source_id)
+      ).size
+    ).toBe(MAX_AUXILIARY_SOURCES)
   })
 
   it("fail-closes auxiliary_sources longer than the writer cap", () => {
@@ -641,6 +674,60 @@ describe("parseCaptureStatus auxiliary_sources cap", () => {
     }
     expect(parsed.detail).toBe(
       "auxiliary_sources[0] unknown field: future_aux_flag"
+    )
+  })
+
+  it("fail-closes duplicate auxiliary source_id", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          knownAuxiliarySource(),
+          knownAuxiliarySource(),
+        ],
+      })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe("auxiliary_sources source_id must be unique")
+  })
+
+  it("parses two distinct source_id values including descending order", () => {
+    const ascending = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          knownAuxiliarySource({ source_id: "node-fills" }),
+          knownAuxiliarySource({ source_id: "node-line-a" }),
+        ],
+      })
+    )
+    expect(ascending.ok).toBe(true)
+    if (!ascending.ok) {
+      return
+    }
+    expect(ascending.value.auxiliary_sources?.[0]?.source_id).toBe("node-fills")
+    expect(ascending.value.auxiliary_sources?.[1]?.source_id).toBe(
+      "node-line-a"
+    )
+
+    const descending = parseCaptureStatus(
+      v4Status({
+        auxiliary_sources: [
+          knownAuxiliarySource({ source_id: "node-line-a" }),
+          knownAuxiliarySource({ source_id: "node-fills" }),
+        ],
+      })
+    )
+    expect(descending.ok).toBe(true)
+    if (!descending.ok) {
+      return
+    }
+    expect(descending.value.auxiliary_sources?.[0]?.source_id).toBe(
+      "node-line-a"
+    )
+    expect(descending.value.auxiliary_sources?.[1]?.source_id).toBe(
+      "node-fills"
     )
   })
 })
