@@ -318,7 +318,10 @@ components:
         durable_height is an optional u64 integer; present non-number or
         non-u64 values are snapshot_invalid. Omitted stays omitted. Top-level
         capture_backlog_records is a required u64 integer; present non-number
-        or non-u64 values, and omitted, are snapshot_invalid. Top-level last_error_reason is an optional string; present
+        or non-u64 values, and omitted, are snapshot_invalid. Top-level
+        oldest_pending_capture_height is an optional u64 integer; present
+        non-number or non-u64 values are snapshot_invalid. Omitted stays
+        omitted. Top-level last_error_reason is an optional string; present
         non-string values, and empty present strings, are snapshot_invalid.
         Omitted stays omitted. Present unknown nested properties are snapshot_invalid.
         Known objects without extras stay valid. This is nested item extra
@@ -669,6 +672,17 @@ components:
             This document does not invent extra numeric bounds.
             HealthAssessment.reason_code stays a free string so unknown RED is
             not closed out. This document does not claim Stage PASS.
+          type: integer
+          minimum: 0
+        oldest_pending_capture_height:
+          description: >
+            Optional capture writer oldest pending capture height. Present
+            non-number or non-u64 values are snapshot_invalid. Omitted stays
+            omitted. This is the top-level field. Capture writer emits
+            Option<u64> with skip_serializing_if. This document does not invent
+            extra numeric bounds. HealthAssessment.reason_code stays a free
+            string so unknown RED is not closed out. This document does not
+            claim Stage PASS.
           type: integer
           minimum: 0
         throughput_records_per_sec:
