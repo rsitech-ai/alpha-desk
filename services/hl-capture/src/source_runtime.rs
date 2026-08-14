@@ -304,6 +304,17 @@ struct CommittedDrainConfig {
     failover_decision: Option<crate::FailoverDecision>,
 }
 
+fn committed_source_role(trust: SourceTrust) -> Result<CommittedSourceRole, SourceRuntimeError> {
+    match trust {
+        SourceTrust::LocallyVerifiedCommitted => Ok(CommittedSourceRole::Primary),
+        SourceTrust::IndependentCommitted => Ok(CommittedSourceRole::Independent),
+        SourceTrust::ReconciledSnapshot
+        | SourceTrust::RecoveryOnly
+        | SourceTrust::ThirdPartyProvisional
+        | SourceTrust::MempoolProvisional => Err(SourceRuntimeError::InvalidConfig),
+    }
+}
+
 pub(crate) fn committed_node_tasks(
     config: &CaptureConfig,
     progress: Arc<dyn CaptureProgressStore>,
@@ -332,11 +343,7 @@ pub(crate) fn committed_node_tasks(
         if !admission.can_advance_committed_watermark() {
             return Err(SourceRuntimeError::InvalidConfig);
         }
-        let role = match source.trust() {
-            SourceTrust::LocallyVerifiedCommitted => CommittedSourceRole::Primary,
-            SourceTrust::IndependentCommitted => CommittedSourceRole::Independent,
-            _ => return Err(SourceRuntimeError::InvalidConfig),
-        };
+        let role = committed_source_role(source.trust())?;
         let selected = NodeSourceTaskConfig {
             role,
             chain_id: config.runtime().chain_id(),
@@ -2084,7 +2091,7 @@ mod tests {
         AuxiliaryNodeSourceTaskConfig, CommittedSourceRole, DrainSessionError,
         NodeSourceTaskConfig, RetryBackoff, SourceNotification, SourceRuntimeError,
         append_auxiliary_observation, attempt_failover, auxiliary_commit_policy,
-        auxiliary_node_task, group_commit_due, open_auxiliary_node_source,
+        auxiliary_node_task, committed_source_role, group_commit_due, open_auxiliary_node_source,
         prepare_source_spool_path, run_auxiliary_node_acquisition_with_probe,
         run_committed_node_acquisition_with_probe, supervise_auxiliary_tasks,
     };
@@ -2379,6 +2386,42 @@ mod tests {
         backoff.reset();
 
         assert_eq!(backoff.next_delay(), first);
+    }
+
+    #[test]
+    fn committed_source_role_fail_closes_every_constructible_trust() {
+        for trust in SourceTrust::ALL {
+            let result = committed_source_role(trust);
+            match trust {
+                SourceTrust::LocallyVerifiedCommitted => {
+                    assert_eq!(
+                        result.expect("primary remains admitted"),
+                        CommittedSourceRole::Primary
+                    );
+                }
+                SourceTrust::IndependentCommitted => {
+                    assert_eq!(
+                        result.expect("independent remains admitted"),
+                        CommittedSourceRole::Independent
+                    );
+                }
+                SourceTrust::ReconciledSnapshot
+                | SourceTrust::RecoveryOnly
+                | SourceTrust::ThirdPartyProvisional
+                | SourceTrust::MempoolProvisional => {
+                    let error = result.expect_err("non-committed trusts fail closed");
+                    assert!(
+                        matches!(error, SourceRuntimeError::InvalidConfig),
+                        "{trust:?} must reuse InvalidConfig"
+                    );
+                    assert_eq!(
+                        error.reason_code(),
+                        "capture_source.invalid_config",
+                        "{trust:?} must reuse the existing invalid-config reason"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
