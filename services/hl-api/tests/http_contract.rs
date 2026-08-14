@@ -6,11 +6,12 @@ use std::time::Duration;
 use bytes::Bytes;
 use hl_api::{
     ApiConfig, AppState, AuthMode, CAPTURE_STATUS_SCHEMA_IDS, CORE_DEADLETTER_REASON_CODES,
-    HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, ROUTER_PATHS,
-    SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
+    HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+    ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
-    is_core_deadletter_reason, openapi_yaml, readyz_200_description, readyz_503_description,
-    readyz_503_schema_ref, spawn_local, unavailable_response_schema_ref,
+    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+    readyz_503_description, readyz_503_schema_ref, spawn_local, unavailable_response_schema_ref,
 };
 use http::Request;
 use serde_json::Value;
@@ -295,6 +296,125 @@ async fn canonical_health_types_core_deadletter_reasons_and_does_not_become_read
             "readyz must surface typed {reason_code}, got {aggregate}"
         );
     }
+}
+
+#[tokio::test]
+async fn canonical_health_types_ledger_unsupported_event_and_does_not_become_ready() {
+    let directory = tempdir().expect("temporary directory");
+    for reason_code in LEDGER_UNSUPPORTED_EVENT_REASON_CODES {
+        let health_path = write_health_snapshot(
+            directory.path(),
+            &format!("{reason_code}.json"),
+            "HEALTH_STATE_RED",
+            reason_code,
+        );
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            Some(&health_path),
+            None,
+        );
+        let (status, body) = call(&state, "/v1/health", &[]).await;
+        assert_eq!(status, 200, "{reason_code}");
+        assert_eq!(body["schema_version"], "hl.health.v1");
+        assert_eq!(body["state"], "HEALTH_STATE_RED");
+        assert_eq!(body["reason_code"], *reason_code);
+        assert!(is_ledger_unsupported_event_reason(reason_code));
+
+        let (status, body) = call(&state, "/readyz", &[]).await;
+        assert_eq!(status, 503, "{reason_code} must not become ready");
+        assert_eq!(body["state"], "HEALTH_STATE_RED");
+        let aggregate = body["reason_code"].as_str().expect("aggregate reason");
+        assert!(
+            aggregate.contains(reason_code),
+            "readyz must surface typed {reason_code}, got {aggregate}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn green_or_amber_ledger_unsupported_event_health_fails_closed() {
+    let directory = tempdir().expect("temporary directory");
+    for reason_code in LEDGER_UNSUPPORTED_EVENT_REASON_CODES {
+        let green = write_health_snapshot(
+            directory.path(),
+            &format!("green-{reason_code}.json"),
+            "HEALTH_STATE_GREEN",
+            reason_code,
+        );
+        let state = state_from(directory.path(), "loopback-dev", None, Some(&green), None);
+        let (status, body) = call(&state, "/v1/health", &[]).await;
+        assert_eq!(status, 503, "{reason_code}");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+        let (status, body) = call(&state, "/readyz", &[]).await;
+        assert_eq!(status, 503, "{reason_code} must not become ready");
+        assert_eq!(body["state"], "HEALTH_STATE_RED");
+
+        let amber = write_health_snapshot(
+            directory.path(),
+            &format!("amber-{reason_code}.json"),
+            "HEALTH_STATE_AMBER",
+            reason_code,
+        );
+        let state = state_from(directory.path(), "loopback-dev", None, Some(&amber), None);
+        let (status, body) = call(&state, "/v1/health", &[]).await;
+        assert_eq!(status, 503, "{reason_code}");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+        let (status, body) = call(&state, "/readyz", &[]).await;
+        assert_eq!(status, 503, "{reason_code} must not become ready");
+        assert_eq!(body["state"], "HEALTH_STATE_RED");
+    }
+}
+
+#[tokio::test]
+async fn unknown_ledger_sibling_red_stays_typed_fail_closed_and_does_not_become_ready() {
+    let directory = tempdir().expect("temporary directory");
+    const UNKNOWN_RED: &str = "ledger.invented";
+    assert!(
+        !LEDGER_UNSUPPORTED_EVENT_REASON_CODES.contains(&UNKNOWN_RED),
+        "HTTP unknown-RED coverage must use a sibling outside the frozen enum"
+    );
+    assert!(!is_ledger_unsupported_event_reason(UNKNOWN_RED));
+    let health_path = write_health_snapshot(
+        directory.path(),
+        "unknown-ledger-red.json",
+        "HEALTH_STATE_RED",
+        UNKNOWN_RED,
+    );
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        Some(&health_path),
+        None,
+    );
+
+    let (status, body) = call(&state, "/v1/health", &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["schema_version"], "hl.health.v1");
+    assert_eq!(body["state"], "HEALTH_STATE_RED");
+    assert_eq!(body["reason_code"], UNKNOWN_RED);
+    assert_ne!(
+        body["reason_code"], "snapshot_invalid",
+        "production serves unknown RED as typed fail-closed, not snapshot_invalid"
+    );
+    assert!(!is_ledger_unsupported_event_reason(UNKNOWN_RED));
+
+    let (status, body) = call(&state, "/readyz", &[]).await;
+    assert_eq!(status, 503, "unknown RED must not become ready");
+    assert_eq!(body["state"], "HEALTH_STATE_RED");
+    let aggregate = body["reason_code"].as_str().expect("aggregate reason");
+    assert!(
+        aggregate.contains(UNKNOWN_RED),
+        "readyz must surface typed {UNKNOWN_RED}, got {aggregate}"
+    );
+    assert!(
+        !aggregate.contains("snapshot_invalid"),
+        "unknown RED must not be rewritten as snapshot_invalid, got {aggregate}"
+    );
 }
 
 #[tokio::test]
@@ -648,6 +768,23 @@ fn openapi_document_covers_router_paths_and_health_fields() {
             "helper must accept {reason_code}"
         );
     }
+    assert!(document.contains("LedgerUnsupportedEventReasonCode"));
+    let ledger_enum = ledger_unsupported_event_reason_openapi_enum(document)
+        .expect("OpenAPI must define LedgerUnsupportedEventReasonCode.enum");
+    assert_eq!(
+        ledger_enum, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+        "YAML enum must match the frozen const; prose mentions do not count"
+    );
+    for reason_code in LEDGER_UNSUPPORTED_EVENT_REASON_CODES {
+        assert!(
+            is_ledger_unsupported_event_reason(reason_code),
+            "helper must accept {reason_code}"
+        );
+        assert!(
+            document.contains(reason_code),
+            "OpenAPI must list {reason_code}"
+        );
+    }
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -739,6 +876,13 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         "served YAML enum must match the frozen const; prose mentions do not count"
     );
     assert!(health_reason_code_is_unrestricted_string(document));
+    assert!(document.contains("LedgerUnsupportedEventReasonCode"));
+    let ledger_enum = ledger_unsupported_event_reason_openapi_enum(document)
+        .expect("served OpenAPI must define LedgerUnsupportedEventReasonCode.enum");
+    assert_eq!(
+        ledger_enum, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+        "served YAML enum must match the frozen const; prose mentions do not count"
+    );
     assert!(
         document.contains("core.deadletter_* family-prefix"),
         "served OpenAPI must name AMBER-family core.deadletter_* as the 503 prefix"

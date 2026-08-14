@@ -67,11 +67,14 @@ paths:
         Fail-closed read of the configured canonical health snapshot.
         HEALTH_STATE_GREEN is accepted only with reason_code healthy.
         Typed fail-closed reasons include CoreDeadLetterReasonCode values
-        such as core.deadletter_unsafe_path and core.deadletter_corrupt;
-        those documents are HEALTH_STATE_RED and must not become ready.
-        HEALTH_STATE_AMBER with a core.deadletter_* family-prefix reason
-        (frozen enum or invented sibling) is 503 snapshot_invalid, not
-        typed AMBER. Unknown HEALTH_STATE_RED codes stay 200 typed
+        such as core.deadletter_unsafe_path and core.deadletter_corrupt,
+        and LedgerUnsupportedEventReasonCode ledger.unsupported_event
+        (hl-core consume-poison / action-bearing reject); those documents
+        are HEALTH_STATE_RED and must not become ready. HEALTH_STATE_AMBER
+        with a core.deadletter_* family-prefix reason (frozen enum or
+        invented sibling) is 503 snapshot_invalid, not typed AMBER.
+        HEALTH_STATE_AMBER with ledger.unsupported_event is 503
+        snapshot_invalid. Unknown HEALTH_STATE_RED codes stay 200 typed
         fail-closed and must not become ready. Missing or invalid
         snapshots return 503. This is not a live core and not Stage 2 PASS.
       parameters:
@@ -228,14 +231,16 @@ components:
           type: string
           description: >
             Ready only when this is healthy. Known fail-closed codes include
-            snapshot_missing, snapshot_invalid, and CoreDeadLetterReasonCode
+            snapshot_missing, snapshot_invalid, CoreDeadLetterReasonCode
             (core.deadletter_unsafe_path, core.deadletter_io,
             core.deadletter_invalid_record, core.deadletter_serialization,
-            core.deadletter_corrupt). AMBER core.deadletter_* family-prefix
-            reasons are 503 snapshot_invalid. Unknown RED codes stay 200
-            typed fail-closed and must not be treated as ready or as a
-            generic 500. Unknown codes fail closed. This is not a live core
-            and not Stage 2 PASS.
+            core.deadletter_corrupt), and LedgerUnsupportedEventReasonCode
+            (ledger.unsupported_event). AMBER core.deadletter_* family-prefix
+            reasons are 503 snapshot_invalid. AMBER plus
+            ledger.unsupported_event is 503 snapshot_invalid. Unknown RED
+            codes stay 200 typed fail-closed and must not be treated as
+            ready or as a generic 500. Unknown codes fail closed. This is
+            not a live core and not Stage 2 PASS.
         observed_at_micros:
           type: integer
           minimum: 0
@@ -259,6 +264,20 @@ components:
         - core.deadletter_invalid_record
         - core.deadletter_serialization
         - core.deadletter_corrupt
+    LedgerUnsupportedEventReasonCode:
+      description: >
+        Frozen hl-core consume-poison / action-bearing reject reason.
+        Documented so clients type ledger.unsupported_event instead of
+        treating it as a generic 500. RED stays 200 typed fail-closed and
+        must not become ready. GREEN plus this code is 503 snapshot_invalid.
+        AMBER plus this code is 503 snapshot_invalid. Unknown RED codes stay
+        200 typed fail-closed. Unknown codes fail closed. This document does
+        not vendor hl-core, implement a live core, or claim Stage 2 PASS.
+        HealthAssessment.reason_code stays a free string so unknown RED is
+        not closed out by this enum.
+      type: string
+      enum:
+        - ledger.unsupported_event
     CaptureStatus:
       description: >
         Fail-closed capture operator snapshot. Inactive documents use

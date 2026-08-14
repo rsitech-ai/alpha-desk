@@ -28,6 +28,15 @@ pub const CORE_DEADLETTER_REASON_CODES: &[&str] = &[
 
 const CORE_DEADLETTER_REASON_PREFIX: &str = "core.deadletter_";
 
+/// Frozen hl-core consume-poison / action-bearing reject reason. Documented
+/// on OpenAPI so clients type it instead of treating it as a generic 500.
+/// Unknown RED codes still fail closed as typed RED and must not become
+/// ready. GREEN plus this code is `snapshot_invalid`. AMBER plus this exact
+/// code is `snapshot_invalid`; invented `ledger.*` siblings are not a family
+/// prefix. This crate does not vendor hl-core and this is not a live core or
+/// Stage 2 PASS.
+pub const LEDGER_UNSUPPORTED_EVENT_REASON_CODES: &[&str] = &["ledger.unsupported_event"];
+
 const MAINTENANCE_FIELDS: &[&str] = &[
     "enabled",
     "kill_switch",
@@ -131,9 +140,14 @@ fn reject_inconsistent_ready_reason(
         WireHealthState::Amber => {
             // Dead-letter family codes are RED fail-closed reasons. AMBER plus
             // a frozen enum value or an invented sibling is inconsistent, not
-            // typed AMBER. Other AMBER reasons stay typed; this is not a
-            // catalog of valid AMBER codes.
-            if is_core_deadletter_family(reason_code) {
+            // typed AMBER. ledger.unsupported_event is likewise a RED
+            // consume-poison reason; AMBER plus that exact code is
+            // inconsistent. Invented ledger.* siblings are not a family
+            // prefix. Other AMBER reasons stay typed; this is not a catalog
+            // of valid AMBER codes.
+            if is_core_deadletter_family(reason_code)
+                || is_ledger_unsupported_event_reason(reason_code)
+            {
                 Err(SnapshotError::Invalid)
             } else {
                 Ok(())
@@ -146,6 +160,11 @@ fn reject_inconsistent_ready_reason(
 #[must_use]
 pub fn is_core_deadletter_reason(reason_code: &str) -> bool {
     CORE_DEADLETTER_REASON_CODES.contains(&reason_code)
+}
+
+#[must_use]
+pub fn is_ledger_unsupported_event_reason(reason_code: &str) -> bool {
+    LEDGER_UNSUPPORTED_EVENT_REASON_CODES.contains(&reason_code)
 }
 
 #[must_use]
@@ -303,12 +322,14 @@ fn require_non_negative_int(object: &Map<String, Value>, field: &str) -> Result<
 mod tests {
     use super::{
         CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, CORE_DEADLETTER_REASON_CODES,
-        MAINTENANCE_FIELDS, SnapshotError, is_core_deadletter_family, is_core_deadletter_reason,
+        LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS, SnapshotError,
+        is_core_deadletter_family, is_core_deadletter_reason, is_ledger_unsupported_event_reason,
         parse_canonical_health_bytes, parse_capture_status_bytes,
     };
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, core_deadletter_reason_openapi_enum,
-        health_reason_code_is_unrestricted_string, openapi_yaml,
+        health_reason_code_is_unrestricted_string, ledger_unsupported_event_reason_openapi_enum,
+        openapi_yaml,
     };
     use api_contracts::WireHealthState;
     use std::path::Path;
@@ -412,6 +433,50 @@ mod tests {
         assert_openapi_does_not_claim_live_qualified(document);
     }
 
+    #[test]
+    fn openapi_document_lists_ledger_unsupported_event_fail_closed_reason() {
+        let document = openapi_yaml();
+        assert!(document.contains("LedgerUnsupportedEventReasonCode"));
+        let enum_values = ledger_unsupported_event_reason_openapi_enum(document)
+            .expect("OpenAPI must define components.schemas.LedgerUnsupportedEventReasonCode.enum");
+        assert_eq!(
+            enum_values, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+            "YAML enum must match the frozen const; prose mentions do not count"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        for reason_code in LEDGER_UNSUPPORTED_EVENT_REASON_CODES {
+            assert!(
+                is_ledger_unsupported_event_reason(reason_code),
+                "helper must accept documented consume-poison reason {reason_code}"
+            );
+        }
+        assert!(
+            !is_ledger_unsupported_event_reason("healthy"),
+            "healthy must not be classified as consume-poison fail-closed"
+        );
+        assert!(
+            !is_ledger_unsupported_event_reason("ledger.invented"),
+            "undocumented ledger.* siblings must not be treated as the frozen code"
+        );
+        assert!(
+            !is_ledger_unsupported_event_reason("core.deadletter_corrupt"),
+            "dead-letter codes must not be classified as ledger.unsupported_event"
+        );
+        assert!(document.contains("Unknown codes fail closed"));
+        assert!(
+            document.contains("Unknown HEALTH_STATE_RED codes stay 200 typed"),
+            "OpenAPI must name unknown RED as 200 typed fail-closed"
+        );
+        assert!(
+            document.contains("consume-poison"),
+            "OpenAPI must name ledger.unsupported_event as consume-poison"
+        );
+        assert_openapi_does_not_claim_live_qualified(document);
+    }
+
     fn health_bytes(state: &str, reason_code: &str) -> Vec<u8> {
         format!(
             r#"{{"schema_version":"hl.health.v1","scope":"canonical","state":"{state}","reason_code":"{reason_code}","observed_at_micros":1,"suppresses":[]}}"#
@@ -494,6 +559,56 @@ mod tests {
         assert_eq!(assessment.state, WireHealthState::Amber);
         assert_eq!(assessment.reason_code, "lag");
         assert!(!is_core_deadletter_family(&assessment.reason_code));
+        assert!(!is_ledger_unsupported_event_reason(&assessment.reason_code));
+    }
+
+    #[test]
+    fn red_ledger_unsupported_event_health_is_accepted_as_typed_fail_closed() {
+        for reason_code in LEDGER_UNSUPPORTED_EVENT_REASON_CODES {
+            let assessment =
+                parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_RED", reason_code))
+                    .unwrap_or_else(|error| panic!("{reason_code} should parse: {error}"));
+            assert_eq!(assessment.state, WireHealthState::Red);
+            assert_eq!(assessment.reason_code, *reason_code);
+            assert!(is_ledger_unsupported_event_reason(&assessment.reason_code));
+        }
+    }
+
+    #[test]
+    fn green_or_amber_ledger_unsupported_event_health_is_rejected() {
+        for reason_code in LEDGER_UNSUPPORTED_EVENT_REASON_CODES {
+            assert_eq!(
+                parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_GREEN", reason_code))
+                    .expect_err("green consume-poison must not become ready"),
+                SnapshotError::Invalid
+            );
+            assert_eq!(
+                parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_AMBER", reason_code))
+                    .expect_err("amber consume-poison must fail closed"),
+                SnapshotError::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_ledger_sibling_red_stays_typed_and_green_is_invalid() {
+        assert_eq!(
+            parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_GREEN", "ledger.invented"))
+                .expect_err("unknown green ledger reason must fail closed"),
+            SnapshotError::Invalid
+        );
+        let assessment =
+            parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_RED", "ledger.invented"))
+                .expect("unknown red ledger sibling remains typed fail-closed, not ready");
+        assert_eq!(assessment.state, WireHealthState::Red);
+        assert_eq!(assessment.reason_code, "ledger.invented");
+        assert!(!is_ledger_unsupported_event_reason(&assessment.reason_code));
+        let amber =
+            parse_canonical_health_bytes(&health_bytes("HEALTH_STATE_AMBER", "ledger.invented"))
+                .expect("invented ledger.* is not a family prefix; AMBER stays typed");
+        assert_eq!(amber.state, WireHealthState::Amber);
+        assert_eq!(amber.reason_code, "ledger.invented");
+        assert!(!is_ledger_unsupported_event_reason(&amber.reason_code));
     }
 
     fn fixture(name: &str) -> Vec<u8> {

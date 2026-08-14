@@ -14,9 +14,10 @@ pub use error::{ERROR_SCHEMA_VERSION, ErrorBody};
 pub use http::{ApiHandle, AppState, serve, spawn_local, spawn_state};
 pub use openapi::{
     CAPTURE_STATUS_SCHEMA_IDS, CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS,
-    LAST_HEARTBEAT_THROUGHPUT_FIELDS, ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
-    core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
-    health_reason_code_is_unrestricted_string, is_core_deadletter_reason, openapi_yaml,
-    readyz_200_description, readyz_503_description, readyz_503_schema_ref,
-    unavailable_response_schema_ref,
+    LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, ROUTER_PATHS,
+    SNAPSHOT_UNAVAILABLE_REASON_CODES, core_deadletter_reason_openapi_enum,
+    health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
+    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    ledger_unsupported_event_reason_openapi_enum, openapi_yaml, readyz_200_description,
+    readyz_503_description, readyz_503_schema_ref, unavailable_response_schema_ref,
 };

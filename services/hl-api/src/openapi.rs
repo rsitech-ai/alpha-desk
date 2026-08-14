@@ -1,14 +1,18 @@
 /// Checked-in OpenAPI document generated from the health proto JSON fields,
 /// capture-status v4 (inactive) / v5 (maintenance) required keys, optional
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
-/// core dead-letter reason codes, and the HTTP router. This is not a
-/// production authentication, availability, or SLO contract, it does not
-/// invent fills or mark sources live or qualified, and it is not a live core.
+/// core dead-letter and ledger.unsupported_event reason codes, and the HTTP
+/// router. This is not a production authentication, availability, or SLO
+/// contract, it does not invent fills or mark sources live or qualified, and
+/// it is not a live core.
 pub fn openapi_yaml() -> &'static str {
     include_str!("../../../schemas/openapi/v1/openapi.yaml")
 }
 
-pub use crate::snapshot::{CORE_DEADLETTER_REASON_CODES, is_core_deadletter_reason};
+pub use crate::snapshot::{
+    CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, is_core_deadletter_reason,
+    is_ledger_unsupported_event_reason,
+};
 
 pub const HEALTH_JSON_FIELDS: &[&str] = &[
     "schema_version",
@@ -56,9 +60,25 @@ pub fn core_deadletter_reason_openapi_enum(document: &str) -> Option<Vec<&str>> 
     )
 }
 
+/// String values of `components.schemas.LedgerUnsupportedEventReasonCode.enum`.
+///
+/// Returns `None` when that schema or its block `enum` is missing. Codes that
+/// appear only in descriptions or other prose are not enum values, so dropping
+/// the frozen code from the YAML enum fails even if the string remains in
+/// prose.
+#[must_use]
+pub fn ledger_unsupported_event_reason_openapi_enum(document: &str) -> Option<Vec<&str>> {
+    yaml_string_sequence(
+        document,
+        &["components", "schemas", "LedgerUnsupportedEventReasonCode"],
+        "enum",
+    )
+}
+
 /// True when `HealthAssessment.reason_code` is a free string, not a `$ref` to
-/// `CoreDeadLetterReasonCode`. Unknown RED codes must still fail closed at
-/// serve time; the enum is documentation-only.
+/// `CoreDeadLetterReasonCode` or `LedgerUnsupportedEventReasonCode`. Unknown
+/// RED codes must still fail closed at serve time; the enums are
+/// documentation-only.
 #[must_use]
 pub fn health_reason_code_is_unrestricted_string(document: &str) -> bool {
     let Some(mapping) = yaml_mapping(
@@ -381,9 +401,10 @@ fn unquote(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        CORE_DEADLETTER_REASON_CODES, core_deadletter_reason_openapi_enum, health_503_response_ref,
-        health_503_schema_ref, health_reason_code_is_unrestricted_string, openapi_yaml,
-        readyz_200_description, readyz_503_description, readyz_503_schema_ref,
+        CORE_DEADLETTER_REASON_CODES, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+        core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
+        health_reason_code_is_unrestricted_string, ledger_unsupported_event_reason_openapi_enum,
+        openapi_yaml, readyz_200_description, readyz_503_description, readyz_503_schema_ref,
         unavailable_response_schema_ref,
     };
 
@@ -393,6 +414,9 @@ mod tests {
         let values = core_deadletter_reason_openapi_enum(document)
             .expect("OpenAPI must define components.schemas.CoreDeadLetterReasonCode.enum");
         assert_eq!(values, CORE_DEADLETTER_REASON_CODES);
+        let ledger_values = ledger_unsupported_event_reason_openapi_enum(document)
+            .expect("OpenAPI must define components.schemas.LedgerUnsupportedEventReasonCode.enum");
+        assert_eq!(ledger_values, LEDGER_UNSUPPORTED_EVENT_REASON_CODES);
         assert!(health_reason_code_is_unrestricted_string(document));
     }
 
@@ -441,6 +465,62 @@ components:
             CORE_DEADLETTER_REASON_CODES,
             "shrinking the YAML enum without shrinking the const must fail the freeze"
         );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_ledger_unsupported_event_enum_freeze() {
+        let document = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+          description: >
+            ledger.unsupported_event remains in prose after the YAML enum
+            drops it.
+    LedgerUnsupportedEventReasonCode:
+      description: >
+        ledger.unsupported_event is only in this description
+      type: string
+      enum:
+        - ledger.placeholder
+"#;
+        let values = ledger_unsupported_event_reason_openapi_enum(document)
+            .expect("synthetic schema must still parse the YAML enum");
+        assert_eq!(values, &["ledger.placeholder"]);
+        assert!(
+            !values.contains(&"ledger.unsupported_event"),
+            "prose must not count as an enum value"
+        );
+        assert_ne!(
+            values.as_slice(),
+            LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
+            "shrinking the YAML enum without shrinking the const must fail the freeze"
+        );
+    }
+
+    #[test]
+    fn reason_code_ref_to_closed_enum_fails_unrestricted_string_freeze() {
+        let document = r##"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          $ref: "#/components/schemas/LedgerUnsupportedEventReasonCode"
+    LedgerUnsupportedEventReasonCode:
+      type: string
+      enum:
+        - ledger.unsupported_event
+"##;
+        assert!(
+            !health_reason_code_is_unrestricted_string(document),
+            "$ref of a closed enum into reason_code must fail so unknown RED stays typed"
+        );
+        let values = ledger_unsupported_event_reason_openapi_enum(document)
+            .expect("closed enum remaining in components must still parse");
+        assert_eq!(values, LEDGER_UNSUPPORTED_EVENT_REASON_CODES);
     }
 
     #[test]
