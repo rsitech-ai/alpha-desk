@@ -24,7 +24,7 @@ use market_intelligence::{
 };
 use signal_core::{
     ProofWithholdReason, Signal, SignalConfirmationClass, SignalError, SignalLifecycleState,
-    SignalType, proof_withhold_reason, suppress_missing_book_or_fills,
+    SignalType, proof_withhold_reason, suppress_proof_withhold,
 };
 
 const BUYER: Address = Address::from_bytes([0x11; 20]);
@@ -647,7 +647,7 @@ fn missing_book_or_fills_cannot_emit_crowding_fragility_or_live_signals() {
             simulate_fragility_from_snapshot(snapshot, &scenario, &[], -100),
             Err(MarketError::MissingInput { name: "book" })
         ));
-        match suppress_missing_book_or_fills(snapshot) {
+        match suppress_proof_withhold(snapshot) {
             Some(signal_core::SignalEvaluation::Suppressed { reasons, .. }) => {
                 assert!(reasons
                     .iter()
@@ -699,7 +699,7 @@ fn missing_inventory_cannot_emit_live_signals_with_decimal_book() {
         proof_withhold_reason(&snapshot),
         Some(ProofWithholdReason::MissingInventory)
     );
-    match suppress_missing_book_or_fills(&snapshot) {
+    match suppress_proof_withhold(&snapshot) {
         Some(signal_core::SignalEvaluation::Suppressed { reasons, .. }) => {
             assert_eq!(
                 reasons.as_slice(),
@@ -761,7 +761,7 @@ fn boolean_inventory_cannot_emit_live_signals_with_decimal_book() {
         proof_withhold_reason(&snapshot),
         Some(ProofWithholdReason::MalformedInventory)
     );
-    match suppress_missing_book_or_fills(&snapshot) {
+    match suppress_proof_withhold(&snapshot) {
         Some(signal_core::SignalEvaluation::Suppressed { reasons, .. }) => {
             assert_eq!(
                 reasons.as_slice(),
