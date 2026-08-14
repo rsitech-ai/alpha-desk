@@ -6,8 +6,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use hl_api::{
     AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, ApiConfig, AppState, AuthMode,
-    CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_IDS, COMMITTED_SOURCE_CLASSES,
-    CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS, HEALTH_JSON_FIELDS,
+    CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_BASE_FIELDS, CAPTURE_STATUS_SCHEMA_IDS,
+    COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS, HEALTH_JSON_FIELDS,
     LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAX_AUXILIARY_SOURCES,
     READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
     ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
@@ -24,11 +24,13 @@ use hl_api::{
     auxiliary_source_unarchived_records_is_required_u64,
     auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
     capture_source_health_openapi_enum, capture_status_archive_manifest_id_is_optional_string,
+    capture_status_base_forbids_additional_properties, capture_status_base_property_keys,
     capture_status_capture_backlog_records_is_required_u64,
     capture_status_disk_free_basis_points_is_optional_u16,
     capture_status_durable_height_is_optional_u64, capture_status_failover_height_is_optional_u64,
     capture_status_failover_reason_is_optional_enum, capture_status_failover_reason_openapi_enum,
     capture_status_last_error_reason_is_optional_string,
+    capture_status_maintenance_is_optional_ref,
     capture_status_oldest_pending_capture_height_is_optional_u64,
     capture_status_throughput_blocks_per_sec_is_optional_u64,
     capture_status_throughput_records_per_sec_is_optional_u64, committed_source_class_openapi_enum,
@@ -950,6 +952,76 @@ async fn unknown_auxiliary_source_property_is_snapshot_invalid() {
     assert_eq!(
         status, 503,
         "present unknown nested property must not fail open"
+    );
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
+}
+
+#[tokio::test]
+async fn unknown_top_level_capture_status_property_is_snapshot_invalid() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known CaptureStatusBase object must stay 200");
+    assert_eq!(body["schema_version"], "hl.capture.status.v4");
+    assert!(body.get("fills").is_none());
+    assert!(body.get("throughput_records_per_sec").is_none());
+    assert!(body.get("throughput_blocks_per_sec").is_none());
+
+    value["throughput_records_per_sec"] = serde_json::json!(3_u64);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode known u64 throughput"),
+    )
+    .expect("write known u64 throughput");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "known throughput u64 must stay 200");
+    assert_eq!(body["throughput_records_per_sec"], 3_u64);
+    assert!(
+        body.get("throughput_blocks_per_sec").is_none(),
+        "present known throughput_records_per_sec must not couple throughput_blocks_per_sec"
+    );
+
+    value
+        .as_object_mut()
+        .expect("capture status object")
+        .remove("throughput_records_per_sec");
+    value["fills"] = serde_json::json!(true);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode extra top-level key"),
+    )
+    .expect("write extra top-level key");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 503,
+        "present unknown top-level property must not fail open"
     );
     assert_eq!(body["schema_version"], "hl.api.error.v1");
     assert_eq!(body["code"], "data_unavailable");
@@ -4056,8 +4128,22 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         "OpenAPI must describe nested extra keys as snapshot_invalid"
     );
     assert!(
-        document.contains("not CaptureStatusBase additionalProperties"),
-        "OpenAPI must not close CaptureStatusBase extra keys in this leftover"
+        capture_status_base_forbids_additional_properties(document),
+        "OpenAPI must set CaptureStatusBase additionalProperties false"
+    );
+    assert_eq!(
+        capture_status_base_property_keys(document)
+            .expect("OpenAPI must define CaptureStatusBase.properties"),
+        CAPTURE_STATUS_BASE_FIELDS,
+        "parse allowlist must stay identical to OpenAPI CaptureStatusBase.properties"
+    );
+    assert!(
+        capture_status_maintenance_is_optional_ref(document),
+        "OpenAPI must define CaptureStatusBase.maintenance as an optional CaptureMaintenance $ref"
+    );
+    assert!(
+        document.contains("Present unknown top-level properties"),
+        "OpenAPI must describe top-level extra keys as snapshot_invalid"
     );
     assert!(
         !document.contains("Sort order stays untyped"),
@@ -4325,8 +4411,22 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         "served OpenAPI must describe nested extra keys as snapshot_invalid"
     );
     assert!(
-        document.contains("not CaptureStatusBase additionalProperties"),
-        "served OpenAPI must not close CaptureStatusBase extra keys in this leftover"
+        capture_status_base_forbids_additional_properties(document),
+        "served OpenAPI must set CaptureStatusBase additionalProperties false"
+    );
+    assert_eq!(
+        capture_status_base_property_keys(document)
+            .expect("served OpenAPI must define CaptureStatusBase.properties"),
+        CAPTURE_STATUS_BASE_FIELDS,
+        "served parse allowlist must stay identical to OpenAPI CaptureStatusBase.properties"
+    );
+    assert!(
+        capture_status_maintenance_is_optional_ref(document),
+        "served OpenAPI must define CaptureStatusBase.maintenance as an optional CaptureMaintenance $ref"
+    );
+    assert!(
+        document.contains("Present unknown top-level properties"),
+        "served OpenAPI must describe top-level extra keys as snapshot_invalid"
     );
     assert!(
         !document.contains("Sort order stays untyped"),

@@ -9,7 +9,8 @@
 /// top-level last_error_reason, top-level failover_height, top-level failover_reason, top-level durable_height, top-level capture_backlog_records, top-level oldest_pending_capture_height, top-level disk_free_basis_points, top-level archive_manifest_id, auxiliary quarantine_reason,
 /// auxiliary_sources maxItems,
 /// auxiliary source_id uniqueness, auxiliary source_id sort order,
-/// auxiliary source extra keys, auxiliary source health, auxiliary restart
+/// auxiliary source extra keys, CaptureStatusBase extra keys,
+/// auxiliary source health, auxiliary restart
 /// reconstruction, auxiliary source qualification, core dead-letter and
 /// ledger.unsupported_event reason codes, and the HTTP router. This is not a
 /// production authentication, availability, or SLO contract, it does not
@@ -20,9 +21,9 @@ pub fn openapi_yaml() -> &'static str {
 
 pub use crate::snapshot::{
     AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
-    COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS,
-    LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAX_AUXILIARY_SOURCES, RESTART_RECONSTRUCTION,
-    is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+    CAPTURE_STATUS_BASE_FIELDS, COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
+    FAILOVER_REASONS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAX_AUXILIARY_SOURCES,
+    RESTART_RECONSTRUCTION, is_core_deadletter_reason, is_ledger_unsupported_event_reason,
 };
 
 pub const HEALTH_JSON_FIELDS: &[&str] = &[
@@ -1292,10 +1293,11 @@ pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
 
 /// True when `CaptureStatusBase.properties.auxiliary_sources.items` forbids
 /// extra keys: `type: object` and `additionalProperties: false`, matching
-/// HealthAssessment / CaptureMaintenance / ApiError. Present unknown nested
-/// properties are parse `snapshot_invalid`. Known objects without extras
-/// stay valid. CaptureStatusBase itself does not set
-/// `additionalProperties: false`. Top-level last-heartbeat
+/// HealthAssessment / CaptureMaintenance / ApiError / CaptureStatusBase.
+/// Present unknown nested properties are parse `snapshot_invalid`. Known
+/// objects without extras stay valid. CaptureStatusBase itself also sets
+/// `additionalProperties: false`; this freeze still requires the key on
+/// `items`, not on CaptureStatusBase. Top-level last-heartbeat
 /// `throughput_records_per_sec` and `throughput_blocks_per_sec` are optional
 /// u64 integers. Top-level `failover_height` is an optional u64. Top-level
 /// `failover_reason` is an optional kebab-case enum. Top-level
@@ -1324,6 +1326,73 @@ pub fn auxiliary_source_items_forbid_additional_properties(document: &str) -> bo
     };
     mapping.scalar("type") == Some("object")
         && mapping.scalar("additionalProperties") == Some("false")
+}
+
+/// True when `CaptureStatusBase` forbids extra keys: `type: object` and
+/// `additionalProperties: false`. Present unknown top-level properties are
+/// parse `snapshot_invalid`. Known objects without extras stay valid. Nested
+/// `auxiliary_sources.items additionalProperties: false` does not satisfy
+/// this freeze. HealthAssessment.reason_code stays a free string so unknown
+/// RED is not closed out.
+#[must_use]
+pub fn capture_status_base_forbids_additional_properties(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(document, &["components", "schemas", "CaptureStatusBase"])
+    else {
+        return false;
+    };
+    mapping.scalar("type") == Some("object")
+        && mapping.scalar("additionalProperties") == Some("false")
+}
+
+/// OpenAPI `CaptureStatusBase.properties` keys in document order. Missing
+/// `properties` returns `None`. Parse allowlist
+/// [`CAPTURE_STATUS_BASE_FIELDS`] must stay identical.
+#[must_use]
+pub fn capture_status_base_property_keys(document: &str) -> Option<Vec<&str>> {
+    Some(
+        yaml_mapping(
+            document,
+            &["components", "schemas", "CaptureStatusBase", "properties"],
+        )?
+        .keys(),
+    )
+}
+
+/// True when top-level `CaptureStatusBase.properties.maintenance` is an
+/// optional `$ref` to `CaptureMaintenance`: not listed on
+/// `CaptureStatusBase.required`. v4 still omits it; v5 still requires it
+/// via CaptureStatusV5. This is the existing discriminator, not a new field.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
+#[must_use]
+pub fn capture_status_maintenance_is_optional_ref(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "maintenance",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("$ref") != Some("#/components/schemas/CaptureMaintenance")
+        || mapping.has_key("type")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("additionalProperties")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &["components", "schemas", "CaptureStatusBase"],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"maintenance"))
 }
 
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
@@ -1534,6 +1603,27 @@ impl<'a> YamlMapping<'a> {
     fn find_key(&self, key: &str) -> Option<(usize, usize)> {
         find_mapping_key(&self.lines, self.begin, self.end, self.key_indent, key)
     }
+
+    fn keys(&self) -> Vec<&'a str> {
+        let mut keys = Vec::new();
+        let mut index = self.begin;
+        while index < self.end {
+            let Some((indent, trimmed)) = significant_line(self.lines[index]) else {
+                index += 1;
+                continue;
+            };
+            if indent < self.key_indent {
+                break;
+            }
+            if indent == self.key_indent
+                && let Some(key) = mapping_key(trimmed)
+            {
+                keys.push(key);
+            }
+            index += 1;
+        }
+        keys
+    }
 }
 
 fn yaml_string_sequence<'a>(
@@ -1717,9 +1807,9 @@ fn unquote(value: &str) -> &str {
 mod tests {
     use super::{
         AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
-        COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS,
-        LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION,
-        READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
+        CAPTURE_STATUS_BASE_FIELDS, COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES,
+        FAILOVER_REASONS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, READYZ_200_DESCRIPTION,
+        READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
         auxiliary_source_cursor_epoch_is_optional_string,
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string,
@@ -1735,6 +1825,7 @@ mod tests {
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
         capture_source_health_openapi_enum, capture_status_archive_manifest_id_is_optional_string,
+        capture_status_base_forbids_additional_properties, capture_status_base_property_keys,
         capture_status_capture_backlog_records_is_required_u64,
         capture_status_disk_free_basis_points_is_optional_u16,
         capture_status_durable_height_is_optional_u64,
@@ -1742,6 +1833,7 @@ mod tests {
         capture_status_failover_reason_is_optional_enum,
         capture_status_failover_reason_openapi_enum,
         capture_status_last_error_reason_is_optional_string,
+        capture_status_maintenance_is_optional_ref,
         capture_status_oldest_pending_capture_height_is_optional_u64,
         capture_status_throughput_blocks_per_sec_is_optional_u64,
         capture_status_throughput_records_per_sec_is_optional_u64,
@@ -1893,12 +1985,26 @@ mod tests {
             "OpenAPI must describe source_id sort order without uniqueItems"
         );
         assert!(
+            capture_status_base_forbids_additional_properties(document),
+            "OpenAPI must set CaptureStatusBase additionalProperties false"
+        );
+        assert_eq!(
+            capture_status_base_property_keys(document)
+                .expect("OpenAPI must define CaptureStatusBase.properties"),
+            CAPTURE_STATUS_BASE_FIELDS,
+            "parse allowlist must stay identical to OpenAPI CaptureStatusBase.properties"
+        );
+        assert!(
+            capture_status_maintenance_is_optional_ref(document),
+            "OpenAPI must define CaptureStatusBase.maintenance as an optional CaptureMaintenance $ref"
+        );
+        assert!(
             document.contains("Present unknown nested properties"),
             "OpenAPI must describe nested extra keys as snapshot_invalid"
         );
         assert!(
-            document.contains("not CaptureStatusBase additionalProperties"),
-            "OpenAPI must not close CaptureStatusBase extra keys in this leftover"
+            document.contains("Present unknown top-level properties"),
+            "OpenAPI must describe top-level extra keys as snapshot_invalid"
         );
         assert!(
             !document.contains("Sort order stays untyped"),
@@ -5750,6 +5856,157 @@ components:
         assert!(
             auxiliary_source_items_forbid_additional_properties(forbidden),
             "items additionalProperties false must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_capture_status_base_additional_properties_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      type: object
+      description: >
+        additionalProperties false remains in prose after the YAML key drops it.
+      properties:
+        schema_version:
+          type: string
+"#;
+        assert!(
+            !capture_status_base_forbids_additional_properties(prose_only),
+            "prose mention of additionalProperties false must not satisfy the freeze"
+        );
+
+        let allowed = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      type: object
+      additionalProperties: true
+      properties:
+        schema_version:
+          type: string
+"#;
+        assert!(
+            !capture_status_base_forbids_additional_properties(allowed),
+            "additionalProperties true must not satisfy the freeze"
+        );
+
+        let items_only = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      type: object
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+"#;
+        assert!(
+            !capture_status_base_forbids_additional_properties(items_only),
+            "nested items additionalProperties must not satisfy the CaptureStatusBase freeze"
+        );
+
+        let health_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      type: object
+      additionalProperties: false
+    CaptureStatusBase:
+      type: object
+      properties:
+        schema_version:
+          type: string
+"#;
+        assert!(
+            !capture_status_base_forbids_additional_properties(health_only),
+            "HealthAssessment additionalProperties must not satisfy the CaptureStatusBase freeze"
+        );
+
+        let forbidden = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      type: object
+      additionalProperties: false
+      properties:
+        schema_version:
+          type: string
+"#;
+        assert!(
+            capture_status_base_forbids_additional_properties(forbidden),
+            "CaptureStatusBase additionalProperties false must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn invented_capture_status_base_property_fails_allowlist_identity_freeze() {
+        let document = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        schema_version:
+          type: string
+        fills:
+          type: boolean
+"#;
+        let keys = capture_status_base_property_keys(document)
+            .expect("synthetic properties must still parse");
+        assert_ne!(
+            keys.as_slice(),
+            CAPTURE_STATUS_BASE_FIELDS,
+            "invented OpenAPI properties must not match the parse allowlist"
+        );
+        assert!(keys.contains(&"fills"));
+    }
+
+    #[test]
+    fn required_or_inline_maintenance_fails_optional_ref_freeze() {
+        let required = r##"
+components:
+  schemas:
+    CaptureStatusBase:
+      required:
+        - maintenance
+      properties:
+        maintenance:
+          $ref: "#/components/schemas/CaptureMaintenance"
+"##;
+        assert!(
+            !capture_status_maintenance_is_optional_ref(required),
+            "required maintenance on CaptureStatusBase must not satisfy the freeze"
+        );
+
+        let inline_object = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        maintenance:
+          type: object
+"#;
+        assert!(
+            !capture_status_maintenance_is_optional_ref(inline_object),
+            "invented inline maintenance object must not satisfy the freeze"
+        );
+
+        let optional_ref = r##"
+components:
+  schemas:
+    CaptureStatusBase:
+      required:
+        - schema_version
+      properties:
+        maintenance:
+          $ref: "#/components/schemas/CaptureMaintenance"
+"##;
+        assert!(
+            capture_status_maintenance_is_optional_ref(optional_ref),
+            "optional CaptureMaintenance $ref must satisfy the freeze"
         );
     }
 

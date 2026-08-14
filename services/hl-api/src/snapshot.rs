@@ -83,21 +83,56 @@ pub const FAILOVER_REASONS: &[&str] = &["primary-range-unavailable"];
 /// present `source_id` is `snapshot_invalid`. Distinct ids stay valid when
 /// strictly increasing (`previous >= source_id` is `snapshot_invalid`).
 /// Present unknown nested properties are `snapshot_invalid`. Known objects
-/// without extras stay valid. This crate does not vendor hl-capture and this
-/// is not a live capture or Stage PASS. `HealthAssessment.reason_code` stays
-/// a free string so unknown RED is not closed out.
+/// without extras stay valid. Present unknown top-level properties are
+/// `snapshot_invalid`. Known CaptureStatusBase objects without extras stay
+/// valid. This crate does not vendor hl-capture and this is not a live
+/// capture or Stage PASS. `HealthAssessment.reason_code` stays a free string
+/// so unknown RED is not closed out.
 pub const MAX_AUXILIARY_SOURCES: usize = 16;
+
+/// OpenAPI `CaptureStatusBase.properties` keys, including optional
+/// last-heartbeat throughput, `archive_manifest_id`, and the existing v4/v5
+/// `maintenance` discriminator. Present unknown top-level properties are
+/// `snapshot_invalid`. Known objects without extras stay valid. This stack's
+/// capture writer serializes a subset of these keys and does not serialize
+/// throughput. Writer `validate_status_text` trim/control/512 lives only in
+/// the capture writer and is not copied here. `HealthAssessment.reason_code`
+/// stays a free string so unknown RED is not closed out.
+pub const CAPTURE_STATUS_BASE_FIELDS: &[&str] = &[
+    "schema_version",
+    "snapshot_at_micros",
+    "build_id",
+    "chain_id",
+    "health",
+    "ready",
+    "active_committed_source",
+    "primary_source_health",
+    "independent_source_health",
+    "failover_height",
+    "failover_reason",
+    "durable_height",
+    "last_error_reason",
+    "auxiliary_sources",
+    "pending_blocks",
+    "capture_backlog_records",
+    "oldest_pending_capture_height",
+    "disk_free_basis_points",
+    "archive_manifest_id",
+    "throughput_records_per_sec",
+    "throughput_blocks_per_sec",
+    "maintenance",
+];
 
 /// Capture writer `AuxiliarySourceStatus` public keys plus this stack's
 /// already-typed optional `restart_reconstruction`. Present unknown nested
 /// properties are `snapshot_invalid`. Known objects without extras stay
-/// valid. This is not CaptureStatusBase extra keys. Top-level `failover_height`
-/// is an optional u64. Top-level `failover_reason` is an optional kebab-case
-/// enum. Top-level `durable_height` is an optional u64. Top-level
-/// `capture_backlog_records` is a required u64. Top-level
-/// `oldest_pending_capture_height` is an optional u64. Top-level
-/// `disk_free_basis_points` is an optional u16. Top-level
-/// `archive_manifest_id` is an optional non-empty string. Writer
+/// valid. CaptureStatusBase extra keys are a separate top-level allowlist.
+/// Top-level `failover_height` is an optional u64. Top-level
+/// `failover_reason` is an optional kebab-case enum. Top-level
+/// `durable_height` is an optional u64. Top-level `capture_backlog_records`
+/// is a required u64. Top-level `oldest_pending_capture_height` is an
+/// optional u64. Top-level `disk_free_basis_points` is an optional u16.
+/// Top-level `archive_manifest_id` is an optional non-empty string. Writer
 /// `validate_status_text` trim/control/512 lives only in the capture writer
 /// and is not copied here. Top-level `last_error_reason` is an optional
 /// non-empty string. Top-level last-heartbeat `throughput_records_per_sec`
@@ -269,6 +304,7 @@ fn parse_capture_status_bytes(bytes: &[u8]) -> Result<Value, SnapshotError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| SnapshotError::Invalid)?;
     reject_lossy_numbers(&value)?;
     let object = value.as_object().ok_or(SnapshotError::Invalid)?;
+    require_capture_status_base_closed_fields(object)?;
     require_string(object, "schema_version", None)?;
     let schema = object
         .get("schema_version")
@@ -417,6 +453,18 @@ fn require_enum(
     }
 }
 
+fn require_capture_status_base_closed_fields(
+    object: &Map<String, Value>,
+) -> Result<(), SnapshotError> {
+    if object
+        .keys()
+        .any(|key| !CAPTURE_STATUS_BASE_FIELDS.contains(&key.as_str()))
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    Ok(())
+}
+
 fn require_auxiliary_source_closed_fields(
     object: &Map<String, Value>,
 ) -> Result<(), SnapshotError> {
@@ -548,10 +596,11 @@ fn require_i64(object: &Map<String, Value>, field: &str) -> Result<(), SnapshotE
 mod tests {
     use super::{
         AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, CAPTURE_SOURCE_HEALTH,
-        CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5, COMMITTED_SOURCE_CLASSES,
-        CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES,
-        MAINTENANCE_FIELDS, MAX_AUXILIARY_SOURCES, RESTART_RECONSTRUCTION, SnapshotError,
-        is_core_deadletter_family, is_core_deadletter_reason, is_ledger_unsupported_event_reason,
+        CAPTURE_STATUS_BASE_FIELDS, CAPTURE_STATUS_SCHEMA_V4, CAPTURE_STATUS_SCHEMA_V5,
+        COMMITTED_SOURCE_CLASSES, CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS,
+        LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAINTENANCE_FIELDS, MAX_AUXILIARY_SOURCES,
+        RESTART_RECONSTRUCTION, SnapshotError, is_core_deadletter_family,
+        is_core_deadletter_reason, is_ledger_unsupported_event_reason,
         parse_canonical_health_bytes, parse_capture_status_bytes,
     };
     use crate::openapi::{
@@ -570,6 +619,7 @@ mod tests {
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
         capture_source_health_openapi_enum, capture_status_archive_manifest_id_is_optional_string,
+        capture_status_base_forbids_additional_properties, capture_status_base_property_keys,
         capture_status_capture_backlog_records_is_required_u64,
         capture_status_disk_free_basis_points_is_optional_u16,
         capture_status_durable_height_is_optional_u64,
@@ -577,6 +627,7 @@ mod tests {
         capture_status_failover_reason_is_optional_enum,
         capture_status_failover_reason_openapi_enum,
         capture_status_last_error_reason_is_optional_string,
+        capture_status_maintenance_is_optional_ref,
         capture_status_oldest_pending_capture_height_is_optional_u64,
         capture_status_throughput_blocks_per_sec_is_optional_u64,
         capture_status_throughput_records_per_sec_is_optional_u64,
@@ -1717,12 +1768,26 @@ mod tests {
             "OpenAPI must describe source_id sort order without uniqueItems"
         );
         assert!(
+            capture_status_base_forbids_additional_properties(document),
+            "OpenAPI must set CaptureStatusBase additionalProperties false"
+        );
+        assert_eq!(
+            capture_status_base_property_keys(document)
+                .expect("OpenAPI must define CaptureStatusBase.properties"),
+            CAPTURE_STATUS_BASE_FIELDS,
+            "parse allowlist must stay identical to OpenAPI CaptureStatusBase.properties"
+        );
+        assert!(
+            capture_status_maintenance_is_optional_ref(document),
+            "OpenAPI must define CaptureStatusBase.maintenance as an optional CaptureMaintenance $ref"
+        );
+        assert!(
             document.contains("Present unknown nested properties"),
             "OpenAPI must describe nested extra keys as snapshot_invalid"
         );
         assert!(
-            document.contains("not CaptureStatusBase additionalProperties"),
-            "OpenAPI must not close CaptureStatusBase extra keys in this leftover"
+            document.contains("Present unknown top-level properties"),
+            "OpenAPI must describe top-level extra keys as snapshot_invalid"
         );
         assert!(
             !document.contains("Sort order stays untyped"),
@@ -2066,6 +2131,60 @@ mod tests {
                 .as_object_mut()
                 .expect("auxiliary source object")
                 .remove(extra);
+        }
+    }
+
+    #[test]
+    fn known_top_level_payload_without_extras_is_accepted() {
+        let v4 = parse_capture_status_bytes(&fixture("capture-status.json")).expect("v4");
+        assert_eq!(v4["schema_version"], "hl.capture.status.v4");
+        assert!(v4.get("fills").is_none());
+        assert!(v4.get("maintenance").is_none());
+        assert!(v4.get("throughput_records_per_sec").is_none());
+        assert!(v4.get("throughput_blocks_per_sec").is_none());
+
+        let v5 = parse_capture_status_bytes(&fixture("capture-status-v5.json")).expect("v5");
+        assert_eq!(v5["schema_version"], "hl.capture.status.v5");
+        assert!(v5.get("maintenance").is_some());
+        assert!(v5.get("fills").is_none());
+
+        let mut with_throughput =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status.json"))
+                .expect("v4 json");
+        with_throughput["throughput_records_per_sec"] = serde_json::json!(3_u64);
+        with_throughput["throughput_blocks_per_sec"] = serde_json::json!(1_u64);
+        with_throughput["archive_manifest_id"] = serde_json::json!("manifest-1");
+        let bytes = serde_json::to_vec(&with_throughput).expect("encode known optional keys");
+        let parsed = parse_capture_status_bytes(&bytes).expect("known optional keys");
+        assert_eq!(parsed["throughput_records_per_sec"], 3_u64);
+        assert_eq!(parsed["throughput_blocks_per_sec"], 1_u64);
+        assert_eq!(parsed["archive_manifest_id"], "manifest-1");
+        assert!(parsed.get("fills").is_none());
+        assert!(parsed.get("qualification").is_none());
+    }
+
+    #[test]
+    fn present_unknown_top_level_property_is_snapshot_invalid() {
+        for fixture_name in ["capture-status.json", "capture-status-v5.json"] {
+            let mut value = serde_json::from_slice::<serde_json::Value>(&fixture(fixture_name))
+                .expect("fixture json");
+            let known = serde_json::to_vec(&value).expect("encode known");
+            parse_capture_status_bytes(&known)
+                .unwrap_or_else(|error| panic!("{fixture_name} known payload must parse: {error}"));
+            for extra in ["fills", "invented", "adapter"] {
+                value[extra] = serde_json::json!(true);
+                let bytes = serde_json::to_vec(&value).expect("encode extra top-level key");
+                assert_eq!(
+                    parse_capture_status_bytes(&bytes)
+                        .expect_err("present unknown top-level property must not fail open"),
+                    SnapshotError::Invalid,
+                    "{fixture_name} {extra} must be snapshot_invalid"
+                );
+                value
+                    .as_object_mut()
+                    .expect("capture status object")
+                    .remove(extra);
+            }
         }
     }
 

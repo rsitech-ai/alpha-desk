@@ -328,8 +328,8 @@ components:
         snapshot_invalid. Omitted stays omitted. Top-level last_error_reason is an optional string; present
         non-string values, and empty present strings, are snapshot_invalid.
         Omitted stays omitted. Present unknown nested properties are snapshot_invalid.
-        Known objects without extras stay valid. This is nested item extra
-        keys, not CaptureStatusBase additionalProperties. Nested health,
+        Known objects without extras stay valid. Present unknown top-level properties are snapshot_invalid.
+        Known CaptureStatusBase objects without extras stay valid. Nested health,
         restart_reconstruction, and qualification, when present, use closed
         kebab-case sets; unknown values are snapshot_invalid. Omitted optional
         nested fields stay omitted.
@@ -341,6 +341,7 @@ components:
         - $ref: "#/components/schemas/CaptureStatusV5"
     CaptureStatusBase:
       type: object
+      additionalProperties: false
       required:
         - schema_version
         - snapshot_at_micros
@@ -485,8 +486,8 @@ components:
             last_error_reason is an optional string; present non-string values,
             and empty present strings, are snapshot_invalid. Omitted stays
             omitted. Present unknown nested properties are snapshot_invalid.
-            Known objects without extras stay valid. This is nested item extra
-            keys, not CaptureStatusBase additionalProperties. Nested health,
+            Known objects without extras stay valid. Present unknown top-level properties are snapshot_invalid.
+            Known CaptureStatusBase objects without extras stay valid. Nested health,
             restart_reconstruction, and qualification are optional; present
             values use closed kebab-case sets. Unknown values are
             snapshot_invalid. Omitted optional nested fields stay omitted.
@@ -724,6 +725,8 @@ components:
           description: >
             Last-heartbeat captured committed-block rate for the completed
             status-heartbeat window. Optional integer; not live-qualified.
+        maintenance:
+          $ref: "#/components/schemas/CaptureMaintenance"
     CaptureStatusV4:
       description: >
         Inactive capture status. maintenance is omitted; documents that
