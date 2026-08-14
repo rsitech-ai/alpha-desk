@@ -111,7 +111,7 @@ fn auxiliary_sources_with_distinct_ids(known: &Value, count: usize) -> Vec<Value
     (0..count)
         .map(|index| {
             let mut item = known.clone();
-            item["source_id"] = serde_json::json!(format!("aux-source-{index}"));
+            item["source_id"] = serde_json::json!(format!("aux-source-{index:02}"));
             item
         })
         .collect()
@@ -836,12 +836,12 @@ async fn duplicate_auxiliary_source_id_is_snapshot_invalid() {
     let mut other = known.clone();
     other["source_id"] = serde_json::json!("node-fills");
 
-    value["auxiliary_sources"] = serde_json::json!([known.clone(), other]);
+    value["auxiliary_sources"] = serde_json::json!([other.clone(), known.clone()]);
     std::fs::write(
         &capture_path,
-        serde_json::to_vec(&value).expect("encode distinct source_id"),
+        serde_json::to_vec(&value).expect("encode sorted distinct source_id"),
     )
-    .expect("write distinct source_id");
+    .expect("write sorted distinct source_id");
     let state = state_from(
         directory.path(),
         "loopback-dev",
@@ -850,13 +850,35 @@ async fn duplicate_auxiliary_source_id_is_snapshot_invalid() {
         Some(&capture_path),
     );
     let (status, body) = call(&state, "/v1/capture/status", &[]).await;
-    assert_eq!(status, 200, "distinct source_id must stay 200");
+    assert_eq!(status, 200, "sorted distinct source_id must stay 200");
+    assert_eq!(body["auxiliary_sources"][0]["source_id"], "node-fills");
     assert_eq!(
-        body["auxiliary_sources"][0]["source_id"],
+        body["auxiliary_sources"][1]["source_id"],
         "node-misc-events"
     );
-    assert_eq!(body["auxiliary_sources"][1]["source_id"], "node-fills");
     assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    value["auxiliary_sources"] = serde_json::json!([known.clone(), other]);
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode descending source_id"),
+    )
+    .expect("write descending source_id");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 503,
+        "descending distinct source_id must not fail open"
+    );
+    assert_eq!(body["schema_version"], "hl.api.error.v1");
+    assert_eq!(body["code"], "data_unavailable");
+    assert_eq!(body["reason_code"], "snapshot_invalid");
 
     value["auxiliary_sources"] = serde_json::json!([known.clone(), known]);
     std::fs::write(
@@ -2803,6 +2825,14 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         document.contains("Duplicate present source_id"),
         "OpenAPI must describe source_id uniqueness without uniqueItems"
     );
+    assert!(
+        document.contains("strictly increasing"),
+        "OpenAPI must describe source_id sort order without uniqueItems"
+    );
+    assert!(
+        !document.contains("Sort order stays untyped"),
+        "OpenAPI must not leave source_id sort order untyped"
+    );
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -3005,6 +3035,14 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         document.contains("Duplicate present source_id"),
         "served OpenAPI must describe source_id uniqueness without uniqueItems"
+    );
+    assert!(
+        document.contains("strictly increasing"),
+        "served OpenAPI must describe source_id sort order without uniqueItems"
+    );
+    assert!(
+        !document.contains("Sort order stays untyped"),
+        "served OpenAPI must not leave source_id sort order untyped"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),
