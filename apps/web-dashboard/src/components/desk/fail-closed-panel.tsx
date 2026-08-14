@@ -26,12 +26,15 @@ import {
 } from "@/lib/api"
 import {
   API_ERROR_SCHEMA_VERSION,
+  CAPTURE_HEALTH_SCHEMA_VERSION,
   healthReasonCode,
   type ApiError,
   type CaptureStatus,
   type HealthBody,
 } from "@/lib/contracts"
 import {
+  LEFTOVER_V4_OMITTED_DETAIL,
+  leftoverV4LaneKind,
   mapApiError,
   type FailClosedFamily,
   type FailClosedView,
@@ -144,6 +147,7 @@ function Lane({
 type LaneBody =
   | { kind: "observed"; view: FailClosedView }
   | { kind: "not_observed"; status?: number; detail: string }
+  | { kind: "unknown_omitted"; status: number; detail: string }
   | { kind: "invalid"; status: number; detail: string }
   | { kind: "network"; detail: string }
 
@@ -187,6 +191,16 @@ function LaneContent({
             {body.status === undefined
               ? body.detail
               : `HTTP ${body.status} · ${body.detail}`}{" "}
+            Expected family {expected}. Not a PASS.
+          </p>
+        </div>
+      )
+    case "unknown_omitted":
+      return (
+        <div className="flex flex-col gap-2">
+          <ToneBadge tone="red">unknown</ToneBadge>
+          <p className="text-xs text-muted-foreground">
+            HTTP {body.status} · {body.detail}{" "}
             Expected family {expected}. Not a PASS.
           </p>
         </div>
@@ -294,11 +308,41 @@ function captureHealthNotReadyLane(feed: DeskFeed): LaneBody {
   if (live) {
     return { kind: "observed", view: live }
   }
+  const omitted = omittedUnreadyCaptureHealth(feed)
+  if (omitted) {
+    return {
+      kind: "unknown_omitted",
+      status: omitted.status,
+      detail: LEFTOVER_V4_OMITTED_DETAIL,
+    }
+  }
   return {
     kind: "not_observed",
     detail:
       "capture /healthz leftover v4 / not live-ready was not returned this poll. Not a PASS.",
   }
+}
+
+function omittedUnreadyCaptureHealth(
+  feed: DeskFeed
+): { status: number } | undefined {
+  const outcomes: EndpointOutcome<HealthBody>[] = [
+    feed.healthz,
+    feed.readyz,
+    feed.canonicalHealth,
+  ]
+  for (const outcome of outcomes) {
+    if (outcome.kind !== "ok") {
+      continue
+    }
+    if (outcome.data.schema_version !== CAPTURE_HEALTH_SCHEMA_VERSION) {
+      continue
+    }
+    if (leftoverV4LaneKind(outcome.status, outcome.data) === "unknown_omitted") {
+      return { status: outcome.status }
+    }
+  }
+  return undefined
 }
 
 function liveTypedCoreView(

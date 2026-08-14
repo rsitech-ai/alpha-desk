@@ -13,9 +13,12 @@ import {
   type CaptureStatus,
 } from "@/lib/contracts"
 import {
+  LEFTOVER_V4_OMITTED_DETAIL,
   captureHealthObservedReason,
+  captureHealthOmittedReasonUnready,
   classifyHttpBody,
   familyOf,
+  leftoverV4LaneKind,
   mapApiError,
 } from "@/lib/fail-closed"
 
@@ -898,6 +901,79 @@ describe("capture leftover v4 / not live-ready healthz", () => {
     expect(leftoverV4.value.throughput_blocks_per_sec).toBeUndefined()
   })
 
+  it("keeps the leftover-v4 fail-closed lane unknown when healthz omits reason_code, not typed leftover-v4 and not a quiet not_observed", () => {
+    const parsed = parseCaptureHealth({
+      schema_version: "hl.capture.health.v1",
+      ok: false,
+      ready: false,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(captureHealthOmittedReasonUnready(503, parsed.value)).toBe(true)
+    expect(leftoverV4LaneKind(503, parsed.value)).toBe("unknown_omitted")
+    expect(leftoverV4LaneKind(503, parsed.value)).not.toBe("typed")
+    expect(leftoverV4LaneKind(503, parsed.value)).not.toBe("not_observed")
+    expect(LEFTOVER_V4_OMITTED_DETAIL).toMatch(/omitted reason_code/)
+    expect(LEFTOVER_V4_OMITTED_DETAIL).toMatch(/not typed/)
+    expect(LEFTOVER_V4_OMITTED_DETAIL).toMatch(/Unknown data_unavailable/)
+    expect(LEFTOVER_V4_OMITTED_DETAIL).toMatch(/not ready/)
+    expect(LEFTOVER_V4_OMITTED_DETAIL).not.toMatch(/was not returned this poll/)
+    expect(parsed.value.reason_code).not.toBe("capture_health.not_ready")
+
+    const nullParsed = parseCaptureHealth({
+      schema_version: "hl.capture.health.v1",
+      ok: false,
+      ready: false,
+      reason_code: null,
+    })
+    expect(nullParsed.ok).toBe(true)
+    if (!nullParsed.ok) {
+      return
+    }
+    expect(nullParsed.value.reason_code).toBeUndefined()
+    expect(leftoverV4LaneKind(503, nullParsed.value)).toBe("unknown_omitted")
+    expect(leftoverV4LaneKind(503, nullParsed.value)).not.toBe("typed")
+    expect(captureHealthObservedReason(nullParsed.value.reason_code)).toBe(
+      "data_unavailable"
+    )
+    expect(captureHealthObservedReason(nullParsed.value.reason_code)).not.toBe(
+      "capture_health.not_ready"
+    )
+  })
+
+  it("keeps present capture_health.not_ready typed on the leftover-v4 lane", () => {
+    const parsed = parseCaptureHealth(
+      captureHealth503("capture_health.not_ready")
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(captureHealthOmittedReasonUnready(503, parsed.value)).toBe(false)
+    expect(leftoverV4LaneKind(503, parsed.value)).toBe("typed")
+    expect(leftoverV4LaneKind(503, parsed.value)).not.toBe("unknown_omitted")
+    expect(leftoverV4LaneKind(503, parsed.value)).not.toBe("not_observed")
+  })
+
+  it("does not treat ready capture healthz with omitted reason as leftover-v4 or as unknown omitted", () => {
+    const parsed = parseCaptureHealth({
+      schema_version: "hl.capture.health.v1",
+      ok: true,
+      health: "green",
+      ready: true,
+    })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(captureHealthOmittedReasonUnready(200, parsed.value)).toBe(false)
+    expect(leftoverV4LaneKind(200, parsed.value)).toBe("not_observed")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("typed")
+    expect(leftoverV4LaneKind(200, parsed.value)).not.toBe("unknown_omitted")
+  })
+
   it("fail-closes unknown capture_health.* /healthz codes instead of showing ready", () => {
     const outcome = classifyHttpBody(
       503,
@@ -914,6 +990,17 @@ describe("capture leftover v4 / not live-ready healthz", () => {
     expect(outcome.view.tone).toBe("red")
     expect(outcome.view.tone).not.toBe("green")
     expect(outcome.view.title).not.toMatch(/ready/i)
+
+    const parsed = parseCaptureHealth(
+      captureHealth503("capture_health.unspecified_future")
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(leftoverV4LaneKind(503, parsed.value)).toBe("not_observed")
+    expect(leftoverV4LaneKind(503, parsed.value)).not.toBe("typed")
+    expect(leftoverV4LaneKind(503, parsed.value)).not.toBe("unknown_omitted")
   })
 
   it("does not treat leftover v4 /status HTTP 200 as typed capture healthz or as a PASS", () => {

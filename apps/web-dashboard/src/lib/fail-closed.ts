@@ -168,6 +168,37 @@ export function captureHealthObservedReason(
   return reason_code ?? "data_unavailable"
 }
 
+export type LeftoverV4LaneKind = "typed" | "unknown_omitted" | "not_observed"
+
+export const LEFTOVER_V4_OMITTED_DETAIL =
+  "capture /healthz omitted reason_code. Leftover v4 was not typed. Unknown data_unavailable; not ready. Not a PASS."
+
+export function leftoverV4LaneKind(
+  status: number,
+  health: CaptureHealthBody
+): LeftoverV4LaneKind {
+  if (
+    health.reason_code !== undefined &&
+    asCaptureHealthNotReadyReason(health.reason_code)
+  ) {
+    return "typed"
+  }
+  if (captureHealthOmittedReasonUnready(status, health)) {
+    return "unknown_omitted"
+  }
+  return "not_observed"
+}
+
+export function captureHealthOmittedReasonUnready(
+  status: number,
+  health: CaptureHealthBody
+): boolean {
+  if (health.reason_code !== undefined) {
+    return false
+  }
+  return status === 503 || !health.ok || health.ready !== true
+}
+
 function classifyCaptureHealth(
   status: number,
   health: CaptureHealthBody
