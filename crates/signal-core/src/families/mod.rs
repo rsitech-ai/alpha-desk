@@ -1,7 +1,8 @@
 use domain_types::{BasisPoints, EntityId, ProbabilityPpm, UsdAmount};
 use feature_core::{FeatureValue, HealthAssessment, HealthState};
 use market_intelligence::{
-    FragilityResult, MarketFeatureSnapshot, ObservationStatus, RegimeAssessment, ScoredDimension,
+    FragilityResult, MarketFeatureSnapshot, ObservationMintKind, ObservationStatus,
+    RegimeAssessment, ScoredDimension,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -76,26 +77,23 @@ impl FamilyThresholds {
 pub fn suppress_missing_book_or_fills(
     snapshot: &MarketFeatureSnapshot,
 ) -> Option<SignalEvaluation> {
-    let book = snapshot
-        .observation("book")
-        .unwrap_or(ObservationStatus::Missing(
-            feature_core::MissingReason::NotObserved,
-        ));
-    let fills = snapshot
-        .observation("fills")
-        .unwrap_or(ObservationStatus::Missing(
-            feature_core::MissingReason::NotObserved,
-        ));
+    let withheld = || SignalEvaluation::Suppressed {
+        health: snapshot.health.clone(),
+        reasons: vec!["missing_book_or_fills".to_owned()],
+    };
+    let book = match snapshot.observation("book", ObservationMintKind::DecimalDepth) {
+        Ok(status) => status,
+        Err(_) => return Some(withheld()),
+    };
+    let fills = match snapshot.observation("fills", ObservationMintKind::BooleanPresence) {
+        Ok(status) => status,
+        Err(_) => return Some(withheld()),
+    };
     match (book, fills) {
         (ObservationStatus::Observed, ObservationStatus::Observed) => None,
         (ObservationStatus::Observed, ObservationStatus::Missing(_))
         | (ObservationStatus::Missing(_), ObservationStatus::Observed)
-        | (ObservationStatus::Missing(_), ObservationStatus::Missing(_)) => {
-            Some(SignalEvaluation::Suppressed {
-                health: snapshot.health.clone(),
-                reasons: vec!["missing_book_or_fills".to_owned()],
-            })
-        }
+        | (ObservationStatus::Missing(_), ObservationStatus::Missing(_)) => Some(withheld()),
     }
 }
 

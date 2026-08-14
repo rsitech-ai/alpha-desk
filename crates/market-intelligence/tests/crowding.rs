@@ -263,3 +263,23 @@ fn constructed_accounts_with_invented_inventory_cannot_produce_crowding_scores()
         })
     ));
 }
+
+#[test]
+fn boolean_book_cannot_mint_crowding_proof() {
+    let positions = vec![invented_mark_position()];
+    let boolean_book = crowding_snapshot(FeatureValue::Boolean(true), FeatureValue::Boolean(true));
+    assert!(matches!(
+        boolean_book.require_observed_book_and_fills(),
+        Err(MarketError::Malformed {
+            what: "observation",
+            reason: "boolean cannot mint decimal depth",
+        })
+    ));
+    assert!(matches!(
+        crowding_components_from_snapshot(&boolean_book, &positions, usd(50)),
+        Err(MarketError::Malformed {
+            what: "observation",
+            reason: "boolean cannot mint decimal depth",
+        })
+    ));
+}

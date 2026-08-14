@@ -52,6 +52,8 @@ pub use regime::{
     MarketRegime, RegimeAssessment, RegimeFeatureVector, RegimeModel, RegimeName, classify_regime,
 };
 pub use sentiment::{
-    DimensionUnit, MarketFeatureSnapshot, MarketSentimentVector, ObservationStatus,
-    ObservedBookAndFills, ScoredDimension, market_feature_key, missing_dimension,
+    BooleanObservationPurpose, DimensionUnit, MarketFeatureSnapshot, MarketSentimentVector,
+    ObservationMintKind, ObservationStatus, ObservedBookAndFills, ScoredDimension,
+    boolean_presence_from_decimal_depth, decimal_depth_from_boolean_presence, market_feature_key,
+    mint_boolean_observation, missing_dimension,
 };
