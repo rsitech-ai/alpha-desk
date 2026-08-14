@@ -7,10 +7,11 @@ use bytes::Bytes;
 use hl_api::{
     AUXILIARY_SOURCE_HEALTH, AUXILIARY_SOURCE_QUALIFICATION, ApiConfig, AppState, AuthMode,
     CAPTURE_SOURCE_HEALTH, CAPTURE_STATUS_SCHEMA_IDS, COMMITTED_SOURCE_CLASSES,
-    CORE_DEADLETTER_REASON_CODES, HEALTH_JSON_FIELDS, LAST_HEARTBEAT_THROUGHPUT_FIELDS,
-    LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAX_AUXILIARY_SOURCES, READYZ_200_DESCRIPTION,
-    READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, ROUTER_PATHS,
-    SNAPSHOT_UNAVAILABLE_REASON_CODES, auxiliary_source_cursor_epoch_is_optional_string,
+    CORE_DEADLETTER_REASON_CODES, FAILOVER_REASONS, HEALTH_JSON_FIELDS,
+    LAST_HEARTBEAT_THROUGHPUT_FIELDS, LEDGER_UNSUPPORTED_EVENT_REASON_CODES, MAX_AUXILIARY_SOURCES,
+    READYZ_200_DESCRIPTION, READYZ_503_DESCRIPTION, READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
+    ROUTER_PATHS, SNAPSHOT_UNAVAILABLE_REASON_CODES,
+    auxiliary_source_cursor_epoch_is_optional_string,
     auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
     auxiliary_source_id_is_required_string, auxiliary_source_items_forbid_additional_properties,
     auxiliary_source_last_durable_wall_micros_is_optional_i64,
@@ -23,6 +24,7 @@ use hl_api::{
     auxiliary_source_unarchived_records_is_required_u64,
     auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
     capture_source_health_openapi_enum, capture_status_failover_height_is_optional_u64,
+    capture_status_failover_reason_is_optional_enum, capture_status_failover_reason_openapi_enum,
     capture_status_last_error_reason_is_optional_string, committed_source_class_openapi_enum,
     core_deadletter_reason_openapi_enum, health_503_response_ref, health_503_schema_ref,
     health_reason_code_is_unrestricted_string, independent_source_health_openapi_enum,
@@ -2353,6 +2355,107 @@ async fn top_level_capture_failover_height_is_optional_u64() {
     }
 }
 
+#[tokio::test]
+async fn top_level_capture_failover_reason_is_optional_enum() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v4 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level failover_reason must stay 200"
+    );
+    assert!(body.get("failover_reason").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v4");
+
+    for reason in FAILOVER_REASONS {
+        value["failover_reason"] = serde_json::json!(reason);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known failover_reason"),
+        )
+        .expect("write known failover_reason");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{reason} must stay 200");
+        assert_eq!(body["failover_reason"], *reason);
+        assert!(
+            body.get("failover_height").is_none(),
+            "typing failover_reason must not couple it to failover_height"
+        );
+    }
+
+    value
+        .as_object_mut()
+        .expect("capture status object")
+        .remove("failover_reason");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted failover_reason"),
+    )
+    .expect("write omitted failover_reason");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted top-level failover_reason after removal must stay 200"
+    );
+    assert!(body.get("failover_reason").is_none());
+
+    for failover_reason in [
+        serde_json::json!("primary_range_unavailable"),
+        serde_json::json!("PrimaryRangeUnavailable"),
+        serde_json::json!("range-unavailable"),
+        serde_json::json!(""),
+        serde_json::json!(1),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-string"}),
+        serde_json::json!(["not-a-string"]),
+    ] {
+        value["failover_reason"] = failover_reason.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode invalid failover_reason"),
+        )
+        .expect("write invalid failover_reason");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{failover_reason} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -2962,6 +3065,15 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     for health in CAPTURE_SOURCE_HEALTH {
         assert!(document.contains(health), "OpenAPI must list {health}");
     }
+    let failover_reason_enum = capture_status_failover_reason_openapi_enum(document)
+        .expect("OpenAPI must define CaptureStatusBase.failover_reason.enum");
+    assert_eq!(
+        failover_reason_enum, FAILOVER_REASONS,
+        "YAML enum must match the frozen const; prose mentions do not count"
+    );
+    for reason in FAILOVER_REASONS {
+        assert!(document.contains(reason), "OpenAPI must list {reason}");
+    }
     let reconstruction_enum = restart_reconstruction_openapi_enum(document).expect(
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.restart_reconstruction.enum",
     );
@@ -3056,6 +3168,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
     assert!(
         capture_status_failover_height_is_optional_u64(document),
         "OpenAPI must define CaptureStatusBase.failover_height as an optional u64 integer"
+    );
+    assert!(
+        capture_status_failover_reason_is_optional_enum(document),
+        "OpenAPI must define CaptureStatusBase.failover_reason as an optional kebab-case enum"
     );
     assert!(
         auxiliary_sources_max_items_is_writer_cap(document),
@@ -3207,6 +3323,12 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
         independent_health_enum, CAPTURE_SOURCE_HEALTH,
         "served optional independent_source_health must freeze the same closed set"
     );
+    let failover_reason_enum = capture_status_failover_reason_openapi_enum(document)
+        .expect("served OpenAPI must define CaptureStatusBase.failover_reason.enum");
+    assert_eq!(
+        failover_reason_enum, FAILOVER_REASONS,
+        "served YAML enum must match the frozen const; prose mentions do not count"
+    );
     let reconstruction_enum = restart_reconstruction_openapi_enum(document).expect(
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.restart_reconstruction.enum",
     );
@@ -3287,6 +3409,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         capture_status_failover_height_is_optional_u64(document),
         "served OpenAPI must define CaptureStatusBase.failover_height as an optional u64 integer"
+    );
+    assert!(
+        capture_status_failover_reason_is_optional_enum(document),
+        "served OpenAPI must define CaptureStatusBase.failover_reason as an optional kebab-case enum"
     );
     assert!(
         auxiliary_sources_max_items_is_writer_cap(document),
