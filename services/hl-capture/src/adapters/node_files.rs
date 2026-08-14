@@ -328,7 +328,7 @@ impl<C: NodeReceiveClock> NodeBlockDirectorySource<C> {
     async fn wait_for_progress(&self, context: &SourceRequestContext) -> Result<(), SourceError> {
         context.check()?;
         let now = tokio::time::Instant::now();
-        let deadline = tokio::time::Instant::from_std(context.backpressure_deadline());
+        let deadline = context.backpressure_deadline();
         let wake = now
             .checked_add(self.config.poll_interval)
             .map_or(deadline, |poll| poll.min(deadline));

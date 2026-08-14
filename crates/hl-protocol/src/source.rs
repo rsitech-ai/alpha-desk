@@ -1,7 +1,6 @@
-use std::time::Instant;
-
 use async_trait::async_trait;
 use domain_types::{AccountId, MarketId, SourceId};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{SourceCursor, SourceError, SourceObservation};
@@ -31,8 +30,7 @@ impl SourceRequestContext {
         if self.cancellation.is_cancelled() {
             return Err(SourceError::Cancelled);
         }
-        if tokio::time::Instant::now() >= tokio::time::Instant::from_std(self.backpressure_deadline)
-        {
+        if Instant::now() >= self.backpressure_deadline {
             return Err(SourceError::BackpressureTimeout);
         }
         Ok(())

@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use domain_types::SourceId;
@@ -6,6 +6,7 @@ use hl_protocol::{
     CursorTransition, ErrorDisposition, ObservationClass, ObservationError, ParseWarning,
     ReceiveTimestamps, SourceCursor, SourceError, SourceObservation, SourceRequestContext,
 };
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 fn source_id() -> SourceId {
