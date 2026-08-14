@@ -562,17 +562,9 @@ fn assess_market_emissions(
         FragilityScenario::default_grid(ScenarioId::new("synthetic-unassessed-fragility")?);
     let mut crowding_emitted = 0_u64;
     let mut fragility_emitted = 0_u64;
-    let mut missing_book_or_fills = false;
-    let mut inventory_withheld = false;
+    let mut withheld = None;
     for snapshot in snapshots {
-        match proof_withhold_reason(snapshot) {
-            Some(ProofWithholdReason::MissingBookOrFills) => missing_book_or_fills = true,
-            Some(ProofWithholdReason::MissingInventory)
-            | Some(ProofWithholdReason::MalformedInventory) => {
-                inventory_withheld = true;
-            }
-            None => {}
-        }
+        withheld = fold_withhold_reason(withheld, proof_withhold_reason(snapshot));
         match crowding_components_from_snapshot(snapshot, &[], remaining_capacity) {
             Ok(_) => crowding_emitted = crowding_emitted.saturating_add(1),
             Err(error) if withheld_market_emission(&error) => {}
@@ -592,14 +584,66 @@ fn assess_market_emissions(
         }
     }
     let live_signal_count = 0_u64;
-    if (missing_book_or_fills || inventory_withheld)
-        && (crowding_emitted > 0 || fragility_emitted > 0 || live_signal_count > 0)
-    {
-        return Err(IntelligenceReplayError::QualificationClaim {
-            what: "invented_marks_or_fills",
-        });
-    }
+    refuse_leaked_withheld_emission(
+        withheld,
+        crowding_emitted,
+        fragility_emitted,
+        live_signal_count,
+    )?;
     Ok((crowding_emitted, fragility_emitted, live_signal_count))
+}
+
+/// Replay qualification `what` for a withheld proof that still leaked emission.
+/// Book/fills holes stay invented marks/fills; inventory holes stay inventory claims.
+#[must_use]
+pub const fn qualification_what_for_withhold(reason: ProofWithholdReason) -> &'static str {
+    match reason {
+        ProofWithholdReason::MissingBookOrFills => "invented_marks_or_fills",
+        ProofWithholdReason::MissingInventory => {
+            ProofWithholdReason::MissingInventory.as_wire_name()
+        }
+        ProofWithholdReason::MalformedInventory => {
+            ProofWithholdReason::MalformedInventory.as_wire_name()
+        }
+    }
+}
+
+/// Fail closed when crowding, fragility, or live signals leak past a withhold.
+pub fn refuse_leaked_withheld_emission(
+    reason: Option<ProofWithholdReason>,
+    crowding_emitted: u64,
+    fragility_emitted: u64,
+    live_signal_count: u64,
+) -> Result<(), IntelligenceReplayError> {
+    let leaked = crowding_emitted > 0 || fragility_emitted > 0 || live_signal_count > 0;
+    match (reason, leaked) {
+        (Some(reason), true) => Err(IntelligenceReplayError::QualificationClaim {
+            what: qualification_what_for_withhold(reason),
+        }),
+        (None, true) | (_, false) => Ok(()),
+    }
+}
+
+#[must_use]
+fn fold_withhold_reason(
+    current: Option<ProofWithholdReason>,
+    next: Option<ProofWithholdReason>,
+) -> Option<ProofWithholdReason> {
+    match (current, next) {
+        (None, next) => next,
+        (current, None) => current,
+        (Some(current), Some(next)) => Some(match (current, next) {
+            (ProofWithholdReason::MissingBookOrFills, _)
+            | (_, ProofWithholdReason::MissingBookOrFills) => {
+                ProofWithholdReason::MissingBookOrFills
+            }
+            (ProofWithholdReason::MissingInventory, _)
+            | (_, ProofWithholdReason::MissingInventory) => ProofWithholdReason::MissingInventory,
+            (ProofWithholdReason::MalformedInventory, ProofWithholdReason::MalformedInventory) => {
+                ProofWithholdReason::MalformedInventory
+            }
+        }),
+    }
 }
 
 fn withheld_market_emission(error: &MarketError) -> bool {

@@ -14,8 +14,9 @@ use domain_types::{
 use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use hl_protocol::node::v1::{parse_node_record, NodeStreamKind};
 use intelligence_replay::{
-    materialize_committed_node, materialize_synthetic_replay, IntelligenceReplayError,
-    IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
+    materialize_committed_node, materialize_synthetic_replay, qualification_what_for_withhold,
+    refuse_leaked_withheld_emission, IntelligenceReplayError, IntelligenceReplayReport,
+    MaterializeRequest, QualificationClaim,
 };
 use market_intelligence::{
     CrowdingPosition, FragilityScenario, MarketError, MarketFeatureSnapshot,
@@ -654,6 +655,9 @@ fn missing_book_or_fills_cannot_emit_crowding_fragility_or_live_signals() {
             }
             other => panic!("expected suppression, got {other:?}"),
         }
+        assert_book_or_fills_qualification_is_not_inventory(
+            ProofWithholdReason::MissingBookOrFills,
+        );
     }
 }
 
@@ -707,6 +711,7 @@ fn missing_inventory_cannot_emit_live_signals_with_decimal_book() {
         }
         other => panic!("expected missing inventory suppression, got {other:?}"),
     }
+    assert_inventory_qualification_is_not_invented_fills(ProofWithholdReason::MissingInventory);
 }
 
 #[test]
@@ -771,6 +776,68 @@ fn boolean_inventory_cannot_emit_live_signals_with_decimal_book() {
         }
         other => panic!("expected malformed inventory suppression, got {other:?}"),
     }
+    assert_inventory_qualification_is_not_invented_fills(ProofWithholdReason::MalformedInventory);
+}
+
+#[test]
+fn replay_qualification_pins_book_fills_and_inventory_families_separately() {
+    for reason in [
+        ProofWithholdReason::MissingBookOrFills,
+        ProofWithholdReason::MissingInventory,
+        ProofWithholdReason::MalformedInventory,
+    ] {
+        match reason {
+            ProofWithholdReason::MissingBookOrFills => {
+                assert_book_or_fills_qualification_is_not_inventory(reason);
+            }
+            ProofWithholdReason::MissingInventory => {
+                assert_inventory_qualification_is_not_invented_fills(reason);
+            }
+            ProofWithholdReason::MalformedInventory => {
+                assert_inventory_qualification_is_not_invented_fills(reason);
+            }
+        }
+    }
+}
+
+fn assert_book_or_fills_qualification_is_not_inventory(reason: ProofWithholdReason) {
+    assert_eq!(reason, ProofWithholdReason::MissingBookOrFills);
+    let what = qualification_what_for_withhold(reason);
+    assert_eq!(what, "invented_marks_or_fills");
+    assert_ne!(what, ProofWithholdReason::MissingInventory.as_wire_name());
+    assert_ne!(what, ProofWithholdReason::MalformedInventory.as_wire_name());
+    assert!(matches!(
+        refuse_leaked_withheld_emission(Some(reason), 1, 0, 0),
+        Err(IntelligenceReplayError::QualificationClaim {
+            what: "invented_marks_or_fills"
+        })
+    ));
+    assert!(refuse_leaked_withheld_emission(Some(reason), 0, 0, 0).is_ok());
+}
+
+fn assert_inventory_qualification_is_not_invented_fills(reason: ProofWithholdReason) {
+    let expected = match reason {
+        ProofWithholdReason::MissingInventory => {
+            ProofWithholdReason::MissingInventory.as_wire_name()
+        }
+        ProofWithholdReason::MalformedInventory => {
+            ProofWithholdReason::MalformedInventory.as_wire_name()
+        }
+        ProofWithholdReason::MissingBookOrFills => {
+            panic!("book/fills must not reuse the inventory qualification helper")
+        }
+    };
+    let what = qualification_what_for_withhold(reason);
+    assert_eq!(what, expected);
+    assert_ne!(what, "invented_marks_or_fills");
+    match refuse_leaked_withheld_emission(Some(reason), 1, 0, 0) {
+        Err(IntelligenceReplayError::QualificationClaim { what }) => {
+            assert_eq!(what, expected);
+            assert_ne!(what, "invented_marks_or_fills");
+        }
+        other => panic!("expected typed inventory qualification claim, got {other:?}"),
+    }
+    assert!(refuse_leaked_withheld_emission(Some(reason), 0, 0, 0).is_ok());
 }
 
 fn constructed_market_snapshot(
