@@ -353,6 +353,7 @@ fn require_auxiliary_source_closed_fields(
         require_string(source, "source_id", None)?;
         require_u64(source, "spool_records")?;
         require_u64(source, "unarchived_records")?;
+        require_bool(source, "partial_line")?;
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -403,7 +404,8 @@ mod tests {
     };
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_health_openapi_enum,
-        auxiliary_source_id_is_required_string, auxiliary_source_qualification_openapi_enum,
+        auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
+        auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
         committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
@@ -1018,6 +1020,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_requires_auxiliary_partial_line_bool() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_partial_line_is_required_bool(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.partial_line as a required boolean"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1191,6 +1210,7 @@ mod tests {
         assert_eq!(value["auxiliary_sources"][0]["health"], "starting");
         assert_eq!(value["auxiliary_sources"][0]["spool_records"], 0);
         assert_eq!(value["auxiliary_sources"][0]["unarchived_records"], 0);
+        assert_eq!(value["auxiliary_sources"][0]["partial_line"], false);
     }
 
     #[test]
@@ -1308,6 +1328,62 @@ mod tests {
         assert_eq!(
             parse_capture_status_bytes(&bytes)
                 .expect_err("omitted nested unarchived_records must not fail open"),
+            SnapshotError::Invalid
+        );
+    }
+
+    #[test]
+    fn known_auxiliary_partial_line_bool_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for partial_line in [false, true] {
+            value["auxiliary_sources"][0]["partial_line"] = serde_json::json!(partial_line);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{partial_line} should parse: {error}"));
+            assert_eq!(parsed["auxiliary_sources"][0]["partial_line"], partial_line);
+        }
+    }
+
+    #[test]
+    fn present_non_bool_auxiliary_partial_line_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for partial_line in [
+            serde_json::json!("true"),
+            serde_json::json!("false"),
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(null),
+            serde_json::json!({"not": "a-bool"}),
+            serde_json::json!(["not-a-bool"]),
+        ] {
+            value["auxiliary_sources"][0]["partial_line"] = partial_line.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-bool partial_line must not fail open"),
+                SnapshotError::Invalid,
+                "{partial_line} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_auxiliary_partial_line_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("partial_line");
+        let bytes = serde_json::to_vec(&value).expect("encode omitted partial_line");
+        assert_eq!(
+            parse_capture_status_bytes(&bytes)
+                .expect_err("omitted nested partial_line must not fail open"),
             SnapshotError::Invalid
         );
     }

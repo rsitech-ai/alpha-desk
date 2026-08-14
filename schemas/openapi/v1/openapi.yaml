@@ -291,7 +291,8 @@ components:
         is a required u64 integer; present non-number or non-u64 values, and
         omitted, are snapshot_invalid. Nested unarchived_records is a required
         u64 integer; present non-number or non-u64 values, and omitted, are
-        snapshot_invalid. Nested health,
+        snapshot_invalid. Nested partial_line is a required boolean; present
+        non-boolean values, and omitted, are snapshot_invalid. Nested health,
         restart_reconstruction, and qualification, when present, use closed
         kebab-case sets; unknown values are snapshot_invalid. Omitted optional
         nested fields stay omitted.
@@ -372,7 +373,9 @@ components:
             required u64 integer; present non-number or non-u64 values, and
             omitted, are snapshot_invalid. Nested unarchived_records is a
             required u64 integer; present non-number or non-u64 values, and
-            omitted, are snapshot_invalid. Nested health,
+            omitted, are snapshot_invalid. Nested partial_line is a required
+            boolean; present non-boolean values, and omitted, are
+            snapshot_invalid. Nested health,
             restart_reconstruction, and qualification are optional; present
             values use closed kebab-case sets. Unknown values are
             snapshot_invalid. Omitted optional nested fields stay omitted.
@@ -385,6 +388,7 @@ components:
               - source_id
               - spool_records
               - unarchived_records
+              - partial_line
             properties:
               source_id:
                 description: >
@@ -416,6 +420,15 @@ components:
                   not claim Stage PASS.
                 type: integer
                 minimum: 0
+              partial_line:
+                description: >
+                  Capture writer unread suffix lacks a newline. Required
+                  boolean. Present non-boolean values are snapshot_invalid.
+                  Omitted is snapshot_invalid. This document does not claim
+                  extra boolean encodings. HealthAssessment.reason_code stays
+                  a free string so unknown RED is not closed out. This
+                  document does not claim Stage PASS.
+                type: boolean
               health:
                 description: >
                   Optional capture writer kebab-case auxiliary source health.
