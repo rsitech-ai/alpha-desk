@@ -12,8 +12,9 @@ use hl_api::{
     READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION, ROUTER_PATHS,
     SNAPSHOT_UNAVAILABLE_REASON_CODES, auxiliary_source_cursor_epoch_is_optional_string,
     auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
-    auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
-    auxiliary_source_qualification_openapi_enum, auxiliary_source_spool_records_is_required_u64,
+    auxiliary_source_id_is_required_string, auxiliary_source_local_sequence_is_optional_u64,
+    auxiliary_source_partial_line_is_required_bool, auxiliary_source_qualification_openapi_enum,
+    auxiliary_source_spool_records_is_required_u64,
     auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
     committed_source_class_openapi_enum, core_deadletter_reason_openapi_enum,
     health_503_response_ref, health_503_schema_ref, health_reason_code_is_unrestricted_string,
@@ -1322,6 +1323,101 @@ async fn nested_auxiliary_durable_offset_is_optional_u64() {
     }
 }
 
+#[tokio::test]
+async fn nested_auxiliary_local_sequence_is_optional_u64() {
+    let directory = tempdir().expect("temporary directory");
+    let capture_path = copy_api_fixture(directory.path(), "capture-status-v5.json");
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(&capture_path).expect("read fixture"))
+            .expect("v5 json");
+
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(status, 200, "omitted nested local_sequence must stay 200");
+    assert!(body["auxiliary_sources"][0].get("local_sequence").is_none());
+    assert_eq!(body["schema_version"], "hl.capture.status.v5");
+
+    for local_sequence in [0_u64, 47, u64::MAX] {
+        value["auxiliary_sources"][0]["local_sequence"] = serde_json::json!(local_sequence);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode known u64 local_sequence"),
+        )
+        .expect("write known u64 local_sequence");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 200, "{local_sequence} must stay 200");
+        assert_eq!(
+            body["auxiliary_sources"][0]["local_sequence"],
+            local_sequence
+        );
+    }
+
+    value["auxiliary_sources"][0]
+        .as_object_mut()
+        .expect("auxiliary source object")
+        .remove("local_sequence");
+    std::fs::write(
+        &capture_path,
+        serde_json::to_vec(&value).expect("encode omitted local_sequence"),
+    )
+    .expect("write omitted local_sequence");
+    let state = state_from(
+        directory.path(),
+        "loopback-dev",
+        None,
+        None,
+        Some(&capture_path),
+    );
+    let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+    assert_eq!(
+        status, 200,
+        "omitted nested local_sequence after removal must stay 200"
+    );
+    assert!(body["auxiliary_sources"][0].get("local_sequence").is_none());
+
+    for local_sequence in [
+        serde_json::json!("0"),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!({"not": "a-u64"}),
+        serde_json::json!(["not-a-u64"]),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+    ] {
+        value["auxiliary_sources"][0]["local_sequence"] = local_sequence.clone();
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(&value).expect("encode non-u64 local_sequence"),
+        )
+        .expect("write non-u64 local_sequence");
+        let state = state_from(
+            directory.path(),
+            "loopback-dev",
+            None,
+            None,
+            Some(&capture_path),
+        );
+        let (status, body) = call(&state, "/v1/capture/status", &[]).await;
+        assert_eq!(status, 503, "{local_sequence} must not fail open");
+        assert_eq!(body["schema_version"], "hl.api.error.v1");
+        assert_eq!(body["code"], "data_unavailable");
+        assert_eq!(body["reason_code"], "snapshot_invalid");
+    }
+}
+
 fn write_health_snapshot(directory: &Path, name: &str, state: &str, reason_code: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(
@@ -1994,6 +2090,10 @@ fn openapi_document_covers_router_paths_and_health_fields() {
         auxiliary_source_durable_offset_is_optional_u64(document),
         "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.durable_offset as an optional u64 integer"
     );
+    assert!(
+        auxiliary_source_local_sequence_is_optional_u64(document),
+        "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.local_sequence as an optional u64 integer"
+    );
     assert!(document.contains("Unknown codes fail closed"));
     assert!(
         document.contains("core.deadletter_* family-prefix"),
@@ -2164,6 +2264,10 @@ async fn served_openapi_matches_capture_status_v4_v5_and_503_contract() {
     assert!(
         auxiliary_source_durable_offset_is_optional_u64(document),
         "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.durable_offset as an optional u64 integer"
+    );
+    assert!(
+        auxiliary_source_local_sequence_is_optional_u64(document),
+        "served OpenAPI must define CaptureStatusBase.auxiliary_sources.items.local_sequence as an optional u64 integer"
     );
     assert!(
         document.contains("core.deadletter_* family-prefix"),

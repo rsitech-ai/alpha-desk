@@ -296,6 +296,8 @@ components:
         is an optional string; present non-string values, and empty present
         strings, are snapshot_invalid. Omitted stays omitted. Nested durable_offset
         is an optional u64 integer; present non-number or non-u64 values are
+        snapshot_invalid. Omitted stays omitted. Nested local_sequence is an
+        optional u64 integer; present non-number or non-u64 values are
         snapshot_invalid. Omitted stays omitted. Nested health,
         restart_reconstruction, and qualification, when present, use closed
         kebab-case sets; unknown values are snapshot_invalid. Omitted optional
@@ -382,6 +384,8 @@ components:
             snapshot_invalid. Nested cursor_epoch is an optional string;
             present non-string values, and empty present strings, are
             snapshot_invalid. Omitted stays omitted. Nested durable_offset is
+            an optional u64 integer; present non-number or non-u64 values are
+            snapshot_invalid. Omitted stays omitted. Nested local_sequence is
             an optional u64 integer; present non-number or non-u64 values are
             snapshot_invalid. Omitted stays omitted. Nested health,
             restart_reconstruction, and qualification are optional; present
@@ -489,6 +493,16 @@ components:
               durable_offset:
                 description: >
                   Optional capture writer durable cluster byte offset.
+                  Present non-number or non-u64 values are snapshot_invalid.
+                  Omitted stays omitted. This document does not invent extra
+                  numeric bounds. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
+                type: integer
+                minimum: 0
+              local_sequence:
+                description: >
+                  Optional capture writer durable cluster local sequence.
                   Present non-number or non-u64 values are snapshot_invalid.
                   Omitted stays omitted. This document does not invent extra
                   numeric bounds. HealthAssessment.reason_code stays a free

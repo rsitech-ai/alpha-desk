@@ -3,7 +3,8 @@
 /// last-heartbeat throughput integers, fail-closed query budgets, frozen
 /// committed source class, committed source health, auxiliary source
 /// identity, auxiliary spool_records, auxiliary unarchived_records,
-/// auxiliary partial_line, auxiliary cursor_epoch, auxiliary durable_offset, auxiliary source health, auxiliary restart reconstruction,
+/// auxiliary partial_line, auxiliary cursor_epoch, auxiliary durable_offset,
+/// auxiliary local_sequence, auxiliary source health, auxiliary restart reconstruction,
 /// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
 /// codes, and the HTTP router. This is not a production authentication,
 /// availability, or SLO contract, it does not invent fills or mark sources
@@ -516,6 +517,58 @@ pub fn auxiliary_source_durable_offset_is_optional_u64(document: &str) -> bool {
     .is_some_and(|required| required.contains(&"durable_offset"))
 }
 
+/// True when nested
+/// `CaptureStatusBase.properties.auxiliary_sources.items.properties.local_sequence`
+/// is an optional u64 integer: `type: integer`, `minimum: 0`, not listed on
+/// `items.required`, and no `$ref`, `enum`, `format`, `pattern`, or
+/// `maximum`. Capture writer emits `local_sequence` as `Option<u64>` with
+/// `skip_serializing_if` once the durable cluster is present; this crate
+/// does not invent extra numeric bounds. HealthAssessment.reason_code stays
+/// a free string so unknown RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_local_sequence_is_optional_u64(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+            "properties",
+            "local_sequence",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("integer")
+        || mapping.scalar("minimum") != Some("0")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("maximum")
+        || mapping.has_key("exclusiveMinimum")
+        || mapping.has_key("exclusiveMaximum")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"local_sequence"))
+}
+
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
 /// no `$ref` (including `CoreDeadLetterReasonCode` or
 /// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
@@ -912,7 +965,8 @@ mod tests {
         READYZ_GET_DESCRIPTION, RESTART_RECONSTRUCTION,
         auxiliary_source_cursor_epoch_is_optional_string,
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
-        auxiliary_source_id_is_required_string, auxiliary_source_partial_line_is_required_bool,
+        auxiliary_source_id_is_required_string, auxiliary_source_local_sequence_is_optional_u64,
+        auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
         auxiliary_source_unarchived_records_is_required_u64, capture_source_health_openapi_enum,
@@ -979,6 +1033,10 @@ mod tests {
         assert!(
             auxiliary_source_durable_offset_is_optional_u64(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.durable_offset as an optional u64 integer"
+        );
+        assert!(
+            auxiliary_source_local_sequence_is_optional_u64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.local_sequence as an optional u64 integer"
         );
         assert!(health_reason_code_is_unrestricted_string(document));
         assert!(
@@ -2125,6 +2183,169 @@ components:
         assert!(
             auxiliary_source_durable_offset_is_optional_u64(optional_integer),
             "optional u64 durable_offset must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_local_sequence_optional_u64_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          description: >
+            local_sequence remains in prose after the YAML property drops it.
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                type: string
+              spool_records:
+                type: integer
+                minimum: 0
+              unarchived_records:
+                type: integer
+                minimum: 0
+              partial_line:
+                type: boolean
+"#;
+        assert!(
+            !auxiliary_source_local_sequence_is_optional_u64(prose_only),
+            "prose mention of local_sequence must not satisfy the optional-u64 freeze"
+        );
+
+        let required_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - local_sequence
+            properties:
+              local_sequence:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            !auxiliary_source_local_sequence_is_optional_u64(required_integer),
+            "required local_sequence must not satisfy the optional-u64 freeze"
+        );
+
+        let string_sequence = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              local_sequence:
+                type: string
+"#;
+        assert!(
+            !auxiliary_source_local_sequence_is_optional_u64(string_sequence),
+            "optional non-integer local_sequence must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              local_sequence:
+                type: integer
+                minimum: 0
+                format: int64
+"#;
+        assert!(
+            !auxiliary_source_local_sequence_is_optional_u64(formatted),
+            "invented local_sequence format must not satisfy the freeze"
+        );
+
+        let bounded = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              local_sequence:
+                type: integer
+                minimum: 0
+                maximum: 100
+"#;
+        assert!(
+            !auxiliary_source_local_sequence_is_optional_u64(bounded),
+            "invented local_sequence maximum must not satisfy the freeze"
+        );
+
+        let optional_integer = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              local_sequence:
+                type: integer
+                minimum: 0
+"#;
+        assert!(
+            auxiliary_source_local_sequence_is_optional_u64(optional_integer),
+            "optional u64 local_sequence must satisfy the freeze"
         );
     }
 
