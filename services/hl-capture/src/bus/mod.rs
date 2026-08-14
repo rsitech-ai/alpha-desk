@@ -19,6 +19,7 @@ pub use subjects::{
     STATE_STREAM, Subject, subject_for_event_kind,
 };
 
+// Frozen JetStream marker schema. Layout lock: tests/block_marker_freeze.rs.
 const BLOCK_MARKER_SCHEMA_V1: &str = "hyperliquid-alpha-desk/block-publication/v1";
 const MAX_IDENTITY_BYTES: usize = 512;
 const MAX_PUBLICATION_PAYLOAD_BYTES: usize = 7_500_000;
@@ -401,6 +402,9 @@ fn validate_identity(value: &str) -> Result<(), PublicationError> {
     }
 }
 
+// Frozen `hyperliquid-alpha-desk/block-publication/v1` layout. Field order,
+// confirmation-class tags `2`/`3`, counted identities, and SHA-256 envelope
+// hashes must not change without a schema version bump.
 fn encode_block_marker(
     block: &BlockEnvelope,
     receipt: &ArchiveReceipt,
