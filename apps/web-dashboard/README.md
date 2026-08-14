@@ -5,9 +5,10 @@ client, not Stage 6, not live-source qualification, and not a Stage PASS.
 
 The desk polls `hl-api` and treats typed fail-closed HTTP states as first-class
 UI: 503 snapshot missing/invalid, 503 hl-core dead-letter open failures
-(`core.deadletter_*`), 400 invalid query, 429/400 query budgets, and 501
-unspecified streams. It does not invent fills, orders, or qualification.
-Missing optional fields stay omitted; they are not displayed as 0.
+(`core.deadletter_*`), 503 `ledger.unsupported_event` consume-poison, 400
+invalid query, 429/400 query budgets, and 501 unspecified streams. It does not
+invent fills, orders, or qualification. Missing optional fields stay omitted;
+they are not displayed as 0.
 
 From the repository root:
 

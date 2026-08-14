@@ -636,4 +636,24 @@ describe("hl-core ledger.unsupported_event consume poison", () => {
     expect(outcome.view.tone).not.toBe("green")
     expect(outcome.view.title).not.toMatch(/ready/i)
   })
+
+  it("fail-closes /status HTTP 200 unknown ledger.* as red data_unavailable, not typed consume-poison", () => {
+    const outcome = classifyHttpBody(
+      200,
+      coreStatusFailClosed("ledger.unspecified_future")
+    )
+    expect(outcome.kind).toBe("observed")
+    if (outcome.kind !== "observed") {
+      return
+    }
+    expect(outcome.view.family).toBe("data_unavailable")
+    expect(outcome.view.family).not.toBe("ledger_unsupported_event")
+    expect(outcome.view.family).not.toBe("core_deadletter")
+    expect(outcome.view.httpStatus).toBe(200)
+    expect(outcome.view.reasonCode).toBe("ledger.unspecified_future")
+    expect(outcome.view.tone).toBe("red")
+    expect(outcome.view.tone).not.toBe("green")
+    expect(outcome.view.title).not.toMatch(/ready/i)
+    expect(outcome.view.title).not.toBe("503 ledger unsupported event")
+  })
 })
