@@ -181,10 +181,17 @@ impl SourceSpoolConfig {
     }
 
     pub fn with_baseline(mut self, baseline: SourceSpoolBaseline) -> Result<Self, SpoolError> {
-        if (self.cursor_policy == CursorPolicy::MonotonicByteOffset)
-            != baseline.last_local_sequence.is_some()
-        {
-            return Err(SpoolError::InvalidManifest);
+        match self.cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                if baseline.last_local_sequence.is_none() {
+                    return Err(SpoolError::InvalidManifest);
+                }
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                if baseline.last_local_sequence.is_some() {
+                    return Err(SpoolError::InvalidManifest);
+                }
+            }
         }
         self.baseline = Some(baseline);
         Ok(self)

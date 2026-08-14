@@ -2,7 +2,8 @@ use bytes::Bytes;
 use domain_types::SourceId;
 use hl_capture::spool::{
     DurabilityPolicy, SegmentHeaderV1, SourceSpool, SourceSpoolAppendDisposition,
-    SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy, SpoolWriter, inspect_spool,
+    SourceSpoolBaseline, SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy,
+    SpoolWriter, inspect_spool,
 };
 use hl_protocol::{
     ObservationClass, ParseWarning, ReceiveTimestamps, SourceCursor, SourceObservation,
@@ -10,7 +11,7 @@ use hl_protocol::{
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Duration;
-use storage_ports::CursorPolicy;
+use storage_ports::{CursorPolicy, LocalRecordSequence};
 use tempfile::TempDir;
 
 fn config(root: &TempDir, source_version: &str) -> SourceSpoolConfig {
@@ -1143,6 +1144,66 @@ fn local_sequence_chain_covers_every_constructible_cursor_policy() {
         assert_eq!(inspection.closed_segments(), 2);
         assert_eq!(inspection.open_segments(), 0);
         assert_eq!(inspection.records(), 2);
+    }
+}
+
+#[test]
+fn with_baseline_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let present = SourceSpoolBaseline::try_new(
+            1,
+            [0x11; 32],
+            SourceCursor::new("node-directory-epoch", 100).unwrap(),
+            Some(LocalRecordSequence::try_new(1).unwrap()),
+        )
+        .unwrap();
+        let absent = SourceSpoolBaseline::try_new(
+            1,
+            [0x11; 32],
+            SourceCursor::new("node-directory-epoch", 100).unwrap(),
+            None,
+        )
+        .unwrap();
+
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                config
+                    .clone()
+                    .with_baseline(present)
+                    .expect("byte-offset baseline still requires last_local_sequence");
+                let error = config
+                    .with_baseline(absent)
+                    .expect_err("byte-offset baseline still forbids a missing last_local_sequence");
+                assert!(matches!(error, SpoolError::InvalidManifest));
+                assert_eq!(error.reason_code(), "spool.invalid_manifest");
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                config
+                    .clone()
+                    .with_baseline(absent)
+                    .expect("contiguous baseline still admits a missing last_local_sequence");
+                let error = config
+                    .with_baseline(present)
+                    .expect_err("contiguous baseline still forbids last_local_sequence");
+                assert!(matches!(error, SpoolError::InvalidManifest));
+                assert_eq!(error.reason_code(), "spool.invalid_manifest");
+            }
+        }
     }
 }
 
