@@ -19,7 +19,8 @@ pub use subjects::{
     STATE_STREAM, Subject, subject_for_event_kind,
 };
 
-// Frozen JetStream marker schema. Layout lock: tests/block_marker_freeze.rs.
+// Frozen JetStream marker schema. Layout lock: tests/block_marker_freeze.rs
+// (empty-primary digest, Independent tag `3`, and one event-row payload).
 const BLOCK_MARKER_SCHEMA_V1: &str = "hyperliquid-alpha-desk/block-publication/v1";
 const MAX_IDENTITY_BYTES: usize = 512;
 const MAX_PUBLICATION_PAYLOAD_BYTES: usize = 7_500_000;
