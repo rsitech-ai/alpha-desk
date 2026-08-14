@@ -6,7 +6,7 @@
 /// auxiliary partial_line, auxiliary cursor_epoch, auxiliary tail_cursor_epoch,
 /// auxiliary durable_offset, auxiliary local_sequence,
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
-/// top-level last_error_reason, top-level failover_height, top-level failover_reason, top-level durable_height, top-level capture_backlog_records, top-level oldest_pending_capture_height, top-level disk_free_basis_points, auxiliary quarantine_reason,
+/// top-level last_error_reason, top-level failover_height, top-level failover_reason, top-level durable_height, top-level capture_backlog_records, top-level oldest_pending_capture_height, top-level disk_free_basis_points, top-level archive_manifest_id, auxiliary quarantine_reason,
 /// auxiliary_sources maxItems,
 /// auxiliary source_id uniqueness, auxiliary source_id sort order,
 /// auxiliary source extra keys, auxiliary source health, auxiliary restart
@@ -1134,6 +1134,49 @@ pub fn capture_status_disk_free_basis_points_is_optional_u16(document: &str) -> 
     .is_some_and(|required| required.contains(&"disk_free_basis_points"))
 }
 
+/// True when top-level `CaptureStatusBase.properties.archive_manifest_id` is
+/// an optional free string: `type: string`, not listed on
+/// `CaptureStatusBase.required`, and no `$ref`, `enum`, `format`, `pattern`,
+/// `minLength`, or `maxLength`. Capture writer emits top-level
+/// `archive_manifest_id` as a string (`Option` + `skip_serializing_if`).
+/// Present writer values use `validate_status_text` (empty / trim / control /
+/// 512); those rules live only in the capture writer and are not copied
+/// here. This crate does not invent a closed enum of manifest ids. Nested
+/// `last_error_reason` / `quarantine_reason` are different properties.
+/// HealthAssessment.reason_code stays a free string so unknown RED is not
+/// closed out.
+#[must_use]
+pub fn capture_status_archive_manifest_id_is_optional_string(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "archive_manifest_id",
+        ],
+    ) else {
+        return false;
+    };
+    if mapping.scalar("type") != Some("string")
+        || mapping.has_key("$ref")
+        || mapping.has_key("enum")
+        || mapping.has_key("format")
+        || mapping.has_key("pattern")
+        || mapping.has_key("minLength")
+        || mapping.has_key("maxLength")
+    {
+        return false;
+    }
+    !yaml_string_sequence(
+        document,
+        &["components", "schemas", "CaptureStatusBase"],
+        "required",
+    )
+    .is_some_and(|required| required.contains(&"archive_manifest_id"))
+}
+
 /// True when `CaptureStatusBase.properties.auxiliary_sources` is an array
 /// capped at capture writer [`MAX_AUXILIARY_SOURCES`]: `type: array`,
 /// `maxItems` equal to that constant, and no `minItems` or `uniqueItems`.
@@ -1170,14 +1213,14 @@ pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
 /// HealthAssessment / CaptureMaintenance / ApiError. Present unknown nested
 /// properties are parse `snapshot_invalid`. Known objects without extras
 /// stay valid. CaptureStatusBase itself does not set
-/// `additionalProperties: false` (top-level writer fields such as
-/// `archive_manifest_id` stay untyped).
-/// Top-level `failover_height` is an optional u64. Top-level
+/// `additionalProperties: false` (last-heartbeat throughput extras still
+/// pass through). Top-level `failover_height` is an optional u64. Top-level
 /// `failover_reason` is an optional kebab-case enum. Top-level
 /// `durable_height` is an optional u64. Top-level
 /// `capture_backlog_records` is a required u64. Top-level
 /// `oldest_pending_capture_height` is an optional u64. Top-level
 /// `disk_free_basis_points` is an optional u16. Top-level
+/// `archive_manifest_id` is an optional string. Top-level
 /// `last_error_reason` is an optional string.
 /// HealthAssessment.reason_code stays a free string so unknown RED is not
 /// closed out.
@@ -1608,7 +1651,8 @@ mod tests {
         auxiliary_source_tail_cursor_epoch_is_optional_string,
         auxiliary_source_unarchived_records_is_required_u64,
         auxiliary_source_unread_bytes_is_optional_u64, auxiliary_sources_max_items_is_writer_cap,
-        capture_source_health_openapi_enum, capture_status_capture_backlog_records_is_required_u64,
+        capture_source_health_openapi_enum, capture_status_archive_manifest_id_is_optional_string,
+        capture_status_capture_backlog_records_is_required_u64,
         capture_status_disk_free_basis_points_is_optional_u16,
         capture_status_durable_height_is_optional_u64,
         capture_status_failover_height_is_optional_u64,
@@ -1734,6 +1778,10 @@ mod tests {
         assert!(
             capture_status_disk_free_basis_points_is_optional_u16(document),
             "OpenAPI must define CaptureStatusBase.disk_free_basis_points as an optional u16 integer"
+        );
+        assert!(
+            capture_status_archive_manifest_id_is_optional_string(document),
+            "OpenAPI must define CaptureStatusBase.archive_manifest_id as an optional string"
         );
         assert!(
             auxiliary_source_items_forbid_additional_properties(document),
@@ -4842,6 +4890,164 @@ components:
         assert!(
             capture_status_disk_free_basis_points_is_optional_u16(optional_integer),
             "optional u16 disk_free_basis_points must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_top_level_archive_manifest_id_optional_string_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        pending_blocks:
+          description: >
+            archive_manifest_id remains in prose after the YAML property drops it.
+          type: integer
+          minimum: 0
+"#;
+        assert!(
+            !capture_status_archive_manifest_id_is_optional_string(prose_only),
+            "prose mention of archive_manifest_id must not satisfy the optional-string freeze"
+        );
+
+        let nested_only = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - pending_blocks
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            properties:
+              archive_manifest_id:
+                type: string
+"#;
+        assert!(
+            !capture_status_archive_manifest_id_is_optional_string(nested_only),
+            "nested archive_manifest_id must not satisfy the top-level optional-string freeze"
+        );
+
+        let required_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - archive_manifest_id
+      properties:
+        archive_manifest_id:
+          type: string
+"#;
+        assert!(
+            !capture_status_archive_manifest_id_is_optional_string(required_string),
+            "required archive_manifest_id must not satisfy the optional-string freeze"
+        );
+
+        let integer_id = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        archive_manifest_id:
+          type: integer
+"#;
+        assert!(
+            !capture_status_archive_manifest_id_is_optional_string(integer_id),
+            "optional non-string archive_manifest_id must not satisfy the freeze"
+        );
+
+        let formatted = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        archive_manifest_id:
+          type: string
+          format: uuid
+"#;
+        assert!(
+            !capture_status_archive_manifest_id_is_optional_string(formatted),
+            "invented archive_manifest_id format must not satisfy the freeze"
+        );
+
+        let closed_enum = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        archive_manifest_id:
+          type: string
+          enum:
+            - manifest-42
+"#;
+        assert!(
+            !capture_status_archive_manifest_id_is_optional_string(closed_enum),
+            "invented archive_manifest_id enum must not satisfy the freeze"
+        );
+
+        let writer_max_length = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      properties:
+        archive_manifest_id:
+          type: string
+          maxLength: 512
+"#;
+        assert!(
+            !capture_status_archive_manifest_id_is_optional_string(writer_max_length),
+            "writer archive_manifest_id maxLength 512 must not satisfy the freeze"
+        );
+
+        let optional_string = r#"
+components:
+  schemas:
+    HealthAssessment:
+      properties:
+        reason_code:
+          type: string
+    CaptureStatusBase:
+      required:
+        - schema_version
+        - pending_blocks
+      properties:
+        archive_manifest_id:
+          type: string
+"#;
+        assert!(
+            capture_status_archive_manifest_id_is_optional_string(optional_string),
+            "optional string archive_manifest_id must satisfy the freeze"
         );
     }
 
