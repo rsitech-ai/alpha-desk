@@ -15,9 +15,9 @@ pub use dedup::{DedupKey, IndependenceClass, MaterialChange, dedup_key, originat
 pub use errors::SignalError;
 pub use evidence::EvidenceBundle;
 pub use families::{
-    FamilyThresholds, FragilityAsymmetryEvaluator, SignalContext, SignalEvaluation,
-    SignalEvaluator, SmartCrowdDivergenceEvaluator, SmartFlowAccelerationEvaluator,
-    suppress_missing_book_or_fills,
+    FamilyThresholds, FragilityAsymmetryEvaluator, ProofWithholdReason, SignalContext,
+    SignalEvaluation, SignalEvaluator, SmartCrowdDivergenceEvaluator,
+    SmartFlowAccelerationEvaluator, proof_withhold_reason, suppress_missing_book_or_fills,
 };
 pub use invalidation::{
     InvalidationObservation, InvalidationRule, InvalidationStatus, any_triggered, evaluate_rule,

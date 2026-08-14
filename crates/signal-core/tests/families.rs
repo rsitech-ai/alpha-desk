@@ -12,8 +12,9 @@ use market_intelligence::{
     classify_regime, market_feature_key, simulate_fragility,
 };
 use signal_core::{
-    FragilityAsymmetryEvaluator, SignalContext, SignalEvaluation, SignalEvaluator, SignalType,
-    SmartCrowdDivergenceEvaluator, SmartFlowAccelerationEvaluator, suppress_missing_book_or_fills,
+    FragilityAsymmetryEvaluator, ProofWithholdReason, SignalContext, SignalEvaluation,
+    SignalEvaluator, SignalType, SmartCrowdDivergenceEvaluator, SmartFlowAccelerationEvaluator,
+    proof_withhold_reason, suppress_missing_book_or_fills,
 };
 
 fn time(micros: i64) -> ProtocolTime {
@@ -349,11 +350,9 @@ fn only_three_v1_types_are_live_capable() {
     assert!(SignalType::IndependentSmartFlowAcceleration.can_enter_live());
     assert!(SignalType::SmartCrowdDivergence.can_enter_live());
     assert!(SignalType::LiquidationFragilityAsymmetry.can_enter_live());
-    assert!(
-        !SignalType::research_only("trapped-cohort")
-            .unwrap()
-            .can_enter_live()
-    );
+    assert!(!SignalType::research_only("trapped-cohort")
+        .unwrap()
+        .can_enter_live());
 }
 
 #[test]
@@ -403,11 +402,9 @@ fn missing_book_or_fills_suppresses_live_capable_families() {
         ] {
             match evaluation {
                 SignalEvaluation::Suppressed { reasons, .. } => {
-                    assert!(
-                        reasons
-                            .iter()
-                            .any(|reason| reason == "missing_book_or_fills")
-                    );
+                    assert!(reasons
+                        .iter()
+                        .any(|reason| reason == "missing_book_or_fills"));
                 }
                 other => panic!("missing book/fills must not emit {other:?}"),
             }
@@ -462,11 +459,9 @@ fn boolean_book_or_false_fills_cannot_emit_live_capable_families() {
         ] {
             match evaluation {
                 SignalEvaluation::Suppressed { reasons, .. } => {
-                    assert!(
-                        reasons
-                            .iter()
-                            .any(|reason| reason == "missing_book_or_fills")
-                    );
+                    assert!(reasons
+                        .iter()
+                        .any(|reason| reason == "missing_book_or_fills"));
                 }
                 other => panic!("cross-kind or false fills must not emit {other:?}"),
             }
@@ -475,7 +470,7 @@ fn boolean_book_or_false_fills_cannot_emit_live_capable_families() {
 }
 
 #[test]
-fn boolean_or_missing_inventory_cannot_emit_live_capable_families() {
+fn missing_inventory_cannot_emit_live_capable_families() {
     let trigger = snapshot(
         HealthState::Green,
         green_values(&[
@@ -489,19 +484,72 @@ fn boolean_or_missing_inventory_cannot_emit_live_capable_families() {
             ("placeholder", FeatureValue::SignedInteger(1)),
         ]),
     );
-    let mut boolean_inventory = trigger.clone();
-    boolean_inventory.values.insert(
-        market_feature_key("inventory").unwrap(),
-        FeatureValue::Boolean(true),
-    );
-    let mut missing_inventory = trigger.clone();
+    let mut missing_inventory = trigger;
     missing_inventory.values.insert(
         market_feature_key("inventory").unwrap(),
         FeatureValue::Missing(MissingReason::NotObserved),
     );
-    boolean_inventory.provenance_hash = boolean_inventory.compute_provenance_hash();
     missing_inventory.provenance_hash = missing_inventory.compute_provenance_hash();
 
+    assert_eq!(
+        proof_withhold_reason(&missing_inventory),
+        Some(ProofWithholdReason::MissingInventory)
+    );
+    assert_ne!(
+        ProofWithholdReason::MissingInventory.as_wire_name(),
+        "missing_book_or_fills"
+    );
+    assert_ne!(
+        ProofWithholdReason::MissingInventory.as_wire_name(),
+        ProofWithholdReason::MalformedInventory.as_wire_name()
+    );
+    assert_inventory_family_withhold(
+        &missing_inventory,
+        ProofWithholdReason::MissingInventory.as_wire_name(),
+    );
+}
+
+#[test]
+fn boolean_inventory_cannot_emit_live_capable_families() {
+    let trigger = snapshot(
+        HealthState::Green,
+        green_values(&[
+            (
+                "smart_flow_acceleration_milli",
+                FeatureValue::SignedInteger(400),
+            ),
+            ("historical_markout_bps", FeatureValue::SignedInteger(40)),
+            ("smart_flow_usd_milli", FeatureValue::SignedInteger(50)),
+            ("crowd_flow_usd_milli", FeatureValue::SignedInteger(-40)),
+            ("placeholder", FeatureValue::SignedInteger(1)),
+        ]),
+    );
+    let mut boolean_inventory = trigger;
+    boolean_inventory.values.insert(
+        market_feature_key("inventory").unwrap(),
+        FeatureValue::Boolean(true),
+    );
+    boolean_inventory.provenance_hash = boolean_inventory.compute_provenance_hash();
+
+    assert_eq!(
+        proof_withhold_reason(&boolean_inventory),
+        Some(ProofWithholdReason::MalformedInventory)
+    );
+    assert_ne!(
+        ProofWithholdReason::MalformedInventory.as_wire_name(),
+        "missing_book_or_fills"
+    );
+    assert_ne!(
+        ProofWithholdReason::MalformedInventory.as_wire_name(),
+        ProofWithholdReason::MissingInventory.as_wire_name()
+    );
+    assert_inventory_family_withhold(
+        &boolean_inventory,
+        ProofWithholdReason::MalformedInventory.as_wire_name(),
+    );
+}
+
+fn assert_inventory_family_withhold(snapshot: &MarketFeatureSnapshot, expected_reason: &str) {
     let flow = flow_eval();
     let crowd = SmartCrowdDivergenceEvaluator::from_toml(include_str!(
         "../../../config/signals/v1/smart-crowd-divergence.toml"
@@ -512,23 +560,28 @@ fn boolean_or_missing_inventory_cannot_emit_live_capable_families() {
     ))
     .unwrap();
     let ctx = context(4, false, false, 5, 100, false, false);
-    for snapshot in [&boolean_inventory, &missing_inventory] {
-        assert!(suppress_missing_book_or_fills(snapshot).is_some());
-        for evaluation in [
-            flow.evaluate(snapshot, &ctx).unwrap(),
-            crowd.evaluate(snapshot, &ctx).unwrap(),
-            fragility.evaluate(snapshot, &ctx).unwrap(),
-        ] {
-            match evaluation {
-                SignalEvaluation::Suppressed { reasons, .. } => {
-                    assert!(
-                        reasons
-                            .iter()
-                            .any(|reason| reason == "missing_book_or_fills")
-                    );
-                }
-                other => panic!("boolean or missing inventory must not emit {other:?}"),
+    match suppress_missing_book_or_fills(snapshot) {
+        Some(SignalEvaluation::Suppressed { reasons, .. }) => {
+            assert_eq!(reasons.as_slice(), [expected_reason]);
+            assert!(!reasons
+                .iter()
+                .any(|reason| reason == "missing_book_or_fills"));
+        }
+        other => panic!("expected inventory suppression, got {other:?}"),
+    }
+    for evaluation in [
+        flow.evaluate(snapshot, &ctx).unwrap(),
+        crowd.evaluate(snapshot, &ctx).unwrap(),
+        fragility.evaluate(snapshot, &ctx).unwrap(),
+    ] {
+        match evaluation {
+            SignalEvaluation::Suppressed { reasons, .. } => {
+                assert_eq!(reasons.as_slice(), [expected_reason]);
+                assert!(!reasons
+                    .iter()
+                    .any(|reason| reason == "missing_book_or_fills"));
             }
+            other => panic!("inventory withhold must not emit {other:?}"),
         }
     }
 }

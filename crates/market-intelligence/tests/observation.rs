@@ -127,7 +127,7 @@ fn typed_mint_refuses_cross_kind_without_conversion() {
 }
 
 #[test]
-fn boolean_book_or_inventory_cannot_mint_observed_proof() {
+fn boolean_book_cannot_mint_observed_proof() {
     let boolean_book = snapshot(
         FeatureValue::Boolean(true),
         FeatureValue::Boolean(true),
@@ -136,21 +136,51 @@ fn boolean_book_or_inventory_cannot_mint_observed_proof() {
     assert!(matches!(
         boolean_book.require_observed_book_and_fills(),
         Err(MarketError::Malformed {
-            what: "observation",
+            what: "book",
             reason: "boolean cannot mint decimal depth",
         })
     ));
+}
+
+#[test]
+fn boolean_inventory_cannot_mint_observed_proof() {
     let boolean_inventory = snapshot(
         depth(),
         FeatureValue::Boolean(true),
         FeatureValue::Boolean(true),
     );
     assert!(matches!(
-        boolean_inventory.require_observed_book_and_fills(),
+        boolean_inventory.observation("inventory", ObservationMintKind::DecimalDepth),
         Err(MarketError::Malformed {
-            what: "observation",
+            what: "inventory",
             reason: "boolean cannot mint decimal depth",
         })
+    ));
+    assert!(matches!(
+        boolean_inventory.require_observed_book_and_fills(),
+        Err(MarketError::Malformed {
+            what: "inventory",
+            reason: "boolean cannot mint decimal depth",
+        })
+    ));
+}
+
+#[test]
+fn missing_inventory_is_missing_input_not_malformed() {
+    let missing_inventory = snapshot(
+        depth(),
+        FeatureValue::Boolean(true),
+        FeatureValue::Missing(MissingReason::NotObserved),
+    );
+    assert_eq!(
+        missing_inventory
+            .observation("inventory", ObservationMintKind::DecimalDepth)
+            .unwrap(),
+        ObservationStatus::Missing(MissingReason::NotObserved)
+    );
+    assert!(matches!(
+        missing_inventory.require_observed_book_and_fills(),
+        Err(MarketError::MissingInput { name: "inventory" })
     ));
 }
 
@@ -160,7 +190,7 @@ fn decimal_fills_cannot_mint_boolean_presence_proof() {
     assert!(matches!(
         snap.require_observed_book_and_fills(),
         Err(MarketError::Malformed {
-            what: "observation",
+            what: "fills",
             reason: "decimal depth cannot mint boolean presence",
         })
     ));

@@ -1,7 +1,7 @@
 use domain_types::{BlockHeight, EntityId, Horizon, ProbabilityPpm, SignalId, UsdAmount};
 use feature_core::EvidenceRef;
 use market_intelligence::{
-    AnalogueSet, MarketFeatureSnapshot, ObservationMintKind, ObservationStatus,
+    AnalogueSet, MarketFeatureSnapshot, ObservationAdmission, ObservationMintKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -141,18 +141,29 @@ impl EvidenceBundle {
         ) {
             missing.push("fills".to_owned());
         }
-        if snapshot_lacks_observation(
-            &self.feature_before,
-            "inventory",
-            ObservationMintKind::DecimalDepth,
-        ) || snapshot_lacks_observation(
-            &self.feature_after,
-            "inventory",
-            ObservationMintKind::DecimalDepth,
+        if matches!(
+            inventory_admission(&self.feature_before),
+            ObservationAdmission::Missing
+        ) || matches!(
+            inventory_admission(&self.feature_after),
+            ObservationAdmission::Missing
         ) {
             missing.push("inventory".to_owned());
         }
         missing
+    }
+
+    #[must_use]
+    pub fn malformed_for_admission(&self) -> Option<(&'static str, &'static str)> {
+        for snapshot in [&self.feature_before, &self.feature_after] {
+            match inventory_admission(snapshot) {
+                ObservationAdmission::Malformed { what, reason } => {
+                    return Some((what, reason));
+                }
+                ObservationAdmission::Observed | ObservationAdmission::Missing => {}
+            }
+        }
+        None
     }
 }
 
@@ -161,9 +172,12 @@ fn snapshot_lacks_observation(
     name: &'static str,
     kind: ObservationMintKind,
 ) -> bool {
-    match snapshot.observation(name, kind) {
-        Ok(ObservationStatus::Observed) => false,
-        Ok(ObservationStatus::Missing(_)) => true,
-        Err(_) => true,
+    match snapshot.admit_observation(name, kind) {
+        ObservationAdmission::Observed => false,
+        ObservationAdmission::Missing | ObservationAdmission::Malformed { .. } => true,
     }
+}
+
+fn inventory_admission(snapshot: &MarketFeatureSnapshot) -> ObservationAdmission {
+    snapshot.admit_observation("inventory", ObservationMintKind::DecimalDepth)
 }
