@@ -363,6 +363,9 @@ fn require_auxiliary_source_closed_fields(
         if source.contains_key("local_sequence") {
             require_u64(source, "local_sequence")?;
         }
+        if source.contains_key("last_durable_wall_micros") {
+            require_i64(source, "last_durable_wall_micros")?;
+        }
         if source.contains_key("health") {
             require_enum(source, "health", AUXILIARY_SOURCE_HEALTH)?;
         }
@@ -401,6 +404,16 @@ fn require_u64(object: &Map<String, Value>, field: &str) -> Result<(), SnapshotE
     }
 }
 
+/// Present JSON integer that fits `i64`. Capture writer emits
+/// `Option<i64>` (`skip_serializing_if`) with the durable cluster; this
+/// is not `require_u64` and does not invent extra range bounds.
+fn require_i64(object: &Map<String, Value>, field: &str) -> Result<(), SnapshotError> {
+    match object.get(field) {
+        Some(Value::Number(number)) if number.as_i64().is_some() => Ok(()),
+        _ => Err(SnapshotError::Invalid),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -414,7 +427,9 @@ mod tests {
     use crate::openapi::{
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_cursor_epoch_is_optional_string,
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
-        auxiliary_source_id_is_required_string, auxiliary_source_local_sequence_is_optional_u64,
+        auxiliary_source_id_is_required_string,
+        auxiliary_source_last_durable_wall_micros_is_optional_i64,
+        auxiliary_source_local_sequence_is_optional_u64,
         auxiliary_source_partial_line_is_required_bool,
         auxiliary_source_qualification_openapi_enum,
         auxiliary_source_spool_records_is_required_u64,
@@ -1099,6 +1114,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_document_types_auxiliary_last_durable_wall_micros_optional_i64() {
+        let document = openapi_yaml();
+        assert!(
+            auxiliary_source_last_durable_wall_micros_is_optional_i64(document),
+            "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_durable_wall_micros as an optional i64 integer"
+        );
+        assert!(
+            health_reason_code_is_unrestricted_string(document),
+            "reason_code must stay a free string so unknown RED codes fail closed"
+        );
+        assert!(
+            document.contains("no inline enum"),
+            "OpenAPI must freeze HealthAssessment.reason_code without an inline enum"
+        );
+    }
+
+    #[test]
     fn closed_auxiliary_source_health_values_are_accepted() {
         for health in AUXILIARY_SOURCE_HEALTH {
             let mut value =
@@ -1657,6 +1689,83 @@ mod tests {
                     .expect_err("present non-u64 local_sequence must not fail open"),
                 SnapshotError::Invalid,
                 "{local_sequence} must be snapshot_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn known_auxiliary_last_durable_wall_micros_i64_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for last_durable_wall_micros in [0_i64, 1_000, i64::MAX, -1] {
+            value["auxiliary_sources"][0]["last_durable_wall_micros"] =
+                serde_json::json!(last_durable_wall_micros);
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            let parsed = parse_capture_status_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("{last_durable_wall_micros} should parse: {error}"));
+            assert_eq!(
+                parsed["auxiliary_sources"][0]["last_durable_wall_micros"],
+                last_durable_wall_micros
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_auxiliary_last_durable_wall_micros_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        assert!(
+            value["auxiliary_sources"][0]
+                .get("last_durable_wall_micros")
+                .is_none(),
+            "v5 fixture must omit optional last_durable_wall_micros"
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode omitted last_durable_wall_micros");
+        let parsed = parse_capture_status_bytes(&bytes).expect("omitted last_durable_wall_micros");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("last_durable_wall_micros")
+                .is_none()
+        );
+
+        value["auxiliary_sources"][0]["last_durable_wall_micros"] = serde_json::json!(1_000_i64);
+        value["auxiliary_sources"][0]
+            .as_object_mut()
+            .expect("auxiliary source object")
+            .remove("last_durable_wall_micros");
+        let bytes = serde_json::to_vec(&value).expect("encode removed last_durable_wall_micros");
+        let parsed = parse_capture_status_bytes(&bytes).expect("removed last_durable_wall_micros");
+        assert!(
+            parsed["auxiliary_sources"][0]
+                .get("last_durable_wall_micros")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn present_non_i64_auxiliary_last_durable_wall_micros_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for last_durable_wall_micros in [
+            serde_json::json!("0"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"not": "an-i64"}),
+            serde_json::json!(["not-an-i64"]),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(1.5),
+        ] {
+            value["auxiliary_sources"][0]["last_durable_wall_micros"] =
+                last_durable_wall_micros.clone();
+            let bytes = serde_json::to_vec(&value).expect("encode");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present non-i64 last_durable_wall_micros must not fail open"),
+                SnapshotError::Invalid,
+                "{last_durable_wall_micros} must be snapshot_invalid"
             );
         }
     }
