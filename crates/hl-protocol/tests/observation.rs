@@ -94,6 +94,73 @@ fn payload_limits_fail_closed_for_each_observation_class() {
     }
 }
 
+fn expected_observation_class(error: &ObservationError) -> Option<ObservationClass> {
+    match error {
+        ObservationError::PayloadTooLarge {
+            observation_class, ..
+        } => Some(*observation_class),
+        ObservationError::InvalidSourceVersion
+        | ObservationError::InvalidParserSchemaVersion
+        | ObservationError::InvalidCursorEpoch
+        | ObservationError::InvalidWallTimestamp
+        | ObservationError::InvalidWarningCode
+        | ObservationError::InvalidWarningDetail
+        | ObservationError::InvalidPayloadLimit
+        | ObservationError::EmptyPayload
+        | ObservationError::CursorRegression => None,
+    }
+}
+
+fn every_observation_error() -> Vec<ObservationError> {
+    let mut errors = vec![
+        ObservationError::InvalidSourceVersion,
+        ObservationError::InvalidParserSchemaVersion,
+        ObservationError::InvalidCursorEpoch,
+        ObservationError::InvalidWallTimestamp,
+        ObservationError::InvalidWarningCode,
+        ObservationError::InvalidWarningDetail,
+        ObservationError::InvalidPayloadLimit,
+        ObservationError::EmptyPayload,
+        ObservationError::CursorRegression,
+    ];
+    errors.extend(ObservationClass::ALL.into_iter().map(|observation_class| {
+        ObservationError::PayloadTooLarge {
+            observation_class,
+            actual: 5,
+            maximum: 4,
+        }
+    }));
+    errors
+}
+
+#[test]
+fn observation_error_observation_class_pins_every_variant() {
+    for error in every_observation_error() {
+        match &error {
+            ObservationError::PayloadTooLarge {
+                observation_class, ..
+            } => {
+                assert_eq!(error.observation_class(), Some(*observation_class));
+            }
+            ObservationError::InvalidSourceVersion
+            | ObservationError::InvalidParserSchemaVersion
+            | ObservationError::InvalidCursorEpoch
+            | ObservationError::InvalidWallTimestamp
+            | ObservationError::InvalidWarningCode
+            | ObservationError::InvalidWarningDetail
+            | ObservationError::InvalidPayloadLimit
+            | ObservationError::EmptyPayload
+            | ObservationError::CursorRegression => {
+                assert_eq!(error.observation_class(), None);
+            }
+        }
+        assert_eq!(
+            error.observation_class(),
+            expected_observation_class(&error)
+        );
+    }
+}
+
 #[test]
 fn empty_payload_and_zero_limit_are_rejected() {
     let empty = valid_observation(ObservationClass::Snapshot, Bytes::new(), 16)
