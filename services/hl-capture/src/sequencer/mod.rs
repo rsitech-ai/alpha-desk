@@ -140,10 +140,26 @@ fn validate_confirmation(
         PublicationLane::CommittedCandidate => match admission.trust() {
             SourceTrust::LocallyVerifiedCommitted => ConfirmationClass::CommittedPrimary,
             SourceTrust::IndependentCommitted => ConfirmationClass::CommittedIndependent,
-            _ => return Err(CandidateError::UnsupportedPublicationLane),
+            SourceTrust::ReconciledSnapshot
+            | SourceTrust::RecoveryOnly
+            | SourceTrust::ThirdPartyProvisional
+            | SourceTrust::MempoolProvisional => {
+                return Err(CandidateError::UnsupportedPublicationLane);
+            }
         },
-        PublicationLane::Provisional => ConfirmationClass::ProvisionalSource,
-        _ => return Err(CandidateError::UnsupportedPublicationLane),
+        PublicationLane::Provisional => match admission.trust() {
+            SourceTrust::ThirdPartyProvisional => ConfirmationClass::ProvisionalSource,
+            SourceTrust::LocallyVerifiedCommitted
+            | SourceTrust::IndependentCommitted
+            | SourceTrust::ReconciledSnapshot
+            | SourceTrust::RecoveryOnly
+            | SourceTrust::MempoolProvisional => {
+                return Err(CandidateError::UnsupportedPublicationLane);
+            }
+        },
+        PublicationLane::Reconciliation | PublicationLane::Recovery | PublicationLane::Mempool => {
+            return Err(CandidateError::UnsupportedPublicationLane);
+        }
     };
     if confirmation == expected {
         Ok(())
@@ -299,7 +315,11 @@ impl CanonicalSequencer {
         match candidate.admission.publication_lane() {
             PublicationLane::CommittedCandidate => self.observe_committed(candidate),
             PublicationLane::Provisional => self.observe_provisional(candidate),
-            _ => unreachable!("BlockCandidate rejects unsupported publication lanes"),
+            PublicationLane::Reconciliation
+            | PublicationLane::Recovery
+            | PublicationLane::Mempool => {
+                unreachable!("BlockCandidate rejects unsupported publication lanes")
+            }
         }
     }
 
