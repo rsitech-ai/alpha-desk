@@ -255,9 +255,14 @@ fn verify_archived_segment(
             || verified.object().source_id() != &verification.source_id
             || verified.spool_manifest_blake3() != verification.spool.manifest_blake3
             || verified.spool_segment_blake3() != verification.spool.segment_blake3
-            || verified.cursor_policy() != CursorPolicy::MonotonicByteOffset
         {
             return Err(RawSegmentArchiveError::VerificationMismatch);
+        }
+        match verified.cursor_policy() {
+            CursorPolicy::MonotonicByteOffset => {}
+            CursorPolicy::ContiguousNativeOffset => {
+                return Err(RawSegmentArchiveError::VerificationMismatch);
+            }
         }
         let range = verified
             .local_sequence_range()
