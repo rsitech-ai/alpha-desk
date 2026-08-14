@@ -272,20 +272,25 @@ fn inspect_directory_entries(
         {
             return Err(SpoolError::ManifestChainBroken);
         }
-        if reader.header().cursor_policy() == CursorPolicy::MonotonicByteOffset
-            && summary.record_count() > 0
-        {
-            let first = match previous_local_sequence {
-                Some(previous) => previous
-                    .checked_next()
-                    .map_err(|_| SpoolError::SizeOverflow)?,
-                None => LocalRecordSequence::try_new(1).map_err(|_| SpoolError::SizeOverflow)?,
-            };
-            previous_local_sequence = Some(
-                first
-                    .checked_advance_by(summary.record_count() - 1)
-                    .map_err(|_| SpoolError::SizeOverflow)?,
-            );
+        match reader.header().cursor_policy() {
+            CursorPolicy::MonotonicByteOffset => {
+                if summary.record_count() > 0 {
+                    let first = match previous_local_sequence {
+                        Some(previous) => previous
+                            .checked_next()
+                            .map_err(|_| SpoolError::SizeOverflow)?,
+                        None => {
+                            LocalRecordSequence::try_new(1).map_err(|_| SpoolError::SizeOverflow)?
+                        }
+                    };
+                    previous_local_sequence = Some(
+                        first
+                            .checked_advance_by(summary.record_count() - 1)
+                            .map_err(|_| SpoolError::SizeOverflow)?,
+                    );
+                }
+            }
+            CursorPolicy::ContiguousNativeOffset => {}
         }
         total_records = total_records
             .checked_add(summary.record_count())

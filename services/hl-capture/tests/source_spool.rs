@@ -1408,6 +1408,84 @@ fn validate_successor_epoch_change_covers_every_constructible_cursor_policy() {
 }
 
 #[test]
+fn open_segment_inspection_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                spool.append(&observation(101), 102).unwrap();
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                spool.append(&byte_observation(49), 102).unwrap();
+            }
+        }
+        drop(spool);
+
+        let inspection = inspect_spool(root.path().join("primary-node"))
+            .expect("open-segment inspection still verifies for this constructible cursor policy");
+        assert_eq!(inspection.closed_segments(), 1);
+        assert_eq!(inspection.open_segments(), 1);
+        assert_eq!(inspection.records(), 2);
+
+        let recovered = SourceSpool::open(config, 200).expect(
+            "recovery still continues after open-segment inspection for this constructible cursor policy",
+        );
+        assert_eq!(recovered.last_local_sequence().unwrap().get(), 2);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .is_none()
+                );
+                assert!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .last_local_sequence()
+                        .is_none()
+                );
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .unwrap()
+                        .get(),
+                    1
+                );
+                assert_eq!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .last_local_sequence()
+                        .unwrap()
+                        .get(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_policy_identity_rejects_an_overlong_base_schema() {
     let root = TempDir::new().unwrap();
     let error = SourceSpoolConfig::try_new_with_cursor_policy(
