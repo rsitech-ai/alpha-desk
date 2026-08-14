@@ -48,26 +48,43 @@ fn snapshot_admitting(
     accounts: &[SimulatedAccount],
 ) -> MarketFeatureSnapshot {
     let inventory = account_inventory_value(accounts);
-    if book.observation == ObservationStatus::Observed && book.health.state != HealthState::Red {
-        market_snapshot_with_health(
-            FeatureValue::Decimal {
-                raw: book.executable_depth.raw(),
-                scale: u32::from(book.executable_depth.scale()),
-            },
+    match book.observation {
+        ObservationStatus::Observed => match book.health.state {
+            HealthState::Green | HealthState::Amber => market_snapshot_with_health(
+                FeatureValue::Decimal {
+                    raw: book.executable_depth.raw(),
+                    scale: u32::from(book.executable_depth.scale()),
+                },
+                FeatureValue::Boolean(true),
+                inventory,
+                book.health.clone(),
+            ),
+            HealthState::Red => {
+                let missing = FeatureValue::Missing(MissingReason::RedDataHealth);
+                let mut values = std::collections::BTreeMap::new();
+                values.insert(market_feature_key("registry").unwrap(), missing.clone());
+                values.insert(market_feature_key("book").unwrap(), missing.clone());
+                values.insert(market_feature_key("fills").unwrap(), missing.clone());
+                values.insert(market_feature_key("inventory").unwrap(), missing);
+                MarketFeatureSnapshot::try_new(
+                    MarketId::new("BTC").unwrap(),
+                    Horizon::MINUTES_5,
+                    FeatureSetVersion::new("market-v1").unwrap(),
+                    ProtocolTime::from_unix_micros(1_000_000).unwrap(),
+                    KnownTime::from_unix_micros(1_000_000).unwrap(),
+                    BlockHeight::new(1),
+                    values,
+                    book.health.clone(),
+                )
+                .unwrap()
+            }
+        },
+        ObservationStatus::Missing(reason) => market_snapshot_with_health(
+            FeatureValue::Missing(reason),
             FeatureValue::Boolean(true),
             inventory,
             book.health.clone(),
-        )
-    } else {
-        market_snapshot_with_health(
-            FeatureValue::Decimal {
-                raw: 20_000 * 100_000_000,
-                scale: 8,
-            },
-            FeatureValue::Boolean(true),
-            inventory,
-            health(HealthState::Amber),
-        )
+        ),
     }
 }
 
@@ -172,9 +189,11 @@ fn red_book_and_unsupported_margin_fail_closed() {
         &book(20_000, HealthState::Red),
         -100,
         0,
-    )
-    .unwrap();
-    assert_eq!(red.health.state, HealthState::Red);
+    );
+    assert!(matches!(
+        red,
+        Err(MarketError::MissingInput { name: "book" })
+    ));
     let mut unsupported = account("a", Direction::Long, 100, 10);
     unsupported.margin_mode = SimulatedMarginMode::Unsupported;
     let path = simulate_bound_path(
@@ -252,7 +271,9 @@ fn missing_book_does_not_invent_depth_or_emit_waves() {
         health: health(HealthState::Amber),
         observation: ObservationStatus::Missing(MissingReason::NotObserved),
     };
-    let error = simulate_bound_path(&scenario, &accounts, &invented, -100, 0).unwrap_err();
+    let unrelated = observed_snapshot();
+    let stolen = unrelated.require_observed_book_and_fills().unwrap();
+    let error = simulate_path(&scenario, &accounts, &invented, -100, 0, stolen).unwrap_err();
     assert!(matches!(
         error,
         MarketError::Malformed {
@@ -262,10 +283,25 @@ fn missing_book_does_not_invent_depth_or_emit_waves() {
     ));
 
     let missing = SimulatedBook::missing(MissingReason::NotObserved).unwrap();
-    let path = simulate_bound_path(&scenario, &accounts, &missing, -100, 0).unwrap();
-    assert!(path.waves.is_empty());
-    assert_eq!(path.total_forced_notional.raw(), 0);
-    assert_eq!(path.health.state, HealthState::Red);
+    assert!(matches!(
+        simulate_bound_path(&scenario, &accounts, &missing, -100, 0),
+        Err(MarketError::MissingInput { name: "book" })
+    ));
+    let stolen_empty = unrelated.require_observed_book_and_fills().unwrap();
+    assert!(matches!(
+        simulate_path(&scenario, &accounts, &missing, -100, 0, stolen_empty),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof is unrelated to missing constructed book",
+        })
+    ));
+    assert!(matches!(
+        simulate_fragility(&scenario, &accounts, &missing, -100, stolen_empty),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof is unrelated to missing constructed book",
+        })
+    ));
 }
 
 #[test]
@@ -323,6 +359,43 @@ fn constructed_observed_book_without_fills_cannot_produce_fragility_scores() {
         })
     ));
     assert_eq!(book.observation, ObservationStatus::Observed);
+}
+
+#[test]
+fn red_or_missing_constructed_book_cannot_admit_via_unrelated_proof() {
+    let scenario = scenario();
+    let accounts = vec![account("a", Direction::Long, 100, 10)];
+    let unrelated = observed_snapshot();
+    let stolen = unrelated.require_observed_book_and_fills().unwrap();
+
+    let red = book(20_000, HealthState::Red);
+    assert!(matches!(
+        simulate_path(&scenario, &accounts, &red, -100, 0, stolen),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof is unrelated to red constructed book",
+        })
+    ));
+    assert!(matches!(
+        simulate_fragility(&scenario, &accounts, &red, -100, stolen),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof is unrelated to red constructed book",
+        })
+    ));
+    assert!(matches!(
+        simulate_bound_path(&scenario, &accounts, &red, -100, 0),
+        Err(MarketError::MissingInput { name: "book" })
+    ));
+
+    let missing = SimulatedBook::missing(MissingReason::RedDataHealth).unwrap();
+    assert!(matches!(
+        simulate_path(&scenario, &accounts, &missing, -100, 0, stolen),
+        Err(MarketError::Malformed {
+            what: "book",
+            reason: "observed book proof is unrelated to missing constructed book",
+        })
+    ));
 }
 
 #[test]
