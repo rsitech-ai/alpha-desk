@@ -310,7 +310,9 @@ components:
         strings, are snapshot_invalid. Omitted stays omitted. Nested
         last_error_reason is an optional string; present non-string values,
         and empty present strings, are snapshot_invalid. Omitted stays
-        omitted. Nested health,
+        omitted. Present unknown nested properties are snapshot_invalid.
+        Known objects without extras stay valid. This is nested item extra
+        keys, not CaptureStatusBase additionalProperties. Nested health,
         restart_reconstruction, and qualification, when present, use closed
         kebab-case sets; unknown values are snapshot_invalid. Omitted optional
         nested fields stay omitted.
@@ -416,7 +418,9 @@ components:
             strings, are snapshot_invalid. Omitted stays omitted. Nested
             last_error_reason is an optional string; present non-string values,
             and empty present strings, are snapshot_invalid. Omitted stays
-            omitted. Nested health,
+            omitted. Present unknown nested properties are snapshot_invalid.
+            Known objects without extras stay valid. This is nested item extra
+            keys, not CaptureStatusBase additionalProperties. Nested health,
             restart_reconstruction, and qualification are optional; present
             values use closed kebab-case sets. Unknown values are
             snapshot_invalid. Omitted optional nested fields stay omitted.
@@ -426,6 +430,7 @@ components:
           maxItems: 16
           items:
             type: object
+            additionalProperties: false
             required:
               - source_id
               - spool_records

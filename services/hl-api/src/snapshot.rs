@@ -75,10 +75,36 @@ pub const AUXILIARY_SOURCE_QUALIFICATION: &[&str] = &["unqualified", "qualified"
 /// are `snapshot_invalid`. Omitted and empty arrays stay valid. Duplicate
 /// present `source_id` is `snapshot_invalid`. Distinct ids stay valid when
 /// strictly increasing (`previous >= source_id` is `snapshot_invalid`).
-/// This crate does not vendor hl-capture and this is not a live capture or
-/// Stage PASS. `HealthAssessment.reason_code` stays a free string so unknown
-/// RED is not closed out.
+/// Present unknown nested properties are `snapshot_invalid`. Known objects
+/// without extras stay valid. This crate does not vendor hl-capture and this
+/// is not a live capture or Stage PASS. `HealthAssessment.reason_code` stays
+/// a free string so unknown RED is not closed out.
 pub const MAX_AUXILIARY_SOURCES: usize = 16;
+
+/// Capture writer `AuxiliarySourceStatus` public keys plus this stack's
+/// already-typed optional `restart_reconstruction`. Present unknown nested
+/// properties are `snapshot_invalid`. Known objects without extras stay
+/// valid. This is not CaptureStatusBase extra keys: top-level writer fields
+/// such as `last_error_reason` stay untyped, and last-heartbeat throughput
+/// still passes through. `HealthAssessment.reason_code` stays a free string
+/// so unknown RED is not closed out.
+const AUXILIARY_SOURCE_FIELDS: &[&str] = &[
+    "source_id",
+    "health",
+    "qualification",
+    "cursor_epoch",
+    "tail_cursor_epoch",
+    "durable_offset",
+    "local_sequence",
+    "spool_records",
+    "unarchived_records",
+    "unread_bytes",
+    "partial_line",
+    "last_durable_wall_micros",
+    "quarantine_reason",
+    "last_error_reason",
+    "restart_reconstruction",
+];
 
 const MAINTENANCE_FIELDS: &[&str] = &[
     "enabled",
@@ -363,6 +389,12 @@ fn require_auxiliary_source_closed_fields(
         let Value::Object(source) = source else {
             return Err(SnapshotError::Invalid);
         };
+        if source
+            .keys()
+            .any(|key| !AUXILIARY_SOURCE_FIELDS.contains(&key.as_str()))
+        {
+            return Err(SnapshotError::Invalid);
+        }
         require_string(source, "source_id", None)?;
         let Some(Value::String(source_id)) = source.get("source_id") else {
             return Err(SnapshotError::Invalid);
@@ -460,6 +492,7 @@ mod tests {
         LAST_HEARTBEAT_THROUGHPUT_FIELDS, auxiliary_source_cursor_epoch_is_optional_string,
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string,
+        auxiliary_source_items_forbid_additional_properties,
         auxiliary_source_last_durable_wall_micros_is_optional_i64,
         auxiliary_source_last_error_reason_is_optional_string,
         auxiliary_source_local_sequence_is_optional_u64,
@@ -1256,12 +1289,24 @@ mod tests {
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
         );
         assert!(
+            auxiliary_source_items_forbid_additional_properties(document),
+            "OpenAPI must set CaptureStatusBase.auxiliary_sources.items.additionalProperties false"
+        );
+        assert!(
             document.contains("Duplicate present source_id"),
             "OpenAPI must describe source_id uniqueness without uniqueItems"
         );
         assert!(
             document.contains("strictly increasing"),
             "OpenAPI must describe source_id sort order without uniqueItems"
+        );
+        assert!(
+            document.contains("Present unknown nested properties"),
+            "OpenAPI must describe nested extra keys as snapshot_invalid"
+        );
+        assert!(
+            document.contains("not CaptureStatusBase additionalProperties"),
+            "OpenAPI must not close CaptureStatusBase extra keys in this leftover"
         );
         assert!(
             !document.contains("Sort order stays untyped"),
@@ -1552,6 +1597,60 @@ mod tests {
                 .expect_err("duplicate present source_id must not fail open"),
             SnapshotError::Invalid
         );
+    }
+
+    #[test]
+    fn known_auxiliary_source_object_without_extras_is_accepted() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        let parsed = parse_capture_status_bytes(&fixture("capture-status-v5.json")).expect("v5");
+        assert_eq!(
+            parsed["auxiliary_sources"][0]["restart_reconstruction"],
+            "complete"
+        );
+
+        value["auxiliary_sources"][0]["cursor_epoch"] = serde_json::json!("node-file-v1:epoch");
+        value["auxiliary_sources"][0]["tail_cursor_epoch"] =
+            serde_json::json!("node-file-v1:epoch");
+        value["auxiliary_sources"][0]["durable_offset"] = serde_json::json!(0_u64);
+        value["auxiliary_sources"][0]["local_sequence"] = serde_json::json!(0_u64);
+        value["auxiliary_sources"][0]["unread_bytes"] = serde_json::json!(0_u64);
+        value["auxiliary_sources"][0]["last_durable_wall_micros"] = serde_json::json!(1_i64);
+        value["auxiliary_sources"][0]["quarantine_reason"] =
+            serde_json::json!("source.schema_drift");
+        value["auxiliary_sources"][0]["last_error_reason"] = serde_json::json!("source.timeout");
+        let bytes = serde_json::to_vec(&value).expect("encode known nested keys");
+        let parsed = parse_capture_status_bytes(&bytes).expect("known nested keys");
+        assert_eq!(
+            parsed["auxiliary_sources"][0]["last_error_reason"],
+            "source.timeout"
+        );
+        assert_eq!(
+            parsed["auxiliary_sources"][0]["restart_reconstruction"],
+            "complete"
+        );
+    }
+
+    #[test]
+    fn present_unknown_auxiliary_source_property_is_snapshot_invalid() {
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fixture("capture-status-v5.json"))
+                .expect("v5 json");
+        for extra in ["fills", "invented", "adapter"] {
+            value["auxiliary_sources"][0][extra] = serde_json::json!(true);
+            let bytes = serde_json::to_vec(&value).expect("encode extra nested key");
+            assert_eq!(
+                parse_capture_status_bytes(&bytes)
+                    .expect_err("present unknown nested property must not fail open"),
+                SnapshotError::Invalid,
+                "{extra} must be snapshot_invalid"
+            );
+            value["auxiliary_sources"][0]
+                .as_object_mut()
+                .expect("auxiliary source object")
+                .remove(extra);
+        }
     }
 
     #[test]

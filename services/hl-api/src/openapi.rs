@@ -8,11 +8,11 @@
 /// auxiliary last_durable_wall_micros, auxiliary last_error_reason,
 /// auxiliary quarantine_reason, auxiliary_sources maxItems,
 /// auxiliary source_id uniqueness, auxiliary source_id sort order,
-/// auxiliary source health, auxiliary restart reconstruction,
-/// auxiliary source qualification, core dead-letter and ledger.unsupported_event reason
-/// codes, and the HTTP router. This is not a production authentication,
-/// availability, or SLO contract, it does not invent fills or mark sources
-/// live or qualified, and it is not a live core.
+/// auxiliary source extra keys, auxiliary source health, auxiliary restart
+/// reconstruction, auxiliary source qualification, core dead-letter and
+/// ledger.unsupported_event reason codes, and the HTTP router. This is not a
+/// production authentication, availability, or SLO contract, it does not
+/// invent fills or mark sources live or qualified, and it is not a live core.
 pub fn openapi_yaml() -> &'static str {
     include_str!("../../../schemas/openapi/v1/openapi.yaml")
 }
@@ -853,6 +853,33 @@ pub fn auxiliary_sources_max_items_is_writer_cap(document: &str) -> bool {
         && !mapping.has_key("uniqueItems")
 }
 
+/// True when `CaptureStatusBase.properties.auxiliary_sources.items` forbids
+/// extra keys: `type: object` and `additionalProperties: false`, matching
+/// HealthAssessment / CaptureMaintenance / ApiError. Present unknown nested
+/// properties are parse `snapshot_invalid`. Known objects without extras
+/// stay valid. CaptureStatusBase itself does not set
+/// `additionalProperties: false` (top-level writer fields such as
+/// `last_error_reason` stay untyped). HealthAssessment.reason_code stays a
+/// free string so unknown RED is not closed out.
+#[must_use]
+pub fn auxiliary_source_items_forbid_additional_properties(document: &str) -> bool {
+    let Some(mapping) = yaml_mapping(
+        document,
+        &[
+            "components",
+            "schemas",
+            "CaptureStatusBase",
+            "properties",
+            "auxiliary_sources",
+            "items",
+        ],
+    ) else {
+        return false;
+    };
+    mapping.scalar("type") == Some("object")
+        && mapping.scalar("additionalProperties") == Some("false")
+}
+
 /// True when `HealthAssessment.reason_code` is a free string: `type: string`,
 /// no `$ref` (including `CoreDeadLetterReasonCode` or
 /// `LedgerUnsupportedEventReasonCode`), and no inline `enum`. Unknown RED
@@ -1250,6 +1277,7 @@ mod tests {
         auxiliary_source_cursor_epoch_is_optional_string,
         auxiliary_source_durable_offset_is_optional_u64, auxiliary_source_health_openapi_enum,
         auxiliary_source_id_is_required_string,
+        auxiliary_source_items_forbid_additional_properties,
         auxiliary_source_last_durable_wall_micros_is_optional_i64,
         auxiliary_source_last_error_reason_is_optional_string,
         auxiliary_source_local_sequence_is_optional_u64,
@@ -1350,6 +1378,10 @@ mod tests {
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.items.last_error_reason as an optional string"
         );
         assert!(
+            auxiliary_source_items_forbid_additional_properties(document),
+            "OpenAPI must set CaptureStatusBase.auxiliary_sources.items.additionalProperties false"
+        );
+        assert!(
             auxiliary_sources_max_items_is_writer_cap(document),
             "OpenAPI must define CaptureStatusBase.auxiliary_sources.maxItems as the capture writer cap"
         );
@@ -1360,6 +1392,14 @@ mod tests {
         assert!(
             document.contains("strictly increasing"),
             "OpenAPI must describe source_id sort order without uniqueItems"
+        );
+        assert!(
+            document.contains("Present unknown nested properties"),
+            "OpenAPI must describe nested extra keys as snapshot_invalid"
+        );
+        assert!(
+            document.contains("not CaptureStatusBase additionalProperties"),
+            "OpenAPI must not close CaptureStatusBase extra keys in this leftover"
         );
         assert!(
             !document.contains("Sort order stays untyped"),
@@ -3584,6 +3624,75 @@ components:
         assert!(
             auxiliary_sources_max_items_is_writer_cap(writer_cap),
             "array maxItems matching the capture writer cap must satisfy the freeze"
+        );
+    }
+
+    #[test]
+    fn prose_mention_does_not_satisfy_auxiliary_source_additional_properties_freeze() {
+        let prose_only = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      description: >
+        additionalProperties false remains in prose after the YAML key drops it.
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+"#;
+        assert!(
+            !auxiliary_source_items_forbid_additional_properties(prose_only),
+            "prose mention of additionalProperties false must not satisfy the freeze"
+        );
+
+        let allowed = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+"#;
+        assert!(
+            !auxiliary_source_items_forbid_additional_properties(allowed),
+            "additionalProperties true must not satisfy the freeze"
+        );
+
+        let base_only = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      type: object
+      additionalProperties: false
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+"#;
+        assert!(
+            !auxiliary_source_items_forbid_additional_properties(base_only),
+            "CaptureStatusBase additionalProperties must not satisfy the nested items freeze"
+        );
+
+        let forbidden = r#"
+components:
+  schemas:
+    CaptureStatusBase:
+      properties:
+        auxiliary_sources:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+"#;
+        assert!(
+            auxiliary_source_items_forbid_additional_properties(forbidden),
+            "items additionalProperties false must satisfy the freeze"
         );
     }
 
