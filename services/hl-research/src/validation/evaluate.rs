@@ -2,7 +2,7 @@ use domain_types::{Decimal, RoundingMode};
 use serde::Serialize;
 
 use crate::baselines::FOLD_ESTIMATOR_CLASSES;
-use crate::claims::serialize_unclaimed;
+use crate::claims::{serialize_denied_true, serialize_unclaimed};
 use crate::error::ResearchError;
 use crate::estimator::{EstimatorClass, FittedEstimator, LinearModel, METRIC_SCALE, fit, zero};
 use crate::ledger::VariantLedger;
@@ -40,6 +40,10 @@ pub struct FoldEstimatorReport {
     pub significance_claimed: bool,
     #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub live_corpus: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub replica_cmds_used: bool,
     pub evaluations: Vec<FoldFit>,
     pub ledger: VariantLedger,
     pub bootstrap: BootstrapReport,
@@ -138,6 +142,8 @@ pub fn evaluate_folds(dataset: &ResearchDataset) -> Result<FoldEstimatorReport, 
         alpha_qualified: false,
         significance_claimed: false,
         stage_pass_claimed: false,
+        live_corpus: false,
+        replica_cmds_used: false,
         evaluations,
         ledger,
         bootstrap,

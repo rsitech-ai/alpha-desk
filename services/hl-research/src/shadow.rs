@@ -1,7 +1,7 @@
 use domain_types::{KnownTime, ProtocolTime};
 use serde::{Deserialize, Serialize};
 
-use crate::claims::serialize_unclaimed;
+use crate::claims::{serialize_denied_true, serialize_unclaimed};
 use crate::error::ResearchError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +44,10 @@ pub struct ShadowCaptureReport {
     pub significance_claimed: bool,
     #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub live_corpus: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub replica_cmds_used: bool,
     pub decisions: usize,
     pub outcomes: usize,
     pub capture_hash: String,
@@ -163,6 +167,8 @@ impl ShadowCapture {
             alpha_qualified: false,
             significance_claimed: false,
             stage_pass_claimed: false,
+            live_corpus: false,
+            replica_cmds_used: false,
             decisions: self.decisions.len(),
             outcomes: self.outcomes.len(),
             capture_hash: hex::encode(self.capture_hash()),

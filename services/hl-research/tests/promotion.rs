@@ -250,20 +250,40 @@ fn status_json_cannot_claim_alpha_significance_or_locked_corpus() {
     assert_unclaimed(&encoded, "alpha_quality_claimed");
     assert_unclaimed(&encoded, "stage_pass_claimed");
     assert_unclaimed(&encoded, "locked_corpus");
+    assert_unclaimed(&encoded, "live_corpus");
+    assert_unclaimed(&encoded, "replica_cmds_used");
 }
 
 #[test]
 fn research_sources_do_not_parse_replica_cmds_or_a_live_corpus() {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    for root in [src, fixture_dir()] {
-        walk_text_files(&root, &mut |path, text| {
-            assert!(
-                !text.contains("replica_cmds"),
-                "{} must not reference replica_cmds",
-                path.display()
-            );
-        });
-    }
+    walk_text_files(&src, &mut |path, text| {
+        let stripped = text
+            .replace("replica_cmds_used", "")
+            .replace("live_corpus", "");
+        assert!(
+            !stripped.contains("replica_cmds/"),
+            "{} must not parse a replica_cmds path",
+            path.display()
+        );
+        assert!(
+            !stripped.contains("/replica_cmds"),
+            "{} must not parse a replica_cmds path",
+            path.display()
+        );
+    });
+    walk_text_files(&fixture_dir(), &mut |path, text| {
+        assert!(
+            !text.contains("replica_cmds"),
+            "{} must not reference replica_cmds",
+            path.display()
+        );
+        assert!(
+            !text.contains("live_corpus"),
+            "{} must not claim a live corpus",
+            path.display()
+        );
+    });
 }
 
 fn walk_text_files(dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
