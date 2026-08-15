@@ -83,18 +83,26 @@ pub fn transition_allowed(
             return Err(SignalError::UnsupportedHealth);
         }
     }
-    if to == SignalLifecycleState::Live {
-        if !signal_type.can_enter_live() {
-            return Err(SignalError::ResearchOnlyCannotGoLive);
+    match to {
+        SignalLifecycleState::Live => {
+            if !signal_type.can_enter_live() {
+                return Err(SignalError::ResearchOnlyCannotGoLive);
+            }
+            if !confirmation_live_ok {
+                return Err(SignalError::ContractViolation(
+                    "confirmation class cannot enter live",
+                ));
+            }
+            if health != HealthState::Green {
+                return Err(SignalError::UnsupportedHealth);
+            }
         }
-        if !confirmation_live_ok {
-            return Err(SignalError::ContractViolation(
-                "confirmation class cannot enter live",
-            ));
-        }
-        if health != HealthState::Green {
-            return Err(SignalError::UnsupportedHealth);
-        }
+        SignalLifecycleState::Candidate
+        | SignalLifecycleState::Validated
+        | SignalLifecycleState::Decaying
+        | SignalLifecycleState::Invalidated
+        | SignalLifecycleState::Expired
+        | SignalLifecycleState::Resolved => {}
     }
     match (from, to) {
         (None, SignalLifecycleState::Candidate) => Ok(()),

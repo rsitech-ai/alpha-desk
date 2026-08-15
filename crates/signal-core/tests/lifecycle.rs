@@ -640,15 +640,29 @@ fn confirmation_live_gate_covers_every_class() {
 }
 
 fn try_candidate_signal(direction: Direction) -> Result<Signal, SignalError> {
+    try_signal(
+        SignalLifecycleState::Candidate,
+        SignalConfirmationClass::SyntheticUnqualified,
+        SignalType::IndependentSmartFlowAcceleration,
+        direction,
+    )
+}
+
+fn try_signal(
+    lifecycle_state: SignalLifecycleState,
+    confirmation_class: SignalConfirmationClass,
+    signal_type: SignalType,
+    direction: Direction,
+) -> Result<Signal, SignalError> {
     Signal::try_new(
         SignalId::new("sig-dir").unwrap(),
-        SignalType::IndependentSmartFlowAcceleration,
+        signal_type,
         MarketId::new("BTC").unwrap(),
         direction,
         known(1_000_000),
         time(1_000_000),
         BlockHeight::new(12),
-        SignalConfirmationClass::SyntheticUnqualified,
+        confirmation_class,
         Horizon::MINUTES_5,
         domain_types::BasisPoints::from_raw(20, 0).unwrap(),
         domain_types::BasisPoints::from_raw(5, 0).unwrap(),
@@ -667,7 +681,7 @@ fn try_candidate_signal(direction: Direction) -> Result<Signal, SignalError> {
         FeatureSetVersion::new("market-v1").unwrap(),
         [7_u8; 32],
         [8_u8; 32],
-        SignalLifecycleState::Candidate,
+        lifecycle_state,
     )
 }
 
@@ -690,6 +704,122 @@ fn direction_admission_covers_every_constructible_direction() {
                     panic!("{direction:?} must still construct: {error:?}")
                 });
                 assert_eq!(signal.direction, direction);
+            }
+        }
+    }
+}
+
+#[test]
+fn live_entry_admission_covers_every_constructible_lifecycle_state() {
+    let bundle = complete_bundle();
+    let live_type = SignalType::IndependentSmartFlowAcceleration;
+    let research = SignalType::research_only("originator-accumulation").unwrap();
+    for to in [
+        SignalLifecycleState::Candidate,
+        SignalLifecycleState::Validated,
+        SignalLifecycleState::Live,
+        SignalLifecycleState::Decaying,
+        SignalLifecycleState::Invalidated,
+        SignalLifecycleState::Expired,
+        SignalLifecycleState::Resolved,
+    ] {
+        let from = match to {
+            SignalLifecycleState::Candidate => None,
+            SignalLifecycleState::Validated
+            | SignalLifecycleState::Invalidated
+            | SignalLifecycleState::Expired => Some(SignalLifecycleState::Candidate),
+            SignalLifecycleState::Live => Some(SignalLifecycleState::Validated),
+            SignalLifecycleState::Decaying => Some(SignalLifecycleState::Live),
+            SignalLifecycleState::Resolved => Some(SignalLifecycleState::Invalidated),
+        };
+        match to {
+            SignalLifecycleState::Live => {
+                assert_eq!(
+                    try_signal(
+                        to,
+                        SignalConfirmationClass::SyntheticUnqualified,
+                        live_type.clone(),
+                        Direction::Long,
+                    ),
+                    Err(SignalError::ContractViolation(
+                        "synthetic or provisional confirmation cannot enter live",
+                    )),
+                    "{to:?} still rejects synthetic confirmation at live entry"
+                );
+                assert_eq!(
+                    try_signal(
+                        to,
+                        SignalConfirmationClass::CommittedPrimary,
+                        research.clone(),
+                        Direction::Long,
+                    ),
+                    Err(SignalError::ResearchOnlyCannotGoLive),
+                    "{to:?} still rejects research-only at live entry"
+                );
+                let constructed = try_signal(
+                    to,
+                    SignalConfirmationClass::CommittedPrimary,
+                    live_type.clone(),
+                    Direction::Long,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{to:?} committed live type must construct: {error:?}")
+                });
+                assert_eq!(constructed.lifecycle_state, to);
+                assert!(
+                    matches!(
+                        transition_allowed(from, to, &research, &bundle, HealthState::Green, true,),
+                        Err(SignalError::ResearchOnlyCannotGoLive)
+                    ),
+                    "{to:?} transition still rejects research-only"
+                );
+                assert_eq!(
+                    transition_allowed(from, to, &live_type, &bundle, HealthState::Green, false,),
+                    Err(SignalError::ContractViolation(
+                        "confirmation class cannot enter live",
+                    )),
+                    "{to:?} transition still requires confirmation"
+                );
+                transition_allowed(from, to, &live_type, &bundle, HealthState::Green, true)
+                    .unwrap_or_else(|error| {
+                        panic!("{to:?} still admits legal live entry: {error:?}")
+                    });
+            }
+            SignalLifecycleState::Candidate
+            | SignalLifecycleState::Validated
+            | SignalLifecycleState::Decaying
+            | SignalLifecycleState::Invalidated
+            | SignalLifecycleState::Expired
+            | SignalLifecycleState::Resolved => {
+                let constructed = try_signal(
+                    to,
+                    SignalConfirmationClass::SyntheticUnqualified,
+                    live_type.clone(),
+                    Direction::Long,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{to:?} still skips live-entry constructor gates: {error:?}")
+                });
+                assert_eq!(constructed.lifecycle_state, to);
+                try_signal(
+                    to,
+                    SignalConfirmationClass::CommittedPrimary,
+                    research.clone(),
+                    Direction::Long,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{to:?} research-only still skips live-entry constructor gates: {error:?}"
+                    )
+                });
+                transition_allowed(from, to, &live_type, &bundle, HealthState::Green, false)
+                    .unwrap_or_else(|error| {
+                        panic!("{to:?} still skips live-entry confirmation: {error:?}")
+                    });
+                transition_allowed(from, to, &research, &bundle, HealthState::Green, true)
+                    .unwrap_or_else(|error| {
+                        panic!("{to:?} research-only still skips live-entry transition: {error:?}")
+                    });
             }
         }
     }

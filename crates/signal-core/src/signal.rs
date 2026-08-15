@@ -194,15 +194,23 @@ impl Signal {
                 .ok_or(SignalError::Overflow)?,
             expected_return_bps.scale(),
         )?;
-        if lifecycle_state == SignalLifecycleState::Live {
-            if !signal_type.can_enter_live() {
-                return Err(SignalError::ResearchOnlyCannotGoLive);
+        match lifecycle_state {
+            SignalLifecycleState::Live => {
+                if !signal_type.can_enter_live() {
+                    return Err(SignalError::ResearchOnlyCannotGoLive);
+                }
+                if !confirmation_class.can_enter_live() {
+                    return Err(SignalError::ContractViolation(
+                        "synthetic or provisional confirmation cannot enter live",
+                    ));
+                }
             }
-            if !confirmation_class.can_enter_live() {
-                return Err(SignalError::ContractViolation(
-                    "synthetic or provisional confirmation cannot enter live",
-                ));
-            }
+            SignalLifecycleState::Candidate
+            | SignalLifecycleState::Validated
+            | SignalLifecycleState::Decaying
+            | SignalLifecycleState::Invalidated
+            | SignalLifecycleState::Expired
+            | SignalLifecycleState::Resolved => {}
         }
         Ok(Self {
             signal_id,
