@@ -455,16 +455,12 @@ impl PositionEpisodeRecordV1 {
         if expected != self.episode_id {
             return Err(PositionStateError::InvalidRecord);
         }
-        match self.completeness {
-            EpisodeCompletenessV1::CompleteFromFlat if self.opening_position.raw() != 0 => {
-                return Err(PositionStateError::InvalidRecord);
-            }
-            EpisodeCompletenessV1::PartialFromFirstObservation
-                if self.opening_position.raw() == 0 =>
-            {
-                return Err(PositionStateError::InvalidRecord);
-            }
-            _ => {}
+        let opening_position_invalid = match self.completeness {
+            EpisodeCompletenessV1::CompleteFromFlat => self.opening_position.raw() != 0,
+            EpisodeCompletenessV1::PartialFromFirstObservation => self.opening_position.raw() == 0,
+        };
+        if opening_position_invalid {
+            return Err(PositionStateError::InvalidRecord);
         }
         validate_close_matrix(self.status, self.close_event_id.as_ref(), self.close_cause)?;
         validate_amounts(
