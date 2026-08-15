@@ -253,6 +253,18 @@ export const HEALTH_FIELD_ORDER = [
   "suppresses",
 ] as const
 
+/** Known keys for this web `parseApiError`. Present unknown keys fail
+ *  parse. This matches OpenAPI `ApiError additionalProperties: false`.
+ *  Allowlist is this parse's typed ApiError fields, which must match
+ *  OpenAPI `ApiError.properties` (`schema_version`, `code`, `reason_code`).
+ *  Do not invent `error` or `message`.
+ */
+export const API_ERROR_FIELD_ORDER = [
+  "schema_version",
+  "code",
+  "reason_code",
+] as const
+
 /** Capture writer `MAX_AUXILIARY_SOURCES`. Present arrays longer than this
  *  fail parse. Omitted and null stay omitted (this web optional-array
  *  pattern). Empty arrays still parse. Duplicate present `source_id` fails
@@ -368,6 +380,17 @@ export function parseApiError(value: unknown): ParseResult<ApiError> {
   const reason_code = requireNonEmptyString(value, "reason_code")
   if (!reason_code.ok) {
     return reason_code
+  }
+  const extras = collectExtraFields(value, API_ERROR_FIELD_ORDER)
+  const extraNames = Object.keys(extras).sort()
+  if (extraNames.length > 0) {
+    return {
+      ok: false,
+      detail:
+        extraNames.length === 1
+          ? `unknown api error field: ${extraNames[0]}`
+          : `unknown api error fields: ${extraNames.join(", ")}`,
+    }
   }
   return {
     ok: true,
@@ -811,7 +834,7 @@ function requireCaptureSchema(
 }
 
 /** Keys outside `known`. Top-level CaptureStatus, nested auxiliary source
- *  items, and HealthAssessment fail-close when this is non-empty.
+ *  items, HealthAssessment, and ApiError fail-close when this is non-empty.
  */
 function collectExtraFields(
   object: Record<string, unknown>,
