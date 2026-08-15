@@ -46,13 +46,13 @@ cleanup() {
   fi
 }
 finish() {
-  local status=$?
+  local status="$1"
   cleanup || true
   rm -f -- "${merged_config}"
   rmdir -- "${nonce_directory}" 2>/dev/null || true
-  return "${status}"
+  exit "${status}"
 }
-trap finish EXIT
+trap 'finish $?' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

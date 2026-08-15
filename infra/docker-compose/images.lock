@@ -1,69 +1,70 @@
 {
   "schema_version": 1,
-  "generated_from": "registry metadata verified 2026-07-27",
+  "generated_from": "registry metadata verified 2026-08-13; nats 2.14.5-alpine clears CVE-2026-39822. nats-box 0.19.7-nonroot, postgres 18.4-alpine3.24, and minio/mc have no newer multi-arch digest. Unfixed OSS MinIO CVEs are listed in infra/docker-compose/.trivyignore.",
   "images": [
     {
-      "service": "nats",
-      "version": "2.14.3-alpine",
-      "compose_ref": "docker.io/library/nats:2.14.3-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0",
-      "index_digest": "sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0",
-      "linux_arm64_digest": "sha256:064222a09af7b194af6760d6089aa9ebd93fe7b8136ec2193ddb72dd78d8bd4c"
+      "name": "docker.io/library/nats",
+      "tag": "2.14.5-alpine",
+      "compose_ref": "docker.io/library/nats:2.14.5-alpine@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da",
+      "index_digest": "sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da",
+      "linux_arm64_digest": "sha256:205044f329047936e25b9946d4f8af0d13eb5af83993bb66b61a857631e94408",
+      "services": ["nats"]
     },
     {
-      "service": "nats-init",
-      "version": "0.19.7-nonroot",
+      "name": "docker.io/natsio/nats-box",
+      "tag": "0.19.7-nonroot",
       "compose_ref": "docker.io/natsio/nats-box:0.19.7-nonroot@sha256:e86b9681f330ab1aa45744dd5cb367d44205b28fac2519a2f74ca0255803161a",
       "index_digest": "sha256:e86b9681f330ab1aa45744dd5cb367d44205b28fac2519a2f74ca0255803161a",
-      "linux_arm64_digest": "sha256:30c4ba6709c8f076d5ec4b968644924e91b61182fcee41cbbdaca23755f54ca7"
+      "linux_arm64_digest": "sha256:30c4ba6709c8f076d5ec4b968644924e91b61182fcee41cbbdaca23755f54ca7",
+      "services": ["nats-init"]
     },
     {
-      "service": "clickhouse",
-      "version": "26.3.17.56-alpine",
+      "name": "docker.io/clickhouse/clickhouse-server",
+      "tag": "26.3.17.56-alpine",
       "compose_ref": "docker.io/clickhouse/clickhouse-server:26.3.17.56-alpine@sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd",
       "index_digest": "sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd",
-      "linux_arm64_digest": "sha256:edb5c6e30f13be8c8d4c710d4ce631e06850aea19012327b69047562d0e1ccc9"
+      "linux_arm64_digest": "sha256:edb5c6e30f13be8c8d4c710d4ce631e06850aea19012327b69047562d0e1ccc9",
+      "services": ["clickhouse", "clickhouse-init"]
     },
     {
-      "service": "clickhouse-init",
-      "version": "26.3.17.56-alpine",
-      "compose_ref": "docker.io/clickhouse/clickhouse-server:26.3.17.56-alpine@sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd",
-      "index_digest": "sha256:1d8f5b3febaf81be475cc0fe8bf71acdc09e90ffcf1d8c8e291674d4f13c29bd",
-      "linux_arm64_digest": "sha256:edb5c6e30f13be8c8d4c710d4ce631e06850aea19012327b69047562d0e1ccc9"
-    },
-    {
-      "service": "postgres",
-      "version": "18.4-alpine3.24",
+      "name": "docker.io/library/postgres",
+      "tag": "18.4-alpine3.24",
       "compose_ref": "docker.io/library/postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
       "index_digest": "sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
-      "linux_arm64_digest": "sha256:122c9942437efcbbb8d595fc578dee7d26ee1543c2a8634d183adfa4a1e55b4d"
+      "linux_arm64_digest": "sha256:122c9942437efcbbb8d595fc578dee7d26ee1543c2a8634d183adfa4a1e55b4d",
+      "services": ["postgres"]
     },
     {
-      "service": "minio",
-      "version": "RELEASE.2025-09-07T16-13-09Z",
+      "name": "quay.io/minio/minio",
+      "tag": "RELEASE.2025-09-07T16-13-09Z",
       "compose_ref": "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
       "index_digest": "sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
-      "linux_arm64_digest": "sha256:9966a92a734f9411e32f4f41d7d9d826fcdc0f68c4e20b70295bd4e7c11f8a2f"
+      "linux_arm64_digest": "sha256:9966a92a734f9411e32f4f41d7d9d826fcdc0f68c4e20b70295bd4e7c11f8a2f",
+      "services": ["minio"]
     },
     {
-      "service": "minio-init",
-      "version": "RELEASE.2025-08-13T08-35-41Z",
+      "name": "quay.io/minio/mc",
+      "tag": "RELEASE.2025-08-13T08-35-41Z",
       "compose_ref": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
       "index_digest": "sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
-      "linux_arm64_digest": "sha256:37d109dddbbb2c95873f5fc81ac93f37023264770fc580a7564148892087b1b7"
+      "linux_arm64_digest": "sha256:37d109dddbbb2c95873f5fc81ac93f37023264770fc580a7564148892087b1b7",
+      "services": ["minio-init"]
     },
     {
-      "service": "otel-collector",
-      "version": "0.157.0",
+      "name": "docker.io/otel/opentelemetry-collector-contrib",
+      "tag": "0.157.0",
       "compose_ref": "docker.io/otel/opentelemetry-collector-contrib:0.157.0@sha256:f2f01157055a9b2aab9df7118e1f1c9abf345e99b23bc7a2bc791db374a7d0f6",
       "index_digest": "sha256:f2f01157055a9b2aab9df7118e1f1c9abf345e99b23bc7a2bc791db374a7d0f6",
-      "linux_arm64_digest": "sha256:1fef9f07f04eb6775b4076ea4f817d6b7b9050e23e52941f0756ba08df798ea6"
+      "linux_arm64_digest": "sha256:1fef9f07f04eb6775b4076ea4f817d6b7b9050e23e52941f0756ba08df798ea6",
+      "services": ["otel-collector"]
     },
     {
-      "service": "victoriametrics",
-      "version": "v1.148.0",
+      "name": "docker.io/victoriametrics/victoria-metrics",
+      "tag": "v1.148.0",
       "compose_ref": "docker.io/victoriametrics/victoria-metrics:v1.148.0@sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda",
       "index_digest": "sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda",
-      "linux_arm64_digest": "sha256:d041b4be8b5f51a8055650ef35346ceae2ede246ecdb60b2e2c9617344aa16a6"
+      "linux_arm64_digest": "sha256:d041b4be8b5f51a8055650ef35346ceae2ede246ecdb60b2e2c9617344aa16a6",
+      "services": ["victoriametrics"]
     }
   ]
 }

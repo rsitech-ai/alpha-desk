@@ -477,7 +477,7 @@ check_quadlet() {
 
 check_quadlet \
   nats \
-  'docker.io/library/nats:2.14.3-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0' \
+  'docker.io/library/nats:2.14.5-alpine@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da' \
   'alpha-desk-nats-data:/data'
 check_quadlet \
   postgresql \

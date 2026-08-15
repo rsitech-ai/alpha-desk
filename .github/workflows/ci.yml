@@ -169,7 +169,8 @@ jobs:
 
       - name: Validate contract and render static configuration
         run: |
-          docker compose -f infra/docker-compose/compose.yaml config --format json \
+          ./tools/dev/with-dev-secrets.sh docker compose \
+            -f infra/docker-compose/compose.yaml config --format json \
             >"$RUNNER_TEMP/compose.json"
 
       - name: Enforce static runtime policy
@@ -178,8 +179,8 @@ jobs:
             --slurpfile lock infra/docker-compose/images.lock \
             --arg workspace "$GITHUB_WORKSPACE" \
             '
-              ([.services[].image] | sort) ==
-                ([$lock[0].images[].compose_ref] | sort) and
+              ([.services[].image] | unique | sort) ==
+                ([$lock[0].images[].compose_ref] | unique | sort) and
               all(.services[];
                 (.privileged // false) == false and
                 ((.volumes // []) | all(
@@ -191,8 +192,12 @@ jobs:
                       ($workspace + "/infra/docker-compose/minio/create-buckets.sh->/opt/alpha-desk/create-buckets.sh"),
                       ($workspace + "/infra/docker-compose/nats/nats.conf->/etc/nats/nats.conf"),
                       ($workspace + "/infra/docker-compose/nats/init-streams.sh->/opt/alpha-desk/init-streams.sh"),
+                      ($workspace + "/infra/docker-compose/nats/bootstrap.json->/opt/alpha-desk/bootstrap.json"),
+                      ($workspace + "/infra/docker-compose/nats/test-permissions.sh->/opt/alpha-desk/test-permissions.sh"),
                       ($workspace + "/infra/docker-compose/otel/collector.yaml->/etc/otelcol-contrib/config.yaml"),
                       ($workspace + "/infra/docker-compose/postgres/init.sql->/docker-entrypoint-initdb.d/001-alpha-desk.sql"),
+                      ($workspace + "/schemas/postgres/0001_capture_incidents.sql->/docker-entrypoint-initdb.d/010-capture-incidents.sql"),
+                      ($workspace + "/schemas/postgres/0002_capture_progress.sql->/docker-entrypoint-initdb.d/020-capture-progress.sql"),
                       ($workspace + "/infra/docker-compose/victoriametrics/prometheus.yml->/etc/victoriametrics/prometheus.yml")
                     )) and
                     (.source | contains("/var/run/docker.sock") | not) and
@@ -221,6 +226,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install just 1.42.4 from verified archive
+        timeout-minutes: 5
+        env:
+          JUST_SHA256: 678efc1cfbd5fa5a88375daa7e2f3864a049d6d63a0296df925a2ae5f516cb56
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/just.tar.gz" \
+            https://github.com/casey/just/releases/download/1.42.4/just-1.42.4-x86_64-unknown-linux-musl.tar.gz
+          echo "$JUST_SHA256  $RUNNER_TEMP/just.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/bin" just
+          chmod 0755 "$RUNNER_TEMP/bin/just"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/just" --version | grep -F 'just 1.42.4'
+
       - name: Pull and validate exact locked images
         timeout-minutes: 20
         run: |
@@ -234,14 +255,17 @@ jobs:
         timeout-minutes: 10
         run: |
           status=0
-          docker compose -f infra/docker-compose/compose.yaml \
+          ./tools/dev/with-dev-secrets.sh docker compose \
+            -f infra/docker-compose/compose.yaml \
             up -d --wait --wait-timeout 120 || status=$?
           if [[ "$status" -eq 0 ]]; then
             ./tools/ci/wait-for-dev-stack.sh || status=$?
           fi
           if [[ "$status" -ne 0 ]]; then
-            docker compose -f infra/docker-compose/compose.yaml ps --all >&2 || true
-            docker compose -f infra/docker-compose/compose.yaml \
+            ./tools/dev/with-dev-secrets.sh docker compose \
+              -f infra/docker-compose/compose.yaml ps --all >&2 || true
+            ./tools/dev/with-dev-secrets.sh docker compose \
+              -f infra/docker-compose/compose.yaml \
               logs --no-color --tail 200 >&2 || true
             exit "$status"
           fi
@@ -249,7 +273,8 @@ jobs:
       - name: Stop development services
         if: always()
         run: >-
-          docker compose -f infra/docker-compose/compose.yaml
+          ./tools/dev/with-dev-secrets.sh docker compose
+          -f infra/docker-compose/compose.yaml
           down --timeout 60 --volumes --remove-orphans
 
   reproducible:
