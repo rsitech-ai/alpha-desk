@@ -134,3 +134,8 @@ dev-down:
 dev-reset:
     printf '%s\n' 'WARNING: dev-reset destroys all alpha-desk-dev local data volumes.' >&2
     ./tools/dev/with-dev-secrets.sh docker compose -f infra/docker-compose/compose.yaml down --timeout 60 --volumes --remove-orphans
+
+# Local Vite + React watch UI for hl-api. Not production, not live-qualified.
+web-dashboard:
+    npm --prefix apps/web-dashboard install
+    npm --prefix apps/web-dashboard run dev
