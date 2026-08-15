@@ -49,12 +49,16 @@ mod checkpoint;
 mod gc;
 mod hint;
 mod import;
+mod import_reclaim;
 mod retention;
 mod scrub;
 
 pub use checkpoint::{RawArchiveCheckpoint, RawArchiveCheckpointV1, RawArchiveCheckpointV2};
 pub use gc::{RawArchiveGcPlan, RawArchiveGcReceipt, RawArchiveRestoreReceipt};
 pub use import::{RawV2ImportApproval, RawV2ImportPlan, RawV2ImportReceipt, RawV2ImportReport};
+pub use import_reclaim::{
+    RawArchiveBackupReceipt, RawV2ImportReclaimPlan, RawV2ImportReclaimReceipt,
+};
 pub use retention::{RawArchiveRetentionReport, RawArchiveRetentionRequest};
 pub use scrub::RawArchiveScrubReport;
 
@@ -367,6 +371,43 @@ impl RawV3Archive {
         let _process_lock =
             fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
         import::approve_v2_import(self, chain, source, plan)
+    }
+
+    pub fn backup_v2_import_originals(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        backup_root: impl AsRef<Path>,
+    ) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import_reclaim::backup_v2_import_originals(self, chain, source, backup_root.as_ref())
+    }
+
+    pub fn plan_v2_import_reclaim(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        backup_receipt: [u8; 32],
+    ) -> Result<RawV2ImportReclaimPlan, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import_reclaim::plan_v2_import_reclaim(self, chain, source, backup_receipt)
+    }
+
+    pub fn execute_v2_import_reclaim(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        plan_digest: [u8; 32],
+        backup_receipt: [u8; 32],
+    ) -> Result<RawV2ImportReclaimReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import_reclaim::execute_v2_import_reclaim(self, chain, source, plan_digest, backup_receipt)
     }
 
     pub(super) fn root(&self) -> &Path {

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use domain_types::{ChainId, ManifestId, SourceId};
 use hl_protocol::SourceObservation;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use storage_ports::{
     ArchiveError, LocalRecordSequence, LocalRecordSequenceRange,
@@ -227,7 +227,7 @@ struct ImportReportDocument {
     parity_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CutoverDocument {
     schema: String,
@@ -842,6 +842,51 @@ fn count_packed_leaves(
         Ok(false)
     })?;
     Ok(count)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VerifiedCutover {
+    pub(super) v2_catalog_sha256: [u8; 32],
+}
+
+pub(super) fn load_verified_cutover(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    expected_root: [u8; 32],
+) -> Result<VerifiedCutover, ArchiveError> {
+    let relative = raw_policy::cutover_relative(chain, source);
+    let bytes = fs::try_read_regular(archive.root(), &relative, 64 * 1024)?.ok_or(
+        ArchiveError::ManifestVerification("raw V2 import reclaim requires a verified cutover"),
+    )?;
+    let document: CutoverDocument = serde_json::from_slice(&bytes)
+        .map_err(|_| ArchiveError::ManifestVerification("invalid raw archive cutover JSON"))?;
+    if document.schema != CUTOVER_SCHEMA
+        || document.chain_id != chain.as_str()
+        || document.source_id != source.as_str()
+        || document.from_dataset != raw_policy::BYTE_V2_DATASET
+        || document.to_dataset != RAW_BYTE_DATASET_V3
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "raw archive cutover does not bind the verified import",
+        ));
+    }
+    let v3_root = manifest::parse_hash(&document.v3_root_sha256)?;
+    let v2_catalog = manifest::parse_hash(&document.v2_catalog_sha256)?;
+    manifest::parse_hash(&document.parity_digest)?;
+    if v3_root != expected_root {
+        return Err(ArchiveError::ManifestVerification(
+            "raw archive cutover does not match V3 CURRENT",
+        ));
+    }
+    if manifest::canonical_json(&document)? != bytes {
+        return Err(ArchiveError::ManifestVerification(
+            "raw archive cutover is not canonical",
+        ));
+    }
+    Ok(VerifiedCutover {
+        v2_catalog_sha256: v2_catalog,
+    })
 }
 
 fn persist_document(
