@@ -284,6 +284,21 @@ impl RawArchiveWorkloadEnvelope {
         Ok(())
     }
 
+    #[must_use]
+    pub const fn retention_horizon_seconds(&self) -> u64 {
+        self.retention_horizon_seconds
+    }
+
+    #[must_use]
+    pub const fn maximum_eligible_bytes(&self) -> u64 {
+        self.maximum_eligible_bytes
+    }
+
+    #[must_use]
+    pub const fn maximum_eligible_inodes(&self) -> u64 {
+        self.maximum_eligible_inodes
+    }
+
     /// Maintenance must call this before publishing capacity health as green.
     pub fn validate_backlog(
         self,
@@ -2095,6 +2110,10 @@ pub enum ArchiveError {
     WriterBusy,
     #[error("canonical archive codec failed: {0}")]
     Codec(String),
+    #[error(transparent)]
+    Capacity(#[from] RawArchiveCapacityRejection),
+    #[error("raw archive receipt index rebuild is required")]
+    ReceiptIndexRebuildRequired,
 }
 
 impl ArchiveError {
@@ -2112,6 +2131,8 @@ impl ArchiveError {
             Self::UnsafePath => "archive.unsafe_path",
             Self::WriterBusy => "archive.writer_busy",
             Self::Codec(_) => "archive.codec",
+            Self::Capacity(rejection) => rejection.reason_code(),
+            Self::ReceiptIndexRebuildRequired => "archive.receipt_index_rebuild_required",
         }
     }
 }
