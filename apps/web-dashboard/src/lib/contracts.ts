@@ -190,7 +190,7 @@ export interface CaptureStatus {
   failover_reason?: FailoverReason
   durable_height?: number
   pending_blocks: number
-  capture_backlog_records?: number
+  capture_backlog_records: number
   oldest_pending_capture_height?: number
   disk_free_basis_points?: number
   archive_manifest_id?: string
@@ -214,7 +214,11 @@ export interface LastHeartbeatThroughput {
  *  keys fail parse. This is this parse's typed field set, not OpenAPI
  *  `CaptureStatusBase` (`maintenance` is not typed here and fails as an extra).
  *  Nested `auxiliary_sources` item extras fail against
- *  `AUXILIARY_SOURCE_FIELD_ORDER`.
+ *  `AUXILIARY_SOURCE_FIELD_ORDER`. `capture_backlog_records` is required
+ *  (writer always emits u64; hl-api omitted is `snapshot_invalid`). Writer
+ *  charset/length and disk-free range are not copied.
+ *  `HealthAssessment.reason_code` stays a free string so unknown RED is
+ *  not closed out.
  */
 export const CAPTURE_STATUS_FIELD_ORDER = [
   "schema_version",
@@ -678,7 +682,7 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   if (!durable_height.ok) {
     return durable_height
   }
-  const capture_backlog_records = optionalNonNegativeInt(
+  const capture_backlog_records = requireNonNegativeInt(
     value,
     "capture_backlog_records"
   )

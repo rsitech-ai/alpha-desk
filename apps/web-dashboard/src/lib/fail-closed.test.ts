@@ -70,6 +70,7 @@ function v4Status(
     active_committed_source: "locally-verified-committed",
     primary_source_health: "starting",
     pending_blocks: 0,
+    capture_backlog_records: 0,
     ...overrides,
   }
 }
@@ -365,6 +366,7 @@ describe("parseCaptureStatus extras", () => {
     expect(v4.value.schema_version).toBe("hl.capture.status.v4")
     expect(v4.value.health).toBe("red")
     expect(v4.value.ready).toBe(false)
+    expect(v4.value.capture_backlog_records).toBe(0)
     expect(v4.value.extra_fields).toEqual({})
 
     const v5 = parseCaptureStatus(
@@ -1239,6 +1241,68 @@ describe("parseCaptureStatus failover reason", () => {
       return
     }
     expect(parsed.detail).toMatch(/failover_reason must be one of/)
+  })
+})
+
+describe("parseCaptureStatus capture_backlog_records", () => {
+  it("accepts known non-negative integers including 0", () => {
+    for (const capture_backlog_records of [0, 12]) {
+      const parsed = parseCaptureStatus(
+        v4Status({ capture_backlog_records })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.capture_backlog_records).toBe(
+        capture_backlog_records
+      )
+      expect(parsed.value.durable_height).toBeUndefined()
+      expect(parsed.value.disk_free_basis_points).toBeUndefined()
+      expect(parsed.value.oldest_pending_capture_height).toBeUndefined()
+      expect(parsed.value.failover_reason).toBeUndefined()
+    }
+  })
+
+  it("fail-closes omitted capture_backlog_records as invalid", () => {
+    const body = v4Status()
+    delete body.capture_backlog_records
+    const parsed = parseCaptureStatus(body)
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      "capture_backlog_records must be a non-negative integer"
+    )
+  })
+
+  it("fail-closes null capture_backlog_records as invalid", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ capture_backlog_records: null })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      "capture_backlog_records must be a non-negative integer"
+    )
+  })
+
+  it("fail-closes present non-integer capture_backlog_records", () => {
+    for (const capture_backlog_records of [-1, 1.5, "12", true]) {
+      const parsed = parseCaptureStatus(
+        v4Status({ capture_backlog_records })
+      )
+      expect(parsed.ok).toBe(false)
+      if (parsed.ok) {
+        return
+      }
+      expect(parsed.detail).toBe(
+        "capture_backlog_records must be a non-negative integer"
+      )
+    }
   })
 })
 
