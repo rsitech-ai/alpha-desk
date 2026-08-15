@@ -514,9 +514,15 @@ fn write_object(
 }
 
 pub(super) fn raw_record_batch(batch: &RawObservationBatch) -> Result<RecordBatch, ArchiveError> {
-    let observations = batch.observations();
+    raw_record_batch_from_observations(batch.chain_id(), batch.observations())
+}
+
+pub(super) fn raw_record_batch_from_observations(
+    chain_id: &ChainId,
+    observations: &[SourceObservation],
+) -> Result<RecordBatch, ArchiveError> {
     let chain_ids = StringArray::from_iter_values(std::iter::repeat_n(
-        batch.chain_id().as_str(),
+        chain_id.as_str(),
         observations.len(),
     ));
     let source_ids =
