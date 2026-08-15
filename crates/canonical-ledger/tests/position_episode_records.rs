@@ -760,3 +760,68 @@ fn record_and_variable_key_bounds_are_inclusive_and_preallocated() {
         Err(PositionStateError::InvalidKey)
     );
 }
+
+#[test]
+fn opening_position_admission_covers_every_constructible_episode_completeness() {
+    fn completeness_wire(completeness: EpisodeCompletenessV1) -> &'static str {
+        match completeness {
+            EpisodeCompletenessV1::CompleteFromFlat => "complete_from_flat",
+            EpisodeCompletenessV1::PartialFromFirstObservation => "partial_from_first_observation",
+        }
+    }
+
+    fn episode_bytes(completeness: EpisodeCompletenessV1, opening_position: &str) -> Vec<u8> {
+        let open = String::from_utf8(open_episode_bytes()).unwrap();
+        open.replace(
+            r#""completeness":"complete_from_flat""#,
+            &format!(r#""completeness":"{}""#, completeness_wire(completeness)),
+        )
+        .replace(
+            r#""opening_position":"0.00000000""#,
+            &format!(r#""opening_position":"{opening_position}""#),
+        )
+        .into_bytes()
+    }
+
+    fn pin(completeness: EpisodeCompletenessV1) {
+        match completeness {
+            EpisodeCompletenessV1::CompleteFromFlat => {
+                let rejected =
+                    PositionEpisodeRecordV1::decode(&episode_bytes(completeness, "1.00000000"));
+                assert_eq!(
+                    rejected,
+                    Err(PositionStateError::InvalidRecord),
+                    "complete-from-flat still fail-closes nonzero opening"
+                );
+                let admitted =
+                    PositionEpisodeRecordV1::decode(&episode_bytes(completeness, "0.00000000"))
+                        .expect("complete-from-flat still admits zero opening");
+                assert_eq!(
+                    admitted.completeness(),
+                    EpisodeCompletenessV1::CompleteFromFlat
+                );
+                assert_eq!(admitted.opening_position().raw(), 0);
+            }
+            EpisodeCompletenessV1::PartialFromFirstObservation => {
+                let rejected =
+                    PositionEpisodeRecordV1::decode(&episode_bytes(completeness, "0.00000000"));
+                assert_eq!(
+                    rejected,
+                    Err(PositionStateError::InvalidRecord),
+                    "partial-from-first-observation still fail-closes zero opening"
+                );
+                let admitted =
+                    PositionEpisodeRecordV1::decode(&episode_bytes(completeness, "1.00000000"))
+                        .expect("partial-from-first-observation still admits nonzero opening");
+                assert_eq!(
+                    admitted.completeness(),
+                    EpisodeCompletenessV1::PartialFromFirstObservation
+                );
+                assert_ne!(admitted.opening_position().raw(), 0);
+            }
+        }
+    }
+
+    pin(EpisodeCompletenessV1::CompleteFromFlat);
+    pin(EpisodeCompletenessV1::PartialFromFirstObservation);
+}
