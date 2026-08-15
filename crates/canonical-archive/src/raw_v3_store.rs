@@ -33,11 +33,11 @@ use storage_ports::{
 use super::{
     ArchiveConfig, fs, manifest, raw, raw_policy, raw_v2,
     raw_v3::{
-        self, IndexPackBytes, JournalGenerationBuilderV3, LogicalCommitDescriptorV3,
-        LogicalCommitManifestV3, LogicalObjectDescriptorV3, MAX_JOURNAL_BYTES,
-        PackedLogicalInputV3, PackedObjectDescriptorV3, RAW_BYTE_DATASET_V3, RawPackManifestV3,
-        RootBundleV3, SequenceLeafEntryV3, SequenceNodeRefV3, SequenceStorageRefV3,
-        append_logical_entry, journal_file_identity, journal_needs_rotation,
+        self, BuiltIndexPackV3, IndexPackBytes, JournalGenerationBuilderV3,
+        LogicalCommitDescriptorV3, LogicalCommitManifestV3, LogicalObjectDescriptorV3,
+        MAX_JOURNAL_BYTES, PackedLogicalInputV3, PackedObjectDescriptorV3, RAW_BYTE_DATASET_V3,
+        RawPackManifestV3, RootBundleV3, SequenceLeafEntryV3, SequenceNodeRefV3,
+        SequenceStorageRefV3, append_logical_entry, journal_file_identity, journal_needs_rotation,
         load_sequence_internal, load_sequence_leaf, logical_object_relative_path,
         pack_journal_leaves, parse_logical_commit_manifest, parse_pack_manifest, parse_root_bundle,
         replace_range_with_packed_entry, root_bundle_hash, seed_rotated_journal_root,
@@ -1087,6 +1087,32 @@ pub(super) fn load_verified_root(
     Ok((root, journal_bytes))
 }
 
+pub(super) fn publish_index_pack(
+    archive: &RawV3Archive,
+    dataset: &Path,
+    pack: &BuiltIndexPackV3,
+) -> Result<[u8; 32], ArchiveError> {
+    let pack_hash = pack.object_sha256();
+    let pack_relative = dataset.join(pack.manifest().object_relative_path());
+    fs::publish_immutable(&archive.root, &pack_relative, pack.bytes())?;
+    let published = fs::read_regular(
+        &archive.root,
+        &pack_relative,
+        RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
+    )?;
+    pack.verify_bytes(&published)?;
+    let manifest_relative = dataset.join(format!(
+        "index-packs/{}.manifest.json",
+        hex::encode(pack_hash)
+    ));
+    fs::publish_immutable(
+        &archive.root,
+        &manifest_relative,
+        &manifest::canonical_json(pack.manifest())?,
+    )?;
+    Ok(pack_hash)
+}
+
 fn pack_index_locked(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -1111,24 +1137,7 @@ fn pack_index_locked(
         &packs,
         &hint_pages,
     )?;
-    let pack_hash = pack.object_sha256();
-    let pack_relative = dataset.join(pack.manifest().object_relative_path());
-    fs::publish_immutable(&archive.root, &pack_relative, pack.bytes())?;
-    let published = fs::read_regular(
-        &archive.root,
-        &pack_relative,
-        RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
-    )?;
-    pack.verify_bytes(&published)?;
-    let manifest_relative = dataset.join(format!(
-        "index-packs/{}.manifest.json",
-        hex::encode(pack_hash)
-    ));
-    fs::publish_immutable(
-        &archive.root,
-        &manifest_relative,
-        &manifest::canonical_json(pack.manifest())?,
-    )?;
+    let pack_hash = publish_index_pack(archive, &dataset, &pack)?;
     packs.insert(pack_hash, pack.bytes().to_vec());
 
     let next_journal_generation =

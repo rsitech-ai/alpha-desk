@@ -2114,6 +2114,8 @@ pub enum ArchiveError {
     Capacity(#[from] RawArchiveCapacityRejection),
     #[error("raw archive receipt index rebuild is required")]
     ReceiptIndexRebuildRequired,
+    #[error("raw V2 import cannot rotate the journal before CURRENT exists: {0}")]
+    ImportJournalRotationBeforeCurrent(&'static str),
 }
 
 impl ArchiveError {
@@ -2133,6 +2135,9 @@ impl ArchiveError {
             Self::Codec(_) => "archive.codec",
             Self::Capacity(rejection) => rejection.reason_code(),
             Self::ReceiptIndexRebuildRequired => "archive.receipt_index_rebuild_required",
+            Self::ImportJournalRotationBeforeCurrent(_) => {
+                "archive.import_journal_rotation_before_current"
+            }
         }
     }
 }
