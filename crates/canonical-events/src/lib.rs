@@ -3090,39 +3090,68 @@ fn validate_payload(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> 
     validate_event_payload(kind.as_wire_name(), bytes).map_err(payload_error)
 }
 
-fn validate_account_payload_size(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
-    if kind == EventKind::TradeMatched && bytes.len() > MAX_CANONICAL_TRADE_PAYLOAD_BYTES {
-        return Err(ContractError::Invalid {
-            field: "payload",
-            reason: "canonical trade payload exceeds the 16384-byte limit".to_owned(),
-        });
-    }
-    if matches!(
-        kind,
+fn payload_size_limit(kind: EventKind) -> Option<(&'static str, usize)> {
+    match kind {
+        EventKind::TradeMatched => Some((
+            "canonical trade payload exceeds the 16384-byte limit",
+            MAX_CANONICAL_TRADE_PAYLOAD_BYTES,
+        )),
         EventKind::DepositCredited
-            | EventKind::WithdrawalDebited
-            | EventKind::SpotTransfer
-            | EventKind::PerpTransfer
-            | EventKind::SubaccountTransfer
-            | EventKind::VaultDeposit
-            | EventKind::VaultWithdrawal
-            | EventKind::FeeCharged
-            | EventKind::BuilderFeeCharged
-            | EventKind::FundingPaid
-            | EventKind::FundingReceived
-            | EventKind::ReferralReward
-            | EventKind::AccountModeChanged
-            | EventKind::MarginModeChanged
-            | EventKind::LeverageChanged
-            | EventKind::LiquidationStarted
-            | EventKind::LiquidationFill
-            | EventKind::BackstopLiquidation
-            | EventKind::PositionSettled
-    ) && bytes.len() > MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES
-    {
+        | EventKind::WithdrawalDebited
+        | EventKind::SpotTransfer
+        | EventKind::PerpTransfer
+        | EventKind::SubaccountTransfer
+        | EventKind::VaultDeposit
+        | EventKind::VaultWithdrawal
+        | EventKind::FeeCharged
+        | EventKind::BuilderFeeCharged
+        | EventKind::FundingPaid
+        | EventKind::FundingReceived
+        | EventKind::ReferralReward
+        | EventKind::AccountModeChanged
+        | EventKind::MarginModeChanged
+        | EventKind::LeverageChanged
+        | EventKind::LiquidationStarted
+        | EventKind::LiquidationFill
+        | EventKind::BackstopLiquidation
+        | EventKind::PositionSettled => Some((
+            "canonical account payload exceeds the 16384-byte limit",
+            MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES,
+        )),
+        EventKind::OrderAccepted
+        | EventKind::OrderRested
+        | EventKind::OrderModified
+        | EventKind::OrderPartiallyFilled
+        | EventKind::OrderFilled
+        | EventKind::OrderCancelled
+        | EventKind::OrderRejected
+        | EventKind::TriggerOrderActivated
+        | EventKind::TwapStarted
+        | EventKind::TwapSliceFilled
+        | EventKind::TwapCompleted
+        | EventKind::MarketHalted
+        | EventKind::MarketResumed
+        | EventKind::OpenInterestCapChanged
+        | EventKind::MarginTableChanged
+        | EventKind::MarketCreated
+        | EventKind::MarketMetadataChanged
+        | EventKind::OracleUpdated
+        | EventKind::FundingRateUpdated
+        | EventKind::AssetContextUpdated
+        | EventKind::DexCreated
+        | EventKind::OutcomeCreated
+        | EventKind::OutcomeResolved => None,
+    }
+}
+
+fn validate_account_payload_size(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
+    let Some((reason, limit)) = payload_size_limit(kind) else {
+        return Ok(());
+    };
+    if bytes.len() > limit {
         return Err(ContractError::Invalid {
             field: "payload",
-            reason: "canonical account payload exceeds the 16384-byte limit".to_owned(),
+            reason: reason.to_owned(),
         });
     }
     Ok(())
