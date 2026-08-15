@@ -388,13 +388,7 @@ impl<R: EventReducer> CanonicalLedger<R> {
         if block.chain_id() != self.state.chain_id() {
             return Err(LedgerError::ChainMismatch);
         }
-        if !matches!(
-            block.confirmation_class(),
-            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent
-        ) {
-            return Err(LedgerError::NonCommittedBlock);
-        }
-        Ok(())
+        admit_committed_confirmation(block.confirmation_class())
     }
 
     fn duplicate_checkpoint(
@@ -464,6 +458,20 @@ impl<R: EventReducer> CanonicalLedger<R> {
             state_hash,
             reducer_set_version: self.state.reducer_set_version().to_owned(),
         }
+    }
+}
+
+/// Admit only committed primary and independent lanes.
+///
+/// Provisional, reconciled, corrected, and expired blocks fail closed with
+/// `NonCommittedBlock`. This does not qualify those lanes.
+fn admit_committed_confirmation(class: ConfirmationClass) -> Result<(), LedgerError> {
+    match class {
+        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => Ok(()),
+        ConfirmationClass::ProvisionalSource
+        | ConfirmationClass::ReconciledSnapshot
+        | ConfirmationClass::Corrected
+        | ConfirmationClass::Expired => Err(LedgerError::NonCommittedBlock),
     }
 }
 

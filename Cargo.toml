@@ -11,6 +11,7 @@ members = [
   "crates/margin-models",
   "crates/entity-graph",
   "crates/feature-core",
+  "crates/intelligence-replay",
   "crates/wallet-intelligence",
   "crates/market-intelligence",
   "crates/signal-core",

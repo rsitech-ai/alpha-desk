@@ -78,6 +78,51 @@ fn empty_transaction_block_maps_to_a_committed_source_bound_block() {
 }
 
 #[test]
+fn committed_mapper_confirmation_covers_every_class() {
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        fixture("transaction-block.json").into(),
+    )
+    .unwrap();
+
+    for class in [
+        ConfirmationClass::ProvisionalSource,
+        ConfirmationClass::CommittedPrimary,
+        ConfirmationClass::CommittedIndependent,
+        ConfirmationClass::ReconciledSnapshot,
+        ConfirmationClass::Corrected,
+        ConfirmationClass::Expired,
+    ] {
+        let mut context = committed_context();
+        context.confirmation_class = class;
+        match class {
+            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => {
+                let block = map_committed_node_v1_block(&record, &context)
+                    .expect("empty committed blocks still map");
+                assert_eq!(block.confirmation_class(), class);
+                assert!(block.events().is_empty());
+            }
+            ConfirmationClass::ProvisionalSource
+            | ConfirmationClass::ReconciledSnapshot
+            | ConfirmationClass::Corrected
+            | ConfirmationClass::Expired => {
+                let error = map_committed_node_v1_block(&record, &context)
+                    .expect_err("non-committed lanes fail closed");
+                assert!(
+                    matches!(error, MappingError::InvalidCommittedConfirmation),
+                    "{class:?} must not blur into committed mapping"
+                );
+                assert_eq!(
+                    error.reason_code(),
+                    "canonical_mapping.invalid_committed_confirmation",
+                    "{class:?} must reuse the existing committed-mapping reason"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn committed_mapper_rejects_height_discontinuity_and_unmapped_actions() {
     let record = parse_node_record(
         NodeStreamKind::TransactionBlocks,

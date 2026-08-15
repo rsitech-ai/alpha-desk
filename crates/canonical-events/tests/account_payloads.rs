@@ -1,17 +1,17 @@
 use api_contracts::{
-    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, PayloadCodecError, WireAccountModeChanged,
-    WireBackstopLiquidation, WireBuilderFeeCharged, WireCanonicalEventEnvelope,
-    WireDepositCredited, WireFeeCharged, WireFundingPaid, WireFundingReceived, WireLeverageChanged,
-    WireLiquidationFill, WireLiquidationStarted, WireMarginModeChanged, WirePerpTransfer,
-    WirePositionSettled, WireReferralReward, WireSpotTransfer, WireSubaccountTransfer,
-    WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited, decode_deposit_credited,
-    encode_account_mode_changed, encode_backstop_liquidation, encode_builder_fee_charged,
-    encode_default_event_payload, encode_deposit_credited, encode_fee_charged, encode_funding_paid,
-    encode_funding_received, encode_leverage_changed, encode_liquidation_fill,
-    encode_liquidation_started, encode_margin_mode_changed, encode_perp_transfer,
-    encode_position_settled, encode_referral_reward, encode_spot_transfer,
-    encode_subaccount_transfer, encode_vault_deposit, encode_vault_withdrawal,
-    encode_withdrawal_debited,
+    MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES, MAX_CANONICAL_TRADE_PAYLOAD_BYTES, PayloadCodecError,
+    WireAccountModeChanged, WireBackstopLiquidation, WireBuilderFeeCharged,
+    WireCanonicalEventEnvelope, WireDepositCredited, WireFeeCharged, WireFundingPaid,
+    WireFundingReceived, WireLeverageChanged, WireLiquidationFill, WireLiquidationStarted,
+    WireMarginModeChanged, WirePerpTransfer, WirePositionSettled, WireReferralReward,
+    WireSpotTransfer, WireSubaccountTransfer, WireVaultDeposit, WireVaultWithdrawal,
+    WireWithdrawalDebited, decode_deposit_credited, encode_account_mode_changed,
+    encode_backstop_liquidation, encode_builder_fee_charged, encode_default_event_payload,
+    encode_deposit_credited, encode_fee_charged, encode_funding_paid, encode_funding_received,
+    encode_leverage_changed, encode_liquidation_fill, encode_liquidation_started,
+    encode_margin_mode_changed, encode_perp_transfer, encode_position_settled,
+    encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_vault_deposit,
+    encode_vault_withdrawal, encode_withdrawal_debited,
 };
 use canonical_events::{
     AccountModeChanged, BackstopLiquidation, BuilderFeeCharged, CanonicalEventEnvelope,
@@ -1989,6 +1989,84 @@ fn inner_unknown_fields_preserve_exact_bound_and_one_over_fails_closed() {
     one_over_wire.payload_hash = blake3::hash(&one_over).as_bytes().to_vec();
     one_over_wire.payload = one_over;
     assert!(CanonicalEventEnvelope::decode(&one_over_wire.encode_to_vec()).is_err());
+}
+
+#[test]
+fn payload_size_preflight_covers_every_constructible_event_kind() {
+    let oversized_account = vec![0xff; ACCOUNT_PAYLOAD_LIMIT + 1];
+    let oversized_trade = vec![0xff; MAX_CANONICAL_TRADE_PAYLOAD_BYTES + 1];
+    for kind in EventKind::ALL {
+        match kind {
+            EventKind::TradeMatched => {
+                let error = EventPayload::decode(kind, &oversized_trade)
+                    .expect_err("oversized trade payload must fail closed");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("canonical trade payload exceeds the 16384-byte limit"),
+                    "{kind:?} must fail the trade size preflight: {error}"
+                );
+            }
+            EventKind::DepositCredited
+            | EventKind::WithdrawalDebited
+            | EventKind::SpotTransfer
+            | EventKind::PerpTransfer
+            | EventKind::SubaccountTransfer
+            | EventKind::VaultDeposit
+            | EventKind::VaultWithdrawal
+            | EventKind::FeeCharged
+            | EventKind::BuilderFeeCharged
+            | EventKind::FundingPaid
+            | EventKind::FundingReceived
+            | EventKind::ReferralReward
+            | EventKind::AccountModeChanged
+            | EventKind::MarginModeChanged
+            | EventKind::LeverageChanged
+            | EventKind::LiquidationStarted
+            | EventKind::LiquidationFill
+            | EventKind::BackstopLiquidation
+            | EventKind::PositionSettled => {
+                let error = EventPayload::decode(kind, &oversized_account)
+                    .expect_err("oversized account payload must fail closed");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("canonical account payload exceeds the 16384-byte limit"),
+                    "{kind:?} must fail the account size preflight: {error}"
+                );
+            }
+            EventKind::OrderAccepted
+            | EventKind::OrderRested
+            | EventKind::OrderModified
+            | EventKind::OrderPartiallyFilled
+            | EventKind::OrderFilled
+            | EventKind::OrderCancelled
+            | EventKind::OrderRejected
+            | EventKind::TriggerOrderActivated
+            | EventKind::TwapStarted
+            | EventKind::TwapSliceFilled
+            | EventKind::TwapCompleted
+            | EventKind::MarketHalted
+            | EventKind::MarketResumed
+            | EventKind::OpenInterestCapChanged
+            | EventKind::MarginTableChanged
+            | EventKind::MarketCreated
+            | EventKind::MarketMetadataChanged
+            | EventKind::OracleUpdated
+            | EventKind::FundingRateUpdated
+            | EventKind::AssetContextUpdated
+            | EventKind::DexCreated
+            | EventKind::OutcomeCreated
+            | EventKind::OutcomeResolved => {
+                let error = EventPayload::decode(kind, &oversized_account)
+                    .expect_err("malformed oversized payload must still fail closed");
+                assert!(
+                    !error.to_string().contains("exceeds the 16384-byte limit"),
+                    "{kind:?} must not apply the account or trade size preflight: {error}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

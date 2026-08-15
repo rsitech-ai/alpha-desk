@@ -204,12 +204,7 @@ pub fn map_committed_node_v1_block(
             reason: "committed mapping requires a transaction-block record".to_owned(),
         });
     }
-    if !matches!(
-        context.confirmation_class,
-        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent
-    ) {
-        return Err(MappingError::InvalidCommittedConfirmation);
-    }
+    admit_committed_confirmation(context.confirmation_class)?;
 
     let root: serde_json::Value = serde_json::from_slice(record.payload()).map_err(|error| {
         MappingError::MalformedRecord {
@@ -262,6 +257,20 @@ pub fn map_committed_node_v1_block(
         BTreeMap::from([(context.source_id.clone(), *record.content_hash().as_bytes())]),
     )
     .map_err(Into::into)
+}
+
+/// Admit only committed primary and independent lanes into committed mapping.
+///
+/// Provisional, reconciled, corrected, and expired classes fail closed with
+/// `InvalidCommittedConfirmation`. This does not qualify those lanes.
+fn admit_committed_confirmation(class: ConfirmationClass) -> Result<(), MappingError> {
+    match class {
+        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => Ok(()),
+        ConfirmationClass::ProvisionalSource
+        | ConfirmationClass::ReconciledSnapshot
+        | ConfirmationClass::Corrected
+        | ConfirmationClass::Expired => Err(MappingError::InvalidCommittedConfirmation),
+    }
 }
 
 pub fn map_node_v1_record(
