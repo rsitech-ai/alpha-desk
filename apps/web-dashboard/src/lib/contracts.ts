@@ -215,8 +215,10 @@ export interface LastHeartbeatThroughput {
  *  `CaptureStatusBase` (`maintenance` is not typed here and fails as an extra).
  *  Nested `auxiliary_sources` item extras fail against
  *  `AUXILIARY_SOURCE_FIELD_ORDER`. `capture_backlog_records` is required
- *  (writer always emits u64; hl-api omitted is `snapshot_invalid`). Writer
- *  charset/length and disk-free range are not copied.
+ *  (writer always emits u64; hl-api omitted is `snapshot_invalid`).
+ *  `disk_free_basis_points` is optional u16 (omitted/null stay omitted;
+ *  present overflow `> 65535` fails). Writer charset/length and writer
+ *  disk-free range (`> 10_000`) are not copied.
  *  `HealthAssessment.reason_code` stays a free string so unknown RED is
  *  not closed out.
  */
@@ -696,10 +698,7 @@ export function parseCaptureStatus(value: unknown): ParseResult<CaptureStatus> {
   if (!oldest_pending_capture_height.ok) {
     return oldest_pending_capture_height
   }
-  const disk_free_basis_points = optionalNonNegativeInt(
-    value,
-    "disk_free_basis_points"
-  )
+  const disk_free_basis_points = optionalU16(value, "disk_free_basis_points")
   if (!disk_free_basis_points.ok) {
     return disk_free_basis_points
   }
@@ -941,6 +940,35 @@ function optionalNonNegativeInt(
     return { ok: true, value: undefined }
   }
   return requireNonNegativeInt(object, field)
+}
+
+const U16_MAX = 65_535
+
+function requireU16(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<number> {
+  const parsed = requireNonNegativeInt(object, field)
+  if (!parsed.ok) {
+    return parsed
+  }
+  if (parsed.value > U16_MAX) {
+    return {
+      ok: false,
+      detail: `${field} must be a non-negative integer that fits u16`,
+    }
+  }
+  return parsed
+}
+
+function optionalU16(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<number | undefined> {
+  if (!(field in object) || object[field] === null) {
+    return { ok: true, value: undefined }
+  }
+  return requireU16(object, field)
 }
 
 function optionalBool(

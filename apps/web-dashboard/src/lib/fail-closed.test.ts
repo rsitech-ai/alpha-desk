@@ -1306,6 +1306,86 @@ describe("parseCaptureStatus capture_backlog_records", () => {
   })
 })
 
+describe("parseCaptureStatus disk_free_basis_points", () => {
+  it("accepts known u16 including 0 and 65535", () => {
+    for (const disk_free_basis_points of [0, 65535]) {
+      const parsed = parseCaptureStatus(
+        v4Status({ disk_free_basis_points })
+      )
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) {
+        return
+      }
+      expect(parsed.value.disk_free_basis_points).toBe(
+        disk_free_basis_points
+      )
+      expect(parsed.value.capture_backlog_records).toBe(0)
+      expect(parsed.value.durable_height).toBeUndefined()
+      expect(parsed.value.oldest_pending_capture_height).toBeUndefined()
+    }
+  })
+
+  it("accepts 10001 so writer 10000 max is not copied onto web parse", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ disk_free_basis_points: 10001 })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.disk_free_basis_points).toBe(10001)
+    expect(parsed.value.capture_backlog_records).toBe(0)
+  })
+
+  it("keeps omitted and null disk_free_basis_points omitted", () => {
+    const omitted = parseCaptureStatus(v4Status())
+    expect(omitted.ok).toBe(true)
+    if (!omitted.ok) {
+      return
+    }
+    expect(omitted.value.disk_free_basis_points).toBeUndefined()
+    expect(omitted.value.capture_backlog_records).toBe(0)
+
+    const nulled = parseCaptureStatus(
+      v4Status({ disk_free_basis_points: null })
+    )
+    expect(nulled.ok).toBe(true)
+    if (!nulled.ok) {
+      return
+    }
+    expect(nulled.value.disk_free_basis_points).toBeUndefined()
+    expect(nulled.value.capture_backlog_records).toBe(0)
+  })
+
+  it("fail-closes present overflow 65536 as invalid", () => {
+    const parsed = parseCaptureStatus(
+      v4Status({ disk_free_basis_points: 65536 })
+    )
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) {
+      return
+    }
+    expect(parsed.detail).toBe(
+      "disk_free_basis_points must be a non-negative integer that fits u16"
+    )
+  })
+
+  it("fail-closes present non-u16 disk_free_basis_points", () => {
+    for (const disk_free_basis_points of [-1, 1.5, "10001", true]) {
+      const parsed = parseCaptureStatus(
+        v4Status({ disk_free_basis_points })
+      )
+      expect(parsed.ok).toBe(false)
+      if (parsed.ok) {
+        return
+      }
+      expect(parsed.detail).toBe(
+        "disk_free_basis_points must be a non-negative integer"
+      )
+    }
+  })
+})
+
 describe("parseCaptureStatus restart reconstruction", () => {
   function auxiliarySource(
     overrides: Record<string, unknown> = {}
