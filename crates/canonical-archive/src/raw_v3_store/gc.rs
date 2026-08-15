@@ -567,6 +567,9 @@ fn collect_packed_input_objects(
             return Ok(false);
         }
         for input in pack.inputs() {
+            if input.original_schema() == "raw-v2" {
+                continue;
+            }
             let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
             insert_eligible(
                 archive,
@@ -640,7 +643,7 @@ fn protect_leaf(
             let pack = load_pack_manifest(archive, chain, source, entry)?;
             protected.insert(dataset.join(pack.object().relative_path()));
             for input in pack.inputs() {
-                if skip_packed_inputs {
+                if skip_packed_inputs || input.original_schema() == "raw-v2" {
                     continue;
                 }
                 let commit =

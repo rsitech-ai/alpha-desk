@@ -36,24 +36,63 @@ impl ActivePolicies {
     }
 }
 
+pub(super) fn cutover_relative(chain: &ChainId, source: &SourceId) -> PathBuf {
+    dataset_relative(chain, source, RawPolicy::LegacyContiguous).join("CUTOVER")
+}
+
+pub(super) fn cutover_exists(
+    root: &Path,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<bool, ArchiveError> {
+    let relative = cutover_relative(chain, source);
+    super::fs::validate_relative(&relative)?;
+    match std::fs::symlink_metadata(root.join(&relative)) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                Err(ArchiveError::UnsafePath)
+            } else {
+                Ok(true)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(ArchiveError::Io("inspecting raw archive cutover pointer")),
+    }
+}
+
 pub(super) fn active_policies(
     root: &Path,
     chain: &ChainId,
     source: &SourceId,
 ) -> Result<ActivePolicies, ArchiveError> {
+    let byte_v2 = checked_current_exists(
+        root,
+        &dataset_relative(chain, source, RawPolicy::MonotonicByteV2),
+    )?;
+    let byte_v3 = checked_current_exists(
+        root,
+        &dataset_relative(chain, source, RawPolicy::MonotonicByteV3),
+    )?;
+    let legacy = checked_current_exists(
+        root,
+        &dataset_relative(chain, source, RawPolicy::LegacyContiguous),
+    )?;
+    if cutover_exists(root, chain, source)? {
+        if !byte_v3 {
+            return Err(ArchiveError::ManifestVerification(
+                "raw V2 cutover exists without a V3 CURRENT pointer",
+            ));
+        }
+        return Ok(ActivePolicies {
+            legacy: false,
+            byte_v2: false,
+            byte_v3: true,
+        });
+    }
     Ok(ActivePolicies {
-        legacy: checked_current_exists(
-            root,
-            &dataset_relative(chain, source, RawPolicy::LegacyContiguous),
-        )?,
-        byte_v2: checked_current_exists(
-            root,
-            &dataset_relative(chain, source, RawPolicy::MonotonicByteV2),
-        )?,
-        byte_v3: checked_current_exists(
-            root,
-            &dataset_relative(chain, source, RawPolicy::MonotonicByteV3),
-        )?,
+        legacy,
+        byte_v2,
+        byte_v3,
     })
 }
 
