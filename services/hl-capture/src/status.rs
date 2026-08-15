@@ -406,7 +406,11 @@ impl CaptureMaintenanceStatus {
         if let Some(reason) = &self.reason_code {
             validate_reason_code(reason)?;
         }
-        if (self.health == CaptureHealth::Green) != self.reason_code.is_none() {
+        let reason_required = match self.health {
+            CaptureHealth::Green => false,
+            CaptureHealth::Yellow | CaptureHealth::Red => true,
+        };
+        if reason_required != self.reason_code.is_some() {
             return Err(StatusError::InvalidField);
         }
         Ok(())
@@ -705,9 +709,12 @@ impl CaptureStatus {
                 if self.independent_source_health.is_none()
                     || self.failover_height.is_none()
                     || self.failover_reason.is_none()
-                    || self.health == CaptureHealth::Green
                 {
                     return Err(StatusError::InvalidField);
+                }
+                match self.health {
+                    CaptureHealth::Green => return Err(StatusError::InvalidField),
+                    CaptureHealth::Yellow | CaptureHealth::Red => {}
                 }
             }
         }
@@ -717,9 +724,11 @@ impl CaptureStatus {
                 .independent_source_health
                 .ok_or(StatusError::InvalidField)?,
         };
-        if (self.ready || self.health == CaptureHealth::Green)
-            && active_source_health != CaptureSourceHealth::Healthy
-        {
+        let requires_healthy_active_source = match self.health {
+            CaptureHealth::Green => true,
+            CaptureHealth::Yellow | CaptureHealth::Red => self.ready,
+        };
+        if requires_healthy_active_source && active_source_health != CaptureSourceHealth::Healthy {
             return Err(StatusError::InvalidField);
         }
         Ok(())
@@ -1669,6 +1678,127 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn capture_health_validate_covers_every_constructible_health() {
+        for health in [
+            CaptureHealth::Green,
+            CaptureHealth::Yellow,
+            CaptureHealth::Red,
+        ] {
+            match health {
+                CaptureHealth::Green => {
+                    capture_health_status(health, false, CaptureSourceHealth::Healthy)
+                        .validate()
+                        .expect(
+                            "green remains valid when not ready if the active source is healthy",
+                        );
+                    assert_eq!(
+                        capture_health_status(health, false, CaptureSourceHealth::Starting)
+                            .validate(),
+                        Err(StatusError::InvalidField),
+                        "green still requires a healthy active source even when not ready"
+                    );
+                    assert_eq!(
+                        committed_source_status(
+                            CommittedSourceClass::IndependentCommitted,
+                            health,
+                            Some(CaptureSourceHealth::Healthy),
+                            Some(42),
+                            Some(FailoverReason::PrimaryRangeUnavailable),
+                        )
+                        .validate(),
+                        Err(StatusError::InvalidField),
+                        "independent failover still rejects green"
+                    );
+                    maintenance_health(health, None)
+                        .validate()
+                        .expect("green maintenance remains valid without a reason_code");
+                    assert_eq!(
+                        maintenance_health(health, Some("maintenance.degraded")).validate(),
+                        Err(StatusError::InvalidField),
+                        "green maintenance still rejects a present reason_code"
+                    );
+                }
+                CaptureHealth::Yellow | CaptureHealth::Red => {
+                    capture_health_status(health, false, CaptureSourceHealth::Starting)
+                        .validate()
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{health:?} not-ready starting source must still admit: {error:?}"
+                            )
+                        });
+                    assert_eq!(
+                        capture_health_status(health, true, CaptureSourceHealth::Starting)
+                            .validate(),
+                        Err(StatusError::InvalidField),
+                        "{health:?} ready still requires a healthy active source"
+                    );
+                    capture_health_status(health, true, CaptureSourceHealth::Healthy)
+                        .validate()
+                        .unwrap_or_else(|error| {
+                            panic!("{health:?} ready healthy source must still admit: {error:?}")
+                        });
+                    committed_source_status(
+                        CommittedSourceClass::IndependentCommitted,
+                        health,
+                        Some(CaptureSourceHealth::Healthy),
+                        Some(42),
+                        Some(FailoverReason::PrimaryRangeUnavailable),
+                    )
+                    .validate()
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{health:?} independent failover must still admit with failover fields: {error:?}"
+                        )
+                    });
+                    maintenance_health(health, Some("maintenance.degraded"))
+                        .validate()
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{health:?} maintenance must still admit with a reason_code: {error:?}"
+                            )
+                        });
+                    assert_eq!(
+                        maintenance_health(health, None).validate(),
+                        Err(StatusError::InvalidField),
+                        "{health:?} maintenance still requires a reason_code"
+                    );
+                }
+            }
+        }
+    }
+
+    fn capture_health_status(
+        health: CaptureHealth,
+        ready: bool,
+        primary_health: CaptureSourceHealth,
+    ) -> CaptureStatus {
+        CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            health,
+        )
+        .with_readiness(ready)
+        .with_source_state(
+            CommittedSourceClass::LocallyVerifiedCommitted,
+            primary_health,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn maintenance_health(
+        health: CaptureHealth,
+        reason_code: Option<&str>,
+    ) -> CaptureMaintenanceStatus {
+        let mut maintenance = CaptureMaintenanceStatus::idle(false, false);
+        maintenance.health = health;
+        maintenance.reason_code = reason_code.map(ToOwned::to_owned);
+        maintenance
     }
 
     fn committed_source_status(
