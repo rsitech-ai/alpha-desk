@@ -173,6 +173,14 @@ impl ModelRegistry {
         Ok(to)
     }
 
+    pub fn stamp_holdout_passed(&self, version: &ModelVersion) -> Result<ModelState, ModelError> {
+        let _ = self
+            .records
+            .get(version.as_str())
+            .ok_or(ModelError::Unregistered)?;
+        Err(ModelError::HoldoutNotImplemented)
+    }
+
     pub fn require_loadable(&self, version: &ModelVersion) -> Result<&RegistryRecord, ModelError> {
         let record = self
             .records

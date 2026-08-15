@@ -51,9 +51,13 @@ fn fold_estimators_fit_without_holdout_and_do_not_claim_significance() {
     assert_eq!(report.mode, "synthetic_fold_estimators");
     assert_eq!(report.significance, "not_claimed");
     assert!(!report.alpha_quality_claimed);
+    assert!(!report.alpha_qualified);
+    assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
     assert_eq!(report.ledger.len(), 6);
     assert_eq!(report.multiple_testing.significance, "not_claimed");
+    assert!(!report.multiple_testing.alpha_qualified);
+    assert!(!report.multiple_testing.significance_claimed);
     assert_eq!(report.multiple_testing.withheld_reason, "no_locked_holdout");
     assert_eq!(report.bootstrap.significance, "not_claimed");
     assert!(report.bootstrap.lower_bound.is_none());
@@ -74,6 +78,8 @@ fn fold_estimators_fit_without_holdout_and_do_not_claim_significance() {
     assert!(!report.calibration.serialized_as_probability);
     assert!(!report.promotion.promoted);
     assert!(!report.promotion.holdout_passed);
+    assert!(!report.promotion.alpha_qualified);
+    assert!(!report.promotion.significance_claimed);
     assert_eq!(report.promotion.decision, "withheld");
     assert!(
         report

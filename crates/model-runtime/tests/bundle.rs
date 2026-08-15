@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use domain_types::Decimal;
+use domain_types::{Decimal, ModelVersion};
 use ed25519_dalek::SigningKey;
 use model_runtime::{
     ArtifactKind, ModelError, ModelRegistry, ModelState, SignedBundle, TransitionEvidence,
@@ -229,6 +229,33 @@ fn holdout_and_shadow_transitions_are_explicitly_unimplemented() {
         ModelError::HoldoutNotImplemented
     );
     assert_eq!(
+        registry.stamp_holdout_passed(&version).unwrap_err(),
+        ModelError::HoldoutNotImplemented
+    );
+    refuse_holdout_passed(
+        &mut registry,
+        &version,
+        TransitionEvidence::SyntheticResearch,
+    );
+    refuse_holdout_passed(
+        &mut registry,
+        &version,
+        TransitionEvidence::HoldoutEvaluation,
+    );
+    refuse_holdout_passed(&mut registry, &version, TransitionEvidence::ShadowLive);
+    refuse_holdout_passed(
+        &mut registry,
+        &version,
+        TransitionEvidence::ProductionApproval,
+    );
+    refuse_holdout_passed(&mut registry, &version, TransitionEvidence::Degrade);
+    refuse_holdout_passed(&mut registry, &version, TransitionEvidence::Retire);
+    refuse_holdout_passed(&mut registry, &version, TransitionEvidence::Revoke);
+    assert_eq!(
+        registry.require_loadable(&version).unwrap().state(),
+        ModelState::ResearchPassed
+    );
+    assert_eq!(
         registry
             .advance(&version, ModelState::Shadow, TransitionEvidence::ShadowLive,)
             .unwrap_err(),
@@ -293,4 +320,58 @@ fn draft_bundle_cannot_score() {
     )
     .unwrap_err();
     assert_eq!(error.reason_code(), "model_runtime.illegal_transition");
+}
+
+#[test]
+fn draft_cannot_skip_to_holdout_passed() {
+    let bundle = signed_linear();
+    let mut registry = ModelRegistry::new();
+    let version = registry.register(&bundle).unwrap();
+    refuse_holdout_passed(
+        &mut registry,
+        &version,
+        TransitionEvidence::HoldoutEvaluation,
+    );
+    assert_eq!(
+        registry.stamp_holdout_passed(&version).unwrap_err(),
+        ModelError::HoldoutNotImplemented
+    );
+    assert_eq!(
+        score_research_bundle(
+            &registry,
+            &version,
+            &bundle,
+            &["flow".to_owned(), "crowding".to_owned()],
+            &[
+                Decimal::parse_at_scale("1", 8).unwrap(),
+                Decimal::parse_at_scale("1", 8).unwrap(),
+            ],
+        )
+        .unwrap_err()
+        .reason_code(),
+        "model_runtime.illegal_transition"
+    );
+}
+
+fn refuse_holdout_passed(
+    registry: &mut ModelRegistry,
+    version: &ModelVersion,
+    evidence: TransitionEvidence,
+) {
+    match evidence {
+        TransitionEvidence::SyntheticResearch
+        | TransitionEvidence::HoldoutEvaluation
+        | TransitionEvidence::ShadowLive
+        | TransitionEvidence::ProductionApproval
+        | TransitionEvidence::Degrade
+        | TransitionEvidence::Retire
+        | TransitionEvidence::Revoke => {
+            assert_eq!(
+                registry
+                    .advance(version, ModelState::HoldoutPassed, evidence)
+                    .unwrap_err(),
+                ModelError::HoldoutNotImplemented
+            );
+        }
+    }
 }

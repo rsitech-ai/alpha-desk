@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::claims::serialize_unclaimed;
 use crate::error::ResearchError;
 
 use super::purge::assert_train_labels_do_not_overlap_validation;
@@ -11,7 +12,13 @@ pub struct WalkForwardReport {
     pub mode: &'static str,
     pub walk_forward: &'static str,
     pub holdout: &'static str,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub alpha_quality_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub alpha_qualified: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub significance_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
     pub fold_count: usize,
     pub fold_hash: String,
@@ -58,6 +65,8 @@ pub fn run_walk_forward(dataset: &ResearchDataset) -> Result<WalkForwardReport, 
         walk_forward: "synthetic_folds",
         holdout: "sealed",
         alpha_quality_claimed: false,
+        alpha_qualified: false,
+        significance_claimed: false,
         stage_pass_claimed: false,
         fold_count: assignments.len(),
         fold_hash: hex::encode(fold_hash),

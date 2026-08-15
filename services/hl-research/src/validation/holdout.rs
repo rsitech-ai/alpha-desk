@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::claims::serialize_unclaimed;
 use crate::error::ResearchError;
 
 use super::{DatasetAccess, ResearchDataset, dataset_from_bytes, hash_rows};
@@ -31,9 +32,17 @@ pub struct HoldoutIsolationReport {
     pub mode: &'static str,
     pub state: HoldoutState,
     pub holdout: &'static str,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub locked: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub holdout_passed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub alpha_quality_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub alpha_qualified: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub significance_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
     pub training_rows_visible: usize,
     pub holdout_rows: usize,
@@ -90,6 +99,8 @@ pub fn evaluate_holdout_isolation(
         locked: false,
         holdout_passed: false,
         alpha_quality_claimed: false,
+        alpha_qualified: false,
+        significance_claimed: false,
         stage_pass_claimed: false,
         training_rows_visible: 0,
         holdout_rows: holdout.len(),

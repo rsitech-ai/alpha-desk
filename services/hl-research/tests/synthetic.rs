@@ -74,6 +74,8 @@ fn synthetic_experiment_runs_and_does_not_claim_stage_pass() {
     let report = run_synthetic_bytes(&bytes, None, None).unwrap();
     assert_eq!(report.mode, "synthetic");
     assert!(!report.alpha_quality_claimed);
+    assert!(!report.alpha_qualified);
+    assert!(!report.significance_claimed);
     assert!(!report.stage_pass_claimed);
     assert_eq!(report.walk_forward, "not_evaluated");
     assert_eq!(report.holdout, "not_evaluated");
