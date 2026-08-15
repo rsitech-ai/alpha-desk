@@ -190,12 +190,7 @@ function Pipeline({
         <Metric field="pending_blocks" value={String(status.pending_blocks)} />
         <Metric
           field="capture_backlog_records"
-          value={
-            status.capture_backlog_records === undefined
-              ? formatOmitted("capture_backlog_records")
-              : String(status.capture_backlog_records)
-          }
-          omitted={status.capture_backlog_records === undefined}
+          value={String(status.capture_backlog_records)}
         />
         <Metric
           field="oldest_pending_capture_height"
