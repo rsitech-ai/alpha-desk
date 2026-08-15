@@ -1,5 +1,10 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use domain_types::{BlockHeight, BlockRange, ExperimentId, FeatureSetVersion, LabelDefinitionId};
+use ed25519_dalek::SigningKey;
 use hl_research::{ExperimentManifest, ExperimentRegistry, ResearchError, run_synthetic_bytes};
+use model_runtime::sign_files;
 
 fn complete_manifest() -> ExperimentManifest {
     ExperimentManifest {
@@ -105,4 +110,116 @@ fn future_data_in_a_synthetic_fixture_is_refused() {
             field: "book.known_at",
         }
     );
+}
+
+#[test]
+fn live_named_bundle_dir_is_refused_even_when_files_exist() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle_dir = root.path().join("live").join("signed-bundle");
+    let approved_key = write_signed_linear_bundle(&bundle_dir);
+    let error = run_synthetic_bytes(
+        &synthetic_experiment_with_features(),
+        Some(&bundle_dir),
+        Some(approved_key),
+    )
+    .unwrap_err();
+    assert_eq!(error, ResearchError::LiveCorpusForbidden);
+}
+
+#[test]
+fn locked_holdout_named_bundle_dir_is_refused_even_when_files_exist() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle_dir = root.path().join("locked-holdout").join("signed-bundle");
+    let approved_key = write_signed_linear_bundle(&bundle_dir);
+    let error = run_synthetic_bytes(
+        &synthetic_experiment_with_features(),
+        Some(&bundle_dir),
+        Some(approved_key),
+    )
+    .unwrap_err();
+    assert_eq!(error, ResearchError::LockedCorpusForbidden);
+}
+
+#[test]
+fn synthetic_bundle_dir_still_loads_when_path_is_admitted() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle_dir = root.path().join("synthetic-bundle");
+    let approved_key = write_signed_linear_bundle(&bundle_dir);
+    let report = run_synthetic_bytes(
+        &synthetic_experiment_with_features(),
+        Some(&bundle_dir),
+        Some(approved_key),
+    )
+    .unwrap();
+    assert_eq!(report.mode, "synthetic");
+    assert_eq!(report.model_score.as_deref(), Some("2.10000000"));
+    assert!(!report.live_corpus);
+    assert!(!report.replica_cmds_used);
+    let encoded = serde_json::to_value(&report).unwrap();
+    assert_eq!(encoded["live_corpus"], false);
+    assert_eq!(encoded["replica_cmds_used"], false);
+}
+
+fn synthetic_experiment_bytes() -> Vec<u8> {
+    std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/research/synthetic-experiment-v1.json"),
+    )
+    .unwrap()
+}
+
+fn synthetic_experiment_with_features() -> Vec<u8> {
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(&synthetic_experiment_bytes()).unwrap();
+    fixture["model_features"] = serde_json::json!({
+        "names": ["flow", "crowding"],
+        "values": ["2", "4"]
+    });
+    serde_json::to_vec(&fixture).unwrap()
+}
+
+fn write_signed_linear_bundle(dir: &Path) -> [u8; 32] {
+    let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let mut files = linear_bundle_files();
+    let signature = sign_files(&files, &signing_key);
+    files.insert("signature.ed25519".to_owned(), signature.to_vec());
+    std::fs::create_dir_all(dir).unwrap();
+    for (name, bytes) in &files {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+    signing_key.verifying_key().to_bytes()
+}
+
+fn linear_bundle_files() -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    files.insert(
+        "manifest.toml".to_owned(),
+        br#"model_id = "linear-synthetic-v1"
+semantic_version = "0.1.0"
+feature_set_version = "features-v1"
+artifact_kind = "deterministic-linear-v1"
+review_expires_unix_micros = 4102444800000000
+approved_use = ["synthetic-research"]
+prohibited_use = ["production-inference", "live-trading"]
+"#
+        .to_vec(),
+    );
+    files.insert(
+        "feature-schema.json".to_owned(),
+        br#"{"ordered_features":["flow","crowding"]}"#.to_vec(),
+    );
+    files.insert("preprocessing.json".to_owned(), b"{}".to_vec());
+    files.insert("calibration.json".to_owned(), b"{}".to_vec());
+    files.insert("evaluation.json".to_owned(), b"{}".to_vec());
+    files.insert("training-data-manifest.json".to_owned(), b"{}".to_vec());
+    files.insert(
+        "model-card.md".to_owned(),
+        b"synthetic linear fixture".to_vec(),
+    );
+    files.insert(
+        "model.linear-v1.json".to_owned(),
+        br#"{"kind":"deterministic-linear-v1","weights":["0.5","0.25"],"intercept":"0.1"}"#
+            .to_vec(),
+    );
+    files
 }

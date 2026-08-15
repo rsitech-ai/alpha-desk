@@ -6,6 +6,7 @@ use model_runtime::{
 };
 use serde::Deserialize;
 
+use crate::corpus::refuse_corpus_path;
 use crate::error::ResearchError;
 use crate::experiment::{ExperimentManifest, ExperimentRegistry, ExperimentStatus};
 use crate::report::ResearchReport;
@@ -59,6 +60,7 @@ pub fn run_synthetic_fixture(
 
     let model_score = match bundle_dir {
         Some(path) => {
+            refuse_corpus_path(path)?;
             let key = approved_key.ok_or(ResearchError::InvalidFixture)?;
             let bundle = SignedBundle::load_dir(path, &[key], &model_runtime::Ed25519Verifier)?;
             let mut models = ModelRegistry::new();

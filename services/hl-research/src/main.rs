@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use hl_research::{
-    ResearchError, ResearchStatus, load_corpus_path, run_evaluate_folds_bytes,
+    ResearchError, ResearchStatus, load_corpus_path, refuse_corpus_path, run_evaluate_folds_bytes,
     run_holdout_isolation_bytes, run_promote_bytes, run_shadow_capture_bytes, run_synthetic_bytes,
     run_walk_forward_bytes,
 };
@@ -51,6 +51,9 @@ fn execute(arguments: Vec<OsString>) -> Result<String, ResearchError> {
             approved_key,
             output,
         } => {
+            if let Some(path) = &bundle {
+                refuse_corpus_path(path)?;
+            }
             let bytes = load_corpus_path(&fixture)?;
             let key = match approved_key {
                 Some(hex_key) => {
