@@ -1073,6 +1073,48 @@ fn observation_policy_covers_every_constructible_cursor_policy() {
 }
 
 #[test]
+fn observation_policy_covers_every_constructible_observation_class() {
+    const MISMATCH: &str =
+        "spool observation class is incompatible with the configured cursor policy";
+    for observation_class in ObservationClass::ALL {
+        let root = TempDir::new().unwrap();
+        let config = byte_config(&root);
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match observation_class {
+            ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock => {
+                let error = spool
+                    .append(&observation_with_class(observation_class, 17), 101)
+                    .expect_err("block heights are not byte offsets");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+                assert_eq!(error.to_string(), MISMATCH);
+                assert!(spool.last_local_sequence().is_none());
+            }
+            ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::Snapshot
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => {
+                let appended = spool
+                    .append(&observation_with_class(observation_class, 17), 101)
+                    .expect("non-block-height classes still skip this incompatibility check");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+                drop(spool);
+                SourceSpool::open(config, 200).expect(
+                    "recovery still applies today's observation-policy admission for this class",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn persisted_schema_identity_covers_every_constructible_cursor_policy() {
     for cursor_policy in [
         CursorPolicy::ContiguousNativeOffset,

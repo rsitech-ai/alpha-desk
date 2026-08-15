@@ -933,15 +933,25 @@ fn validate_observation_policy(
 ) -> Result<(), SpoolError> {
     match policy {
         CursorPolicy::MonotonicByteOffset => {
-            if matches!(
-                observation_class,
-                ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock
-            ) {
+            if byte_offset_rejects_block_height_class(observation_class) {
                 Err(SpoolError::CursorPolicyMismatch)
             } else {
                 Ok(())
             }
         }
         CursorPolicy::ContiguousNativeOffset => Ok(()),
+    }
+}
+
+fn byte_offset_rejects_block_height_class(class: ObservationClass) -> bool {
+    match class {
+        ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock => true,
+        ObservationClass::AuxiliaryOrderStatus
+        | ObservationClass::AuxiliaryBookDiff
+        | ObservationClass::AuxiliaryLedger
+        | ObservationClass::Snapshot
+        | ObservationClass::PublicMarketData
+        | ObservationClass::ProvisionalFeed
+        | ObservationClass::ProvisionalMempool => false,
     }
 }
