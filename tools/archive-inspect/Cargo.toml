@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 datafusion.workspace = true
 canonical-archive = { path = "../../crates/canonical-archive", version = "=0.1.0" }
+domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
 storage-ports = { path = "../../crates/storage-ports", version = "=0.1.0" }
 thiserror.workspace = true
 tokio.workspace = true

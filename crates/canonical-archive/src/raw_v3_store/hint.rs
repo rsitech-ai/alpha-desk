@@ -15,7 +15,7 @@ use crate::{
     fs, manifest,
     raw_v3::{
         BuiltIndexPackV3, IndexPackPageKindV3, ReceiptHintEntryV3, ReceiptHintPageV3,
-        parse_logical_commit_manifest, parse_receipt_hint_page, root_bundle_hash,
+        parse_receipt_hint_page, root_bundle_hash,
     },
 };
 
@@ -281,12 +281,10 @@ fn collect_hint_entries(
             crate::raw_v3::SequenceStorageRefV3::Packed { .. } => {
                 let pack = load_pack_manifest(archive, chain, source, entry)?;
                 for input in pack.inputs() {
-                    let commit =
-                        parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
                     entries.push(ReceiptHintEntryV3::try_new(
                         input.manifest_sha256()?,
-                        commit.commit().first_local_sequence(),
-                        commit.commit().last_local_sequence(),
+                        input.first_local_sequence(),
+                        input.last_local_sequence(),
                     )?);
                 }
             }

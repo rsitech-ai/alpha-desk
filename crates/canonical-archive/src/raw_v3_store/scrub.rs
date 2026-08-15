@@ -45,12 +45,15 @@ impl RawArchiveScrubReport {
 
 pub fn verify_all_sources(archive: &RawV3Archive) -> Result<(), ArchiveError> {
     for (chain, source) in super::discover_v3_sources(archive)? {
-        if load_current_root(archive, &chain, &source)?.is_none() {
-            return Err(ArchiveError::ManifestVerification(
-                "raw V3 source directory is missing CURRENT",
-            ));
+        if super::load_current_root(archive, &chain, &source)?.is_some() {
+            let _ = scrub_source(archive, &chain, &source)?;
+            continue;
         }
-        let _ = scrub_source(archive, &chain, &source)?;
+        let Some((root, journal_bytes)) = super::load_import_root(archive, &chain, &source)? else {
+            continue;
+        };
+        let _lease = lease_root(archive, &chain, &source, &root)?;
+        let _ = inspect_tree(archive, &chain, &source, &root, &journal_bytes, true)?;
     }
     Ok(())
 }
@@ -148,8 +151,6 @@ fn inspect_tree(
                     super::load_pack_manifest(archive, chain, source, entry)?
                 };
                 for input in pack.inputs() {
-                    let commit =
-                        parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
                     logical_manifest_count =
                         logical_manifest_count
                             .checked_add(1)
@@ -157,10 +158,10 @@ fn inspect_tree(
                                 "logical manifest count overflows",
                             ))?;
                     logical_row_count = logical_row_count
-                        .checked_add(commit.object().row_count())
+                        .checked_add(input.row_count())
                         .ok_or(ArchiveError::InvalidInput("logical row count overflows"))?;
                     logical_data_bytes = logical_data_bytes
-                        .checked_add(commit.object().size_bytes())
+                        .checked_add(packed_input_object_size_bytes(input)?)
                         .ok_or(ArchiveError::InvalidInput("logical data bytes overflow"))?;
                 }
                 physical.insert(dataset.join(pack.object().relative_path()));
@@ -236,7 +237,12 @@ fn collect_index_paths(
 ) -> Result<BTreeSet<PathBuf>, ArchiveError> {
     let dataset = dataset_relative(chain, source);
     let mut paths = BTreeSet::new();
-    paths.insert(dataset.join("CURRENT"));
+    let current = dataset.join("CURRENT");
+    if fs::exists_regular(&archive.root, &current)? {
+        paths.insert(current);
+    } else {
+        paths.insert(dataset.join("IMPORT"));
+    }
     paths.insert(root_relative(&dataset, root_bundle_hash(root)?));
     paths.insert(PathBuf::from(root.journal_prefix().relative_path()));
     let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), journal_bytes)?;
@@ -316,5 +322,24 @@ fn verify_checkpoint(
             }
             Ok(())
         }
+    }
+}
+
+fn packed_input_object_size_bytes(
+    input: &crate::raw_v3::PackedLogicalInputV3,
+) -> Result<u64, ArchiveError> {
+    match input.original_schema() {
+        "raw-v2" => Ok(crate::raw_v2::validate_embedded_manifest_v2(
+            input.canonical_manifest_json().as_bytes().to_vec(),
+            input.manifest_sha256()?,
+        )?
+        .object_size_bytes),
+        "raw-v3" => {
+            let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+            Ok(commit.object().size_bytes())
+        }
+        _ => Err(ArchiveError::ManifestVerification(
+            "packed input original schema is unsupported",
+        )),
     }
 }
