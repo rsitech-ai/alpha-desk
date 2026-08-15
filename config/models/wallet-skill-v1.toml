@@ -1,0 +1,5 @@
+version = "wallet-skill-v1"
+mu0_bps = 0
+kappa0_milli = 10000
+min_ess_milli = 5000
+half_life_micros = 2_592_000_000_000

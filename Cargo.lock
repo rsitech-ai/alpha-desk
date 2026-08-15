@@ -1602,6 +1602,15 @@ dependencies = [
 [[package]]
 name = "entity-graph"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+]
 
 [[package]]
 name = "equivalent"
@@ -1649,6 +1658,13 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "feature-core"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "proptest",
+ "serde",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "fiat-crypto"
@@ -2329,6 +2345,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
+name = "intelligence-replay"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "canonical-events",
+ "canonical-ledger",
+ "domain-types",
+ "entity-graph",
+ "feature-core",
+ "hl-protocol",
+ "market-intelligence",
+ "serde_json",
+ "signal-core",
+ "thiserror 2.0.19",
+ "wallet-intelligence",
+]
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2543,6 +2578,17 @@ version = "0.1.0"
 [[package]]
 name = "market-intelligence"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+ "wallet-intelligence",
+]
 
 [[package]]
 name = "matchers"
@@ -3787,6 +3833,17 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "signal-core"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "market-intelligence",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+ "wallet-intelligence",
+]
 
 [[package]]
 name = "signal-hook-registry"
@@ -4696,6 +4753,15 @@ dependencies = [
 [[package]]
 name = "wallet-intelligence"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain-types",
+ "feature-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+]
 
 [[package]]
 name = "want"

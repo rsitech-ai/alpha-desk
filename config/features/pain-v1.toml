@@ -1,0 +1,3 @@
+near_break_even_bps = 15
+voluntary_age_micros = 3600000000
+near_liquidation_bps = 40
