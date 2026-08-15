@@ -3,9 +3,9 @@ use feature_core::HealthState;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    SignalError,
     evidence::EvidenceBundle,
     signal::{SignalActor, SignalLifecycleState, SignalType},
-    SignalError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,10 +71,7 @@ pub fn transition_allowed(
     health: HealthState,
     confirmation_live_ok: bool,
 ) -> Result<(), SignalError> {
-    if matches!(
-        to,
-        SignalLifecycleState::Validated | SignalLifecycleState::Live
-    ) {
+    if requires_evidence_admission(to) {
         let missing = evidence.missing_for_admission();
         if !missing.is_empty() {
             return Err(SignalError::IncompleteEvidence(missing));
@@ -120,6 +117,17 @@ pub fn transition_allowed(
             from: SignalLifecycleState::Candidate,
             to,
         }),
+    }
+}
+
+const fn requires_evidence_admission(to: SignalLifecycleState) -> bool {
+    match to {
+        SignalLifecycleState::Validated | SignalLifecycleState::Live => true,
+        SignalLifecycleState::Candidate
+        | SignalLifecycleState::Decaying
+        | SignalLifecycleState::Invalidated
+        | SignalLifecycleState::Expired
+        | SignalLifecycleState::Resolved => false,
     }
 }
 
