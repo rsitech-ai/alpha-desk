@@ -639,6 +639,62 @@ fn confirmation_live_gate_covers_every_class() {
     }
 }
 
+fn try_candidate_signal(direction: Direction) -> Result<Signal, SignalError> {
+    Signal::try_new(
+        SignalId::new("sig-dir").unwrap(),
+        SignalType::IndependentSmartFlowAcceleration,
+        MarketId::new("BTC").unwrap(),
+        direction,
+        known(1_000_000),
+        time(1_000_000),
+        BlockHeight::new(12),
+        SignalConfirmationClass::SyntheticUnqualified,
+        Horizon::MINUTES_5,
+        domain_types::BasisPoints::from_raw(20, 0).unwrap(),
+        domain_types::BasisPoints::from_raw(5, 0).unwrap(),
+        ProbabilityPpm::ONE,
+        ClosedInterval::new(
+            domain_types::BasisPoints::from_raw(1, 0).unwrap(),
+            domain_types::BasisPoints::from_raw(30, 0).unwrap(),
+        )
+        .unwrap(),
+        UsdAmount::from_raw(1, 8).unwrap(),
+        Horizon::MINUTES_5,
+        ProbabilityPpm::from_ppm(100_000).unwrap(),
+        domain_types::BasisPoints::from_raw(10, 0).unwrap(),
+        health(HealthState::Green),
+        ModelVersion::new("signals-v1").unwrap(),
+        FeatureSetVersion::new("market-v1").unwrap(),
+        [7_u8; 32],
+        [8_u8; 32],
+        SignalLifecycleState::Candidate,
+    )
+}
+
+#[test]
+fn direction_admission_covers_every_constructible_direction() {
+    for direction in [Direction::Long, Direction::Short, Direction::Flat] {
+        let result = try_candidate_signal(direction);
+        match direction {
+            Direction::Flat => {
+                assert_eq!(
+                    result,
+                    Err(SignalError::ContractViolation(
+                        "signals must be directional",
+                    )),
+                    "{direction:?} must still fail closed as non-directional"
+                );
+            }
+            Direction::Long | Direction::Short => {
+                let signal = result.unwrap_or_else(|error| {
+                    panic!("{direction:?} must still construct: {error:?}")
+                });
+                assert_eq!(signal.direction, direction);
+            }
+        }
+    }
+}
+
 #[test]
 fn synthetic_confirmation_cannot_construct_live_signal() {
     let error = Signal::try_new(
