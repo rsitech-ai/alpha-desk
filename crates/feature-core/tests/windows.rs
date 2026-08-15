@@ -115,6 +115,63 @@ fn unsupported_and_malformed_window_inputs_fail_closed() {
 }
 
 #[test]
+fn covariance_paired_value_admission_covers_every_constructible_window_algorithm() {
+    fn window(algorithm: WindowAlgorithm) -> RollingWindow {
+        let (decay_ppm, quantile_ppm) = match algorithm {
+            WindowAlgorithm::ExponentiallyWeighted => (500_000, 0),
+            WindowAlgorithm::QuantileSketch => (0, 500_000),
+            WindowAlgorithm::EventCount
+            | WindowAlgorithm::ProtocolTime
+            | WindowAlgorithm::Covariance
+            | WindowAlgorithm::RobustZScore => (0, 0),
+        };
+        RollingWindow::try_new(algorithm, 8, 0, decay_ppm, quantile_ppm).unwrap()
+    }
+
+    fn pin(algorithm: WindowAlgorithm) {
+        match algorithm {
+            WindowAlgorithm::Covariance => {
+                let mut reject = window(algorithm);
+                let error = reject.update(event("missing-pair", 1, 1)).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        FeatureError::Malformed {
+                            what: "window_update",
+                            reason: "covariance requires paired_value",
+                        }
+                    ),
+                    "covariance still fail-closes a missing paired_value: {error:?}"
+                );
+                let mut admit = window(algorithm);
+                assert!(
+                    admit.update(pair("has-pair", 1, 100, 200)).unwrap(),
+                    "covariance still admits a present paired_value"
+                );
+            }
+            WindowAlgorithm::EventCount
+            | WindowAlgorithm::ProtocolTime
+            | WindowAlgorithm::ExponentiallyWeighted
+            | WindowAlgorithm::QuantileSketch
+            | WindowAlgorithm::RobustZScore => {
+                let mut skip = window(algorithm);
+                assert!(
+                    skip.update(event("no-pair", 1, 100)).unwrap(),
+                    "{algorithm:?} still skips the covariance paired_value gate"
+                );
+            }
+        }
+    }
+
+    pin(WindowAlgorithm::EventCount);
+    pin(WindowAlgorithm::ProtocolTime);
+    pin(WindowAlgorithm::ExponentiallyWeighted);
+    pin(WindowAlgorithm::QuantileSketch);
+    pin(WindowAlgorithm::Covariance);
+    pin(WindowAlgorithm::RobustZScore);
+}
+
+#[test]
 fn robust_z_requires_history_and_nonzero_mad() {
     let mut window = RollingWindow::try_new(WindowAlgorithm::RobustZScore, 8, 0, 0, 0).unwrap();
     window.update(event("e1", 1, 100)).unwrap();
