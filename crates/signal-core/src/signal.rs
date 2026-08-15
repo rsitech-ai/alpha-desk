@@ -176,10 +176,13 @@ impl Signal {
                 "zero_evidence_or_rule_hash".to_owned(),
             ]));
         }
-        if matches!(direction, Direction::Flat) {
-            return Err(SignalError::ContractViolation(
-                "signals must be directional",
-            ));
+        match direction {
+            Direction::Flat => {
+                return Err(SignalError::ContractViolation(
+                    "signals must be directional",
+                ));
+            }
+            Direction::Long | Direction::Short => {}
         }
         if expected_cost_bps.raw() < 0 {
             return Err(SignalError::ContractViolation("cost must be non-negative"));
