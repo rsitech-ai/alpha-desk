@@ -214,6 +214,24 @@ impl RawV3Archive {
         checkpoint::load_checkpoint(self, chain, source)
     }
 
+    pub fn backup_eligible_objects(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        backup_root: impl AsRef<Path>,
+    ) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        gc::backup_eligible_objects(self, chain, source, backup_root.as_ref())
+    }
+
     pub fn plan_packed_object_gc(
         &self,
         chain: &ChainId,
