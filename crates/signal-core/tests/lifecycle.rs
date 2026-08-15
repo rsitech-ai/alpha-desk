@@ -7,11 +7,11 @@ use domain_types::{
 use feature_core::{
     EvidenceKind, EvidenceRef, FeatureValue, HealthAssessment, HealthState, MissingReason,
 };
-use market_intelligence::{market_feature_key, AnalogueSet, MarketFeatureSnapshot, MemorySupport};
+use market_intelligence::{AnalogueSet, MarketFeatureSnapshot, MemorySupport, market_feature_key};
 use signal_core::{
-    append_event, fold_lifecycle, transition_allowed, EvidenceBundle, InvalidationRule, Signal,
-    SignalActor, SignalConfirmationClass, SignalError, SignalLifecycleEvent, SignalLifecycleState,
-    SignalType,
+    EvidenceBundle, InvalidationRule, Signal, SignalActor, SignalConfirmationClass, SignalError,
+    SignalLifecycleEvent, SignalLifecycleState, SignalType, append_event, fold_lifecycle,
+    transition_allowed,
 };
 
 fn time(micros: i64) -> ProtocolTime {
@@ -551,6 +551,65 @@ fn inventory_bundle(
         vec!["synthetic_unqualified".to_owned()],
     )
     .unwrap()
+}
+
+#[test]
+fn evidence_admission_covers_every_constructible_lifecycle_state() {
+    let bundle = incomplete_bundle();
+    let missing = bundle.missing_for_admission();
+    assert!(missing.contains(&"canonical_event_refs".to_owned()));
+    for to in [
+        SignalLifecycleState::Candidate,
+        SignalLifecycleState::Validated,
+        SignalLifecycleState::Live,
+        SignalLifecycleState::Decaying,
+        SignalLifecycleState::Invalidated,
+        SignalLifecycleState::Expired,
+        SignalLifecycleState::Resolved,
+    ] {
+        let from = match to {
+            SignalLifecycleState::Candidate => None,
+            SignalLifecycleState::Validated
+            | SignalLifecycleState::Invalidated
+            | SignalLifecycleState::Expired => Some(SignalLifecycleState::Candidate),
+            SignalLifecycleState::Live => Some(SignalLifecycleState::Validated),
+            SignalLifecycleState::Decaying => Some(SignalLifecycleState::Live),
+            SignalLifecycleState::Resolved => Some(SignalLifecycleState::Invalidated),
+        };
+        match to {
+            SignalLifecycleState::Validated | SignalLifecycleState::Live => {
+                assert!(
+                    matches!(
+                        transition_allowed(
+                            from,
+                            to,
+                            &SignalType::IndependentSmartFlowAcceleration,
+                            &bundle,
+                            HealthState::Green,
+                            true,
+                        ),
+                        Err(SignalError::IncompleteEvidence(_))
+                    ),
+                    "{to:?} still requires evidence admission"
+                );
+            }
+            SignalLifecycleState::Candidate
+            | SignalLifecycleState::Decaying
+            | SignalLifecycleState::Invalidated
+            | SignalLifecycleState::Expired
+            | SignalLifecycleState::Resolved => {
+                transition_allowed(
+                    from,
+                    to,
+                    &SignalType::IndependentSmartFlowAcceleration,
+                    &bundle,
+                    HealthState::Green,
+                    true,
+                )
+                .unwrap_or_else(|error| panic!("{to:?} still skips this evidence gate: {error:?}"));
+            }
+        }
+    }
 }
 
 #[test]
