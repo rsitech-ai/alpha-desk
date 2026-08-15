@@ -141,11 +141,20 @@ impl RollingWindow {
         {
             return Err(FeatureError::WindowCapacityExceeded);
         }
-        if matches!(self.algorithm, WindowAlgorithm::Covariance) && update.paired_value.is_none() {
-            return Err(FeatureError::Malformed {
-                what: "window_update",
-                reason: "covariance requires paired_value",
-            });
+        match self.algorithm {
+            WindowAlgorithm::Covariance => {
+                if update.paired_value.is_none() {
+                    return Err(FeatureError::Malformed {
+                        what: "window_update",
+                        reason: "covariance requires paired_value",
+                    });
+                }
+            }
+            WindowAlgorithm::EventCount
+            | WindowAlgorithm::ProtocolTime
+            | WindowAlgorithm::ExponentiallyWeighted
+            | WindowAlgorithm::QuantileSketch
+            | WindowAlgorithm::RobustZScore => {}
         }
         if self
             .samples
