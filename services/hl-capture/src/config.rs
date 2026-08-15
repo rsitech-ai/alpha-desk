@@ -62,19 +62,35 @@ impl CaptureConfig {
                 return Err(ConfigError::DuplicateSource);
             }
             match source.trust {
-                SourceTrust::LocallyVerifiedCommitted => {
-                    if source.observation_class == ObservationClass::CommittedBlock {
+                SourceTrust::LocallyVerifiedCommitted => match source.observation_class {
+                    ObservationClass::CommittedBlock => {
                         primary_committed_sources = primary_committed_sources.saturating_add(1);
                         validate_committed_source_adapter(source)?;
                     }
-                }
-                SourceTrust::IndependentCommitted => {
-                    if source.observation_class == ObservationClass::CommittedBlock {
+                    ObservationClass::AuxiliaryOrderStatus
+                    | ObservationClass::AuxiliaryBookDiff
+                    | ObservationClass::AuxiliaryLedger
+                    | ObservationClass::Snapshot
+                    | ObservationClass::HistoricalBlock
+                    | ObservationClass::PublicMarketData
+                    | ObservationClass::ProvisionalFeed
+                    | ObservationClass::ProvisionalMempool => {}
+                },
+                SourceTrust::IndependentCommitted => match source.observation_class {
+                    ObservationClass::CommittedBlock => {
                         independent_committed_sources =
                             independent_committed_sources.saturating_add(1);
                         validate_committed_source_adapter(source)?;
                     }
-                }
+                    ObservationClass::AuxiliaryOrderStatus
+                    | ObservationClass::AuxiliaryBookDiff
+                    | ObservationClass::AuxiliaryLedger
+                    | ObservationClass::Snapshot
+                    | ObservationClass::HistoricalBlock
+                    | ObservationClass::PublicMarketData
+                    | ObservationClass::ProvisionalFeed
+                    | ObservationClass::ProvisionalMempool => {}
+                },
                 SourceTrust::ReconciledSnapshot => {}
                 SourceTrust::RecoveryOnly => {}
                 SourceTrust::ThirdPartyProvisional => {}

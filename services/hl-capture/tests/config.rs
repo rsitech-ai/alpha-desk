@@ -449,6 +449,87 @@ fn topology_counter_pins_every_source_trust_count_effect() {
 }
 
 #[test]
+fn committed_slot_admission_covers_every_constructible_observation_class() {
+    for class in ObservationClass::ALL {
+        match class {
+            ObservationClass::CommittedBlock => {
+                let duplicate_primary = format!(
+                    "{}{}",
+                    valid_config(),
+                    committed_node_source(
+                        "primary-node-two",
+                        "locally-verified-committed",
+                        "/var/lib/hyperliquid-two/hl/data/replica_cmds"
+                    )
+                );
+                assert_eq!(
+                    CaptureConfig::from_toml(&duplicate_primary)
+                        .expect_err("committed-block still occupies the primary slot")
+                        .reason_code(),
+                    "capture_config.duplicate_primary_committed_source"
+                );
+                assert_eq!(
+                    CaptureConfig::from_toml(&format!(
+                        "{}{}",
+                        valid_config(),
+                        extra_source("probe-source", SourceTrust::LocallyVerifiedCommitted, class)
+                    ))
+                    .expect_err("committed-block still requires the committed adapter")
+                    .reason_code(),
+                    "capture_config.invalid_committed_source_adapter"
+                );
+                CaptureConfig::from_toml(&format!(
+                    "{}{}",
+                    valid_config(),
+                    independent_committed_source("independent-node")
+                ))
+                .expect("one committed-block independent still occupies the independent slot once");
+                assert_eq!(
+                    CaptureConfig::from_toml(&format!(
+                        "{}{}",
+                        valid_config(),
+                        extra_source("probe-source", SourceTrust::IndependentCommitted, class)
+                    ))
+                    .expect_err("committed-block independent still requires the committed adapter")
+                    .reason_code(),
+                    "capture_config.invalid_committed_source_adapter"
+                );
+            }
+            ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger => {
+                assert_does_not_occupy_committed_slots(
+                    SourceTrust::LocallyVerifiedCommitted,
+                    class,
+                );
+                assert_does_not_occupy_committed_slots(SourceTrust::IndependentCommitted, class);
+            }
+            ObservationClass::Snapshot
+            | ObservationClass::HistoricalBlock
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => {
+                for trust in [
+                    SourceTrust::LocallyVerifiedCommitted,
+                    SourceTrust::IndependentCommitted,
+                ] {
+                    let probe = extra_source("probe-source", trust, class);
+                    assert_eq!(
+                        CaptureConfig::from_toml(&format!("{}{probe}", valid_config()))
+                            .expect_err(
+                                "incompatible pairing still fails before the committed-slot count"
+                            )
+                            .reason_code(),
+                        "capture_config.invalid_source_trust",
+                        "{trust:?}/{class:?} still fails closed as invalid source trust"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn unknown_keys_fail_startup_at_every_configuration_level() {
     for (from, to) in [
         (
