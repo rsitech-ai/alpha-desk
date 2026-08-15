@@ -614,6 +614,148 @@ describe("parseHealthAssessment extras", () => {
   })
 })
 
+describe("parseHealthAssessment identifiers", () => {
+  it("parses known identifiers including a non-empty suppresses entry", () => {
+    const parsed = parseHealthAssessment(
+      healthAssessment({
+        suppresses: ["signal:common"],
+      })
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.scope).toBe("canonical")
+    expect(parsed.value.reason_code).toBe("healthy")
+    expect(parsed.value.suppresses).toEqual(["signal:common"])
+  })
+
+  it("fail-closes surrounding whitespace on scope and reason_code", () => {
+    const paddedScope = parseHealthAssessment(
+      healthAssessment({ scope: " canonical" })
+    )
+    expect(paddedScope.ok).toBe(false)
+    if (paddedScope.ok) {
+      return
+    }
+    expect(paddedScope.detail).toBe(
+      "scope must be a non-empty string without surrounding whitespace or control characters"
+    )
+
+    const paddedReason = parseHealthAssessment(
+      healthAssessment({
+        state: "HEALTH_STATE_RED",
+        reason_code: " gap",
+      })
+    )
+    expect(paddedReason.ok).toBe(false)
+    if (paddedReason.ok) {
+      return
+    }
+    expect(paddedReason.detail).toBe(
+      "reason_code must be a non-empty string without surrounding whitespace or control characters"
+    )
+
+    const trailingReason = parseHealthAssessment(
+      healthAssessment({ reason_code: "healthy " })
+    )
+    expect(trailingReason.ok).toBe(false)
+    if (trailingReason.ok) {
+      return
+    }
+    expect(trailingReason.detail).toBe(
+      "reason_code must be a non-empty string without surrounding whitespace or control characters"
+    )
+  })
+
+  it("fail-closes control characters in reason_code without closing unknown RED", () => {
+    const control = parseHealthAssessment(
+      healthAssessment({
+        state: "HEALTH_STATE_RED",
+        reason_code: "lag\u0001",
+      })
+    )
+    expect(control.ok).toBe(false)
+    if (control.ok) {
+      return
+    }
+    expect(control.detail).toBe(
+      "reason_code must be a non-empty string without surrounding whitespace or control characters"
+    )
+
+    const unknownRed = parseHealthAssessment(
+      healthAssessment({
+        state: "HEALTH_STATE_RED",
+        reason_code: "not-a-known-catalog-code",
+      })
+    )
+    expect(unknownRed.ok).toBe(true)
+    if (!unknownRed.ok) {
+      return
+    }
+    expect(unknownRed.value.reason_code).toBe("not-a-known-catalog-code")
+  })
+
+  it("fail-closes empty, padded, and control suppresses entries", () => {
+    const emptyItem = parseHealthAssessment(
+      healthAssessment({ suppresses: [""] })
+    )
+    expect(emptyItem.ok).toBe(false)
+    if (emptyItem.ok) {
+      return
+    }
+    expect(emptyItem.detail).toBe(
+      "suppresses entries must be non-empty without surrounding whitespace or control characters"
+    )
+
+    const paddedItem = parseHealthAssessment(
+      healthAssessment({ suppresses: [" signal:common"] })
+    )
+    expect(paddedItem.ok).toBe(false)
+    if (paddedItem.ok) {
+      return
+    }
+    expect(paddedItem.detail).toBe(
+      "suppresses entries must be non-empty without surrounding whitespace or control characters"
+    )
+
+    const controlItem = parseHealthAssessment(
+      healthAssessment({ suppresses: ["signal\u0001common"] })
+    )
+    expect(controlItem.ok).toBe(false)
+    if (controlItem.ok) {
+      return
+    }
+    expect(controlItem.detail).toBe(
+      "suppresses entries must be non-empty without surrounding whitespace or control characters"
+    )
+  })
+
+  it("does not copy identifier rules onto ApiError or capture-status strings", () => {
+    const apiError = parseApiError({
+      schema_version: ERROR_SCHEMA,
+      code: "data_unavailable",
+      reason_code: " snapshot_missing",
+    })
+    expect(apiError.ok).toBe(true)
+    if (!apiError.ok) {
+      return
+    }
+    expect(apiError.value.reason_code).toBe(" snapshot_missing")
+
+    const capture = parseCaptureStatus(
+      v4Status({
+        archive_manifest_id: " padded-manifest",
+      })
+    )
+    expect(capture.ok).toBe(true)
+    if (!capture.ok) {
+      return
+    }
+    expect(capture.value.archive_manifest_id).toBe(" padded-manifest")
+  })
+})
+
 describe("parseApiError extras", () => {
   function apiErrorObject(
     overrides: Record<string, unknown> = {}

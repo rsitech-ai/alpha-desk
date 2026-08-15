@@ -247,8 +247,12 @@ export const CAPTURE_STATUS_FIELD_ORDER = [
 
 /** Known keys for this web `parseHealthAssessment`. Present unknown keys
  *  fail parse. This matches OpenAPI `HealthAssessment additionalProperties:
- *  false` and hl-api `HealthDocument` `deny_unknown_fields`. `reason_code`
- *  stays a free string so unknown RED is not closed out.
+ *  false` and hl-api `HealthDocument` `deny_unknown_fields`. Identifier
+ *  fields (`scope`, `reason_code`, `suppresses` entries) match hl-api
+ *  `WireHealthAssessment::try_new`: non-empty, no surrounding whitespace,
+ *  no control characters. `reason_code` stays a free string so unknown RED
+ *  is not closed out. Capture writer charset/length is not copied onto
+ *  capture-status strings.
  */
 export const HEALTH_FIELD_ORDER = [
   "schema_version",
@@ -323,7 +327,7 @@ export function parseHealthAssessment(
   if (!schema_version.ok) {
     return schema_version
   }
-  const scope = requireNonEmptyString(value, "scope")
+  const scope = requireHealthIdentifier(value, "scope")
   if (!scope.ok) {
     return scope
   }
@@ -331,7 +335,7 @@ export function parseHealthAssessment(
   if (!state.ok) {
     return state
   }
-  const reason_code = requireNonEmptyString(value, "reason_code")
+  const reason_code = requireHealthIdentifier(value, "reason_code")
   if (!reason_code.ok) {
     return reason_code
   }
@@ -339,7 +343,7 @@ export function parseHealthAssessment(
   if (!observed_at_micros.ok) {
     return observed_at_micros
   }
-  const suppresses = requireStringArray(value, "suppresses")
+  const suppresses = requireHealthIdentifierArray(value, "suppresses")
   if (!suppresses.ok) {
     return suppresses
   }
@@ -877,6 +881,50 @@ function requireNonEmptyString(
     return { ok: false, detail: `${field} must be a non-empty string` }
   }
   return { ok: true, value }
+}
+
+/** hl-api `WireHealthAssessment::try_new` / api-contracts
+ *  `validate_identifier`: non-empty, no surrounding whitespace, no Unicode
+ *  Cc controls. This is not capture writer 512-byte charset/length.
+ */
+function isHealthIdentifier(value: string): boolean {
+  return (
+    value.length > 0 && value.trim() === value && !/\p{Cc}/u.test(value)
+  )
+}
+
+function requireHealthIdentifier(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<string> {
+  const parsed = requireNonEmptyString(object, field)
+  if (!parsed.ok) {
+    return parsed
+  }
+  if (!isHealthIdentifier(parsed.value)) {
+    return {
+      ok: false,
+      detail: `${field} must be a non-empty string without surrounding whitespace or control characters`,
+    }
+  }
+  return parsed
+}
+
+function requireHealthIdentifierArray(
+  object: Record<string, unknown>,
+  field: string
+): ParseResult<string[]> {
+  const parsed = requireStringArray(object, field)
+  if (!parsed.ok) {
+    return parsed
+  }
+  if (parsed.value.some((item) => !isHealthIdentifier(item))) {
+    return {
+      ok: false,
+      detail: `${field} entries must be non-empty without surrounding whitespace or control characters`,
+    }
+  }
+  return parsed
 }
 
 function optionalNonEmptyString(
