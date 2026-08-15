@@ -1,0 +1,6 @@
+# Fail-closed hl-api query budgets. This is not a production SLO.
+
+schema_version = "hl.api.query_budgets.v1"
+max_rows = 1024
+timeout_ms = 2000
+max_concurrency = 8

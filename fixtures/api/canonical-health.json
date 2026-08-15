@@ -1,0 +1,8 @@
+{
+  "schema_version": "hl.health.v1",
+  "scope": "canonical",
+  "state": "HEALTH_STATE_GREEN",
+  "reason_code": "healthy",
+  "observed_at_micros": 1,
+  "suppresses": []
+}
