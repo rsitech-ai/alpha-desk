@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use domain_types::SourceId;
 use hl_capture::adapters::{
@@ -15,6 +15,7 @@ use hl_protocol::{
     SourceRequestContext,
 };
 use tempfile::TempDir;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -316,6 +317,42 @@ async fn durable_acknowledgement_must_match_an_emitted_cursor() {
         .acknowledge_durable(&emitted)
         .expect("emitted cursor");
     assert_eq!(source.committed_cursor(), Some(&emitted));
+}
+
+#[tokio::test]
+async fn restart_after_rotation_opens_the_successor_epoch_at_offset_zero() {
+    let directory = TempDir::new().expect("temp directory");
+    let path = directory.path().join("fills");
+    let rotated = directory.path().join("fills.1");
+    let payload = fixture("fill.json");
+    write_line(&path, &payload);
+    let cancellation = CancellationToken::new();
+    let mut source =
+        NodeLineFileSource::open_with_clock(config(path.clone()), None, TestClock::new())
+            .expect("open source");
+    let first = source
+        .next_observation(&context(cancellation.clone(), Duration::from_secs(1)))
+        .await
+        .expect("first epoch record");
+    source
+        .acknowledge_durable(first.cursor())
+        .expect("first epoch durable");
+    let durable = first.cursor().clone();
+    drop(source);
+
+    fs::rename(&path, rotated).expect("rotate old file");
+    write_line(&path, &payload);
+    let mut restarted =
+        NodeLineFileSource::open_with_clock(config(path), Some(durable.clone()), TestClock::new())
+            .expect("successor epoch must open after rotation");
+    assert_eq!(restarted.committed_cursor(), Some(&durable));
+    let second = restarted
+        .next_observation(&context(cancellation, Duration::from_secs(1)))
+        .await
+        .expect("successor epoch record");
+    assert_ne!(second.cursor().epoch(), durable.epoch());
+    assert!(second.cursor().offset() > 0);
+    assert_eq!(second.payload().as_ref(), payload);
 }
 
 #[tokio::test]

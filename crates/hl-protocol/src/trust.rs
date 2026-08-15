@@ -48,31 +48,75 @@ impl SourceAdmission {
         trust: SourceTrust,
         observation_class: ObservationClass,
     ) -> Result<Self, SourceTrustError> {
-        let publication_lane = match (trust, observation_class) {
-            (
-                SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted,
-                ObservationClass::CommittedBlock,
-            ) => PublicationLane::CommittedCandidate,
-            (
-                SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted,
-                ObservationClass::AuxiliaryOrderStatus
+        let publication_lane = match trust {
+            SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted => {
+                match observation_class {
+                    ObservationClass::CommittedBlock => PublicationLane::CommittedCandidate,
+                    ObservationClass::AuxiliaryOrderStatus
+                    | ObservationClass::AuxiliaryBookDiff
+                    | ObservationClass::AuxiliaryLedger => PublicationLane::Reconciliation,
+                    ObservationClass::Snapshot
+                    | ObservationClass::HistoricalBlock
+                    | ObservationClass::PublicMarketData
+                    | ObservationClass::ProvisionalFeed
+                    | ObservationClass::ProvisionalMempool => {
+                        return Err(SourceTrustError::IncompatibleObservationClass);
+                    }
+                }
+            }
+            SourceTrust::ReconciledSnapshot => match observation_class {
+                ObservationClass::Snapshot => PublicationLane::Reconciliation,
+                ObservationClass::CommittedBlock
+                | ObservationClass::AuxiliaryOrderStatus
                 | ObservationClass::AuxiliaryBookDiff
-                | ObservationClass::AuxiliaryLedger,
-            )
-            | (SourceTrust::ReconciledSnapshot, ObservationClass::Snapshot) => {
-                PublicationLane::Reconciliation
-            }
-            (SourceTrust::RecoveryOnly, ObservationClass::HistoricalBlock) => {
-                PublicationLane::Recovery
-            }
-            (
-                SourceTrust::ThirdPartyProvisional,
-                ObservationClass::PublicMarketData | ObservationClass::ProvisionalFeed,
-            ) => PublicationLane::Provisional,
-            (SourceTrust::MempoolProvisional, ObservationClass::ProvisionalMempool) => {
-                PublicationLane::Mempool
-            }
-            _ => return Err(SourceTrustError::IncompatibleObservationClass),
+                | ObservationClass::AuxiliaryLedger
+                | ObservationClass::HistoricalBlock
+                | ObservationClass::PublicMarketData
+                | ObservationClass::ProvisionalFeed
+                | ObservationClass::ProvisionalMempool => {
+                    return Err(SourceTrustError::IncompatibleObservationClass);
+                }
+            },
+            SourceTrust::RecoveryOnly => match observation_class {
+                ObservationClass::HistoricalBlock => PublicationLane::Recovery,
+                ObservationClass::CommittedBlock
+                | ObservationClass::AuxiliaryOrderStatus
+                | ObservationClass::AuxiliaryBookDiff
+                | ObservationClass::AuxiliaryLedger
+                | ObservationClass::Snapshot
+                | ObservationClass::PublicMarketData
+                | ObservationClass::ProvisionalFeed
+                | ObservationClass::ProvisionalMempool => {
+                    return Err(SourceTrustError::IncompatibleObservationClass);
+                }
+            },
+            SourceTrust::ThirdPartyProvisional => match observation_class {
+                ObservationClass::PublicMarketData | ObservationClass::ProvisionalFeed => {
+                    PublicationLane::Provisional
+                }
+                ObservationClass::CommittedBlock
+                | ObservationClass::AuxiliaryOrderStatus
+                | ObservationClass::AuxiliaryBookDiff
+                | ObservationClass::AuxiliaryLedger
+                | ObservationClass::Snapshot
+                | ObservationClass::HistoricalBlock
+                | ObservationClass::ProvisionalMempool => {
+                    return Err(SourceTrustError::IncompatibleObservationClass);
+                }
+            },
+            SourceTrust::MempoolProvisional => match observation_class {
+                ObservationClass::ProvisionalMempool => PublicationLane::Mempool,
+                ObservationClass::CommittedBlock
+                | ObservationClass::AuxiliaryOrderStatus
+                | ObservationClass::AuxiliaryBookDiff
+                | ObservationClass::AuxiliaryLedger
+                | ObservationClass::Snapshot
+                | ObservationClass::HistoricalBlock
+                | ObservationClass::PublicMarketData
+                | ObservationClass::ProvisionalFeed => {
+                    return Err(SourceTrustError::IncompatibleObservationClass);
+                }
+            },
         };
         Ok(Self {
             trust,

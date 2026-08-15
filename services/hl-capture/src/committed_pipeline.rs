@@ -50,14 +50,18 @@ impl CommittedNodePipelineConfig {
         retained_committed_blocks: usize,
     ) -> Result<Self, PipelineError> {
         let source_version = source_version.into();
+        let admitted_committed_trust = match admission.trust() {
+            SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted => true,
+            SourceTrust::ReconciledSnapshot
+            | SourceTrust::RecoveryOnly
+            | SourceTrust::ThirdPartyProvisional
+            | SourceTrust::MempoolProvisional => false,
+        };
         if source_version.is_empty()
             || source_version.trim() != source_version
             || source_version.chars().any(char::is_control)
             || admission.observation_class() != ObservationClass::CommittedBlock
-            || !matches!(
-                admission.trust(),
-                SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted
-            )
+            || !admitted_committed_trust
         {
             return Err(PipelineError::InvalidConfig);
         }
@@ -123,7 +127,10 @@ impl<'a, C: CanonicalBlockCommitter + ?Sized> CommittedNodePipeline<'a, C> {
         let confirmation_class = match self.config.admission.trust() {
             SourceTrust::LocallyVerifiedCommitted => ConfirmationClass::CommittedPrimary,
             SourceTrust::IndependentCommitted => ConfirmationClass::CommittedIndependent,
-            _ => return Err(PipelineError::InvalidConfig),
+            SourceTrust::ReconciledSnapshot
+            | SourceTrust::RecoveryOnly
+            | SourceTrust::ThirdPartyProvisional
+            | SourceTrust::MempoolProvisional => return Err(PipelineError::InvalidConfig),
         };
         let block = map_committed_node_v1_block(
             &record,

@@ -61,7 +61,7 @@ bounded batches, and capture configuration rejects segment targets above
 512 MiB. Local acquisition and canonical drain are independent owned tasks:
 PostgreSQL or NATS failure degrades readiness without stopping fsynced source
 capture, and the drain reconnects from durable PostgreSQL progress.
-The atomic V4 status distinguishes active-source fsynced capture backlog from
+The atomic V5 status distinguishes active-source fsynced capture backlog from
 downstream publication plans, reports source class and bounded source health,
 records the immutable failover height/reason without source paths or operator
 identity, reports the oldest pending capture height and lowest spool/archive
