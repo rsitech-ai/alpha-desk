@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use domain_types::{BlockHeight, ChainId, SourceId};
@@ -60,16 +61,40 @@ impl CaptureConfig {
             if !ids.insert(source.id.as_str()) {
                 return Err(ConfigError::DuplicateSource);
             }
-            match (source.trust, source.observation_class) {
-                (SourceTrust::LocallyVerifiedCommitted, ObservationClass::CommittedBlock) => {
-                    primary_committed_sources = primary_committed_sources.saturating_add(1);
-                    validate_committed_source_adapter(source)?;
-                }
-                (SourceTrust::IndependentCommitted, ObservationClass::CommittedBlock) => {
-                    independent_committed_sources = independent_committed_sources.saturating_add(1);
-                    validate_committed_source_adapter(source)?;
-                }
-                _ => {}
+            match source.trust {
+                SourceTrust::LocallyVerifiedCommitted => match source.observation_class {
+                    ObservationClass::CommittedBlock => {
+                        primary_committed_sources = primary_committed_sources.saturating_add(1);
+                        validate_committed_source_adapter(source)?;
+                    }
+                    ObservationClass::AuxiliaryOrderStatus
+                    | ObservationClass::AuxiliaryBookDiff
+                    | ObservationClass::AuxiliaryLedger
+                    | ObservationClass::Snapshot
+                    | ObservationClass::HistoricalBlock
+                    | ObservationClass::PublicMarketData
+                    | ObservationClass::ProvisionalFeed
+                    | ObservationClass::ProvisionalMempool => {}
+                },
+                SourceTrust::IndependentCommitted => match source.observation_class {
+                    ObservationClass::CommittedBlock => {
+                        independent_committed_sources =
+                            independent_committed_sources.saturating_add(1);
+                        validate_committed_source_adapter(source)?;
+                    }
+                    ObservationClass::AuxiliaryOrderStatus
+                    | ObservationClass::AuxiliaryBookDiff
+                    | ObservationClass::AuxiliaryLedger
+                    | ObservationClass::Snapshot
+                    | ObservationClass::HistoricalBlock
+                    | ObservationClass::PublicMarketData
+                    | ObservationClass::ProvisionalFeed
+                    | ObservationClass::ProvisionalMempool => {}
+                },
+                SourceTrust::ReconciledSnapshot => {}
+                SourceTrust::RecoveryOnly => {}
+                SourceTrust::ThirdPartyProvisional => {}
+                SourceTrust::MempoolProvisional => {}
             }
         }
         if primary_committed_sources == 0 {
@@ -116,13 +141,11 @@ impl CaptureConfig {
 }
 
 fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), ConfigError> {
-    if matches!(
-        source.adapter,
-        Some(SourceAdapterConfig::NodeBlockDirectory { .. })
-    ) {
-        Ok(())
-    } else {
-        Err(ConfigError::InvalidCommittedSourceAdapter)
+    match source.adapter.as_ref() {
+        Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => Ok(()),
+        Some(SourceAdapterConfig::NodeLine { .. }) | None => {
+            Err(ConfigError::InvalidCommittedSourceAdapter)
+        }
     }
 }
 
@@ -148,6 +171,8 @@ pub struct RuntimeConfig {
     backpressure_timeout_millis: u64,
     shutdown_grace_millis: u64,
     disk_reserve_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status_listen: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -175,6 +200,9 @@ impl RuntimeConfig {
             || !(1..=MAX_DISK_RESERVE_BYTES).contains(&self.disk_reserve_bytes)
         {
             return Err(ConfigError::InvalidRuntimeLimit);
+        }
+        if let Some(listen) = &self.status_listen {
+            validate_status_listen(listen)?;
         }
         Ok(())
     }
@@ -274,6 +302,15 @@ impl RuntimeConfig {
     pub const fn disk_reserve_bytes(&self) -> u64 {
         self.disk_reserve_bytes
     }
+
+    #[must_use]
+    pub fn status_listen(&self) -> Option<SocketAddr> {
+        self.status_listen.as_ref().map(|value| {
+            value
+                .parse()
+                .expect("RuntimeConfig is constructed only through validated deserialization")
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,13 +336,13 @@ impl SpoolConfig {
         }
         self.committed_durability.validate()?;
         self.provisional_durability.validate()?;
-        if !matches!(
-            self.committed_durability,
-            DurabilityPolicy::FsyncEveryRecord
-        ) {
-            return Err(ConfigError::InvalidDurabilityPolicy);
+        match self.committed_durability {
+            DurabilityPolicy::FsyncEveryRecord => Ok(()),
+            DurabilityPolicy::Batched {
+                max_records: _,
+                max_delay_millis: _,
+            } => Err(ConfigError::InvalidDurabilityPolicy),
         }
-        Ok(())
     }
 
     #[must_use]
@@ -519,12 +556,15 @@ impl SourceAdapterConfig {
         validate_identity(stream_name).map_err(|_| ConfigError::InvalidSourceAdapter)?;
         if !(1..=MAX_SOURCE_POLL_INTERVAL_MILLIS).contains(&poll_interval_millis)
             || observation_class != expected_class
-            || replica_cmds_style
-                .is_some_and(|style| style != NodeReplicaCmdsStyle::ActionsAndResponses)
         {
             return Err(ConfigError::InvalidSourceAdapter);
         }
-        Ok(())
+        match replica_cmds_style {
+            None | Some(NodeReplicaCmdsStyle::ActionsAndResponses) => Ok(()),
+            Some(NodeReplicaCmdsStyle::Actions | NodeReplicaCmdsStyle::RecentActions) => {
+                Err(ConfigError::InvalidSourceAdapter)
+            }
+        }
     }
 }
 
@@ -580,6 +620,8 @@ pub enum ConfigError {
     InvalidNatsStream,
     #[error("capture runtime limit is outside the supported range")]
     InvalidRuntimeLimit,
+    #[error("capture operator status listen address is invalid")]
+    InvalidStatusListen,
     #[error("validated capture configuration could not be serialized")]
     Serialization,
 }
@@ -621,6 +663,7 @@ impl ConfigError {
             Self::InvalidNatsServer => "capture_config.invalid_nats_server",
             Self::InvalidNatsStream => "capture_config.invalid_nats_stream",
             Self::InvalidRuntimeLimit => "capture_config.invalid_runtime_limit",
+            Self::InvalidStatusListen => "capture_config.invalid_status_listen",
             Self::Serialization => "capture_config.serialization",
         }
     }
@@ -670,6 +713,17 @@ fn validate_nats_server(value: &str) -> Result<(), ConfigError> {
     }
 
     Ok(())
+}
+
+fn validate_status_listen(value: &str) -> Result<(), ConfigError> {
+    let address: SocketAddr = value
+        .parse()
+        .map_err(|_| ConfigError::InvalidStatusListen)?;
+    if address.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidStatusListen)
+    }
 }
 
 fn validate_identity(value: &str) -> Result<(), ()> {

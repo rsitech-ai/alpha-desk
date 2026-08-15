@@ -11,6 +11,7 @@ pub mod coordinator;
 mod disk;
 mod failover;
 mod fixture;
+mod operator;
 pub mod progress;
 mod quarantine;
 mod raw_archive;
@@ -29,6 +30,7 @@ pub use config::*;
 pub use disk::*;
 pub use failover::*;
 pub use fixture::{FixtureError, synthetic_fixture_block};
+pub use operator::{OperatorError, accept_operator_status, serve_operator_status};
 pub use quarantine::*;
 pub use raw_archive::*;
 pub use sequencer::*;
@@ -36,6 +38,6 @@ pub use service::{ConnectedCapture, RuntimeConnectError, connect_capture};
 pub use shutdown::{AppError, OwnedTask, run_owned_tasks};
 pub use status::{
     AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
-    CaptureSourceHealth, CaptureStatus, CommittedSourceClass, StatusError, StatusWriter,
-    read_status,
+    CaptureMaintenanceStatus, CaptureSourceHealth, CaptureStatus, CommittedSourceClass,
+    RestartReconstruction, StatusError, StatusWriter, read_status,
 };

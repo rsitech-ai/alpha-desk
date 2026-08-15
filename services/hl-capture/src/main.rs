@@ -2,16 +2,17 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use hl_capture::{CaptureConfig, connect_capture, read_status};
+use hl_capture::{CaptureConfig, connect_capture, read_status, serve_operator_status};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-const USAGE: &str = "usage: hl-capture <check-config|status|run> --config <path> [--json]\n       hl-capture fixture-replay --config <path> --blocks <count> [--block-delay-millis <ms>]";
+const USAGE: &str = "usage: hl-capture <check-config|status|serve-status|run> --config <path> [--json]\n       hl-capture serve-status --config <path> [--listen <addr>]\n       hl-capture fixture-replay --config <path> --blocks <count> [--block-delay-millis <ms>]";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -58,6 +59,35 @@ async fn execute(arguments: Vec<OsString>) -> Result<(), CliError> {
             Ok(())
         }
         Command::Status { json: false, .. } => Err(CliError::Usage),
+        Command::ServeStatus {
+            config_path,
+            listen,
+        } => {
+            let config = load_config(&config_path)?;
+            let listen = listen
+                .or_else(|| config.runtime().status_listen())
+                .ok_or(CliError::Usage)?;
+            if !listen.ip().is_loopback() {
+                return Err(CliError::Stable("capture_operator.unsafe_bind"));
+            }
+            let cancellation = CancellationToken::new();
+            let serve = serve_operator_status(
+                config.runtime().status_path().to_path_buf(),
+                listen,
+                cancellation.clone(),
+            );
+            tokio::pin!(serve);
+            tokio::select! {
+                result = &mut serve => {
+                    result.map_err(|error| CliError::Stable(error.reason_code()))
+                }
+                result = wait_for_shutdown_signal() => {
+                    result?;
+                    cancellation.cancel();
+                    serve.await.map_err(|error| CliError::Stable(error.reason_code()))
+                }
+            }
+        }
         Command::Run { config_path } => {
             let config = load_config(&config_path)?;
             run_capture(&config).await
@@ -82,6 +112,10 @@ enum Command {
         config_path: PathBuf,
         json: bool,
     },
+    ServeStatus {
+        config_path: PathBuf,
+        listen: Option<SocketAddr>,
+    },
     Run {
         config_path: PathBuf,
     },
@@ -101,12 +135,18 @@ impl Command {
         let mut json = false;
         let mut block_count = None;
         let mut block_delay_millis = None;
+        let mut listen = None;
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
                 Some("--config") if config_path.is_none() => {
                     config_path = Some(PathBuf::from(arguments.next().ok_or(CliError::Usage)?));
                 }
                 Some("--json") if !json => json = true,
+                Some("--listen") if listen.is_none() => {
+                    let value = arguments.next().ok_or(CliError::Usage)?;
+                    let value = value.to_str().ok_or(CliError::Usage)?;
+                    listen = Some(value.parse().map_err(|_| CliError::Usage)?);
+                }
                 Some("--blocks") if block_count.is_none() => {
                     block_count = Some(parse_u64(arguments.next().ok_or(CliError::Usage)?)?);
                 }
@@ -118,16 +158,34 @@ impl Command {
         }
         let config_path = config_path.ok_or(CliError::Usage)?;
         match command {
-            "check-config" if !json && block_count.is_none() && block_delay_millis.is_none() => {
+            "check-config"
+                if !json
+                    && block_count.is_none()
+                    && block_delay_millis.is_none()
+                    && listen.is_none() =>
+            {
                 Ok(Self::CheckConfig { config_path })
             }
-            "status" if block_count.is_none() && block_delay_millis.is_none() => {
+            "status"
+                if block_count.is_none() && block_delay_millis.is_none() && listen.is_none() =>
+            {
                 Ok(Self::Status { config_path, json })
             }
-            "run" if !json && block_count.is_none() && block_delay_millis.is_none() => {
+            "serve-status" if !json && block_count.is_none() && block_delay_millis.is_none() => {
+                Ok(Self::ServeStatus {
+                    config_path,
+                    listen,
+                })
+            }
+            "run"
+                if !json
+                    && block_count.is_none()
+                    && block_delay_millis.is_none()
+                    && listen.is_none() =>
+            {
                 Ok(Self::Run { config_path })
             }
-            "fixture-replay" if !json => {
+            "fixture-replay" if !json && listen.is_none() => {
                 let block_count = block_count
                     .filter(|count| (1..=10_000_000).contains(count))
                     .ok_or(CliError::Usage)?;
