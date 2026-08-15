@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest"
 import type { FeedState } from "@/hooks/use-hl-api"
 import type { DeskFeed, EndpointOutcome } from "@/lib/api"
 import {
+  API_ERROR_FIELD_ORDER,
   AUXILIARY_SOURCE_FIELD_ORDER,
   AUXILIARY_SOURCE_HEALTH,
   CAPTURE_HEALTH_NOT_READY_REASONS,
@@ -20,6 +21,7 @@ import {
   MAX_AUXILIARY_SOURCES,
   RESTART_RECONSTRUCTION,
   lastHeartbeatThroughput,
+  parseApiError,
   parseCaptureHealth,
   parseCaptureStatus,
   parseCoreHealth,
@@ -607,6 +609,80 @@ describe("parseHealthAssessment extras", () => {
     }
     expect(parsed.value.state).toBe("HEALTH_STATE_RED")
     expect(parsed.value.reason_code).toBe("not-a-known-catalog-code")
+  })
+})
+
+describe("parseApiError extras", () => {
+  function apiErrorObject(
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      schema_version: ERROR_SCHEMA,
+      code: "data_unavailable",
+      reason_code: "snapshot_missing",
+      ...overrides,
+    }
+  }
+
+  it("allowlists this web parse's known ApiError fields matching OpenAPI", () => {
+    expect([...API_ERROR_FIELD_ORDER]).toEqual([
+      "schema_version",
+      "code",
+      "reason_code",
+    ])
+    expect(API_ERROR_FIELD_ORDER).not.toContain("error")
+    expect(API_ERROR_FIELD_ORDER).not.toContain("message")
+    expect(API_ERROR_FIELD_ORDER).not.toContain("fills")
+  })
+
+  it("fail-closes present unknown keys as invalid, not a quiet extra", () => {
+    for (const extra of ["fills", "invented", "adapter"] as const) {
+      const parsed = parseApiError(apiErrorObject({ [extra]: true }))
+      expect(parsed.ok).toBe(false)
+      if (parsed.ok) {
+        return
+      }
+      expect(parsed.detail).toBe(`unknown api error field: ${extra}`)
+    }
+
+    const both = parseApiError(
+      apiErrorObject({
+        later_unknown: "ignored-as-qualification",
+        px: 1.5,
+      })
+    )
+    expect(both.ok).toBe(false)
+    if (both.ok) {
+      return
+    }
+    expect(both.detail).toBe("unknown api error fields: later_unknown, px")
+  })
+
+  it("parses a known payload without extras", () => {
+    const parsed = parseApiError(apiErrorObject())
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) {
+      return
+    }
+    expect(parsed.value.schema_version).toBe(ERROR_SCHEMA)
+    expect(parsed.value.code).toBe("data_unavailable")
+    expect(parsed.value.reason_code).toBe("snapshot_missing")
+  })
+
+  it("does not invent error or message as typed ApiError keys", () => {
+    const withError = parseApiError(apiErrorObject({ error: "nope" }))
+    expect(withError.ok).toBe(false)
+    if (withError.ok) {
+      return
+    }
+    expect(withError.detail).toBe("unknown api error field: error")
+
+    const withMessage = parseApiError(apiErrorObject({ message: "nope" }))
+    expect(withMessage.ok).toBe(false)
+    if (withMessage.ok) {
+      return
+    }
+    expect(withMessage.detail).toBe("unknown api error field: message")
   })
 })
 
