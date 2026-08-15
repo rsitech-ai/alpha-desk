@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::baselines::UNMODELED_BASELINES;
-use crate::claims::serialize_unclaimed;
+use crate::claims::{serialize_denied_true, serialize_unclaimed};
 use crate::error::ResearchError;
 use crate::metrics::{BootstrapReport, CalibrationReport, PerformanceMetrics};
 
@@ -129,6 +129,10 @@ pub struct PromotionReport {
     pub significance_claimed: bool,
     #[serde(serialize_with = "serialize_unclaimed")]
     pub stage_pass_claimed: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub live_corpus: bool,
+    #[serde(serialize_with = "serialize_denied_true")]
+    pub replica_cmds_used: bool,
     pub unmodeled_baselines: &'static [&'static str],
     pub gates: Vec<GateResult>,
 }
@@ -246,6 +250,8 @@ pub fn evaluate_promotion(evidence: &PromotionEvidence<'_>) -> PromotionReport {
         alpha_qualified: false,
         significance_claimed: false,
         stage_pass_claimed: false,
+        live_corpus: false,
+        replica_cmds_used: false,
         unmodeled_baselines: &UNMODELED_BASELINES,
         gates,
     }

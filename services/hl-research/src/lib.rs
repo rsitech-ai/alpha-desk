@@ -2,6 +2,7 @@
 
 mod baselines;
 mod claims;
+mod corpus;
 mod error;
 mod estimator;
 mod experiment;
@@ -14,6 +15,7 @@ mod synthetic;
 mod validation;
 
 pub use baselines::{FOLD_ESTIMATOR_CLASSES, SYNTHETIC_BASELINES, UNMODELED_BASELINES};
+pub use corpus::{CorpusClass, load_corpus_path, refuse_corpus_path};
 pub use error::ResearchError;
 pub use estimator::{EstimatorClass, FittedEstimator, LinearModel, fit};
 pub use experiment::{ExperimentManifest, ExperimentRecord, ExperimentRegistry, ExperimentStatus};

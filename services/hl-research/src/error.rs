@@ -28,6 +28,12 @@ pub enum ResearchError {
     Model(String),
     #[error("research cannot sign or place live orders")]
     TradingSignerForbidden,
+    #[error("research cannot load a live corpus")]
+    LiveCorpusForbidden,
+    #[error("research cannot load a locked holdout corpus")]
+    LockedCorpusForbidden,
+    #[error("research cannot claim replica command usage")]
+    ReplicaCmdsUsedForbidden,
     #[error("observation is missing {field}")]
     MissingObservation { field: &'static str },
     #[error("training sample is insufficient to fit {field}")]
@@ -62,6 +68,9 @@ impl ResearchError {
             Self::Simulation(_) => "hl_research.simulation",
             Self::Model(_) => "hl_research.model",
             Self::TradingSignerForbidden => "hl_research.trading_signer_forbidden",
+            Self::LiveCorpusForbidden => "hl_research.live_corpus",
+            Self::LockedCorpusForbidden => "hl_research.locked_corpus",
+            Self::ReplicaCmdsUsedForbidden => "hl_research.replica_cmds_used",
             Self::MissingObservation { .. } => "hl_research.missing_observation",
             Self::InsufficientTrain { .. } => "hl_research.insufficient_train",
             Self::UnmodeledVariance { .. } => "hl_research.unmodeled_variance",
