@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::claims::serialize_unclaimed;
 use crate::error::ResearchError;
 use crate::ledger::VariantLedger;
 
@@ -12,7 +13,12 @@ pub struct MultipleTestingReport {
     pub false_discovery: &'static str,
     pub deflated_performance: &'static str,
     pub withheld_reason: &'static str,
+    #[serde(serialize_with = "serialize_unclaimed")]
     pub alpha_quality_claimed: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub alpha_qualified: bool,
+    #[serde(serialize_with = "serialize_unclaimed")]
+    pub significance_claimed: bool,
 }
 
 pub fn diagnose_family(ledger: &VariantLedger) -> MultipleTestingReport {
@@ -31,6 +37,8 @@ pub fn diagnose_family(ledger: &VariantLedger) -> MultipleTestingReport {
         deflated_performance: "not_claimed",
         withheld_reason: reason,
         alpha_quality_claimed: false,
+        alpha_qualified: false,
+        significance_claimed: false,
     }
 }
 

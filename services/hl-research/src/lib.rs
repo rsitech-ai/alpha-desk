@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod baselines;
+mod claims;
 mod error;
 mod estimator;
 mod experiment;
@@ -23,8 +24,8 @@ pub use metrics::{
     score_predictions, stationary_block_bootstrap,
 };
 pub use promotion::{
-    GateDecision, GateResult, PromotionEvidence, PromotionPolicy, PromotionReport,
-    evaluate_promotion, promote, stamp_holdout_passed,
+    GateDecision, GateResult, HoldoutLock, PromotionEvidence, PromotionPolicy, PromotionReport,
+    evaluate_promotion, lock_path_is_in_repo, promote, stamp_holdout_passed,
 };
 pub use report::{ResearchReport, ResearchStatus};
 pub use shadow::{
