@@ -6,7 +6,7 @@ use std::{
 
 use canonical_events::BlockEnvelope;
 use domain_types::{BlockHeight, BlockRange, ChainId, KnownTime, ManifestId, SourceId};
-use hl_protocol::SourceObservation;
+use hl_protocol::{ObservationClass, SourceObservation};
 
 pub const ARCHIVE_MANIFEST_SCHEMA_V1: &str = "hyperliquid-alpha-desk/archive-manifest/v1";
 
@@ -1491,11 +1491,7 @@ impl RawObservationBatch {
         let first = observations
             .first()
             .ok_or(ArchiveError::InvalidInput("raw observation batch is empty"))?;
-        if matches!(
-            first.observation_class(),
-            hl_protocol::ObservationClass::CommittedBlock
-                | hl_protocol::ObservationClass::HistoricalBlock
-        ) {
+        if byte_offset_rejects_block_height_class(first.observation_class()) {
             return Err(ArchiveError::InvalidInput(
                 "byte-offset cursor policy is incompatible with block-height observation class",
             ));
@@ -1606,6 +1602,19 @@ impl RawObservationBatch {
     #[must_use]
     pub const fn spool_segment_blake3(&self) -> [u8; 32] {
         self.spool_segment_blake3
+    }
+}
+
+fn byte_offset_rejects_block_height_class(class: ObservationClass) -> bool {
+    match class {
+        ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock => true,
+        ObservationClass::AuxiliaryOrderStatus
+        | ObservationClass::AuxiliaryBookDiff
+        | ObservationClass::AuxiliaryLedger
+        | ObservationClass::Snapshot
+        | ObservationClass::PublicMarketData
+        | ObservationClass::ProvisionalFeed
+        | ObservationClass::ProvisionalMempool => false,
     }
 }
 
