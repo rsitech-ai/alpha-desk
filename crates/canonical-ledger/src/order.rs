@@ -827,8 +827,16 @@ impl OrderCurrentRecordV1 {
             .filled_quantity
             .checked_add(self.remaining_quantity)
             .map_err(|_| OrderStateError::InvalidRecord)?;
+        let filled_remaining_invalid = match self.lifecycle {
+            OrderLifecycleV1::Filled => self.remaining_quantity.raw() != 0,
+            OrderLifecycleV1::Accepted
+            | OrderLifecycleV1::Rested
+            | OrderLifecycleV1::Modified
+            | OrderLifecycleV1::PartiallyFilled
+            | OrderLifecycleV1::Cancelled => false,
+        };
         if total != self.accepted_quantity
-            || (self.lifecycle == OrderLifecycleV1::Filled && self.remaining_quantity.raw() != 0)
+            || filled_remaining_invalid
             || (!self.lifecycle.is_terminal() && self.remaining_quantity.raw() <= 0)
         {
             return Err(OrderStateError::InvalidRecord);
