@@ -5,21 +5,22 @@ use canonical_events::{
     AssetContextUpdated, BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput,
     CommittedNodeV1MappingContext, ConfirmationClass, DepositCredited, DexCreated, EventPayload,
     MarketCreated, OrderAccepted, OrderFilled, SourceEvidence, SpotTransfer, SubaccountTransfer,
-    VaultDeposit,
+    TradeMatched, TradeParticipantRoleV1, TradeParticipantV1, VaultDeposit,
 };
+use canonical_ledger::{PositionEpisodeRecordV1, derive_position_episode_id};
 use domain_types::{
     AccountId, Address, AssetId, BlockHeight, ChainId, ClosedInterval, DexId, Direction, EntityId,
-    FeatureSetVersion, Horizon, KnownTime, MarketId, OrderId, OrderSide, Price, ProbabilityPpm,
-    ProtocolTime, Quantity, QuoteAmount, ScenarioId, SignalId, SourceId, TradeId, TransactionId,
-    UsdAmount, VaultId,
+    EventId, FeatureSetVersion, Horizon, KnownTime, MarketId, OrderId, OrderSide, PositionQuantity,
+    Price, ProbabilityPpm, ProtocolTime, Quantity, QuoteAmount, ScenarioId, SignalId, SourceId,
+    TradeId, TransactionId, UsdAmount, VaultId,
 };
 use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
 use intelligence_replay::{
     IntelligenceReplayError, IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
-    admit_committed_confirmation, fold_withhold_reason, materialize_committed_node,
-    materialize_synthetic_replay, qualification_what_for_withhold, refuse_leaked_withheld_emission,
-    slippage_from_replay_blocks,
+    admit_committed_confirmation, fold_withhold_reason, holding_time_from_closed_episodes,
+    holding_time_from_replay_blocks, materialize_committed_node, materialize_synthetic_replay,
+    qualification_what_for_withhold, refuse_leaked_withheld_emission, slippage_from_replay_blocks,
 };
 use market_intelligence::{
     CrowdingPosition, FragilityScenario, MarketError, MarketFeatureSnapshot,
@@ -29,7 +30,10 @@ use signal_core::{
     ProofWithholdReason, Signal, SignalConfirmationClass, SignalError, SignalLifecycleState,
     SignalType, proof_withhold_reason, suppress_proof_withhold,
 };
-use wallet_intelligence::{IntelligenceError, slippage_from_order_events};
+use wallet_intelligence::{
+    HoldingTimeDistribution, IntelligenceError, ObservedHoldInterval, holding_time_distribution,
+    slippage_from_order_events,
+};
 
 const BUYER: Address = Address::from_bytes([0x11; 20]);
 const SELLER: Address = Address::from_bytes([0x22; 20]);
@@ -308,6 +312,182 @@ fn fill_without_limit_blocks() -> Vec<BlockEnvelope> {
     blocks
 }
 
+fn matched_trade(
+    height: u64,
+    index: u32,
+    trade_id: &str,
+    buyer: Address,
+    buyer_start: &str,
+    seller: Address,
+    seller_start: &str,
+) -> CanonicalEventEnvelope {
+    event(
+        height,
+        index,
+        EventPayload::TradeMatched(TradeMatched {
+            trade_id: Some(TradeId::new(trade_id).unwrap()),
+            market_id: Some(market()),
+            maker_order_id: None,
+            taker_order_id: None,
+            price: Price::from_str("100").unwrap(),
+            quantity: Quantity::from_str("1").unwrap(),
+            deterministic_seed: height,
+            participants: Some(Box::new([
+                TradeParticipantV1 {
+                    role: TradeParticipantRoleV1::Buyer,
+                    account_id: buyer,
+                    start_position: PositionQuantity::from_str(buyer_start).unwrap(),
+                    order_id: OrderId::new(format!("buyer-order-{trade_id}")).unwrap(),
+                    twap_id: None,
+                    client_order_id: None,
+                },
+                TradeParticipantV1 {
+                    role: TradeParticipantRoleV1::Seller,
+                    account_id: seller,
+                    start_position: PositionQuantity::from_str(seller_start).unwrap(),
+                    order_id: OrderId::new(format!("seller-order-{trade_id}")).unwrap(),
+                    twap_id: None,
+                    client_order_id: None,
+                },
+            ])),
+        }),
+        vec![market()],
+        vec![buyer, seller],
+    )
+}
+
+fn open_and_close_blocks() -> Vec<BlockEnvelope> {
+    let mut blocks = synthetic_blocks();
+    let open_height = START_HEIGHT + 2;
+    let close_height = START_HEIGHT + 3;
+    blocks.push(block(
+        open_height,
+        vec![matched_trade(
+            open_height,
+            0,
+            "trd-open",
+            BUYER,
+            "0",
+            SELLER,
+            "0",
+        )],
+    ));
+    blocks.push(block(
+        close_height,
+        vec![matched_trade(
+            close_height,
+            0,
+            "trd-close",
+            SELLER,
+            "-1",
+            BUYER,
+            "1",
+        )],
+    ));
+    blocks
+}
+
+fn open_only_blocks() -> Vec<BlockEnvelope> {
+    let mut blocks = synthetic_blocks();
+    let open_height = START_HEIGHT + 2;
+    blocks.push(block(
+        open_height,
+        vec![matched_trade(
+            open_height,
+            0,
+            "trd-open-only",
+            BUYER,
+            "0",
+            SELLER,
+            "0",
+        )],
+    ));
+    blocks
+}
+
+fn participant_free_trade_blocks() -> Vec<BlockEnvelope> {
+    let mut blocks = synthetic_blocks();
+    let height = START_HEIGHT + 2;
+    blocks.push(block(
+        height,
+        vec![event(
+            height,
+            0,
+            EventPayload::TradeMatched(TradeMatched {
+                trade_id: Some(TradeId::new("trd-legacy").unwrap()),
+                market_id: Some(market()),
+                maker_order_id: None,
+                taker_order_id: None,
+                price: Price::from_str("100").unwrap(),
+                quantity: Quantity::from_str("1").unwrap(),
+                deterministic_seed: height,
+                participants: None,
+            }),
+            vec![market()],
+            vec![BUYER, SELLER],
+        )],
+    ));
+    blocks
+}
+
+fn trade_named<'a>(
+    events: &'a [CanonicalEventEnvelope],
+    trade_id: &str,
+) -> &'a CanonicalEventEnvelope {
+    events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.payload(),
+                EventPayload::TradeMatched(trade)
+                    if trade.trade_id.as_ref().is_some_and(|id| id.as_str() == trade_id)
+            )
+        })
+        .unwrap_or_else(|| panic!("missing TradeMatched {trade_id}"))
+}
+
+fn expected_closed_holding_time(blocks: &[BlockEnvelope]) -> HoldingTimeDistribution {
+    let events = replay_events(blocks);
+    let open = trade_named(&events, "trd-open");
+    let close = trade_named(&events, "trd-close");
+    let interval = ObservedHoldInterval::try_new(open.block_time(), close.block_time()).unwrap();
+    holding_time_distribution(&[interval.clone(), interval]).unwrap()
+}
+
+fn zero_holding_time_distribution() -> HoldingTimeDistribution {
+    HoldingTimeDistribution {
+        sample_count: 0,
+        min_micros: 0,
+        max_micros: 0,
+        median_micros: 0,
+        total_micros: 0,
+    }
+}
+
+fn decoded_closed_episode() -> PositionEpisodeRecordV1 {
+    let opening = EventId::new("evt-open").unwrap();
+    let episode_id = derive_position_episode_id(&BUYER, &market(), &opening, 0).unwrap();
+    let bytes = format!(
+        "{{\"schema\":\"hyperliquid-alpha-desk/position-episode/v1\",\"episode_id\":\"{}\",\"account_id\":\"{}\",\"market_id\":\"{}\",\"opening_anchor_event_id\":\"evt-open\",\"opening_leg_ordinal\":0,\"opening_position\":\"0\",\"close_event_id\":\"evt-close\",\"close_cause\":\"trade_flat\",\"completeness\":\"complete_from_flat\",\"buy_quantity\":\"1\",\"buy_notional\":\"100\",\"sell_quantity\":\"1\",\"sell_notional\":\"100\",\"funding_paid\":\"0\",\"funding_received\":\"0\",\"status\":\"closed\",\"last_event_id\":\"evt-close\",\"last_block_height\":4}}",
+        episode_id.as_str(),
+        BUYER.to_api_string(),
+        market().as_str(),
+    );
+    PositionEpisodeRecordV1::decode(bytes.as_bytes()).unwrap()
+}
+
+fn decoded_open_episode() -> PositionEpisodeRecordV1 {
+    let opening = EventId::new("evt-open").unwrap();
+    let episode_id = derive_position_episode_id(&BUYER, &market(), &opening, 0).unwrap();
+    let bytes = format!(
+        "{{\"schema\":\"hyperliquid-alpha-desk/position-episode/v1\",\"episode_id\":\"{}\",\"account_id\":\"{}\",\"market_id\":\"{}\",\"opening_anchor_event_id\":\"evt-open\",\"opening_leg_ordinal\":0,\"opening_position\":\"0\",\"close_event_id\":null,\"close_cause\":null,\"completeness\":\"complete_from_flat\",\"buy_quantity\":\"1\",\"buy_notional\":\"100\",\"sell_quantity\":\"0\",\"sell_notional\":\"0\",\"funding_paid\":\"0\",\"funding_received\":\"0\",\"status\":\"open\",\"last_event_id\":\"evt-open\",\"last_block_height\":4}}",
+        episode_id.as_str(),
+        BUYER.to_api_string(),
+        market().as_str(),
+    );
+    PositionEpisodeRecordV1::decode(bytes.as_bytes()).unwrap()
+}
+
 fn replay_events(blocks: &[BlockEnvelope]) -> Vec<CanonicalEventEnvelope> {
     blocks
         .iter()
@@ -502,6 +682,7 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
     assert_synthetic_unassessed(&first);
     assert!(first.wallet_performance_withheld);
     assert!(first.slippage.is_none());
+    assert!(first.holding_time.is_none());
     assert!(matches!(
         first.require_wallet_performance(),
         Err(IntelligenceReplayError::MissingState)
@@ -599,6 +780,10 @@ fn observed_accept_and_fill_emits_slippage_from_in_force_limit_join() {
     assert!(report.wallet_performance_withheld);
     assert!(!report.fills_invented);
     assert!(!report.marks_invented);
+    assert!(
+        report.holding_time.is_none(),
+        "OrderFilled timestamps are not holding intervals"
+    );
     assert_eq!(
         report
             .require_asof_account(&account_id(BUYER), time(3), known(3))
@@ -661,6 +846,136 @@ fn inverted_replay_block_times_fail_closed_with_existing_order_event_error() {
             reason: "inverted times"
         })
     ));
+}
+
+#[test]
+fn closed_episodes_emit_holding_time_from_observed_stream_event_times() {
+    let blocks = open_and_close_blocks();
+    let report = materialize_synthetic_replay(&blocks, &request()).unwrap();
+    assert_synthetic_unassessed(&report);
+    assert!(report.wallet_performance_withheld);
+    assert_eq!(
+        report
+            .require_asof_account(&account_id(BUYER), time(4), known(4))
+            .unwrap()
+            .values
+            .get(&feature_core::FeatureKey::try_new("wallet", "equity_usd", 1).unwrap()),
+        Some(&FeatureValue::Missing(MissingReason::NotObserved))
+    );
+    assert_eq!(
+        report
+            .require_asof_account(&account_id(BUYER), time(4), known(4))
+            .unwrap()
+            .values
+            .get(&feature_core::FeatureKey::try_new("wallet", "fills", 1).unwrap()),
+        Some(&FeatureValue::Missing(MissingReason::NotObserved))
+    );
+    assert!(report.slippage.is_none());
+
+    let expected = expected_closed_holding_time(&blocks);
+    assert_eq!(report.holding_time.as_ref(), Some(&expected));
+    assert_eq!(
+        holding_time_from_replay_blocks(&blocks, &[]).unwrap(),
+        None,
+        "empty episode sample must withhold, not invent intervals from TradeMatched times"
+    );
+    assert_eq!(expected.sample_count, 2);
+    assert_eq!(expected.min_micros, 1_000_000);
+    assert_eq!(expected.max_micros, 1_000_000);
+    assert_eq!(expected.median_micros, 1_000_000);
+    assert_eq!(expected.total_micros, 2_000_000);
+    assert_ne!(expected.min_micros, 0);
+}
+
+#[test]
+fn open_episodes_withhold_holding_time_instead_of_inventing_a_close() {
+    let blocks = open_only_blocks();
+    let report = materialize_synthetic_replay(&blocks, &request()).unwrap();
+    assert_synthetic_unassessed(&report);
+    assert!(report.wallet_performance_withheld);
+    assert!(report.holding_time.is_none());
+    assert_ne!(report.holding_time, Some(zero_holding_time_distribution()));
+
+    let open = decoded_open_episode();
+    let mut times = BTreeMap::new();
+    times.insert(open.opening_anchor_event_id().clone(), time(3));
+    times.insert(EventId::new("watermark-is-not-a-close").unwrap(), time(4));
+    assert!(
+        holding_time_from_closed_episodes(std::slice::from_ref(&open), &times)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        holding_time_from_replay_blocks(&blocks, &[open])
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn closed_episode_missing_open_or_close_event_on_stream_withholds() {
+    let closed = decoded_closed_episode();
+    let open_id = closed.opening_anchor_event_id().clone();
+    let close_id = closed.close_event_id().unwrap().clone();
+    let mut times = BTreeMap::new();
+    times.insert(open_id.clone(), time(3));
+    assert!(
+        holding_time_from_closed_episodes(std::slice::from_ref(&closed), &times)
+            .unwrap()
+            .is_none(),
+        "missing close event must withhold, not use last_block_height"
+    );
+    times.remove(&open_id);
+    times.insert(close_id, time(4));
+    assert!(
+        holding_time_from_closed_episodes(std::slice::from_ref(&closed), &times)
+            .unwrap()
+            .is_none(),
+        "missing open event must withhold"
+    );
+    times.insert(open_id, time(3));
+    let expected =
+        holding_time_distribution(&[ObservedHoldInterval::try_new(time(3), time(4)).unwrap()])
+            .unwrap();
+    assert_eq!(
+        holding_time_from_closed_episodes(&[closed], &times)
+            .unwrap()
+            .as_ref(),
+        Some(&expected)
+    );
+}
+
+#[test]
+fn empty_holding_time_sample_withholds_instead_of_emitting_a_zero_distribution() {
+    assert!(matches!(
+        holding_time_distribution(&[]).unwrap_err(),
+        IntelligenceError::InsufficientHistory {
+            what: "holding_time"
+        }
+    ));
+    let empty = holding_time_from_closed_episodes(&[], &BTreeMap::new()).unwrap();
+    assert!(empty.is_none());
+    assert_ne!(empty, Some(zero_holding_time_distribution()));
+
+    let report = materialize_synthetic_replay(&synthetic_blocks(), &request()).unwrap();
+    assert!(report.holding_time.is_none());
+    assert_ne!(report.holding_time, Some(zero_holding_time_distribution()));
+}
+
+#[test]
+fn participant_free_trade_matched_does_not_invent_a_holding_interval() {
+    let blocks = participant_free_trade_blocks();
+    let report = materialize_synthetic_replay(&blocks, &request()).unwrap();
+    assert_synthetic_unassessed(&report);
+    assert!(report.wallet_performance_withheld);
+    assert!(report.holding_time.is_none());
+    assert_ne!(report.holding_time, Some(zero_holding_time_distribution()));
+    assert!(
+        holding_time_from_replay_blocks(&blocks, &[])
+            .unwrap()
+            .is_none(),
+        "participant-free TradeMatched must not mint an episode or interval"
+    );
 }
 
 fn assert_accounts_unmerged(report: &IntelligenceReplayReport) {

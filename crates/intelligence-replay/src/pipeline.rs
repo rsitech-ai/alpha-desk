@@ -5,11 +5,12 @@ use canonical_events::{
 };
 use canonical_ledger::{
     AccountFactRecordV1, AccountVaultRelationCurrentRecordV1, ApplyOutcome, CanonicalLedger,
-    CanonicalStateReducerV1, EventReducer, LedgerError, LedgerLimits, MarketCurrentRecordV1,
-    MarketStatusV1, StateImage, SubaccountMasterCurrentRecordV1, WatermarkOnlyReducerV1,
+    CanonicalStateReducerV1, EpisodeStatusV1, EventReducer, LedgerError, LedgerLimits,
+    MarketCurrentRecordV1, MarketStatusV1, PositionEpisodeRecordV1, StateImage,
+    SubaccountMasterCurrentRecordV1, WatermarkOnlyReducerV1,
 };
 use domain_types::{
-    AccountId, Address, BlockHeight, EvidenceId, FeatureSetVersion, Horizon, KnownTime,
+    AccountId, Address, BlockHeight, EventId, EvidenceId, FeatureSetVersion, Horizon, KnownTime,
     ProtocolTime, ScenarioId, UsdAmount,
 };
 use entity_graph::{EntityGraph, GraphNodeId, LinkEvidence, LinkKind};
@@ -25,8 +26,9 @@ use market_intelligence::{
 };
 use signal_core::{ProofWithholdReason, SignalConfirmationClass, proof_withhold_reason};
 use wallet_intelligence::{
-    DEFAULT_RETURN_SCALE, DEFAULT_USD_SCALE, IntelligenceError, IntelligenceSubject,
-    PerformanceLedger, SlippageSummary, slippage_from_order_events,
+    DEFAULT_RETURN_SCALE, DEFAULT_USD_SCALE, HoldingTimeDistribution, IntelligenceError,
+    IntelligenceSubject, ObservedHoldInterval, PerformanceLedger, SlippageSummary,
+    holding_time_distribution, slippage_from_order_events,
 };
 
 use crate::IntelligenceReplayError;
@@ -35,6 +37,7 @@ const ACCOUNT_FACT_NS: &str = "account-fact.v1";
 const SUBACCOUNT_NS: &str = "account-subaccount-master.v1";
 const VAULT_RELATION_NS: &str = "account-vault-relation.v1";
 const MARKET_CURRENT_NS: &str = "market-current.v1";
+const POSITION_EPISODE_NS: &str = "position-episode.v1";
 const SOURCE_QUALIFICATION: &str = "synthetic_unassessed";
 
 /// Explicit qualification claim. Only synthetic-unassessed replay is admitted.
@@ -102,6 +105,7 @@ pub struct IntelligenceReplayReport {
     pub alpha_qualified: bool,
     pub wallet_performance_withheld: bool,
     pub slippage: Option<SlippageSummary>,
+    pub holding_time: Option<HoldingTimeDistribution>,
     pub live_signal_count: u64,
     pub crowding_emitted: u64,
     pub fragility_emitted: u64,
@@ -238,6 +242,10 @@ fn replay_and_materialize<R: EventReducer>(
     let market_snapshots = emit_market_snapshots(&facts, &ctx)?;
     let wallet_performance_withheld = withhold_wallet_performance(&facts.accounts, &ctx)?;
     let slippage = slippage_from_replay_blocks(blocks)?;
+    let holding_time = holding_time_from_closed_episodes(
+        &facts.episodes,
+        &event_times_from_replay_blocks(blocks)?,
+    )?;
     let (crowding_emitted, fragility_emitted, live_signal_count) =
         assess_market_emissions(&market_snapshots)?;
 
@@ -253,6 +261,7 @@ fn replay_and_materialize<R: EventReducer>(
         alpha_qualified: false,
         wallet_performance_withheld,
         slippage,
+        holding_time,
         live_signal_count,
         crowding_emitted,
         fragility_emitted,
@@ -287,6 +296,7 @@ struct ReconstructedFacts {
     subaccounts: Vec<SubaccountMasterCurrentRecordV1>,
     vaults: Vec<AccountVaultRelationCurrentRecordV1>,
     markets: Vec<MarketCurrentRecordV1>,
+    episodes: Vec<PositionEpisodeRecordV1>,
 }
 
 impl ReconstructedFacts {
@@ -321,6 +331,11 @@ fn decode_facts(image: &StateImage) -> Result<ReconstructedFacts, IntelligenceRe
                 facts
                     .markets
                     .push(MarketCurrentRecordV1::decode_at(key, value)?);
+            }
+            POSITION_EPISODE_NS => {
+                facts
+                    .episodes
+                    .push(PositionEpisodeRecordV1::decode_at(key, value)?);
             }
             _ => {}
         }
@@ -535,6 +550,78 @@ pub fn slippage_from_replay_blocks(
         .cloned()
         .collect();
     Ok(slippage_from_order_events(&events)?)
+}
+
+/// Join closed position episodes to open/close times already present on the
+/// replay stream. Open episodes are withheld. Missing event IDs withhold that
+/// interval. An empty sample withholds (`None`) instead of a zero distribution.
+/// Watermarks and `last_block_height` are never used as a close.
+pub fn holding_time_from_replay_blocks(
+    blocks: &[BlockEnvelope],
+    episodes: &[PositionEpisodeRecordV1],
+) -> Result<Option<HoldingTimeDistribution>, IntelligenceReplayError> {
+    holding_time_from_closed_episodes(episodes, &event_times_from_replay_blocks(blocks)?)
+}
+
+/// Join closed episode event IDs to observed stream times.
+pub fn holding_time_from_closed_episodes(
+    episodes: &[PositionEpisodeRecordV1],
+    event_times: &BTreeMap<EventId, ProtocolTime>,
+) -> Result<Option<HoldingTimeDistribution>, IntelligenceReplayError> {
+    let mut intervals = Vec::new();
+    for episode in episodes {
+        if let Some(interval) = closed_hold_interval(episode, event_times)? {
+            intervals.push(interval);
+        }
+    }
+    match holding_time_distribution(&intervals) {
+        Ok(distribution) => Ok(Some(distribution)),
+        Err(IntelligenceError::InsufficientHistory {
+            what: "holding_time",
+        }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn closed_hold_interval(
+    episode: &PositionEpisodeRecordV1,
+    event_times: &BTreeMap<EventId, ProtocolTime>,
+) -> Result<Option<ObservedHoldInterval>, IntelligenceReplayError> {
+    match episode.status() {
+        EpisodeStatusV1::Open | EpisodeStatusV1::Interrupted => Ok(None),
+        EpisodeStatusV1::Closed => {
+            let Some(close_event_id) = episode.close_event_id() else {
+                return Ok(None);
+            };
+            let Some(&opened_at) = event_times.get(episode.opening_anchor_event_id()) else {
+                return Ok(None);
+            };
+            let Some(&closed_at) = event_times.get(close_event_id) else {
+                return Ok(None);
+            };
+            Ok(Some(ObservedHoldInterval::try_new(opened_at, closed_at)?))
+        }
+    }
+}
+
+fn event_times_from_replay_blocks(
+    blocks: &[BlockEnvelope],
+) -> Result<BTreeMap<EventId, ProtocolTime>, IntelligenceReplayError> {
+    let mut times = BTreeMap::new();
+    for block in blocks {
+        for event in block.events() {
+            if let Some(previous) = times.insert(event.event_id().clone(), event.block_time())
+                && previous != event.block_time()
+            {
+                return Err(IntelligenceError::Malformed {
+                    what: "holding_time",
+                    reason: "conflicting event times",
+                }
+                .into());
+            }
+        }
+    }
+    Ok(times)
 }
 
 fn withhold_wallet_performance(
