@@ -1,6 +1,6 @@
 use domain_types::{
-    AssetId, BasisPoints, BlockHeight, Decimal, DexId, FeatureSetVersion, KnownTime,
-    ProbabilityPpm, ProtocolTime, RoundingMode, UsdAmount,
+    AssetId, BasisPoints, BlockHeight, Decimal, DexId, FeatureSetVersion, KnownTime, MarketId,
+    ProbabilityPpm, ProtocolTime, RegimeId, RoundingMode, UsdAmount,
 };
 use feature_core::HealthState;
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,8 @@ impl EquityObservation {
 pub struct ConcentrationInput {
     pub asset_pnl: Vec<(AssetId, UsdAmount)>,
     pub dex_pnl: Vec<(DexId, UsdAmount)>,
+    pub collateral_pnl: Vec<(AssetId, UsdAmount)>,
+    pub regime_pnl: Vec<(RegimeId, UsdAmount)>,
     pub trade_pnl: Vec<UsdAmount>,
     pub month_pnl: Vec<UsdAmount>,
 }
@@ -81,6 +83,8 @@ pub struct ConcentrationInput {
 pub struct ConcentrationBreakdown {
     pub asset_hhi_ppm: ProbabilityPpm,
     pub dex_hhi_ppm: ProbabilityPpm,
+    pub collateral_hhi_ppm: Option<ProbabilityPpm>,
+    pub regime_hhi_ppm: Option<ProbabilityPpm>,
     pub best_trade_share: ProbabilityPpm,
     pub best_month_share: ProbabilityPpm,
 }
@@ -680,9 +684,21 @@ pub fn concentration_breakdown(
     Ok(ConcentrationBreakdown {
         asset_hhi_ppm: herfindahl(&input.asset_pnl)?,
         dex_hhi_ppm: herfindahl(&input.dex_pnl)?,
+        collateral_hhi_ppm: optional_herfindahl(&input.collateral_pnl)?,
+        regime_hhi_ppm: optional_herfindahl(&input.regime_pnl)?,
         best_trade_share: best_share(&input.trade_pnl)?,
         best_month_share: best_share(&input.month_pnl)?,
     })
+}
+
+fn optional_herfindahl<T>(
+    items: &[(T, UsdAmount)],
+) -> Result<Option<ProbabilityPpm>, IntelligenceError> {
+    if items.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(herfindahl(items)?))
+    }
 }
 
 fn herfindahl<T>(items: &[(T, UsdAmount)]) -> Result<ProbabilityPpm, IntelligenceError> {
@@ -797,6 +813,56 @@ pub fn long_short_beta(
         RoundingMode::NearestTiesToEven,
     )?;
     Ok((long, short))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketBetaObservation {
+    pub market_id: MarketId,
+    pub long_pnl: UsdAmount,
+    pub short_pnl: UsdAmount,
+    pub market_return: Option<BasisPoints>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketBeta {
+    pub market_id: MarketId,
+    pub long_beta: Decimal,
+    pub short_beta: Decimal,
+}
+
+pub fn long_short_beta_by_market(
+    observations: &[MarketBetaObservation],
+) -> Result<Option<Vec<MarketBeta>>, IntelligenceError> {
+    if observations.is_empty() {
+        return Ok(None);
+    }
+    let mut betas = Vec::new();
+    for (index, observation) in observations.iter().enumerate() {
+        if observations[..index]
+            .iter()
+            .any(|prior| prior.market_id == observation.market_id)
+        {
+            return Err(IntelligenceError::Malformed {
+                what: "beta",
+                reason: "duplicate market",
+            });
+        }
+        let Some(market_return) = observation.market_return else {
+            continue;
+        };
+        let (long_beta, short_beta) =
+            long_short_beta(observation.long_pnl, observation.short_pnl, market_return)?;
+        betas.push(MarketBeta {
+            market_id: observation.market_id.clone(),
+            long_beta,
+            short_beta,
+        });
+    }
+    if betas.is_empty() {
+        return Ok(None);
+    }
+    betas.sort_by(|left, right| left.market_id.as_str().cmp(right.market_id.as_str()));
+    Ok(Some(betas))
 }
 
 pub fn performance_before_after_capital_change(

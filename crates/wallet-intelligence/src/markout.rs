@@ -45,10 +45,27 @@ impl ActionSide {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MarkoutKind {
+    Entry,
+    Exit,
+}
+
+impl MarkoutKind {
+    #[must_use]
+    pub const fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Entry => "entry",
+            Self::Exit => "exit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkoutPoint {
     pub action_id: EventId,
     pub market_id: MarketId,
+    pub kind: MarkoutKind,
     pub side: ActionSide,
     pub role: LiquidityRole,
     pub entry_at: ProtocolTime,
@@ -65,6 +82,7 @@ pub struct MarkoutPoint {
 pub struct MarkoutResult {
     pub action_id: EventId,
     pub market_id: MarketId,
+    pub kind: MarkoutKind,
     pub horizon: Horizon,
     pub net_markout_bps: BasisPoints,
     pub complete: bool,
@@ -91,6 +109,7 @@ impl MarkoutPoint {
             return Ok(MarkoutResult {
                 action_id: self.action_id.clone(),
                 market_id: self.market_id.clone(),
+                kind: self.kind,
                 horizon: self.horizon,
                 net_markout_bps: BasisPoints::from_raw(0, 2)?,
                 complete: false,
@@ -121,6 +140,7 @@ impl MarkoutPoint {
         Ok(MarkoutResult {
             action_id: self.action_id.clone(),
             market_id: self.market_id.clone(),
+            kind: self.kind,
             horizon: self.horizon,
             net_markout_bps: BasisPoints::from_raw(net, 2)?,
             complete: true,
@@ -128,6 +148,20 @@ impl MarkoutPoint {
             side: self.side,
         })
     }
+}
+
+pub fn evaluate_markouts(
+    points: &[MarkoutPoint],
+    known_at: KnownTime,
+) -> Result<Option<Vec<MarkoutResult>>, IntelligenceError> {
+    if points.is_empty() {
+        return Ok(None);
+    }
+    let mut results = Vec::with_capacity(points.len());
+    for point in points {
+        results.push(point.evaluate(known_at)?);
+    }
+    Ok(Some(results))
 }
 
 fn cost_to_bps(
