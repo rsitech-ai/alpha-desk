@@ -17,7 +17,8 @@ pub use evidence::{EvidenceFamily, LinkEvidence, LinkKind};
 pub use graph::{ClusterMembershipVersion, EntityGraph, membership_hash};
 pub use independence::{IndependenceInput, effective_votes, independence_weight, normalize_cohort};
 pub use leader_follower::{
-    ActionDirection, ActionEvent, RelationshipClass, RelationshipEdge, classify_pair,
+    ActionDirection, ActionEvent, RelationshipClass, RelationshipEdge, SizeRelationship,
+    classify_pair,
 };
 pub use node::GraphNodeId;
 pub use policy::LinkPolicy;
