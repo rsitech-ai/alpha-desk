@@ -1,10 +1,12 @@
 use domain_types::{
-    AccountId, AssetId, BlockHeight, DexId, FeatureSetVersion, KnownTime, ProtocolTime, UsdAmount,
+    AccountId, AssetId, BasisPoints, BlockHeight, DexId, FeatureSetVersion, KnownTime, MarketId,
+    ProtocolTime, RegimeId, UsdAmount,
 };
 use wallet_intelligence::{
     CashFlowKind, ConcentrationInput, DEFAULT_RETURN_SCALE, DEFAULT_USD_SCALE, EquityObservation,
-    ExternalCashFlow, IntelligenceError, IntelligenceSubject, PerformanceLedger,
-    concentration_breakdown, maker_taker_mix,
+    ExternalCashFlow, IntelligenceError, IntelligenceSubject, MarketBetaObservation,
+    PerformanceLedger, concentration_breakdown, long_short_beta, long_short_beta_by_market,
+    maker_taker_mix,
 };
 
 fn usd(value: &str) -> UsdAmount {
@@ -124,6 +126,8 @@ fn concentration_and_maker_mix_preserve_exact_ratios() {
             (AssetId::new("eth").unwrap(), usd("20")),
         ],
         dex_pnl: vec![(DexId::new("xyz").unwrap(), usd("100"))],
+        collateral_pnl: vec![],
+        regime_pnl: vec![],
         trade_pnl: vec![usd("90"), usd("10")],
         month_pnl: vec![usd("70"), usd("30")],
     })
@@ -131,8 +135,101 @@ fn concentration_and_maker_mix_preserve_exact_ratios() {
     assert_eq!(breakdown.best_trade_share.ppm(), 900_000);
     assert_eq!(breakdown.best_month_share.ppm(), 700_000);
     assert!(breakdown.asset_hhi_ppm.ppm() > 600_000);
+    assert!(breakdown.collateral_hhi_ppm.is_none());
+    assert!(breakdown.regime_hhi_ppm.is_none());
     assert_eq!(
         maker_taker_mix(usd("25"), usd("75")).unwrap().ppm(),
         250_000
     );
+}
+
+#[test]
+fn collateral_and_regime_concentration_use_observed_series_only() {
+    let breakdown = concentration_breakdown(&ConcentrationInput {
+        asset_pnl: vec![(AssetId::new("btc").unwrap(), usd("100"))],
+        dex_pnl: vec![(DexId::new("xyz").unwrap(), usd("100"))],
+        collateral_pnl: vec![
+            (AssetId::new("usdc").unwrap(), usd("80")),
+            (AssetId::new("eth").unwrap(), usd("20")),
+        ],
+        regime_pnl: vec![
+            (RegimeId::new("vol-high").unwrap(), usd("70")),
+            (RegimeId::new("vol-low").unwrap(), usd("30")),
+        ],
+        trade_pnl: vec![usd("100")],
+        month_pnl: vec![usd("100")],
+    })
+    .unwrap();
+    assert_eq!(breakdown.collateral_hhi_ppm.unwrap().ppm(), 680_000);
+    assert_eq!(breakdown.regime_hhi_ppm.unwrap().ppm(), 580_000);
+}
+
+#[test]
+fn long_short_beta_by_market_withholds_missing_returns() {
+    assert!(long_short_beta_by_market(&[]).unwrap().is_none());
+    let withheld = long_short_beta_by_market(&[MarketBetaObservation {
+        market_id: MarketId::new("BTC").unwrap(),
+        long_pnl: usd("10"),
+        short_pnl: usd("-4"),
+        market_return: None,
+    }])
+    .unwrap();
+    assert!(withheld.is_none());
+    let zero = long_short_beta_by_market(&[MarketBetaObservation {
+        market_id: MarketId::new("BTC").unwrap(),
+        long_pnl: usd("10"),
+        short_pnl: usd("-4"),
+        market_return: Some(BasisPoints::from_raw(0, 2).unwrap()),
+    }])
+    .unwrap_err();
+    assert!(matches!(
+        zero,
+        IntelligenceError::Unsupported {
+            what: "beta_with_zero_market_return"
+        }
+    ));
+    let duplicate = long_short_beta_by_market(&[
+        MarketBetaObservation {
+            market_id: MarketId::new("BTC").unwrap(),
+            long_pnl: usd("10"),
+            short_pnl: usd("-4"),
+            market_return: Some(BasisPoints::from_raw(200, 2).unwrap()),
+        },
+        MarketBetaObservation {
+            market_id: MarketId::new("BTC").unwrap(),
+            long_pnl: usd("1"),
+            short_pnl: usd("1"),
+            market_return: Some(BasisPoints::from_raw(100, 2).unwrap()),
+        },
+    ])
+    .unwrap_err();
+    assert!(matches!(
+        duplicate,
+        IntelligenceError::Malformed {
+            what: "beta",
+            reason: "duplicate market"
+        }
+    ));
+    let (long, short) =
+        long_short_beta(usd("10"), usd("-4"), BasisPoints::from_raw(200, 2).unwrap()).unwrap();
+    let by_market = long_short_beta_by_market(&[
+        MarketBetaObservation {
+            market_id: MarketId::new("ETH").unwrap(),
+            long_pnl: usd("5"),
+            short_pnl: usd("1"),
+            market_return: None,
+        },
+        MarketBetaObservation {
+            market_id: MarketId::new("BTC").unwrap(),
+            long_pnl: usd("10"),
+            short_pnl: usd("-4"),
+            market_return: Some(BasisPoints::from_raw(200, 2).unwrap()),
+        },
+    ])
+    .unwrap()
+    .unwrap();
+    assert_eq!(by_market.len(), 1);
+    assert_eq!(by_market[0].market_id, MarketId::new("BTC").unwrap());
+    assert_eq!(by_market[0].long_beta, long);
+    assert_eq!(by_market[0].short_beta, short);
 }
