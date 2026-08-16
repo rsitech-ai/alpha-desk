@@ -128,12 +128,14 @@ fn concentration_and_maker_mix_preserve_exact_ratios() {
         dex_pnl: vec![(DexId::new("xyz").unwrap(), usd("100"))],
         collateral_pnl: vec![],
         regime_pnl: vec![],
+        market_pnl: vec![],
         trade_pnl: vec![usd("90"), usd("10")],
         month_pnl: vec![usd("70"), usd("30")],
     })
     .unwrap();
     assert_eq!(breakdown.best_trade_share.ppm(), 900_000);
     assert_eq!(breakdown.best_month_share.ppm(), 700_000);
+    assert!(breakdown.best_market_share.is_none());
     assert!(breakdown.asset_hhi_ppm.ppm() > 600_000);
     assert!(breakdown.collateral_hhi_ppm.is_none());
     assert!(breakdown.regime_hhi_ppm.is_none());
@@ -156,12 +158,77 @@ fn collateral_and_regime_concentration_use_observed_series_only() {
             (RegimeId::new("vol-high").unwrap(), usd("70")),
             (RegimeId::new("vol-low").unwrap(), usd("30")),
         ],
+        market_pnl: vec![],
         trade_pnl: vec![usd("100")],
         month_pnl: vec![usd("100")],
     })
     .unwrap();
     assert_eq!(breakdown.collateral_hhi_ppm.unwrap().ppm(), 680_000);
     assert_eq!(breakdown.regime_hhi_ppm.unwrap().ppm(), 580_000);
+    assert!(breakdown.best_market_share.is_none());
+}
+
+#[test]
+fn best_market_share_uses_observed_market_series_and_withholds_when_unobserved() {
+    let withheld = concentration_breakdown(&ConcentrationInput {
+        asset_pnl: vec![(AssetId::new("btc").unwrap(), usd("100"))],
+        dex_pnl: vec![(DexId::new("xyz").unwrap(), usd("100"))],
+        collateral_pnl: vec![],
+        regime_pnl: vec![],
+        market_pnl: vec![],
+        trade_pnl: vec![usd("100")],
+        month_pnl: vec![usd("100")],
+    })
+    .unwrap();
+    assert!(withheld.best_market_share.is_none());
+
+    let breakdown = concentration_breakdown(&ConcentrationInput {
+        asset_pnl: vec![(AssetId::new("btc").unwrap(), usd("100"))],
+        dex_pnl: vec![(DexId::new("xyz").unwrap(), usd("100"))],
+        collateral_pnl: vec![],
+        regime_pnl: vec![],
+        market_pnl: vec![
+            (MarketId::new("BTC").unwrap(), usd("90")),
+            (MarketId::new("ETH").unwrap(), usd("10")),
+        ],
+        trade_pnl: vec![usd("100")],
+        month_pnl: vec![usd("100")],
+    })
+    .unwrap();
+    assert_eq!(breakdown.best_market_share.unwrap().ppm(), 900_000);
+
+    let duplicate = concentration_breakdown(&ConcentrationInput {
+        asset_pnl: vec![(AssetId::new("btc").unwrap(), usd("100"))],
+        dex_pnl: vec![(DexId::new("xyz").unwrap(), usd("100"))],
+        collateral_pnl: vec![],
+        regime_pnl: vec![],
+        market_pnl: vec![
+            (MarketId::new("BTC").unwrap(), usd("90")),
+            (MarketId::new("BTC").unwrap(), usd("10")),
+        ],
+        trade_pnl: vec![usd("100")],
+        month_pnl: vec![usd("100")],
+    })
+    .unwrap_err();
+    assert!(matches!(
+        duplicate,
+        IntelligenceError::Malformed {
+            what: "concentration",
+            reason: "duplicate market"
+        }
+    ));
+
+    let zero_total = concentration_breakdown(&ConcentrationInput {
+        asset_pnl: vec![(AssetId::new("btc").unwrap(), usd("100"))],
+        dex_pnl: vec![(DexId::new("xyz").unwrap(), usd("100"))],
+        collateral_pnl: vec![],
+        regime_pnl: vec![],
+        market_pnl: vec![(MarketId::new("BTC").unwrap(), usd("0"))],
+        trade_pnl: vec![usd("100")],
+        month_pnl: vec![usd("100")],
+    })
+    .unwrap_err();
+    assert!(matches!(zero_total, IntelligenceError::DivisionByZero));
 }
 
 #[test]
