@@ -39,7 +39,10 @@ pub use skill::{
     SkillEstimate, SkillObservation, SkillPrior, SkillVector, effective_sample_size_milli,
     estimate_skill,
 };
-pub use slippage::{ObservedFill, SlippageSummary, slippage_from_fills};
+pub use slippage::{
+    ObservedFill, SlippageSummary, observed_fills_from_order_events, slippage_from_fills,
+    slippage_from_order_events,
+};
 pub use style::{StyleClass, StyleFeatures, StyleSnapshot, classify_style};
 pub use subject::{Applicability, ApplicabilitySupport, IntelligenceSubject};
 pub use whale::{WhaleComponents, WhaleInputs};

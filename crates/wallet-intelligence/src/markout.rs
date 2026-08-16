@@ -1,5 +1,5 @@
 use domain_types::{
-    BasisPoints, EventId, Horizon, KnownTime, MarketId, Price, ProtocolTime, UsdAmount,
+    BasisPoints, EventId, Horizon, KnownTime, MarketId, OrderSide, Price, ProtocolTime, UsdAmount,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,15 @@ impl ActionSide {
         match self {
             Self::Buy => 1,
             Self::Sell => -1,
+        }
+    }
+}
+
+impl From<OrderSide> for ActionSide {
+    fn from(side: OrderSide) -> Self {
+        match side {
+            OrderSide::Buy => Self::Buy,
+            OrderSide::Sell => Self::Sell,
         }
     }
 }
