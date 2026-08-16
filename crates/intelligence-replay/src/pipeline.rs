@@ -26,7 +26,7 @@ use market_intelligence::{
 use signal_core::{ProofWithholdReason, SignalConfirmationClass, proof_withhold_reason};
 use wallet_intelligence::{
     DEFAULT_RETURN_SCALE, DEFAULT_USD_SCALE, IntelligenceError, IntelligenceSubject,
-    PerformanceLedger,
+    PerformanceLedger, SlippageSummary, slippage_from_order_events,
 };
 
 use crate::IntelligenceReplayError;
@@ -101,6 +101,7 @@ pub struct IntelligenceReplayReport {
     pub live_qualified: bool,
     pub alpha_qualified: bool,
     pub wallet_performance_withheld: bool,
+    pub slippage: Option<SlippageSummary>,
     pub live_signal_count: u64,
     pub crowding_emitted: u64,
     pub fragility_emitted: u64,
@@ -236,6 +237,7 @@ fn replay_and_materialize<R: EventReducer>(
     let entity_graph = emit_links(&facts, &block_times)?;
     let market_snapshots = emit_market_snapshots(&facts, &ctx)?;
     let wallet_performance_withheld = withhold_wallet_performance(&facts.accounts, &ctx)?;
+    let slippage = slippage_from_replay_blocks(blocks)?;
     let (crowding_emitted, fragility_emitted, live_signal_count) =
         assess_market_emissions(&market_snapshots)?;
 
@@ -250,6 +252,7 @@ fn replay_and_materialize<R: EventReducer>(
         live_qualified: false,
         alpha_qualified: false,
         wallet_performance_withheld,
+        slippage,
         live_signal_count,
         crowding_emitted,
         fragility_emitted,
@@ -516,6 +519,22 @@ fn emit_market_snapshots(
         )?);
     }
     Ok(snapshots)
+}
+
+/// Join canonical events already present on replayed blocks to in-force limits.
+///
+/// The join reference is the in-force limit, never a mid or mark. Missing order
+/// events or missing in-force limits withhold (`None`). Inverted times and
+/// unknown event order fail closed through existing wallet-intelligence errors.
+pub fn slippage_from_replay_blocks(
+    blocks: &[BlockEnvelope],
+) -> Result<Option<SlippageSummary>, IntelligenceReplayError> {
+    let events: Vec<_> = blocks
+        .iter()
+        .flat_map(BlockEnvelope::events)
+        .cloned()
+        .collect();
+    Ok(slippage_from_order_events(&events)?)
 }
 
 fn withhold_wallet_performance(

@@ -4,12 +4,14 @@ use std::str::FromStr;
 use canonical_events::{
     AssetContextUpdated, BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput,
     CommittedNodeV1MappingContext, ConfirmationClass, DepositCredited, DexCreated, EventPayload,
-    MarketCreated, SourceEvidence, SpotTransfer, SubaccountTransfer, VaultDeposit,
+    MarketCreated, OrderAccepted, OrderFilled, SourceEvidence, SpotTransfer, SubaccountTransfer,
+    VaultDeposit,
 };
 use domain_types::{
     AccountId, Address, AssetId, BlockHeight, ChainId, ClosedInterval, DexId, Direction, EntityId,
-    FeatureSetVersion, Horizon, KnownTime, MarketId, Price, ProbabilityPpm, ProtocolTime, Quantity,
-    QuoteAmount, ScenarioId, SignalId, SourceId, TransactionId, UsdAmount, VaultId,
+    FeatureSetVersion, Horizon, KnownTime, MarketId, OrderId, OrderSide, Price, ProbabilityPpm,
+    ProtocolTime, Quantity, QuoteAmount, ScenarioId, SignalId, SourceId, TradeId, TransactionId,
+    UsdAmount, VaultId,
 };
 use feature_core::{FeatureValue, HealthAssessment, HealthState, MissingReason};
 use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
@@ -17,6 +19,7 @@ use intelligence_replay::{
     IntelligenceReplayError, IntelligenceReplayReport, MaterializeRequest, QualificationClaim,
     admit_committed_confirmation, fold_withhold_reason, materialize_committed_node,
     materialize_synthetic_replay, qualification_what_for_withhold, refuse_leaked_withheld_emission,
+    slippage_from_replay_blocks,
 };
 use market_intelligence::{
     CrowdingPosition, FragilityScenario, MarketError, MarketFeatureSnapshot,
@@ -26,6 +29,7 @@ use signal_core::{
     ProofWithholdReason, Signal, SignalConfirmationClass, SignalError, SignalLifecycleState,
     SignalType, proof_withhold_reason, suppress_proof_withhold,
 };
+use wallet_intelligence::{IntelligenceError, slippage_from_order_events};
 
 const BUYER: Address = Address::from_bytes([0x11; 20]);
 const SELLER: Address = Address::from_bytes([0x22; 20]);
@@ -245,6 +249,73 @@ fn synthetic_blocks() -> Vec<BlockEnvelope> {
     vec![market_prerequisite_block(), account_relation_block()]
 }
 
+fn order_id() -> OrderId {
+    OrderId::new("intelligence-replay-order-1").unwrap()
+}
+
+fn accepted_payload() -> EventPayload {
+    EventPayload::OrderAccepted(OrderAccepted {
+        order_id: order_id(),
+        account_id: BUYER,
+        market_id: market(),
+        side: OrderSide::Buy,
+        limit_price: Price::parse_at_scale("100", 6).unwrap(),
+        quantity: Quantity::parse_at_scale("1", 8).unwrap(),
+    })
+}
+
+fn filled_payload(trade: &str, fill_price: &str) -> EventPayload {
+    EventPayload::OrderFilled(OrderFilled {
+        order_id: order_id(),
+        trade_id: TradeId::new(trade).unwrap(),
+        fill_price: Price::parse_at_scale(fill_price, 6).unwrap(),
+        fill_quantity: Quantity::parse_at_scale("1", 8).unwrap(),
+    })
+}
+
+fn accept_and_fill_blocks() -> Vec<BlockEnvelope> {
+    let height = START_HEIGHT + 2;
+    let mut blocks = synthetic_blocks();
+    blocks.push(block(
+        height,
+        vec![
+            event(height, 0, accepted_payload(), vec![market()], vec![BUYER]),
+            event(
+                height,
+                1,
+                filled_payload("intelligence-replay-trade-1", "101"),
+                vec![market()],
+                vec![BUYER],
+            ),
+        ],
+    ));
+    blocks
+}
+
+fn fill_without_limit_blocks() -> Vec<BlockEnvelope> {
+    let height = START_HEIGHT + 2;
+    let mut blocks = synthetic_blocks();
+    blocks.push(block(
+        height,
+        vec![event(
+            height,
+            0,
+            filled_payload("intelligence-replay-trade-orphan", "101"),
+            vec![market()],
+            vec![BUYER],
+        )],
+    ));
+    blocks
+}
+
+fn replay_events(blocks: &[BlockEnvelope]) -> Vec<CanonicalEventEnvelope> {
+    blocks
+        .iter()
+        .flat_map(BlockEnvelope::events)
+        .cloned()
+        .collect()
+}
+
 fn empty_confirmed_block(confirmation: ConfirmationClass) -> BlockEnvelope {
     BlockEnvelope::try_new(
         chain(),
@@ -430,6 +501,7 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
     assert_eq!(first.state_hash, second.state_hash);
     assert_synthetic_unassessed(&first);
     assert!(first.wallet_performance_withheld);
+    assert!(first.slippage.is_none());
     assert!(matches!(
         first.require_wallet_performance(),
         Err(IntelligenceReplayError::MissingState)
@@ -517,6 +589,78 @@ fn synthetic_replay_wires_reconstructed_state_to_pit_features() {
             .get(&market_intelligence::market_feature_key("inventory").unwrap()),
         Some(&FeatureValue::Missing(MissingReason::NotObserved))
     );
+}
+
+#[test]
+fn observed_accept_and_fill_emits_slippage_from_in_force_limit_join() {
+    let blocks = accept_and_fill_blocks();
+    let report = materialize_synthetic_replay(&blocks, &request()).unwrap();
+    assert_synthetic_unassessed(&report);
+    assert!(report.wallet_performance_withheld);
+    assert!(!report.fills_invented);
+    assert!(!report.marks_invented);
+    assert_eq!(
+        report
+            .require_asof_account(&account_id(BUYER), time(3), known(3))
+            .unwrap()
+            .values
+            .get(&feature_core::FeatureKey::try_new("wallet", "equity_usd", 1).unwrap()),
+        Some(&FeatureValue::Missing(MissingReason::NotObserved))
+    );
+    assert_eq!(
+        report
+            .require_asof_account(&account_id(BUYER), time(3), known(3))
+            .unwrap()
+            .values
+            .get(&feature_core::FeatureKey::try_new("wallet", "fills", 1).unwrap()),
+        Some(&FeatureValue::Missing(MissingReason::NotObserved))
+    );
+
+    let expected = slippage_from_order_events(&replay_events(&blocks))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        report.slippage.as_ref(),
+        Some(&expected),
+        "replay must attach the join result, not a mid or invented fill"
+    );
+    assert_eq!(
+        slippage_from_replay_blocks(&blocks).unwrap().as_ref(),
+        Some(&expected)
+    );
+    assert_eq!(expected.observed_fill_count, 1);
+    assert_eq!(expected.withheld_missing_reference_count, 0);
+    assert_eq!(expected.notional_weighted_slippage_bps.raw(), 10_000);
+    assert_ne!(expected.notional_weighted_slippage_bps.raw(), 0);
+}
+
+#[test]
+fn missing_in_force_limit_withholds_slippage() {
+    let fill_only = fill_without_limit_blocks();
+    assert!(
+        slippage_from_order_events(&replay_events(&fill_only))
+            .unwrap()
+            .is_none(),
+        "fill without an in-force limit must withhold, not invent a mid"
+    );
+    assert!(slippage_from_replay_blocks(&fill_only).unwrap().is_none());
+
+    let error = materialize_synthetic_replay(&fill_only, &request()).unwrap_err();
+    assert_eq!(error.reason_code(), "ledger.reducer_failed");
+}
+
+#[test]
+fn inverted_replay_block_times_fail_closed_with_existing_order_event_error() {
+    let blocks = accept_and_fill_blocks();
+    let reversed: Vec<_> = blocks.iter().rev().cloned().collect();
+    let error = slippage_from_replay_blocks(&reversed).unwrap_err();
+    assert!(matches!(
+        error,
+        IntelligenceReplayError::Wallet(IntelligenceError::Malformed {
+            what: "order_event",
+            reason: "inverted times"
+        })
+    ));
 }
 
 fn assert_accounts_unmerged(report: &IntelligenceReplayReport) {
