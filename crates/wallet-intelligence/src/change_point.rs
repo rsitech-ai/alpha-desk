@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::IntelligenceError;
 
+const TURNOVER_SHIFT_PPM: u32 = 300_000;
+const MAKER_SHIFT_PPM: i64 = 300_000;
+const LEVERAGE_ESCALATION_MILLI: u32 = 4_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChangeReason {
     CapitalActivation,
@@ -41,6 +45,10 @@ pub struct BehaviorSample {
     pub leverage_milli: u32,
     pub skill_bps: i64,
     pub dormant: bool,
+    pub capital_activated: bool,
+    pub market_count: u32,
+    pub linked_account_migration: bool,
+    pub risk_escalation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +67,8 @@ pub struct ChangePointDetector {
     cusum: i64,
     run: usize,
     last_mean: i64,
+    last_turnover_ppm: u32,
+    last_market_count: u32,
     next_regime: u32,
     regimes: Vec<BehaviorRegime>,
 }
@@ -82,6 +92,8 @@ impl ChangePointDetector {
             cusum: 0,
             run: 0,
             last_mean: 0,
+            last_turnover_ppm: 0,
+            last_market_count: 0,
             next_regime: 1,
             regimes: Vec::new(),
         })
@@ -94,9 +106,17 @@ impl ChangePointDetector {
         if sample.maker_ratio_ppm > 1_000_000 || sample.turnover_ppm > 1_000_000 {
             return Err(IntelligenceError::OutOfRange);
         }
+        if sample.market_count == 0 {
+            return Err(IntelligenceError::Malformed {
+                what: "change_point",
+                reason: "market_count must be positive",
+            });
+        }
         let observation = i64::from(sample.maker_ratio_ppm);
         if self.regimes.is_empty() {
             self.last_mean = observation;
+            self.last_turnover_ppm = sample.turnover_ppm;
+            self.last_market_count = sample.market_count;
             self.regimes.push(BehaviorRegime {
                 regime_id: self.next_regime,
                 started_at: sample.protocol_time,
@@ -116,19 +136,9 @@ impl ChangePointDetector {
             .cusum
             .saturating_add(i64::try_from(deviation).map_err(|_| IntelligenceError::Overflow)?);
         self.run += 1;
-        let mut reasons = Vec::new();
-        if sample.dormant {
-            reasons.push(ChangeReason::DormantReactivation);
-        }
-        if sample.leverage_milli > 4_000 {
-            reasons.push(ChangeReason::LeverageEscalation);
-        }
-        if sample.skill_bps < self.last_mean / 1_000 {
-            reasons.push(ChangeReason::SkillDecay);
-        }
-        if observation + 300_000 < self.last_mean {
-            reasons.push(ChangeReason::MakerRatioShift);
-        }
+        let reasons = reason_codes(self, &sample, observation);
+        self.last_turnover_ppm = sample.turnover_ppm;
+        self.last_market_count = sample.market_count;
         if self.cusum >= self.threshold && self.run >= self.min_evidence {
             if let Some(current) = self.regimes.last_mut() {
                 current.ended_at = Some(sample.protocol_time);
@@ -157,4 +167,40 @@ impl ChangePointDetector {
     pub fn regimes(&self) -> &[BehaviorRegime] {
         &self.regimes
     }
+}
+
+fn reason_codes(
+    detector: &ChangePointDetector,
+    sample: &BehaviorSample,
+    observation: i64,
+) -> Vec<ChangeReason> {
+    let mut reasons = Vec::new();
+    if sample.capital_activated {
+        reasons.push(ChangeReason::CapitalActivation);
+    }
+    if sample.turnover_ppm.abs_diff(detector.last_turnover_ppm) >= TURNOVER_SHIFT_PPM {
+        reasons.push(ChangeReason::TurnoverShift);
+    }
+    if observation + MAKER_SHIFT_PPM < detector.last_mean {
+        reasons.push(ChangeReason::MakerRatioShift);
+    }
+    if sample.market_count == 1 && detector.last_market_count > 1 {
+        reasons.push(ChangeReason::MarketSpecialization);
+    }
+    if sample.leverage_milli > LEVERAGE_ESCALATION_MILLI {
+        reasons.push(ChangeReason::LeverageEscalation);
+    }
+    if sample.risk_escalation {
+        reasons.push(ChangeReason::RiskEscalation);
+    }
+    if sample.linked_account_migration {
+        reasons.push(ChangeReason::LinkedAccountMigration);
+    }
+    if sample.skill_bps < detector.last_mean / 1_000 {
+        reasons.push(ChangeReason::SkillDecay);
+    }
+    if sample.dormant {
+        reasons.push(ChangeReason::DormantReactivation);
+    }
+    reasons
 }
