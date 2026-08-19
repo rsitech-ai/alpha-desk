@@ -11,11 +11,12 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    CanonicalPullSource, CanonicalSubject, InMemoryCanonicalSource, JetStreamReplayAuth,
-    JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplaySession,
-    committed_block_delivery, committed_event_delivery, decode_committed_block_marker,
-    encode_committed_block_marker,
+    CanonicalPullSource, CanonicalSubject, DEAD_LETTER_SCHEMA_V1, FileDeadLetterSink,
+    InMemoryCanonicalSource, InMemoryDeadLetterSink, JetStreamReplayAuth, JetStreamReplayConfig,
+    JetStreamReplayConfigError, JetStreamReplaySession, committed_block_delivery,
+    committed_event_delivery, decode_committed_block_marker, encode_committed_block_marker,
 };
+use sha2::{Digest as _, Sha256};
 use storage_ports::ArchiveReceipt;
 
 #[tokio::test]
@@ -29,9 +30,10 @@ async fn empty_committed_block_from_the_bus_applies_atomically_and_survives_rest
     let receipt = archive_receipt(&block);
     let delivery = committed_block_delivery(&block, &receipt).expect("delivery");
     let mut source = InMemoryCanonicalSource::new([delivery.clone()]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
 
     let report = session
-        .consume_available(&mut source)
+        .consume_available(&mut source, &mut dead_letter)
         .await
         .expect("replay");
     assert_eq!(report.applied, 1);
@@ -40,11 +42,13 @@ async fn empty_committed_block_from_the_bus_applies_atomically_and_survives_rest
     assert!(!report.live_qualified);
     assert!(!report.stage_2_qualified);
     assert!(source.acked().contains(&delivery.message_id));
+    assert!(dead_letter.records().is_empty());
     let hash_after_first = report.state_hash;
 
     let mut duplicate = InMemoryCanonicalSource::new([delivery.clone()]);
+    let mut duplicate_dead_letter = InMemoryDeadLetterSink::default();
     let redone = session
-        .consume_available(&mut duplicate)
+        .consume_available(&mut duplicate, &mut duplicate_dead_letter)
         .await
         .expect("idempotent");
     assert_eq!(redone.applied, 0);
@@ -53,6 +57,7 @@ async fn empty_committed_block_from_the_bus_applies_atomically_and_survives_rest
     assert!(!redone.live_qualified);
     assert!(!redone.stage_2_qualified);
     assert!(duplicate.acked().contains(&delivery.message_id));
+    assert!(duplicate_dead_letter.records().is_empty());
 
     drop(session);
     let restarted =
@@ -63,14 +68,16 @@ async fn empty_committed_block_from_the_bus_applies_atomically_and_survives_rest
     let next = empty_block(201, 1);
     let next_delivery = committed_block_delivery(&next, &archive_receipt(&next)).expect("next");
     let mut continued_source = InMemoryCanonicalSource::new([next_delivery]);
+    let mut continued_dead_letter = InMemoryDeadLetterSink::default();
     let continued = resumed
-        .consume_available(&mut continued_source)
+        .consume_available(&mut continued_source, &mut continued_dead_letter)
         .await
         .expect("resume");
     assert_eq!(continued.applied, 1);
     assert_eq!(continued.last_height, Some(BlockHeight::new(201)));
     assert!(!continued.live_qualified);
     assert!(!continued.stage_2_qualified);
+    assert!(continued_dead_letter.records().is_empty());
 }
 
 #[tokio::test]
@@ -87,10 +94,11 @@ async fn action_bearing_bus_block_fails_closed_without_ack_or_state_advance() {
     let event = committed_event_delivery(&block.events()[0], &block, &receipt).expect("event");
     let event_id = event.message_id.clone();
     let marker_id = marker.message_id.clone();
-    let mut source = InMemoryCanonicalSource::new([event, marker]);
+    let mut source = InMemoryCanonicalSource::new([event, marker.clone()]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
 
     let error = session
-        .consume_available(&mut source)
+        .consume_available(&mut source, &mut dead_letter)
         .await
         .expect_err("action-bearing mapping/reducer still rejects");
     assert_eq!(error.reason_code(), "ledger.unsupported_event");
@@ -98,6 +106,13 @@ async fn action_bearing_bus_block_fails_closed_without_ack_or_state_advance() {
     assert!(session.ledger().checkpoint().is_none());
     assert!(!source.acked().contains(&event_id));
     assert!(!source.acked().contains(&marker_id));
+    assert_one_dead_letter(
+        &dead_letter,
+        "ledger.unsupported_event",
+        &marker_id,
+        marker.publication_sha256,
+        marker.block_hash,
+    );
 }
 
 #[tokio::test]
@@ -112,15 +127,23 @@ async fn event_without_committed_marker_is_incomplete_and_unacked() {
     let receipt = archive_receipt(&block);
     let event = committed_event_delivery(&block.events()[0], &block, &receipt).expect("event");
     let event_id = event.message_id.clone();
-    let mut source = InMemoryCanonicalSource::new([event]);
+    let mut source = InMemoryCanonicalSource::new([event.clone()]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
 
     let error = session
-        .consume_available(&mut source)
+        .consume_available(&mut source, &mut dead_letter)
         .await
         .expect_err("incomplete block");
     assert_eq!(error.reason_code(), "core.jetstream_incomplete_block");
     assert_eq!(session.ledger().state_image().canonical_bytes(), before);
     assert!(!source.acked().contains(&event_id));
+    assert_one_dead_letter(
+        &dead_letter,
+        "core.jetstream_incomplete_block",
+        &event_id,
+        event.publication_sha256,
+        event.block_hash,
+    );
 }
 
 #[tokio::test]
@@ -130,19 +153,33 @@ async fn payload_hash_mismatch_fails_closed() {
         SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
             .expect("store");
     let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
     let block = empty_block(200, 1);
     let receipt = archive_receipt(&block);
     let mut delivery = committed_block_delivery(&block, &receipt).expect("delivery");
     let last = delivery.payload.len() - 1;
     delivery.payload[last] ^= 0xff;
+    let poison_hash: [u8; 32] = Sha256::digest(&delivery.payload).into();
+    let message_id = delivery.message_id.clone();
+    let block_hash = delivery.block_hash;
     let mut source = InMemoryCanonicalSource::new([delivery]);
+    let mut dead_letter = InMemoryDeadLetterSink::default();
 
     let error = session
-        .consume_available(&mut source)
+        .consume_available(&mut source, &mut dead_letter)
         .await
         .expect_err("tampered marker");
     assert_eq!(error.reason_code(), "core.jetstream_hash_mismatch");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
     assert!(session.ledger().checkpoint().is_none());
+    assert!(!source.acked().contains(&message_id));
+    assert_one_dead_letter(
+        &dead_letter,
+        "core.jetstream_hash_mismatch",
+        &message_id,
+        poison_hash,
+        block_hash,
+    );
 }
 
 #[test]
@@ -234,7 +271,10 @@ async fn real_jetstream_file_replay_is_an_opt_in_integration_lane() {
     let mut session = open_session(store);
     let _ = source.fetch(1).await.expect("fetch must not panic");
     let report = session
-        .consume_available(&mut InMemoryCanonicalSource::new([]))
+        .consume_available(
+            &mut InMemoryCanonicalSource::new([]),
+            &mut InMemoryDeadLetterSink::default(),
+        )
         .await
         .expect("empty drain after optional fetch");
     assert!(!report.live_qualified);
@@ -245,6 +285,64 @@ async fn real_jetstream_file_replay_is_an_opt_in_integration_lane() {
 fn committed_subject_rejects_provisional_fanout() {
     let error = CanonicalSubject::parse("hl.v1.block.provisional").expect_err("provisional");
     assert_eq!(error.reason_code(), "core.jetstream_provisional");
+}
+
+#[tokio::test]
+async fn file_dead_letter_sink_persists_poison_without_applying_state() {
+    let root = private_root();
+    let store =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let block = empty_block(200, 1);
+    let receipt = archive_receipt(&block);
+    let mut delivery = committed_block_delivery(&block, &receipt).expect("delivery");
+    let last = delivery.payload.len() - 1;
+    delivery.payload[last] ^= 0xff;
+    let poison_hash = hex::encode(Sha256::digest(&delivery.payload));
+    let path = root.path().join("dead-letter.jsonl");
+    let mut dead_letter = FileDeadLetterSink::open(&path).expect("file dlq");
+    let mut source = InMemoryCanonicalSource::new([delivery]);
+
+    let error = session
+        .consume_available(&mut source, &mut dead_letter)
+        .await
+        .expect_err("tampered marker");
+    assert_eq!(error.reason_code(), "core.jetstream_hash_mismatch");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    drop(dead_letter);
+
+    let encoded = fs::read_to_string(&path).expect("dlq file");
+    let value: serde_json::Value = serde_json::from_str(encoded.trim()).expect("json");
+    assert_eq!(value["schema_version"], DEAD_LETTER_SCHEMA_V1);
+    assert_eq!(value["reason_code"], "core.jetstream_hash_mismatch");
+    assert_eq!(value["payload_sha256"], poison_hash);
+    assert!(value.get("stream_sequence").is_none());
+    assert!(value.get("live_qualified").is_none());
+    assert!(value.get("stage_2_qualified").is_none());
+}
+
+fn assert_one_dead_letter(
+    sink: &InMemoryDeadLetterSink,
+    reason_code: &str,
+    message_id: &str,
+    payload_sha256: [u8; 32],
+    block_hash: [u8; 32],
+) {
+    assert_eq!(sink.records().len(), 1);
+    let record = &sink.records()[0];
+    assert_eq!(record.reason_code(), reason_code);
+    assert_eq!(record.message_id(), message_id);
+    assert_eq!(record.payload_sha256(), payload_sha256);
+    assert_eq!(record.block_hash(), block_hash);
+    assert!(record.stream_sequence().is_none());
+    assert!(record.consumer_sequence().is_none());
+    assert_eq!(
+        record.consumer(),
+        JetStreamReplayConfig::default_durable_name()
+    );
+    assert!(record.failed_at_unix_micros() >= 0);
 }
 
 fn open_session(

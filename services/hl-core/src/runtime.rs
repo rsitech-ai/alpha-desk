@@ -3,8 +3,9 @@ use canonical_state_store::SyncedWriteBatchStore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    CanonicalPullSource, CoreConfig, CoreConfigError, CoreStatusHandle, JetStreamPullSource,
-    JetStreamReplayError, JetStreamReplayReport, JetStreamReplaySession, StatusError,
+    CanonicalPullSource, CoreConfig, CoreConfigError, CoreStatusHandle, DeadLetterError,
+    DeadLetterSink, FileDeadLetterSink, JetStreamPullSource, JetStreamReplayError,
+    JetStreamReplayReport, JetStreamReplaySession, StatusError,
 };
 
 pub struct CoreRuntime {
@@ -27,7 +28,8 @@ impl CoreRuntime {
             store,
             StateImageLimits::production(),
         )?
-        .with_fetch_batch(jetstream.fetch_batch())?;
+        .with_fetch_batch(jetstream.fetch_batch())?
+        .with_dead_letter_consumer(jetstream.durable_name());
         let last_applied = session
             .ledger()
             .checkpoint()
@@ -57,6 +59,7 @@ impl CoreRuntime {
         source: &mut Src,
         cancellation: CancellationToken,
     ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
+        let mut dead_letter = FileDeadLetterSink::open(self.config.dead_letter_path())?;
         let status_cancellation = cancellation.child_token();
         let status_task = match self.config.status_listen() {
             Some(listen) => {
@@ -72,7 +75,9 @@ impl CoreRuntime {
             None => None,
         };
         self.status.mark_ready();
-        let result = self.consume_until_cancelled(source, cancellation).await;
+        let result = self
+            .consume_until_cancelled(source, &mut dead_letter, cancellation)
+            .await;
         status_cancellation.cancel();
         if let Some(task) = status_task {
             match task.await {
@@ -85,11 +90,16 @@ impl CoreRuntime {
         result
     }
 
-    async fn consume_until_cancelled<Src: CanonicalPullSource>(
+    async fn consume_until_cancelled<Src, Dlq>(
         &mut self,
         source: &mut Src,
+        dead_letter: &mut Dlq,
         cancellation: CancellationToken,
-    ) -> Result<JetStreamReplayReport, CoreRuntimeError> {
+    ) -> Result<JetStreamReplayReport, CoreRuntimeError>
+    where
+        Src: CanonicalPullSource,
+        Dlq: DeadLetterSink,
+    {
         let mut report = JetStreamReplayReport {
             applied: 0,
             already_applied: 0,
@@ -107,7 +117,7 @@ impl CoreRuntime {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Ok(report),
-                result = self.session.consume_available(source) => {
+                result = self.session.consume_available(source, dead_letter) => {
                     report = match result {
                         Ok(report) => {
                             debug_assert!(!report.live_qualified);
@@ -138,6 +148,8 @@ pub enum CoreRuntimeError {
     #[error("hl-core file-store could not be opened: {0}")]
     Store(storage_ports::StateStoreError),
     #[error(transparent)]
+    DeadLetter(#[from] DeadLetterError),
+    #[error(transparent)]
     Status(#[from] StatusError),
     #[error(transparent)]
     Replay(#[from] JetStreamReplayError),
@@ -149,6 +161,7 @@ impl CoreRuntimeError {
         match self {
             Self::Config(error) => error.reason_code(),
             Self::Store(_) => "core_runtime.store",
+            Self::DeadLetter(error) => error.reason_code(),
             Self::Status(error) => error.reason_code(),
             Self::Replay(error) => error.reason_code(),
         }

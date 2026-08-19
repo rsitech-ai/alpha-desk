@@ -72,6 +72,12 @@ async fn action_bearing_source_still_fails_closed_without_ack_or_state_advance()
             .expect("load")
             .is_none()
     );
+    let encoded = fs::read_to_string(root.path().join("dead-letter.jsonl")).expect("dlq");
+    let record: serde_json::Value = serde_json::from_str(encoded.trim()).expect("dlq json");
+    assert_eq!(record["reason_code"], "ledger.unsupported_event");
+    assert!(record.get("stream_sequence").is_none());
+    assert!(record.get("live_qualified").is_none());
+    assert!(record.get("stage_2_qualified").is_none());
 }
 
 #[tokio::test]

@@ -18,7 +18,9 @@ use futures_util::StreamExt as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    DurableApplyError, DurableApplyOutcome, LocalReplayError, LocalReplaySession,
+    DeadLetterError, DeadLetterRecord, DeadLetterSink, DurableApplyError, DurableApplyOutcome,
+    LocalReplayError, LocalReplaySession,
+    dead_letter::failed_at_unix_micros,
     publication::{
         BLOCK_MARKER_SCHEMA_V1, CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker,
         HEADER_ARCHIVE_MANIFEST_SHA256, HEADER_ARCHIVE_RECEIPT, HEADER_BLOCK_HASH,
@@ -70,6 +72,9 @@ pub struct CanonicalDelivery {
     pub archive_manifest_sha256: [u8; 32],
     pub publication_sha256: [u8; 32],
     pub payload: Vec<u8>,
+    pub stream_sequence: Option<u64>,
+    pub consumer_sequence: Option<u64>,
+    pub delivery_count: u64,
 }
 
 impl CanonicalDelivery {
@@ -115,6 +120,9 @@ impl CanonicalDelivery {
             archive_manifest_sha256,
             publication_sha256,
             payload,
+            stream_sequence: None,
+            consumer_sequence: None,
+            delivery_count: 0,
         })
     }
 }
@@ -405,6 +413,11 @@ impl JetStreamReplayConfig {
     }
 
     #[must_use]
+    pub fn durable_name(&self) -> &str {
+        &self.durable_name
+    }
+
+    #[must_use]
     pub fn fetch_batch(&self) -> usize {
         self.fetch_batch
     }
@@ -464,6 +477,8 @@ pub enum JetStreamReplayError {
     Transport,
     #[error(transparent)]
     Replay(#[from] LocalReplayError),
+    #[error(transparent)]
+    DeadLetter(#[from] DeadLetterError),
     #[error("JetStream replay applied-block counter overflowed")]
     Overflow,
 }
@@ -482,6 +497,7 @@ impl JetStreamReplayError {
                 error.reason_code()
             }
             Self::Replay(error) => error.reason_code(),
+            Self::DeadLetter(error) => error.reason_code(),
             Self::Overflow => "core.replay_overflow",
         }
     }
@@ -491,6 +507,7 @@ pub struct JetStreamReplaySession<R, S> {
     replay: LocalReplaySession<R, S>,
     assembler: BlockAssembler,
     fetch_batch: usize,
+    dead_letter_consumer: String,
 }
 
 impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession<R, S> {
@@ -513,6 +530,7 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
             )?,
             assembler: BlockAssembler::new(),
             fetch_batch: 64,
+            dead_letter_consumer: DEFAULT_DURABLE_NAME.to_owned(),
         })
     }
 
@@ -525,14 +543,25 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
     }
 
     #[must_use]
+    pub fn with_dead_letter_consumer(mut self, durable_name: impl Into<String>) -> Self {
+        self.dead_letter_consumer = durable_name.into();
+        self
+    }
+
+    #[must_use]
     pub fn ledger(&self) -> &canonical_ledger::CanonicalLedger<R> {
         self.replay.ledger()
     }
 
-    pub async fn consume_available<Src: CanonicalPullSource>(
+    pub async fn consume_available<Src, Dlq>(
         &mut self,
         source: &mut Src,
-    ) -> Result<JetStreamReplayReport, JetStreamReplayError> {
+        dead_letter: &mut Dlq,
+    ) -> Result<JetStreamReplayReport, JetStreamReplayError>
+    where
+        Src: CanonicalPullSource,
+        Dlq: DeadLetterSink,
+    {
         let mut report = JetStreamReplayReport::empty(
             self.replay.ledger().state_hash(),
             self.replay
@@ -544,30 +573,72 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
             let batch = source.fetch(self.fetch_batch).await?;
             if batch.is_empty() {
                 if self.assembler.has_pending() {
-                    return Err(JetStreamReplayError::IncompleteBlock);
+                    let identity = self
+                        .assembler
+                        .first_delivery()
+                        .expect("pending block retains a delivery");
+                    return Err(self.persist_fail_closed(
+                        dead_letter,
+                        identity,
+                        JetStreamReplayError::IncompleteBlock,
+                    ));
                 }
                 break;
             }
             for delivery in batch {
-                if let Some(assembled) = self.assembler.push(delivery)? {
-                    match self.replay.apply_next(&assembled.block)? {
-                        DurableApplyOutcome::Applied { .. } => {
+                match self.assembler.push(&delivery) {
+                    Ok(Some(assembled)) => match self.replay.apply_next(&assembled.block) {
+                        Ok(DurableApplyOutcome::Applied { .. }) => {
                             report.applied = report
                                 .applied
                                 .checked_add(1)
                                 .ok_or(JetStreamReplayError::Overflow)?;
+                            report.last_height = Some(assembled.block.block_height());
+                            report.state_hash = self.replay.ledger().state_hash();
+                            source.ack(&assembled.message_ids).await?;
                         }
-                        DurableApplyOutcome::AlreadyApplied(_) => {
+                        Ok(DurableApplyOutcome::AlreadyApplied(_)) => {
                             report.already_applied = report.already_applied.saturating_add(1);
+                            report.last_height = Some(assembled.block.block_height());
+                            report.state_hash = self.replay.ledger().state_hash();
+                            source.ack(&assembled.message_ids).await?;
                         }
+                        Err(error) => {
+                            return Err(self.persist_fail_closed(
+                                dead_letter,
+                                delivery,
+                                error.into(),
+                            ));
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(self.persist_fail_closed(dead_letter, delivery, error));
                     }
-                    report.last_height = Some(assembled.block.block_height());
-                    report.state_hash = self.replay.ledger().state_hash();
-                    source.ack(&assembled.message_ids).await?;
                 }
             }
         }
         Ok(report)
+    }
+
+    fn persist_fail_closed<Dlq: DeadLetterSink>(
+        &self,
+        dead_letter: &mut Dlq,
+        delivery: CanonicalDelivery,
+        error: JetStreamReplayError,
+    ) -> JetStreamReplayError {
+        match DeadLetterRecord::from_delivery(
+            &delivery,
+            error.reason_code(),
+            &self.dead_letter_consumer,
+            failed_at_unix_micros(),
+        ) {
+            Ok(record) => match dead_letter.persist(&record) {
+                Ok(()) => error,
+                Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+            },
+            Err(dead_letter_error) => JetStreamReplayError::DeadLetter(dead_letter_error),
+        }
     }
 }
 
@@ -581,6 +652,7 @@ struct PendingBlock {
     marker: Option<CommittedBlockMarker>,
     events: BTreeMap<String, CanonicalEventEnvelope>,
     message_ids: Vec<String>,
+    first_delivery: CanonicalDelivery,
 }
 
 struct AssembledBlock {
@@ -599,9 +671,16 @@ impl BlockAssembler {
         !self.pending.is_empty()
     }
 
+    fn first_delivery(&self) -> Option<CanonicalDelivery> {
+        self.pending
+            .values()
+            .next()
+            .map(|pending| pending.first_delivery.clone())
+    }
+
     fn push(
         &mut self,
-        delivery: CanonicalDelivery,
+        delivery: &CanonicalDelivery,
     ) -> Result<Option<AssembledBlock>, JetStreamReplayError> {
         let digest: [u8; 32] = Sha256::digest(&delivery.payload).into();
         if digest != delivery.publication_sha256 {
@@ -621,6 +700,7 @@ impl BlockAssembler {
                 marker: None,
                 events: BTreeMap::new(),
                 message_ids: Vec::new(),
+                first_delivery: delivery.clone(),
             });
         if pending.height != delivery.block_height || pending.chain_id != delivery.chain_id {
             return Err(JetStreamReplayError::HashMismatch);
@@ -773,7 +853,7 @@ fn delivery_from_jetstream(
     if digest != publication_sha256 {
         return Err(JetStreamReplayError::HashMismatch);
     }
-    let delivery = CanonicalDelivery::try_new(
+    let mut delivery = CanonicalDelivery::try_new(
         subject,
         message_id,
         schema,
@@ -786,6 +866,11 @@ fn delivery_from_jetstream(
     )?;
     if delivery.publication_sha256 != publication_sha256 {
         return Err(JetStreamReplayError::HashMismatch);
+    }
+    if let Ok(info) = message.info() {
+        delivery.stream_sequence = Some(info.stream_sequence);
+        delivery.consumer_sequence = Some(info.consumer_sequence);
+        delivery.delivery_count = u64::try_from(info.delivered.max(0)).unwrap_or(0);
     }
     Ok(delivery)
 }

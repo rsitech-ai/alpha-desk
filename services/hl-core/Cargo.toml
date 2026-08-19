@@ -18,6 +18,7 @@ domain-types = { path = "../../crates/domain-types", version = "=0.1.0" }
 async-nats.workspace = true
 futures-util = { version = "0.3.33", default-features = false }
 hex.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -31,5 +32,7 @@ tracing.workspace = true
 [dev-dependencies]
 blake3.workspace = true
 hex.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio-util.workspace = true
