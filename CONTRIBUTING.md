@@ -5,7 +5,7 @@ Alpha Desk is being built through staged, evidence-backed plans. Contributions a
 ## Before opening a change
 
 1. Read [docs/STATUS.md](docs/STATUS.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
-2. Find the owning contract in the relevant plan under `docs/superpowers/plans/`.
+2. Read [docs/STATUS.md](docs/STATUS.md) and match the change to the current stage.
 3. Open an issue for changes that alter public contracts, architecture, gate criteria, dependencies, data policy, or licensing.
 4. Keep private alpha, operator data, wallet labels, secrets, and deployment details outside the repository.
 

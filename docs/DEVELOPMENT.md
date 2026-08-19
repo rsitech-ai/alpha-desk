@@ -277,7 +277,7 @@ evidence and restart diagnosis.
 
 ## Stage plans
 
-The detailed implementation plans live under `docs/superpowers/plans/`. They are approved design inputs and retain their original checklist state. Current implementation evidence is recorded in `docs/STATUS.md`.
+Current implementation evidence is recorded in `docs/STATUS.md`.
 
 Stage 1 normally requires a verified signed `stage-0-foundations` tag. Work developed before that external gate closes must remain clearly labeled as unreleased development and cannot be used to claim the gate passed.
 
