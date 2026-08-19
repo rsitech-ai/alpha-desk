@@ -82,6 +82,30 @@ fn check_config_missing_nats_reports_only_a_stable_reason_code() {
 }
 
 #[test]
+fn check_config_rejects_non_loopback_status_listen() {
+    let directory = tempdir().expect("temporary directory");
+    let config_path = directory.path().join("core.toml");
+    fs::write(
+        &config_path,
+        include_str!("../../../config/core.example.toml")
+            .replace("listen = \"127.0.0.1:8742\"", "listen = \"8.8.8.8:8742\""),
+    )
+    .expect("write config");
+
+    let output = binary()
+        .args(["check-config", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("run check-config");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    assert!(stderr.contains("\"reason_code\":\"core_config.invalid_status_listen\""));
+    assert!(!stderr.contains("panicked"));
+}
+
+#[test]
 fn run_missing_store_fails_closed_before_nats() {
     let directory = tempdir().expect("temporary directory");
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))

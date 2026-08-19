@@ -8,6 +8,9 @@ idle_poll_millis = 250
 [store]
 path = "state/core-file-store"
 
+[status]
+listen = "127.0.0.1:8742"
+
 [nats]
 server_url = "nats://127.0.0.1:4222"
 stream = "HL_CANONICAL"

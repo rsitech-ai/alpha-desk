@@ -8,6 +8,10 @@ fn example_config_is_valid_and_does_not_claim_qualification() {
         .expect("example config");
     assert_eq!(config.chain_id().as_str(), "mainnet");
     assert_eq!(config.first_height().get(), 1);
+    assert_eq!(
+        config.status_listen().expect("loopback status"),
+        "127.0.0.1:8742".parse().expect("addr")
+    );
     assert_eq!(config.jetstream_config().expect("nats").fetch_batch(), 64);
     assert_eq!(CANONICAL_STREAM, "HL_CANONICAL");
 }
@@ -62,6 +66,27 @@ fn qualification_claims_are_rejected_as_unknown_fields() {
     .expect_err("qualification claims");
     assert_eq!(error, CoreConfigError::InvalidToml);
     assert_eq!(error.reason_code(), "core_config.invalid_toml");
+}
+
+#[test]
+fn non_loopback_status_listen_fails_closed() {
+    let error = CoreConfig::from_toml(
+        &valid_toml(Path::new("state/core-file-store"))
+            .replace("[nats]", "[status]\nlisten = \"8.8.8.8:8742\"\n\n[nats]"),
+    )
+    .expect_err("non-loopback");
+    assert_eq!(error, CoreConfigError::InvalidStatusListen);
+    assert_eq!(error.reason_code(), "core_config.invalid_status_listen");
+}
+
+#[test]
+fn unspecified_status_listen_fails_closed() {
+    let error = CoreConfig::from_toml(
+        &valid_toml(Path::new("state/core-file-store"))
+            .replace("[nats]", "[status]\nlisten = \"0.0.0.0:8742\"\n\n[nats]"),
+    )
+    .expect_err("unspecified");
+    assert_eq!(error, CoreConfigError::InvalidStatusListen);
 }
 
 fn valid_toml(store_path: &Path) -> String {
