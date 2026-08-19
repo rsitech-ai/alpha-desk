@@ -11,13 +11,16 @@ use domain_types::{
     SourceId, TransactionId,
 };
 use hl_core::{
-    CoreConfig, CoreRuntime, CoreStatusHandle, DEAD_LETTER_SCHEMA_V1, InMemoryCanonicalSource,
-    committed_block_delivery, committed_event_delivery,
+    CanonicalDelivery, CanonicalPullSource, CoreConfig, CoreRuntime, CoreStatusHandle,
+    DEAD_LETTER_SCHEMA_V1, InMemoryCanonicalSource, JetStreamReplayError, committed_block_delivery,
+    committed_event_delivery,
 };
 use storage_ports::{ArchiveReceipt, AtomicStateStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
+
+mod common;
 
 #[tokio::test]
 async fn missing_store_parent_fails_closed_without_opening_nats() {
@@ -183,14 +186,16 @@ async fn consume_poison_after_dlq_open_is_visible_on_loopback_status() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consume_persist_at_cap_after_dlq_open_is_visible_on_loopback_status() {
     // Store-then-DLQ-open-then-consume is the `run_source` path. Leftover-open
-    // at the 1 MiB cap still succeeds; the next persist must fail closed as
-    // `core.deadletter_corrupt` and stay scrapeable. Live NATS Term /
-    // HL_DEADLETTER remains unproven. No second writer: the file is filled
-    // before `run_source` opens the sink.
+    // at the 1 MiB cap must be scrapeable as ready (not already
+    // `core.deadletter_corrupt`) before the persist that exceeds the cap.
+    // An invalid leftover would fail at open with the same code and unchanged
+    // jsonl. Live NATS Term / HL_DEADLETTER remains unproven. No second writer:
+    // the file is filled before `run_source` opens the sink. Fetch is held
+    // until that ready window is observed, then the persist is delivered.
     let root = private_root();
     let store_path = root.path().join("state");
     let dead_letter_path = root.path().join("dead-letter.jsonl");
-    let leftover = valid_dead_letter_jsonl_of_len(1_048_576);
+    let leftover = common::valid_dead_letter_jsonl_of_len(1_048_576);
     let config =
         CoreConfig::from_toml(&valid_toml(&store_path, 200, Some("127.0.0.1:0"))).expect("config");
     let runtime = CoreRuntime::open(config).expect("store open");
@@ -206,11 +211,57 @@ async fn consume_persist_at_cap_after_dlq_open_is_visible_on_loopback_status() {
     let event = committed_event_delivery(&block.events()[0], &block, &receipt).expect("event");
     let event_id = event.message_id.clone();
     let marker_id = marker.message_id.clone();
-    let mut source = InMemoryCanonicalSource::new([event, marker]);
+    let (release_persist, hold_persist) = tokio::sync::watch::channel(false);
+    let mut source = HoldThenReleaseSource::new([event, marker], hold_persist);
     let cancellation = CancellationToken::new();
     let run = runtime.run_source(&mut source, cancellation.clone());
     let probe = async {
         let addr = wait_for_listen_addr(&status).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = status.snapshot();
+                if snapshot.fail_closed_reason() == Some("core.deadletter_corrupt") {
+                    panic!(
+                        "leftover-open must not already be core.deadletter_corrupt before persist"
+                    );
+                }
+                if snapshot.ready() && snapshot.fail_closed_reason().is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("leftover-open ready");
+        assert!(
+            store_path.exists(),
+            "file-store must stay in play after leftover-open"
+        );
+        assert_eq!(
+            fs::read(&dead_letter_path).expect("history not truncated before persist"),
+            leftover.as_slice()
+        );
+        let (health_code, health_body) = http_get(addr, "/healthz").await;
+        assert_eq!(health_code, 200);
+        let health = json_from_http(&health_body);
+        assert_eq!(health["ok"], true);
+        assert_eq!(health["ready"], true);
+        assert!(health["reason_code"].is_null());
+        assert_eq!(health["live_qualified"], false);
+        assert_eq!(health["stage_2_qualified"], false);
+        let (status_code, status_body) = http_get(addr, "/status").await;
+        assert_eq!(status_code, 200);
+        let value = json_from_http(&status_body);
+        assert_eq!(value["ready"], true);
+        assert!(value.get("fail_closed_reason").is_none());
+        assert_eq!(value["live_qualified"], false);
+        assert_eq!(value["stage_2_qualified"], false);
+        let (metrics_code, metrics_body) = http_get(addr, "/metrics").await;
+        assert_eq!(metrics_code, 200);
+        assert!(metrics_body.contains("hl_core_ready 1"));
+        release_persist
+            .send(true)
+            .expect("deliver persist after leftover-open");
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if status.snapshot().fail_closed_reason() == Some("core.deadletter_corrupt") {
@@ -1183,41 +1234,44 @@ fn json_from_http(body: &str) -> serde_json::Value {
     serde_json::from_str(&body[json_start..]).expect("JSON body")
 }
 
-fn valid_dead_letter_jsonl_of_len(total_bytes: usize) -> Vec<u8> {
-    const MAX_RECORD_FILE_BYTES: usize = 4_096 + 1;
-    let mut leftover = Vec::with_capacity(total_bytes);
-    let mut n = 0u32;
-    while leftover.len() < total_bytes {
-        let remaining = total_bytes - leftover.len();
-        let file_len = remaining.min(MAX_RECORD_FILE_BYTES);
-        leftover.extend(valid_dead_letter_line(&format!("cap-{n:08}"), file_len));
-        n += 1;
-    }
-    assert_eq!(leftover.len(), total_bytes);
-    leftover
+struct HoldThenReleaseSource {
+    inner: InMemoryCanonicalSource,
+    release: tokio::sync::watch::Receiver<bool>,
 }
 
-fn valid_dead_letter_line(message_id: &str, file_len: usize) -> Vec<u8> {
-    let mut encoded = serde_json::to_vec(&serde_json::json!({
-        "schema_version": DEAD_LETTER_SCHEMA_V1,
-        "reason_code": "core.jetstream_transport",
-        "subject": "hl.v1.connect.transport",
-        "message_id": message_id,
-        "payload_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
-        "block_hash": "2222222222222222222222222222222222222222222222222222222222222222",
-        "consumer": "hl-core-file-replay",
-        "retry_count": 0,
-        "failed_at_unix_micros": 1,
-    }))
-    .expect("existing record json");
-    assert!(
-        file_len > encoded.len() && file_len - 1 <= 4_096,
-        "file_len {file_len} cannot hold a valid ExistingRecord line of {} bytes",
-        encoded.len()
-    );
-    encoded.resize(file_len - 1, b' ');
-    encoded.push(b'\n');
-    encoded
+impl HoldThenReleaseSource {
+    fn new(
+        deliveries: impl IntoIterator<Item = CanonicalDelivery>,
+        release: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            inner: InMemoryCanonicalSource::new(deliveries),
+            release,
+        }
+    }
+
+    fn acked(&self) -> &std::collections::BTreeSet<String> {
+        self.inner.acked()
+    }
+}
+
+impl CanonicalPullSource for HoldThenReleaseSource {
+    async fn fetch(
+        &mut self,
+        max_messages: usize,
+    ) -> Result<Vec<CanonicalDelivery>, JetStreamReplayError> {
+        loop {
+            if *self.release.borrow() {
+                break;
+            }
+            self.release.changed().await.expect("persist release");
+        }
+        self.inner.fetch(max_messages).await
+    }
+
+    async fn ack(&mut self, message_ids: &[String]) -> Result<(), JetStreamReplayError> {
+        self.inner.ack(message_ids).await
+    }
 }
 
 fn archive_receipt(block: &BlockEnvelope) -> ArchiveReceipt {
