@@ -1,0 +1,20 @@
+# Safe local example. This starts no live source by itself and does not claim
+# live or Stage 2 qualification. Sensitive NATS material is a path reference.
+chain_id = "mainnet"
+first_height = 1
+shutdown_grace_millis = 15000
+idle_poll_millis = 250
+
+[store]
+path = "state/core-file-store"
+
+[nats]
+server_url = "nats://127.0.0.1:4222"
+stream = "HL_CANONICAL"
+username = "core"
+password_path = "/run/secrets/alpha-desk-nats-core-password"
+connect_timeout_millis = 5000
+acknowledgement_timeout_millis = 5000
+max_ack_inflight = 64
+durable_name = "hl-core-file-replay"
+fetch_batch = 64

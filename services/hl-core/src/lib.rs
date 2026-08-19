@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+mod config;
 mod consumer;
 mod publication;
 mod replay;
+mod runtime;
 mod source;
 
 use canonical_events::BlockEnvelope;
@@ -11,6 +13,7 @@ use canonical_ledger::{
 };
 use storage_ports::{AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateStoreError};
 
+pub use config::{CoreConfig, CoreConfigError};
 pub use consumer::{
     CanonicalDelivery, CanonicalPullSource, InMemoryCanonicalSource, JetStreamPullSource,
     JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
@@ -23,6 +26,7 @@ pub use publication::{
     encode_committed_block_marker, encode_event_payload, subject_for_event_kind,
 };
 pub use replay::{LocalReplayError, LocalReplayReport, LocalReplaySession, replay_block_durably};
+pub use runtime::{CoreRuntime, CoreRuntimeError};
 pub use source::{
     BlockSourceError, CanonicalBlockSource, DirectoryBlockSource, InMemoryBlockSource,
     LOCAL_REPLAY_BLOCK_SCHEMA, decode_local_replay_block,

@@ -403,6 +403,11 @@ impl JetStreamReplayConfig {
     pub fn default_durable_name() -> &'static str {
         DEFAULT_DURABLE_NAME
     }
+
+    #[must_use]
+    pub fn fetch_batch(&self) -> usize {
+        self.fetch_batch
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +514,14 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
             assembler: BlockAssembler::new(),
             fetch_batch: 64,
         })
+    }
+
+    pub fn with_fetch_batch(mut self, fetch_batch: usize) -> Result<Self, JetStreamReplayError> {
+        if !(1..=MAX_FETCH_BATCH).contains(&fetch_batch) {
+            return Err(JetStreamReplayConfigError::InvalidFetchBatch.into());
+        }
+        self.fetch_batch = fetch_batch;
+        Ok(self)
     }
 
     #[must_use]

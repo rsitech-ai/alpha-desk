@@ -2022,7 +2022,6 @@ dependencies = [
 name = "hl-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-nats",
  "blake3",
  "canonical-events",
@@ -2038,6 +2037,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
+ "toml",
  "tracing",
 ]
 
