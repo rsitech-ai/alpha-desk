@@ -4,6 +4,7 @@ members = [
   "crates/domain-types",
   "crates/hl-protocol",
   "crates/canonical-events",
+  "crates/jetstream-marker",
   "crates/canonical-ledger",
   "crates/canonical-state-store",
   "crates/canonical-archive",

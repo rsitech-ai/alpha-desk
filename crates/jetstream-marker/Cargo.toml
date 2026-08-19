@@ -1,0 +1,23 @@
+[package]
+name = "jetstream-marker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Frozen JetStream committed-block marker codec for Hyperliquid Alpha Desk."
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+
+[dependencies]
+canonical-events = { path = "../canonical-events", version = "=0.1.0" }
+domain-types = { path = "../domain-types", version = "=0.1.0" }
+sha2.workspace = true
+storage-ports = { path = "../storage-ports", version = "=0.1.0" }
+thiserror.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+hex.workspace = true
+sha2.workspace = true
