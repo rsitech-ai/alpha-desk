@@ -1,0 +1,11 @@
+{
+  "schema_version": "hl.capture.status.v4",
+  "snapshot_at_micros": 1,
+  "build_id": "synthetic-serve-status-fixture",
+  "chain_id": "mainnet",
+  "health": "green",
+  "ready": true,
+  "active_committed_source": "locally-verified-committed",
+  "primary_source_health": "healthy",
+  "pending_blocks": 0
+}

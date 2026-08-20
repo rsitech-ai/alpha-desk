@@ -1,10 +1,36 @@
 #![forbid(unsafe_code)]
 
+mod consumer;
+mod publication;
+mod replay;
+mod source;
+
 use canonical_events::BlockEnvelope;
 use canonical_ledger::{
-    CanonicalLedger, EventReducer, LedgerError, PrepareOutcome, StateCheckpoint, StateDelta,
+    CanonicalLedger, CorrectionRecord, EventReducer, LedgerError, PrepareOutcome, StateCheckpoint,
+    StateDelta,
 };
 use storage_ports::{AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateStoreError};
+
+pub use consumer::{
+    CanonicalDelivery, CanonicalPullSource, InMemoryCanonicalSource, JetStreamPullSource,
+    JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
+    JetStreamReplayReport, JetStreamReplaySession, committed_block_delivery,
+    committed_event_delivery,
+};
+pub use publication::{
+    BLOCK_COMMITTED_SUBJECT, BLOCK_MARKER_SCHEMA_V1, BLOCK_PROVISIONAL_SUBJECT, BlockMarkerError,
+    CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker, decode_committed_block_marker,
+    encode_committed_block_marker, encode_event_payload, subject_for_event_kind,
+};
+pub use replay::{
+    LocalBlockInspectReport, LocalReplayError, LocalReplayReport, LocalReplaySession,
+    inspect_local_replay_block, replay_block_durably,
+};
+pub use source::{
+    BlockSourceError, CanonicalBlockSource, DirectoryBlockSource, InMemoryBlockSource,
+    LOCAL_REPLAY_BLOCK_SCHEMA, confirmation_label, decode_local_replay_block,
+};
 
 #[derive(Debug)]
 pub enum DurableApplyOutcome {
@@ -33,7 +59,7 @@ impl DurableApplyError {
     #[must_use]
     pub const fn reason_code(&self) -> &'static str {
         match self {
-            Self::Ledger(_) => "core.ledger",
+            Self::Ledger(error) => error.reason_code(),
             Self::CommitContract(_) => "core.state_commit_contract",
             Self::Store(_) => "core.state_store",
             Self::ReceiptMismatch => "core.state_receipt_mismatch",
@@ -66,4 +92,16 @@ pub fn apply_block_durably<R: EventReducer, S: AtomicStateStore>(
         .commit_prepared(prepared)
         .map_err(DurableApplyError::PostCommitLedger)?;
     Ok(DurableApplyOutcome::Applied { delta, disposition })
+}
+
+/// Ingest a typed correction record. Application is unimplemented: the store is
+/// not contacted and the ledger is not mutated.
+pub fn ingest_correction_record<R, S: AtomicStateStore>(
+    _ledger: &CanonicalLedger<R>,
+    _store: &S,
+    _record: &CorrectionRecord,
+) -> Result<(), DurableApplyError> {
+    Err(DurableApplyError::Ledger(
+        LedgerError::CorrectionUnimplemented,
+    ))
 }

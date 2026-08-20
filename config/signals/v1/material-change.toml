@@ -1,0 +1,3 @@
+net_edge_delta_bps = 10
+confidence_delta_ppm = 50000
+crowding_delta_ppm = 100000

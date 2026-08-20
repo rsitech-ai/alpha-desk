@@ -1,0 +1,12 @@
+#![forbid(unsafe_code)]
+
+mod error;
+mod pipeline;
+
+pub use error::IntelligenceReplayError;
+pub use pipeline::{
+    IntelligenceReplayReport, MaterializeRequest, QualificationClaim, admit_committed_confirmation,
+    fold_withhold_reason, holding_time_from_closed_episodes, holding_time_from_replay_blocks,
+    materialize_committed_node, materialize_synthetic_replay, qualification_what_for_withhold,
+    refuse_leaked_withheld_emission, slippage_from_replay_blocks,
+};

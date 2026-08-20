@@ -7,15 +7,17 @@ use canonical_events::{
     AssetContextUpdated, BackstopLiquidation, BlockEnvelope, CanonicalEventEnvelope,
     CanonicalEventInput, ConfirmationClass, DepositCredited, DexCreated, EventKind, EventPayload,
     FundingPaid, LiquidationStarted, MarketCreated, OrderAccepted, PositionSettled, SourceEvidence,
-    TradeMatched, TradeParticipantRoleV1, TradeParticipantV1,
+    TradeMatched, TradeParticipantRoleV1, TradeParticipantV1, TriggerOrderActivated, TwapCompleted,
+    TwapStarted,
 };
 use canonical_ledger::{
     ApplyContext, ApplyOutcome, BlockDeltaView, CanonicalAccountReducerV1, CanonicalLedger,
     CanonicalLiquidationReducerV1, CanonicalMarketReducerV1, CanonicalOrderReducerV1,
     CanonicalPositionEpisodeReducerV1, CanonicalPositionReducerV1, CanonicalStateReducerV1,
-    CanonicalTradeReducerSetV2, CanonicalTradeReducerV1, CanonicalTradeReducerV2, EventReducer,
-    LedgerLimits, PositionEffectFactRecordV1, PositionQuantityCurrentRecordV1, ReducerError,
-    StateImage, StateImageLimits, StateKey, StateMutation, StateView,
+    CanonicalTradeReducerSetV2, CanonicalTradeReducerV1, CanonicalTradeReducerV2,
+    CanonicalTriggerReducerV1, CanonicalTwapReducerV1, EventReducer, LedgerLimits,
+    PositionEffectFactRecordV1, PositionQuantityCurrentRecordV1, ReducerError, StateImage,
+    StateImageLimits, StateKey, StateMutation, StateView,
 };
 use domain_types::{
     Address, AssetId, BlockHeight, ChainId, DexId, FundingRate, KnownTime, LiquidationId, MarketId,
@@ -33,7 +35,7 @@ fn validated_constructor_exposes_the_exact_ordered_component_manifest() {
 
     assert_eq!(
         reducer.reducer_set_version(),
-        "hyperliquid-alpha-desk-canonical-state@1.0.0"
+        "hyperliquid-alpha-desk-canonical-state@1.1.0"
     );
     assert_eq!(
         reducer
@@ -57,6 +59,8 @@ fn validated_constructor_exposes_the_exact_ordered_component_manifest() {
                 "position_liquidation",
                 "hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0"
             ),
+            ("trigger", "hyperliquid-alpha-desk-canonical-trigger@1.0.0"),
+            ("twap", "hyperliquid-alpha-desk-canonical-twap@1.0.0"),
         ]
     );
 }
@@ -68,7 +72,7 @@ fn ledger_and_direct_reducer_keep_unsupported_boundaries_separate() {
         .into_iter()
         .find(|payload| payload.kind() == EventKind::TriggerOrderActivated)
         .unwrap();
-    let event = raw_event(1, 0, trigger, Vec::new(), Vec::new(), "1.0.0");
+    let event = raw_event(1, 0, trigger, Vec::new(), Vec::new(), "1.1.0");
     let mut ledger = composite_ledger(1);
 
     let error = ledger
@@ -90,6 +94,70 @@ fn ledger_and_direct_reducer_keep_unsupported_boundaries_separate() {
 }
 
 #[test]
+fn trigger_and_twap_write_lifecycle_facts_without_positions_or_orders() {
+    let mut ledger = composite_ledger(60);
+    ledger
+        .apply_block(&block(60, market_prerequisites(60)))
+        .unwrap();
+    let order_id = OrderId::new("composite-trigger").unwrap();
+    let twap_id = OrderId::new("composite-twap").unwrap();
+    let delta = applied(
+        ledger
+            .apply_block(&block(
+                61,
+                vec![
+                    raw_event(
+                        61,
+                        0,
+                        EventPayload::TriggerOrderActivated(TriggerOrderActivated {
+                            order_id: order_id.clone(),
+                            trigger_price: Price::parse_at_scale("64000", 6).unwrap(),
+                            oracle_price: Price::parse_at_scale("63990", 6).unwrap(),
+                        }),
+                        vec![market()],
+                        vec![BUYER],
+                        "1.0.0",
+                    ),
+                    raw_event(
+                        61,
+                        1,
+                        EventPayload::TwapStarted(TwapStarted {
+                            order_id: twap_id.clone(),
+                            account_id: BUYER,
+                            market_id: market(),
+                            total_quantity: Quantity::parse_at_scale("1", 8).unwrap(),
+                            end_time: ProtocolTime::from_unix_micros(1_700_000_000_000_000)
+                                .unwrap(),
+                        }),
+                        vec![market()],
+                        vec![BUYER],
+                        "1.0.0",
+                    ),
+                    raw_event(
+                        61,
+                        2,
+                        EventPayload::TwapCompleted(TwapCompleted {
+                            order_id: twap_id,
+                            filled_quantity: Quantity::parse_at_scale("0", 8).unwrap(),
+                            average_price: Price::parse_at_scale("0", 6).unwrap(),
+                        }),
+                        vec![market()],
+                        vec![BUYER],
+                        "1.0.0",
+                    ),
+                ],
+            ))
+            .unwrap(),
+    );
+    assert_eq!(namespace_count(&ledger, "trigger-current.v1"), 1);
+    assert_eq!(namespace_count(&ledger, "twap-current.v1"), 1);
+    assert!(delta.mutations().iter().all(|mutation| {
+        !mutation.key().namespace().starts_with("position-")
+            && mutation.key().namespace() != "order-current.v1"
+    }));
+}
+
+#[test]
 fn every_named_pre_composite_checkpoint_is_refused() {
     let component_states = [
         state_for(CanonicalMarketReducerV1),
@@ -101,6 +169,8 @@ fn every_named_pre_composite_checkpoint_is_refused() {
         state_for(CanonicalPositionReducerV1),
         state_for(CanonicalPositionEpisodeReducerV1),
         state_for(CanonicalLiquidationReducerV1),
+        state_for(CanonicalTriggerReducerV1),
+        state_for(CanonicalTwapReducerV1),
     ];
     assert_eq!(
         component_states
@@ -117,6 +187,8 @@ fn every_named_pre_composite_checkpoint_is_refused() {
             "hyperliquid-alpha-desk-canonical-position@1.0.0",
             "hyperliquid-alpha-desk-canonical-position-episode@1.0.0",
             "hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0",
+            "hyperliquid-alpha-desk-canonical-trigger@1.0.0",
+            "hyperliquid-alpha-desk-canonical-twap@1.0.0",
         ]
     );
 

@@ -1,0 +1,23 @@
+{
+  "evaluation_known_at": 10000,
+  "horizon_micros": 1000,
+  "decisions": [
+    {
+      "id": "d1",
+      "decided_at": 1000,
+      "known_at": 1100,
+      "prediction": "long",
+      "expected_cost": "0.01000000",
+      "model_hash": "aa",
+      "feature_hash": "bb"
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "d1",
+      "observed_at": 2500,
+      "known_at": 2600,
+      "realized_net": "0.02000000"
+    }
+  ]
+}

@@ -11,7 +11,7 @@ use hl_capture::{
     BlockCandidate, CandidateError, CanonicalSequencer, QuarantineReason, SequencerConfig,
     SequencerDecision, SequencerError, SequencerHealth,
 };
-use hl_protocol::{ObservationClass, SourceAdmission, SourceTrust};
+use hl_protocol::{ObservationClass, PublicationLane, SourceAdmission, SourceTrust};
 
 fn known(micros: i64) -> KnownTime {
     KnownTime::from_unix_micros(micros).expect("known test time")
@@ -22,7 +22,11 @@ fn confirmation_for(trust: SourceTrust) -> ConfirmationClass {
         SourceTrust::LocallyVerifiedCommitted => ConfirmationClass::CommittedPrimary,
         SourceTrust::IndependentCommitted => ConfirmationClass::CommittedIndependent,
         SourceTrust::ThirdPartyProvisional => ConfirmationClass::ProvisionalSource,
-        other => panic!("unsupported fixture trust {other:?}"),
+        SourceTrust::ReconciledSnapshot
+        | SourceTrust::RecoveryOnly
+        | SourceTrust::MempoolProvisional => {
+            panic!("unsupported fixture trust {trust:?}")
+        }
     }
 }
 
@@ -32,18 +36,21 @@ fn admission_for(trust: SourceTrust) -> SourceAdmission {
             ObservationClass::CommittedBlock
         }
         SourceTrust::ThirdPartyProvisional => ObservationClass::ProvisionalFeed,
-        other => panic!("unsupported fixture trust {other:?}"),
+        SourceTrust::ReconciledSnapshot
+        | SourceTrust::RecoveryOnly
+        | SourceTrust::MempoolProvisional => {
+            panic!("unsupported fixture trust {trust:?}")
+        }
     };
     SourceAdmission::new(trust, class).expect("valid source admission")
 }
 
-fn candidate(
+fn classified_block(
     height: u64,
     source_id: &str,
-    trust: SourceTrust,
+    confirmation: ConfirmationClass,
     payload_seed: u64,
-) -> BlockCandidate {
-    let confirmation = confirmation_for(trust);
+) -> (SourceId, BlockEnvelope) {
     let source_id = SourceId::new(source_id).expect("source ID");
     let block_time_micros =
         i64::try_from(height % 1_000_000).expect("bounded fixture height") * 1_000;
@@ -87,7 +94,17 @@ fn candidate(
         BTreeMap::from([(source_id.clone(), [0x55; 32])]),
     )
     .expect("canonical block");
+    (source_id, block)
+}
 
+fn candidate(
+    height: u64,
+    source_id: &str,
+    trust: SourceTrust,
+    payload_seed: u64,
+) -> BlockCandidate {
+    let confirmation = confirmation_for(trust);
+    let (source_id, block) = classified_block(height, source_id, confirmation, payload_seed);
     BlockCandidate::try_new(source_id, admission_for(trust), block).expect("valid candidate")
 }
 
@@ -579,6 +596,69 @@ fn candidate_rejects_missing_source_evidence_and_confirmation_mismatch() {
         ),
         Err(CandidateError::UnexpectedEventSourceEvidence)
     );
+}
+
+#[test]
+fn candidate_admission_covers_every_constructible_publication_lane() {
+    for trust in SourceTrust::ALL {
+        for class in ObservationClass::ALL {
+            let Ok(admission) = SourceAdmission::new(trust, class) else {
+                continue;
+            };
+            let confirmation = match admission.publication_lane() {
+                PublicationLane::CommittedCandidate => match trust {
+                    SourceTrust::LocallyVerifiedCommitted => ConfirmationClass::CommittedPrimary,
+                    SourceTrust::IndependentCommitted => ConfirmationClass::CommittedIndependent,
+                    SourceTrust::ReconciledSnapshot
+                    | SourceTrust::RecoveryOnly
+                    | SourceTrust::ThirdPartyProvisional
+                    | SourceTrust::MempoolProvisional => {
+                        panic!("committed-candidate lane must not admit {trust:?}")
+                    }
+                },
+                PublicationLane::Provisional => match trust {
+                    SourceTrust::ThirdPartyProvisional => ConfirmationClass::ProvisionalSource,
+                    SourceTrust::LocallyVerifiedCommitted
+                    | SourceTrust::IndependentCommitted
+                    | SourceTrust::ReconciledSnapshot
+                    | SourceTrust::RecoveryOnly
+                    | SourceTrust::MempoolProvisional => {
+                        panic!("provisional lane must not admit {trust:?}")
+                    }
+                },
+                PublicationLane::Reconciliation
+                | PublicationLane::Recovery
+                | PublicationLane::Mempool => ConfirmationClass::CommittedPrimary,
+            };
+            let (source_id, block) = classified_block(100, "primary", confirmation, 1);
+            let result = BlockCandidate::try_new(source_id, admission, block);
+            match admission.publication_lane() {
+                PublicationLane::CommittedCandidate | PublicationLane::Provisional => {
+                    let candidate = result.expect("accepted sequencer lanes still construct");
+                    assert_eq!(
+                        candidate.admission().publication_lane(),
+                        admission.publication_lane()
+                    );
+                    assert_eq!(candidate.block().confirmation_class(), confirmation);
+                }
+                PublicationLane::Reconciliation
+                | PublicationLane::Recovery
+                | PublicationLane::Mempool => {
+                    let error = result.expect_err("unsupported lanes fail closed");
+                    assert_eq!(
+                        error,
+                        CandidateError::UnsupportedPublicationLane,
+                        "{trust:?}/{class:?} must not blur into the canonical sequencer"
+                    );
+                    assert_eq!(
+                        error.reason_code(),
+                        "sequencer.unsupported_publication_lane",
+                        "{trust:?}/{class:?} must reuse the existing unsupported-lane reason"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

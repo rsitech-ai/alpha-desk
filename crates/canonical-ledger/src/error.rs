@@ -141,6 +141,8 @@ pub enum LedgerError {
     ChainMismatch,
     #[error("canonical block is not committed state input")]
     NonCommittedBlock,
+    #[error("canonical correction processing is unimplemented")]
+    CorrectionUnimplemented,
     #[error("expected block height {expected:?}, received {actual:?}")]
     HeightDiscontinuity {
         expected: BlockHeight,
@@ -178,6 +180,7 @@ impl LedgerError {
             Self::InvalidReducerError => "ledger.invalid_reducer_error",
             Self::ChainMismatch => "ledger.chain_mismatch",
             Self::NonCommittedBlock => "ledger.non_committed_block",
+            Self::CorrectionUnimplemented => "ledger.correction_unimplemented",
             Self::HeightDiscontinuity { .. } => "ledger.height_discontinuity",
             Self::CanonicalDivergence => "ledger.canonical_divergence",
             Self::HeightExhausted => "ledger.height_exhausted",

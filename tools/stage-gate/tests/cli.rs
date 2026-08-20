@@ -685,15 +685,18 @@ fn approval_verifier_mutating_a_tracked_file_fails_final_snapshot_check() {
     let verifier = repository.join("fake-gpgv");
     let script = format!(
         concat!(
-            "#!/bin/bash\n",
-            "set -euo pipefail\n",
+            "#!/bin/sh\n",
+            "set -eu\n",
             "printf '%s\\n' mutated >> \"{}\"\n",
-            "statement=\"${{@:$#}}\"\n",
-            "case \"${{statement}}\" in\n",
-            "  *platform-data*) fingerprint=0123456789abcdef0123456789abcdef01234567 ;;\n",
-            "  *) fingerprint=89abcdef0123456789abcdef0123456789abcdef ;;\n",
-            "esac\n",
-            "printf '[GNUPG:] VALIDSIG %s\\n' \"${{fingerprint}}\"\n",
+            "statement=\"$1\"\n",
+            "for arg in \"$@\"; do\n",
+            "  statement=\"$arg\"\n",
+            "done\n",
+            "fingerprint=89abcdef0123456789abcdef0123456789abcdef\n",
+            "if /usr/bin/grep -F '\"role\":\"platform-data\"' \"$statement\" >/dev/null 2>&1; then\n",
+            "  fingerprint=0123456789abcdef0123456789abcdef01234567\n",
+            "fi\n",
+            "printf '[GNUPG:] VALIDSIG %s\\n' \"$fingerprint\"\n",
         ),
         repository.join("design.md").display()
     );
@@ -1257,15 +1260,26 @@ fn compose_signal_interruption_cleans_only_the_interrupted_gate_project() {
     let fixture = ComposeSmokeFixture::new();
     let mut child = fixture.spawn("signal");
     wait_for_path(&fixture.signal_marker);
-    let status = Command::new("/bin/kill")
-        .args(["-TERM", &format!("-{}", child.id())])
+    let pid = child.id();
+    let leader = Command::new("/bin/kill")
+        .args(["-s", "TERM", "--", &pid.to_string()])
         .status()
         .unwrap();
-    assert!(status.success());
+    let group = Command::new("/bin/kill")
+        .args(["-s", "TERM", "--", &format!("-{pid}")])
+        .status()
+        .unwrap();
+    assert!(
+        leader.success() || group.success(),
+        "TERM must reach the smoke script leader or its process group: leader={leader:?} group={group:?}"
+    );
 
     let status = child.wait().unwrap();
 
-    assert!(!status.success());
+    assert!(
+        !status.success(),
+        "SIGINT/SIGTERM must fail the smoke script, got {status:?}"
+    );
     let calls = fixture.calls();
     let cleanup = calls
         .lines()
@@ -1444,12 +1458,14 @@ fn stage_gate_cli_check_helper() {
             thread::sleep(Duration::from_millis(10));
         }
     }
+    std::process::exit(0);
 }
 
 #[test]
 fn stage_gate_cli_identity_helper() {
     println!("fixture-tool 1.0.0");
     println!("host: fixture-target");
+    std::process::exit(0);
 }
 
 fn stage_gate_binary() -> &'static str {
@@ -1806,7 +1822,7 @@ impl ComposeSmokeFixture {
                 "      timeout) exit 124 ;;\n",
                 "      signal)\n",
                 "        : > \"$STAGE_GATE_SIGNAL_MARKER\"\n",
-                "        sleep 30\n",
+                "        exec /bin/sleep 30\n",
                 "        ;;\n",
                 "      success) exit 0 ;;\n",
                 "      *) exit 92 ;;\n",

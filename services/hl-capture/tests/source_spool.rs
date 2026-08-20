@@ -2,7 +2,8 @@ use bytes::Bytes;
 use domain_types::SourceId;
 use hl_capture::spool::{
     DurabilityPolicy, SegmentHeaderV1, SourceSpool, SourceSpoolAppendDisposition,
-    SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy, SpoolWriter, inspect_spool,
+    SourceSpoolBaseline, SourceSpoolConfig, SpoolError, SpoolReader, SpoolRotationPolicy,
+    SpoolWriter, inspect_spool,
 };
 use hl_protocol::{
     ObservationClass, ParseWarning, ReceiveTimestamps, SourceCursor, SourceObservation,
@@ -10,7 +11,7 @@ use hl_protocol::{
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Duration;
-use storage_ports::CursorPolicy;
+use storage_ports::{CursorPolicy, LocalRecordSequence};
 use tempfile::TempDir;
 
 fn config(root: &TempDir, source_version: &str) -> SourceSpoolConfig {
@@ -24,6 +25,38 @@ fn config(root: &TempDir, source_version: &str) -> SourceSpoolConfig {
         SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
     )
     .unwrap()
+}
+
+fn recovered_writer_for_cursor_policy(cursor_policy: CursorPolicy) -> (TempDir, SpoolWriter) {
+    let root = TempDir::new().unwrap();
+    let mut spool = SourceSpool::open(
+        SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap(),
+        100,
+    )
+    .unwrap();
+    match cursor_policy {
+        CursorPolicy::ContiguousNativeOffset => {
+            spool.append(&observation(100), 101).unwrap();
+        }
+        CursorPolicy::MonotonicByteOffset => {
+            spool.append(&byte_observation(17), 101).unwrap();
+        }
+    }
+    let path = spool.active_segment_path().to_owned();
+    drop(spool);
+    let (writer, _) =
+        SpoolWriter::open_recovered(path, DurabilityPolicy::FsyncEveryRecord).unwrap();
+    (root, writer)
 }
 
 fn byte_config(root: &TempDir) -> SourceSpoolConfig {
@@ -97,6 +130,21 @@ fn observation_with(epoch: &str, offset: u64, payload: impl Into<Bytes>) -> Sour
         ReceiveTimestamps::new(1_785_240_000_000_000 + offset as i64, offset).unwrap(),
         "node-v1",
         payload.into(),
+        Vec::new(),
+        1024,
+    )
+    .unwrap()
+}
+
+fn observation_with_class(class: ObservationClass, offset: u64) -> SourceObservation {
+    SourceObservation::new(
+        SourceId::new("primary-node").unwrap(),
+        "hyperliquid-node-v1",
+        class,
+        SourceCursor::new("node-directory-epoch", offset).unwrap(),
+        ReceiveTimestamps::new(1_785_240_000_000_000 + offset as i64, offset).unwrap(),
+        "node-v1",
+        Bytes::from(format!("payload-{offset}")),
         Vec::new(),
         1024,
     )
@@ -563,6 +611,95 @@ fn byte_offset_policy_requires_per_record_fsync() {
 }
 
 #[test]
+fn spool_config_fsync_gate_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let batched = DurabilityPolicy::FsyncEvery {
+            max_records: 2,
+            max_delay: Duration::from_secs(1),
+        };
+        let root = TempDir::new().unwrap();
+        let batched_result = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            batched,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        );
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                let error = batched_result
+                    .expect_err("byte-offset acknowledgements require immediate durability");
+                assert!(matches!(error, SpoolError::InvalidDurabilityPolicy));
+                assert_eq!(error.reason_code(), "spool.invalid_durability_policy");
+                assert!(!root.path().join("primary-node").exists());
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                batched_result.expect(
+                    "contiguous native offset still admits bounded FsyncEvery at construction",
+                );
+            }
+        }
+
+        let admitted = TempDir::new().unwrap();
+        SourceSpoolConfig::try_new_with_cursor_policy(
+            admitted.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .expect("fsync-every-record remains admitted for every current cursor policy");
+    }
+}
+
+#[test]
+fn byte_offset_durability_covers_every_constructible_writer_policy() {
+    for policy in [
+        DurabilityPolicy::FsyncEveryRecord,
+        DurabilityPolicy::FsyncEvery {
+            max_records: 2,
+            max_delay: Duration::from_secs(1),
+        },
+    ] {
+        let root = TempDir::new().unwrap();
+        let result = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            policy,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            CursorPolicy::MonotonicByteOffset,
+        );
+        match policy {
+            DurabilityPolicy::FsyncEveryRecord => {
+                result
+                    .expect("fsync-every-record remains admitted for byte-offset acknowledgements");
+            }
+            DurabilityPolicy::FsyncEvery {
+                max_records: _,
+                max_delay: _,
+            } => {
+                let error = result.expect_err("non-admitted byte-offset durability");
+                assert!(matches!(error, SpoolError::InvalidDurabilityPolicy));
+                assert_eq!(error.reason_code(), "spool.invalid_durability_policy");
+                assert!(!root.path().join("primary-node").exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn byte_offset_duplicate_index_is_bounded_by_segments_not_record_count() {
     let root = TempDir::new().unwrap();
     let mut spool = SourceSpool::open(byte_config(&root), 100).unwrap();
@@ -727,6 +864,745 @@ fn byte_offset_policy_rejects_block_height_observations() {
     assert!(matches!(error, SpoolError::CursorPolicyMismatch));
     assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
     assert!(spool.last_local_sequence().is_none());
+}
+
+#[test]
+fn append_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new_with_cursor_policy(
+                root.path().join("primary-node"),
+                SourceId::new("primary-node").unwrap(),
+                "hyperliquid-node-v1",
+                "spool-v1",
+                [0x31; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+                cursor_policy,
+            )
+            .unwrap(),
+            100,
+        )
+        .unwrap();
+
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                let appended = spool
+                    .append(&byte_observation(17), 101)
+                    .expect("byte-offset append remains admitted");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+
+                let error = spool
+                    .append(&observation(17), 102)
+                    .expect_err("block heights are not byte offsets");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                let appended = spool
+                    .append(&observation(100), 101)
+                    .expect("contiguous native offset still uses the legacy append path");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+            }
+        }
+    }
+}
+
+fn after_header_identities(encoded: &[u8]) -> usize {
+    let mut cursor = 12;
+    for _ in 0..3 {
+        let length = usize::from(u16::from_le_bytes(
+            encoded[cursor..cursor + 2]
+                .try_into()
+                .expect("identity length prefix"),
+        ));
+        cursor += 2 + length;
+    }
+    cursor
+}
+
+#[test]
+fn header_policy_byte_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new_with_cursor_policy(
+                root.path().join("primary-node"),
+                SourceId::new("primary-node").unwrap(),
+                "hyperliquid-node-v1",
+                "spool-v1",
+                [0x31; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+                cursor_policy,
+            )
+            .unwrap(),
+            100,
+        )
+        .unwrap();
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                spool
+                    .append(&byte_observation(17), 101)
+                    .expect("byte-offset append remains admitted");
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                spool
+                    .append(&observation(100), 101)
+                    .expect("contiguous native offset still uses the legacy append path");
+            }
+        }
+
+        let encoded = std::fs::read(spool.active_segment_path()).unwrap();
+        let after = after_header_identities(&encoded);
+        let header_len = usize::try_from(u32::from_le_bytes(
+            encoded[8..12].try_into().expect("header length"),
+        ))
+        .unwrap();
+        let reader = SpoolReader::open(spool.active_segment_path()).unwrap();
+        assert_eq!(reader.header().cursor_policy(), cursor_policy);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert_eq!(&encoded[..8], b"HLSPV001");
+                assert_eq!(header_len, after + 8 + 8 + 32);
+                assert_eq!(&encoded[after..after + 8], 1_u64.to_le_bytes().as_slice());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(&encoded[..8], b"HLSPV002");
+                assert_eq!(header_len, after + 1 + 8 + 8 + 32);
+                assert_eq!(encoded[after], 1);
+                assert_eq!(
+                    &encoded[after + 1..after + 9],
+                    1_u64.to_le_bytes().as_slice()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn observation_policy_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                for class in [
+                    ObservationClass::CommittedBlock,
+                    ObservationClass::HistoricalBlock,
+                ] {
+                    let error = spool
+                        .append(&observation_with_class(class, 17), 101)
+                        .expect_err("block heights are not byte offsets");
+                    assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                    assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+                }
+                assert!(spool.last_local_sequence().is_none());
+
+                let appended = spool
+                    .append(&byte_observation(17), 101)
+                    .expect("non-block observations remain admitted under byte-offset policy");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                let committed = spool
+                    .append(
+                        &observation_with_class(ObservationClass::CommittedBlock, 100),
+                        101,
+                    )
+                    .expect("contiguous native offset still admits committed block observations");
+                assert_eq!(committed.local_sequence().get(), 1);
+                assert_eq!(
+                    committed.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+
+                let historical = spool
+                    .append(
+                        &observation_with_class(ObservationClass::HistoricalBlock, 101),
+                        102,
+                    )
+                    .expect("contiguous native offset still admits historical block observations");
+                assert_eq!(historical.local_sequence().get(), 2);
+                assert_eq!(
+                    historical.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+            }
+        }
+
+        drop(spool);
+        SourceSpool::open(config, 200).expect(
+            "recovery still applies today's observation-policy admission for this cursor policy",
+        );
+    }
+}
+
+#[test]
+fn observation_policy_covers_every_constructible_observation_class() {
+    const MISMATCH: &str =
+        "spool observation class is incompatible with the configured cursor policy";
+    for observation_class in ObservationClass::ALL {
+        let root = TempDir::new().unwrap();
+        let config = byte_config(&root);
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match observation_class {
+            ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock => {
+                let error = spool
+                    .append(&observation_with_class(observation_class, 17), 101)
+                    .expect_err("block heights are not byte offsets");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+                assert_eq!(error.to_string(), MISMATCH);
+                assert!(spool.last_local_sequence().is_none());
+            }
+            ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::Snapshot
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => {
+                let appended = spool
+                    .append(&observation_with_class(observation_class, 17), 101)
+                    .expect("non-block-height classes still skip this incompatibility check");
+                assert_eq!(appended.local_sequence().get(), 1);
+                assert_eq!(
+                    appended.disposition(),
+                    SourceSpoolAppendDisposition::Appended
+                );
+                drop(spool);
+                SourceSpool::open(config, 200).expect(
+                    "recovery still applies today's observation-policy admission for this class",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn persisted_schema_identity_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let spool = SourceSpool::open(config, 100).unwrap();
+        let schema_version = SpoolReader::open(spool.active_segment_path())
+            .unwrap()
+            .header()
+            .schema_version()
+            .to_owned();
+
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert_eq!(schema_version, "spool-v1");
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(
+                    schema_version,
+                    format!(
+                        "hl-spool-policy-v1:monotonic-byte-offset:{}",
+                        blake3::hash(b"spool-v1").to_hex()
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn local_sequence_chain_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new_with_cursor_policy(
+                root.path().join("primary-node"),
+                SourceId::new("primary-node").unwrap(),
+                "hyperliquid-node-v1",
+                "spool-v1",
+                [0x31; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap(),
+                cursor_policy,
+            )
+            .unwrap(),
+            100,
+        )
+        .unwrap();
+
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                let rotated = spool.append(&observation(101), 102).unwrap();
+                let first = rotated
+                    .closed_segment()
+                    .expect("contiguous rotation still closes the first segment");
+                assert!(first.manifest().first_local_sequence().is_none());
+                assert!(first.manifest().last_local_sequence().is_none());
+                let last = spool
+                    .shutdown(103)
+                    .unwrap()
+                    .expect("contiguous shutdown still closes the second segment");
+                assert!(last.manifest().first_local_sequence().is_none());
+                assert!(last.manifest().last_local_sequence().is_none());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                let rotated = spool.append(&byte_observation(49), 102).unwrap();
+                let first = rotated
+                    .closed_segment()
+                    .expect("byte-offset rotation still closes the first segment");
+                assert_eq!(first.manifest().first_local_sequence().unwrap().get(), 1);
+                assert_eq!(first.manifest().last_local_sequence().unwrap().get(), 1);
+                let last = spool
+                    .shutdown(103)
+                    .unwrap()
+                    .expect("byte-offset shutdown still closes the second segment");
+                assert_eq!(last.manifest().first_local_sequence().unwrap().get(), 2);
+                assert_eq!(last.manifest().last_local_sequence().unwrap().get(), 2);
+            }
+        }
+
+        let inspection = inspect_spool(root.path().join("primary-node")).expect(
+            "closed local-sequence chain still verifies for this constructible cursor policy",
+        );
+        assert_eq!(inspection.closed_segments(), 2);
+        assert_eq!(inspection.open_segments(), 0);
+        assert_eq!(inspection.records(), 2);
+    }
+}
+
+#[test]
+fn with_baseline_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let present = SourceSpoolBaseline::try_new(
+            1,
+            [0x11; 32],
+            SourceCursor::new("node-directory-epoch", 100).unwrap(),
+            Some(LocalRecordSequence::try_new(1).unwrap()),
+        )
+        .unwrap();
+        let absent = SourceSpoolBaseline::try_new(
+            1,
+            [0x11; 32],
+            SourceCursor::new("node-directory-epoch", 100).unwrap(),
+            None,
+        )
+        .unwrap();
+
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                config
+                    .clone()
+                    .with_baseline(present)
+                    .expect("byte-offset baseline still requires last_local_sequence");
+                let error = config
+                    .with_baseline(absent)
+                    .expect_err("byte-offset baseline still forbids a missing last_local_sequence");
+                assert!(matches!(error, SpoolError::InvalidManifest));
+                assert_eq!(error.reason_code(), "spool.invalid_manifest");
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                config
+                    .clone()
+                    .with_baseline(absent)
+                    .expect("contiguous baseline still admits a missing last_local_sequence");
+                let error = config
+                    .with_baseline(present)
+                    .expect_err("contiguous baseline still forbids last_local_sequence");
+                assert!(matches!(error, SpoolError::InvalidManifest));
+                assert_eq!(error.reason_code(), "spool.invalid_manifest");
+            }
+        }
+    }
+}
+
+#[test]
+fn recovery_first_in_segment_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                spool.append(&observation(101), 102).unwrap();
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                spool.append(&byte_observation(49), 102).unwrap();
+            }
+        }
+        spool
+            .shutdown(103)
+            .unwrap()
+            .expect("recovery fixture still closes the second segment");
+
+        let mut recovered = SourceSpool::open(config, 200).expect(
+            "recovery still assigns first-in-segment local sequences for this constructible cursor policy",
+        );
+        assert_eq!(recovered.closed_segments().len(), 2);
+        assert_eq!(recovered.last_local_sequence().unwrap().get(), 2);
+
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .is_none()
+                );
+                assert!(
+                    recovered.closed_segments()[1]
+                        .manifest()
+                        .first_local_sequence()
+                        .is_none()
+                );
+                let continued = recovered
+                    .append(&observation(102), 201)
+                    .expect("contiguous recovery still continues from next_local_sequence");
+                assert_eq!(continued.local_sequence().get(), 3);
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .unwrap()
+                        .get(),
+                    1
+                );
+                assert_eq!(
+                    recovered.closed_segments()[1]
+                        .manifest()
+                        .first_local_sequence()
+                        .unwrap()
+                        .get(),
+                    2
+                );
+                let continued = recovered
+                    .append(&byte_observation(81), 201)
+                    .expect("byte-offset recovery still continues from closed-manifest first_local_sequence");
+                assert_eq!(continued.local_sequence().get(), 3);
+            }
+        }
+    }
+}
+
+#[test]
+fn recovery_retained_index_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                spool.append(&observation(101), 102).unwrap();
+                assert_eq!(spool.retained_segment_count(), 0);
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                spool.append(&byte_observation(49), 102).unwrap();
+                assert_eq!(spool.retained_segment_count(), 1);
+            }
+        }
+        drop(spool);
+
+        let mut recovered = SourceSpool::open(config, 200).expect(
+            "recovery still rebuilds or skips the retained index for this constructible cursor policy",
+        );
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert_eq!(recovered.retained_segment_count(), 0);
+                recovered
+                    .append(&observation(102), 201)
+                    .expect("contiguous recovery still skips retained-index updates");
+                assert_eq!(recovered.retained_segment_count(), 0);
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(recovered.retained_segment_count(), 1);
+                let duplicate = recovered.append(&byte_observation(17), 201).expect(
+                    "byte-offset recovery still serves duplicates from the rebuilt retained index",
+                );
+                assert_eq!(
+                    duplicate.disposition(),
+                    SourceSpoolAppendDisposition::Duplicate
+                );
+                assert_eq!(recovered.retained_segment_count(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn validate_successor_epoch_change_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(u64::MAX, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                spool
+                    .append(&byte_observation_with("epoch-a", 49, "first"), 101)
+                    .unwrap();
+                let second = spool
+                    .append(&byte_observation_with("epoch-b", 7, "second"), 102)
+                    .expect("byte-offset still admits epoch change at first-in-segment");
+                assert!(second.closed_segment().is_some());
+                drop(spool);
+                let recovered = SourceSpool::open(config, 200).expect(
+                    "recovery still admits first-in-segment epoch change for monotonic byte offset",
+                );
+                assert_eq!(recovered.last_durable_cursor().unwrap().epoch(), "epoch-b");
+                assert_eq!(recovered.last_durable_cursor().unwrap().offset(), 7);
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                let error = spool
+                    .append(&observation_with("next-epoch", 1, "next"), 102)
+                    .expect_err("contiguous still rejects epoch change");
+                assert!(matches!(error, SpoolError::CursorRegression));
+                assert_eq!(error.reason_code(), "spool.cursor_regression");
+                drop(spool);
+                let recovered = SourceSpool::open(config, 200).expect(
+                    "contiguous recovery still succeeds when the durable tail has no epoch change",
+                );
+                assert_eq!(
+                    recovered.last_durable_cursor().unwrap().epoch(),
+                    "node-directory-epoch"
+                );
+                assert_eq!(recovered.last_durable_cursor().unwrap().offset(), 100);
+            }
+        }
+    }
+}
+
+#[test]
+fn open_segment_inspection_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let config = SourceSpoolConfig::try_new_with_cursor_policy(
+            root.path().join("primary-node"),
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            [0x31; 32],
+            DurabilityPolicy::FsyncEveryRecord,
+            SpoolRotationPolicy::try_new(1, Duration::from_secs(3600)).unwrap(),
+            cursor_policy,
+        )
+        .unwrap();
+        let mut spool = SourceSpool::open(config.clone(), 100).unwrap();
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                spool.append(&observation(100), 101).unwrap();
+                spool.append(&observation(101), 102).unwrap();
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                spool.append(&byte_observation(17), 101).unwrap();
+                spool.append(&byte_observation(49), 102).unwrap();
+            }
+        }
+        drop(spool);
+
+        let inspection = inspect_spool(root.path().join("primary-node"))
+            .expect("open-segment inspection still verifies for this constructible cursor policy");
+        assert_eq!(inspection.closed_segments(), 1);
+        assert_eq!(inspection.open_segments(), 1);
+        assert_eq!(inspection.records(), 2);
+
+        let recovered = SourceSpool::open(config, 200).expect(
+            "recovery still continues after open-segment inspection for this constructible cursor policy",
+        );
+        assert_eq!(recovered.last_local_sequence().unwrap().get(), 2);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .is_none()
+                );
+                assert!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .last_local_sequence()
+                        .is_none()
+                );
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .first_local_sequence()
+                        .unwrap()
+                        .get(),
+                    1
+                );
+                assert_eq!(
+                    recovered.closed_segments()[0]
+                        .manifest()
+                        .last_local_sequence()
+                        .unwrap()
+                        .get(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn writer_close_gates_cover_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let (_root, writer) = recovered_writer_for_cursor_policy(cursor_policy);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                let receipt = writer
+                    .close(102, None)
+                    .expect("legacy close still admits contiguous native offset");
+                assert!(receipt.manifest().first_local_sequence().is_none());
+                assert!(receipt.manifest().last_local_sequence().is_none());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                let error = writer
+                    .close(102, None)
+                    .expect_err("legacy close still rejects byte-offset policy");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+            }
+        }
+
+        let (_root, writer) = recovered_writer_for_cursor_policy(cursor_policy);
+        let first = LocalRecordSequence::try_new(1).unwrap();
+        let last = LocalRecordSequence::try_new(1).unwrap();
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                let receipt = writer
+                    .close_with_local_sequence_span(102, None, first, last)
+                    .expect("byte-offset close still admits a local-sequence span");
+                assert_eq!(receipt.manifest().first_local_sequence().unwrap().get(), 1);
+                assert_eq!(receipt.manifest().last_local_sequence().unwrap().get(), 1);
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                let error = writer
+                    .close_with_local_sequence_span(102, None, first, last)
+                    .expect_err("span close still rejects contiguous native offset");
+                assert!(matches!(error, SpoolError::CursorPolicyMismatch));
+                assert_eq!(error.reason_code(), "spool.cursor_policy_mismatch");
+            }
+        }
+    }
 }
 
 #[test]

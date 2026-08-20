@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use canonical_events::BlockEnvelope;
+use canonical_events::{BlockEnvelope, ConfirmationClass};
 use domain_types::{BlockHeight, ChainId, SourceId};
 use hl_capture::{
     CanonicalBlockCommitter, CommittedNodePipeline, CommittedNodePipelineConfig, PipelineError,
@@ -26,21 +26,26 @@ impl CanonicalBlockCommitter for RecordingCommitter {
     }
 }
 
-fn config() -> CommittedNodePipelineConfig {
+fn pipeline_config(
+    admission: SourceAdmission,
+) -> Result<CommittedNodePipelineConfig, PipelineError> {
     CommittedNodePipelineConfig::try_new(
         ChainId::new("mainnet").unwrap(),
         SourceId::new("primary-node").unwrap(),
         "hyperliquid-node-v1",
-        SourceAdmission::new(
-            SourceTrust::LocallyVerifiedCommitted,
-            ObservationClass::CommittedBlock,
-        )
-        .unwrap(),
+        admission,
         BlockHeight::new(992_814_678),
         32,
         32,
     )
-    .unwrap()
+}
+
+fn config_for(trust: SourceTrust) -> CommittedNodePipelineConfig {
+    pipeline_config(SourceAdmission::new(trust, ObservationClass::CommittedBlock).unwrap()).unwrap()
+}
+
+fn config() -> CommittedNodePipelineConfig {
+    config_for(SourceTrust::LocallyVerifiedCommitted)
 }
 
 fn observation(height: u64, bundles: serde_json::Value) -> SourceObservation {
@@ -87,7 +92,36 @@ async fn qualified_empty_committed_observation_reaches_the_committer_once() {
     let committed = committer.committed.lock().unwrap();
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].block_height(), BlockHeight::new(992_814_678));
+    assert_eq!(
+        committed[0].confirmation_class(),
+        ConfirmationClass::CommittedPrimary
+    );
     assert!(committed[0].events().is_empty());
+}
+
+#[tokio::test]
+async fn independent_committed_observation_still_reaches_the_committer_once() {
+    let committer = RecordingCommitter::default();
+    let mut pipeline =
+        CommittedNodePipeline::new(config_for(SourceTrust::IndependentCommitted), &committer);
+
+    let outcome = pipeline
+        .process_spooled(&observation(992_814_678, serde_json::json!([])))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        PipelineOutcome::Committed {
+            block_height: BlockHeight::new(992_814_678)
+        }
+    );
+    let committed = committer.committed.lock().unwrap();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(
+        committed[0].confirmation_class(),
+        ConfirmationClass::CommittedIndependent
+    );
 }
 
 #[tokio::test]
@@ -135,4 +169,48 @@ async fn a_gap_is_reported_without_publishing_the_later_block() {
             && end_inclusive == BlockHeight::new(992_814_679)
     ));
     assert_eq!(committer.committed.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn committed_pipeline_fail_closes_every_constructible_non_admitted_trust() {
+    for trust in SourceTrust::ALL {
+        for class in ObservationClass::ALL {
+            let Ok(admission) = SourceAdmission::new(trust, class) else {
+                continue;
+            };
+            let result = pipeline_config(admission);
+            match trust {
+                SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted => {
+                    if class == ObservationClass::CommittedBlock {
+                        result.expect("admitted committed trusts still construct");
+                    } else {
+                        assert_invalid_config(result, trust, class);
+                    }
+                }
+                SourceTrust::ReconciledSnapshot
+                | SourceTrust::RecoveryOnly
+                | SourceTrust::ThirdPartyProvisional
+                | SourceTrust::MempoolProvisional => {
+                    assert_invalid_config(result, trust, class);
+                }
+            }
+        }
+    }
+}
+
+fn assert_invalid_config(
+    result: Result<CommittedNodePipelineConfig, PipelineError>,
+    trust: SourceTrust,
+    class: ObservationClass,
+) {
+    let error = result.expect_err("non-admitted constructible pairs fail closed");
+    assert!(
+        matches!(error, PipelineError::InvalidConfig),
+        "{trust:?}/{class:?} must reuse InvalidConfig"
+    );
+    assert_eq!(
+        error.reason_code(),
+        "capture_pipeline.invalid_config",
+        "{trust:?}/{class:?} must reuse the existing invalid-config reason"
+    );
 }

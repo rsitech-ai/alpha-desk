@@ -31,13 +31,13 @@ use storage_ports::{
 };
 
 use super::{
-    ArchiveConfig, fs, manifest, raw, raw_policy,
+    ArchiveConfig, fs, manifest, raw, raw_policy, raw_v2,
     raw_v3::{
-        self, IndexPackBytes, JournalGenerationBuilderV3, LogicalCommitDescriptorV3,
-        LogicalCommitManifestV3, LogicalObjectDescriptorV3, MAX_JOURNAL_BYTES,
-        PackedLogicalInputV3, PackedObjectDescriptorV3, RAW_BYTE_DATASET_V3, RawPackManifestV3,
-        RootBundleV3, SequenceLeafEntryV3, SequenceNodeRefV3, SequenceStorageRefV3,
-        append_logical_entry, journal_file_identity, journal_needs_rotation,
+        self, BuiltIndexPackV3, IndexPackBytes, JournalGenerationBuilderV3,
+        LogicalCommitDescriptorV3, LogicalCommitManifestV3, LogicalObjectDescriptorV3,
+        MAX_JOURNAL_BYTES, PackedLogicalInputV3, PackedObjectDescriptorV3, RAW_BYTE_DATASET_V3,
+        RawPackManifestV3, RootBundleV3, SequenceLeafEntryV3, SequenceNodeRefV3,
+        SequenceStorageRefV3, append_logical_entry, journal_file_identity, journal_needs_rotation,
         load_sequence_internal, load_sequence_leaf, logical_object_relative_path,
         pack_journal_leaves, parse_logical_commit_manifest, parse_pack_manifest, parse_root_bundle,
         replace_range_with_packed_entry, root_bundle_hash, seed_rotated_journal_root,
@@ -48,11 +48,17 @@ use super::{
 mod checkpoint;
 mod gc;
 mod hint;
+mod import;
+mod import_reclaim;
 mod retention;
 mod scrub;
 
 pub use checkpoint::{RawArchiveCheckpoint, RawArchiveCheckpointV1, RawArchiveCheckpointV2};
 pub use gc::{RawArchiveGcPlan, RawArchiveGcReceipt, RawArchiveRestoreReceipt};
+pub use import::{RawV2ImportApproval, RawV2ImportPlan, RawV2ImportReceipt, RawV2ImportReport};
+pub use import_reclaim::{
+    RawArchiveBackupReceipt, RawV2ImportReclaimPlan, RawV2ImportReclaimReceipt,
+};
 pub use retention::{RawArchiveRetentionReport, RawArchiveRetentionRequest};
 pub use scrub::RawArchiveScrubReport;
 
@@ -251,6 +257,24 @@ impl RawV3Archive {
         checkpoint::load_checkpoint(self, chain, source)
     }
 
+    pub fn backup_eligible_objects(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        backup_root: impl AsRef<Path>,
+    ) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        raw_policy::ensure_append_policy(
+            &self.root,
+            chain,
+            source,
+            raw_policy::RawPolicy::MonotonicByteV3,
+        )?;
+        gc::backup_eligible_objects(self, chain, source, backup_root.as_ref())
+    }
+
     pub fn plan_packed_object_gc(
         &self,
         chain: &ChainId,
@@ -373,6 +397,86 @@ impl RawV3Archive {
         manifest: &ManifestId,
     ) -> Result<(u64, u64), ArchiveError> {
         hint::lookup_receipt_hint(self, chain, source, manifest)
+    }
+
+    pub fn plan_v2_import(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+    ) -> Result<RawV2ImportPlan, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import::plan_v2_import(self, chain, source)
+    }
+
+    pub fn publish_v2_import(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        plan: &RawV2ImportPlan,
+    ) -> Result<RawV2ImportReport, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import::publish_v2_import(self, chain, source, plan)
+    }
+
+    pub fn approve_v2_import(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        plan: &RawV2ImportPlan,
+    ) -> Result<RawV2ImportApproval, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import::approve_v2_import(self, chain, source, plan)
+    }
+
+    pub fn backup_v2_import_originals(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        backup_root: impl AsRef<Path>,
+    ) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import_reclaim::backup_v2_import_originals(self, chain, source, backup_root.as_ref())
+    }
+
+    pub fn plan_v2_import_reclaim(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        backup_receipt: [u8; 32],
+    ) -> Result<RawV2ImportReclaimPlan, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import_reclaim::plan_v2_import_reclaim(self, chain, source, backup_receipt)
+    }
+
+    pub fn execute_v2_import_reclaim(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        plan_digest: [u8; 32],
+        backup_receipt: [u8; 32],
+    ) -> Result<RawV2ImportReclaimReceipt, ArchiveError> {
+        let _in_process = self.writer.lock().map_err(|_| ArchiveError::WriterBusy)?;
+        let _process_lock =
+            fs::open_writer_lock(&self.root, &raw_policy::writer_lock_relative(chain, source))?;
+        import_reclaim::execute_v2_import_reclaim(self, chain, source, plan_digest, backup_receipt)
+    }
+
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(super) const fn config(&self) -> &ArchiveConfig {
+        &self.config
     }
 }
 
@@ -819,7 +923,7 @@ fn write_object(
     )
 }
 
-fn write_packed_object(
+pub(super) fn write_packed_object(
     archive: &RawV3Archive,
     chain: &ChainId,
     source: &SourceId,
@@ -922,7 +1026,7 @@ fn hash_file(file: &mut std::fs::File) -> Result<([u8; 32], u64), ArchiveError> 
     Ok((hasher.finalize().into(), length))
 }
 
-fn load_current_root(
+pub(super) fn load_current_root(
     archive: &RawV3Archive,
     chain: &ChainId,
     source: &SourceId,
@@ -949,7 +1053,59 @@ fn load_current_root(
     Ok(Some(load_verified_root(archive, chain, source, hash)?))
 }
 
-fn load_verified_root(
+pub(super) fn load_import_root(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<Option<(RootBundleV3, Vec<u8>)>, ArchiveError> {
+    load_root_pointer(
+        archive,
+        chain,
+        source,
+        "IMPORT",
+        "invalid raw V3 import pointer JSON",
+    )
+}
+
+fn load_root_pointer(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    file_name: &str,
+    invalid_json: &'static str,
+) -> Result<Option<(RootBundleV3, Vec<u8>)>, ArchiveError> {
+    let dataset = dataset_relative(chain, source);
+    let pointer_path = dataset.join(file_name);
+    let Some(bytes) = fs::try_read_regular(&archive.root, &pointer_path, 64 * 1024)? else {
+        return Ok(None);
+    };
+    let pointer: manifest::CurrentPointerV1 = serde_json::from_slice(&bytes)
+        .map_err(|_| ArchiveError::ManifestVerification(invalid_json))?;
+    if pointer.schema != manifest::CURRENT_POINTER_SCHEMA_V1 {
+        return Err(ArchiveError::ManifestVerification(
+            "unsupported raw V3 root pointer schema",
+        ));
+    }
+    let hash = manifest::parse_hash(&pointer.manifest_sha256)?;
+    let expected = root_relative(&dataset, hash);
+    if Path::new(&pointer.manifest_relative_path) != expected {
+        return Err(ArchiveError::ManifestVerification(
+            "raw V3 root pointer does not bind exact root path",
+        ));
+    }
+    Ok(Some(load_verified_root(archive, chain, source, hash)?))
+}
+
+pub(super) fn root_pointer_bytes(dataset: &Path, hash: [u8; 32]) -> Result<Vec<u8>, ArchiveError> {
+    let relative = root_relative(dataset, hash);
+    manifest::canonical_json(&manifest::CurrentPointerV1 {
+        schema: manifest::CURRENT_POINTER_SCHEMA_V1.to_owned(),
+        manifest_relative_path: raw::path_string(&relative)?,
+        manifest_sha256: hex::encode(hash),
+    })
+}
+
+pub(super) fn load_verified_root(
     archive: &RawV3Archive,
     chain: &ChainId,
     source: &SourceId,
@@ -992,6 +1148,32 @@ fn load_verified_root(
     Ok((root, journal_bytes))
 }
 
+pub(super) fn publish_index_pack(
+    archive: &RawV3Archive,
+    dataset: &Path,
+    pack: &BuiltIndexPackV3,
+) -> Result<[u8; 32], ArchiveError> {
+    let pack_hash = pack.object_sha256();
+    let pack_relative = dataset.join(pack.manifest().object_relative_path());
+    fs::publish_immutable(&archive.root, &pack_relative, pack.bytes())?;
+    let published = fs::read_regular(
+        &archive.root,
+        &pack_relative,
+        RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
+    )?;
+    pack.verify_bytes(&published)?;
+    let manifest_relative = dataset.join(format!(
+        "index-packs/{}.manifest.json",
+        hex::encode(pack_hash)
+    ));
+    fs::publish_immutable(
+        &archive.root,
+        &manifest_relative,
+        &manifest::canonical_json(pack.manifest())?,
+    )?;
+    Ok(pack_hash)
+}
+
 fn pack_index_locked(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -1016,24 +1198,7 @@ fn pack_index_locked(
         &packs,
         &hint_pages,
     )?;
-    let pack_hash = pack.object_sha256();
-    let pack_relative = dataset.join(pack.manifest().object_relative_path());
-    fs::publish_immutable(&archive.root, &pack_relative, pack.bytes())?;
-    let published = fs::read_regular(
-        &archive.root,
-        &pack_relative,
-        RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES,
-    )?;
-    pack.verify_bytes(&published)?;
-    let manifest_relative = dataset.join(format!(
-        "index-packs/{}.manifest.json",
-        hex::encode(pack_hash)
-    ));
-    fs::publish_immutable(
-        &archive.root,
-        &manifest_relative,
-        &manifest::canonical_json(pack.manifest())?,
-    )?;
+    let pack_hash = publish_index_pack(archive, &dataset, &pack)?;
     packs.insert(pack_hash, pack.bytes().to_vec());
 
     let next_journal_generation =
@@ -1320,7 +1485,7 @@ fn pack_logical_range_locked(
     Ok(bundle_hash)
 }
 
-fn load_packs_for_tree(
+pub(super) fn load_packs_for_tree(
     archive: &RawV3Archive,
     chain: &ChainId,
     source: &SourceId,
@@ -1463,7 +1628,7 @@ fn lookup_leaf_covering(
     Ok(None)
 }
 
-fn collect_overlapping_leaves(
+pub(super) fn collect_overlapping_leaves(
     node: &SequenceNodeRefV3,
     journal_bytes: &[u8],
     packs: &IndexPackBytes,
@@ -1493,7 +1658,7 @@ fn collect_overlapping_leaves(
     Ok(())
 }
 
-fn walk_logical_leaves(
+pub(super) fn walk_logical_leaves(
     node: &SequenceNodeRefV3,
     journal_bytes: &[u8],
     packs: &IndexPackBytes,
@@ -1531,7 +1696,7 @@ fn load_logical_commit(
     parse_logical_commit_manifest(&bytes)
 }
 
-fn verify_logical_at_sequence(
+pub(super) fn verify_logical_at_sequence(
     archive: &RawV3Archive,
     root: &RootBundleV3,
     journal_bytes: &[u8],
@@ -1692,13 +1857,12 @@ fn verify_packed_manifest_from_embed(
         .ok_or(ArchiveError::ManifestVerification(
             "packed slice does not contain the expected logical commit",
         ))?;
-    let embedded = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
     if manifest::sha256(input.canonical_manifest_json().as_bytes()) != hash {
         return Err(ArchiveError::ManifestVerification(
             "packed embedded logical commit hash mismatch",
         ));
     }
-    verified_from_packed_input(&embedded, input, &rows, hash)
+    verified_from_any_packed_input(input, &rows, hash)
 }
 
 fn try_load_logical_commit(
@@ -1872,6 +2036,81 @@ fn bind_observations_to_commit(
     )
 }
 
+fn bind_packed_input_slice(
+    input: &PackedLogicalInputV3,
+    observations: &[SourceObservation],
+) -> Result<RawArchiveObject, ArchiveError> {
+    match input.original_schema() {
+        "raw-v2" => bind_observations_to_v2_input(input, observations),
+        "raw-v3" => {
+            let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+            bind_observations_to_commit(&commit, observations)
+        }
+        _ => Err(ArchiveError::ManifestVerification(
+            "packed input original schema is unsupported",
+        )),
+    }
+}
+
+fn bind_observations_to_v2_input(
+    input: &PackedLogicalInputV3,
+    observations: &[SourceObservation],
+) -> Result<RawArchiveObject, ArchiveError> {
+    let evidence = raw_v2::validate_embedded_manifest_v2(
+        input.canonical_manifest_json().as_bytes().to_vec(),
+        input.manifest_sha256()?,
+    )?;
+    let first_observation = observations
+        .first()
+        .ok_or(ArchiveError::ManifestVerification(
+            "packed V2 slice is empty",
+        ))?;
+    let last_observation = observations
+        .last()
+        .ok_or(ArchiveError::ManifestVerification(
+            "packed V2 slice is empty",
+        ))?;
+    if first_observation.cursor().offset() != evidence.start_offset
+        || last_observation.cursor().offset() != evidence.end_offset
+        || u64::try_from(observations.len()).ok() != Some(evidence.row_count)
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "packed V2 descriptor boundaries disagree with Parquet rows",
+        ));
+    }
+    let first_sequence = LocalRecordSequence::try_new(evidence.first_local_sequence)?;
+    let reconstructed = RawObservationBatch::try_new_byte_offsets(
+        evidence.chain_id.clone(),
+        observations.to_vec(),
+        evidence.spool_manifest_blake3,
+        evidence.spool_segment_blake3,
+        first_sequence,
+    )?;
+    if raw_v2::rolling_content_hash(&reconstructed)? != evidence.rolling_content_sha256 {
+        return Err(ArchiveError::ManifestVerification(
+            "packed V2 rolling content hash mismatch",
+        ));
+    }
+    let cursor_range = RawObservationRange::try_new(
+        evidence.cursor_epoch.clone(),
+        evidence.start_offset,
+        evidence.end_offset,
+    )?;
+    RawArchiveObject::try_new_byte_offsets(
+        PathBuf::from(evidence.object_relative_path),
+        evidence.object_sha256,
+        evidence.object_size_bytes,
+        evidence.row_count,
+        evidence.chain_id,
+        evidence.source_id,
+        cursor_range,
+        LocalRecordSequenceRange::try_new(
+            LocalRecordSequence::try_new(evidence.first_local_sequence)?,
+            LocalRecordSequence::try_new(evidence.last_local_sequence)?,
+        )?,
+    )
+}
+
 fn decode_raw_batch(
     batch: &RecordBatch,
     commit: &LogicalCommitManifestV3,
@@ -1945,19 +2184,34 @@ fn read_observations_by_sequence(
     )? {
         return Err(ArchiveError::RangeUnavailable);
     }
+    let (root, journal_bytes) =
+        load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let lease = lease_root(archive, chain, source, &root)?;
+    let replayed = replay_root_by_sequence(archive, chain, source, &root, &journal_bytes, range)?;
+    Ok(Box::new(HoldingLease {
+        _lease: lease,
+        inner: replayed.into_iter().map(Ok),
+    }))
+}
+
+pub(super) fn replay_root_by_sequence(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root: &RootBundleV3,
+    journal_bytes: &[u8],
+    range: LocalRecordSequenceRange,
+) -> Result<Vec<storage_ports::OwnedSequencedSourceObservation>, ArchiveError> {
     if range.len() > archive.config.max_read_blocks() {
         return Err(ArchiveError::InvalidInput(
             "raw observation sequence range exceeds configured record limit",
         ));
     }
-    let (root, journal_bytes) =
-        load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
-    let lease = lease_root(archive, chain, source, &root)?;
-    let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), &journal_bytes)?;
+    let packs = load_packs_for_tree(archive, chain, source, root.sequence_root(), journal_bytes)?;
     let mut leaves = Vec::new();
     collect_overlapping_leaves(
         root.sequence_root(),
-        &journal_bytes,
+        journal_bytes,
         &packs,
         range,
         &mut leaves,
@@ -2027,10 +2281,7 @@ fn read_observations_by_sequence(
             return Err(ArchiveError::RangeUnavailable);
         }
     }
-    Ok(Box::new(HoldingLease {
-        _lease: lease,
-        inner: replayed.into_iter().map(Ok),
-    }))
+    Ok(replayed)
 }
 
 fn read_observations(
@@ -2136,7 +2387,7 @@ fn receipt(
     )
 }
 
-fn dataset_relative(chain: &ChainId, source: &SourceId) -> PathBuf {
+pub(super) fn dataset_relative(chain: &ChainId, source: &SourceId) -> PathBuf {
     raw_policy::dataset_relative(chain, source, raw_policy::RawPolicy::MonotonicByteV3)
 }
 
@@ -2153,7 +2404,7 @@ impl<I: Iterator> Iterator for HoldingLease<I> {
     }
 }
 
-fn lease_root(
+pub(super) fn lease_root(
     archive: &RawV3Archive,
     chain: &ChainId,
     source: &SourceId,
@@ -2173,7 +2424,7 @@ fn lease_root(
     Ok(lease)
 }
 
-fn pack_manifest_relative(hash: [u8; 32]) -> PathBuf {
+pub(super) fn pack_manifest_relative(hash: [u8; 32]) -> PathBuf {
     PathBuf::from("_manifests")
         .join("raw-byte-v3")
         .join("packs")
@@ -2291,7 +2542,7 @@ fn load_pack_manifest(
     Ok(pack)
 }
 
-fn load_verified_pack_rows(
+pub(super) fn load_verified_pack_rows(
     archive: &RawV3Archive,
     chain: &ChainId,
     source: &SourceId,
@@ -2341,7 +2592,6 @@ fn load_verified_pack_rows(
         ));
     }
     for input in pack.inputs() {
-        let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
         let start = usize::try_from(input.row_slice_start()).map_err(|_| {
             ArchiveError::ManifestVerification("packed row slice exceeds address space")
         })?;
@@ -2358,7 +2608,7 @@ fn load_verified_pack_rows(
             .ok_or(ArchiveError::ManifestVerification(
                 "packed row slice is outside the packed object",
             ))?;
-        bind_observations_to_commit(&commit, slice)?;
+        bind_packed_input_slice(input, slice)?;
     }
     Ok((pack, observations))
 }
@@ -2442,6 +2692,14 @@ fn find_exact_packed(
         return Ok(None);
     };
     let hash = input.manifest_sha256()?;
+    if input.original_schema() != "raw-v3" {
+        return Err(ArchiveError::ConflictingRawRange {
+            source_id: descriptor.source_id()?,
+            epoch: descriptor.cursor_epoch().to_owned(),
+            start: descriptor.start_offset(),
+            end: descriptor.end_offset(),
+        });
+    }
     let loaded = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
     if loaded.commit() != descriptor {
         return Err(ArchiveError::ConflictingRawRange {
@@ -2480,8 +2738,7 @@ fn verify_packed_at_sequence(
             "packed slice sequence evidence does not match the expected range",
         ));
     }
-    let loaded = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
-    verified_from_packed_input(&loaded, input, &rows, manifest_sha256)
+    verified_from_any_packed_input(input, &rows, manifest_sha256)
 }
 
 fn verify_packed_manifest(
@@ -2515,6 +2772,21 @@ fn verified_from_packed_input(
     rows: &[SourceObservation],
     manifest_hash: [u8; 32],
 ) -> Result<VerifiedRawManifest, ArchiveError> {
+    verified_from_any_packed_input(input, rows, manifest_hash).and_then(|verified| {
+        if verified.rolling_content_sha256() != commit.commit().rolling_content_sha256()? {
+            return Err(ArchiveError::ManifestVerification(
+                "packed embedded logical commit disagrees with the original manifest",
+            ));
+        }
+        Ok(verified)
+    })
+}
+
+fn verified_from_any_packed_input(
+    input: &PackedLogicalInputV3,
+    rows: &[SourceObservation],
+    manifest_hash: [u8; 32],
+) -> Result<VerifiedRawManifest, ArchiveError> {
     let start = usize::try_from(input.row_slice_start()).map_err(|_| {
         ArchiveError::ManifestVerification("packed row slice exceeds address space")
     })?;
@@ -2531,31 +2803,54 @@ fn verified_from_packed_input(
         .ok_or(ArchiveError::ManifestVerification(
             "packed row slice is outside the packed object",
         ))?;
-    let object = bind_observations_to_commit(commit, slice)?;
-    Ok(VerifiedRawManifest::new(
-        manifest::manifest_id(manifest_hash)?,
-        manifest_hash,
-        schema::raw_schema_fingerprint()?,
-        commit.commit().rolling_content_sha256()?,
-        commit.commit().spool_manifest_blake3()?,
-        commit.commit().spool_segment_blake3()?,
-        object,
-    ))
+    let object = bind_packed_input_slice(input, slice)?;
+    match input.original_schema() {
+        "raw-v2" => {
+            let evidence = raw_v2::validate_embedded_manifest_v2(
+                input.canonical_manifest_json().as_bytes().to_vec(),
+                input.manifest_sha256()?,
+            )?;
+            Ok(VerifiedRawManifest::new(
+                manifest::manifest_id(manifest_hash)?,
+                manifest_hash,
+                schema::raw_schema_fingerprint()?,
+                evidence.rolling_content_sha256,
+                evidence.spool_manifest_blake3,
+                evidence.spool_segment_blake3,
+                object,
+            ))
+        }
+        "raw-v3" => {
+            let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
+            Ok(VerifiedRawManifest::new(
+                manifest::manifest_id(manifest_hash)?,
+                manifest_hash,
+                schema::raw_schema_fingerprint()?,
+                commit.commit().rolling_content_sha256()?,
+                commit.commit().spool_manifest_blake3()?,
+                commit.commit().spool_segment_blake3()?,
+                object,
+            ))
+        }
+        _ => Err(ArchiveError::ManifestVerification(
+            "packed input original schema is unsupported",
+        )),
+    }
 }
 
-fn logical_manifest_relative(hash: [u8; 32]) -> PathBuf {
+pub(super) fn logical_manifest_relative(hash: [u8; 32]) -> PathBuf {
     PathBuf::from("_manifests")
         .join("raw-byte-v3")
         .join(format!("manifest-{}.json", hex::encode(hash)))
 }
 
-fn root_relative(dataset: &Path, hash: [u8; 32]) -> PathBuf {
+pub(super) fn root_relative(dataset: &Path, hash: [u8; 32]) -> PathBuf {
     dataset
         .join("roots")
         .join(format!("root-{}.json", hex::encode(hash)))
 }
 
-fn journal_relative(dataset: &Path, generation: u64) -> PathBuf {
+pub(super) fn journal_relative(dataset: &Path, generation: u64) -> PathBuf {
     dataset
         .join("journals")
         .join(format!("generation-{generation}.log"))

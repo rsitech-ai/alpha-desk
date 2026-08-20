@@ -224,7 +224,7 @@ impl SequenceLeafEntryV3 {
         let expected_rows = sequence_span(first_local_sequence, last_local_sequence)?;
         if object_size_bytes == 0
             || row_count != expected_rows
-            || logical_manifest_count < 2
+            || logical_manifest_count == 0
             || logical_manifest_count > row_count
         {
             return Err(ArchiveError::InvalidInput(
@@ -1352,6 +1352,15 @@ impl PackedLogicalInputV3 {
     pub fn manifest_id(&self) -> &str {
         &self.manifest_id
     }
+
+    #[must_use]
+    pub fn original_schema(&self) -> &str {
+        &self.original_schema
+    }
+
+    pub fn rolling_content_sha256(&self) -> Result<[u8; 32], ArchiveError> {
+        manifest::parse_hash(&self.rolling_content_sha256)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1428,7 +1437,7 @@ impl RawPackManifestV3 {
         object: PackedObjectDescriptorV3,
         created_at: KnownTime,
     ) -> Result<Self, ArchiveError> {
-        if inputs.len() < 2 || inputs.len() > RAW_ARCHIVE_MAXIMUM_PACK_LOGICAL_INPUTS {
+        if inputs.is_empty() || inputs.len() > RAW_ARCHIVE_MAXIMUM_PACK_LOGICAL_INPUTS {
             return Err(ArchiveError::InvalidInput("raw pack logical input count"));
         }
         let chain_id = inputs[0].chain_id.clone();
@@ -4003,7 +4012,7 @@ mod tests {
                 [0x44; 32],
                 2_048,
                 8,
-                1,
+                9,
                 "date=2026-08-03/hour=12",
             )
             .is_err()

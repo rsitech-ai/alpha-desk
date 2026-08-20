@@ -5,11 +5,13 @@ use std::{
 
 use canonical_events::{BlockEnvelope, ConfirmationClass};
 use canonical_ledger::{
-    ApplyContext, CanonicalLedger, EventReducer, LedgerLimits, ReducerError, StateMutation,
-    StateView,
+    ApplyContext, CanonicalLedger, CorrectionRecord, EventReducer, LedgerLimits, ReducerError,
+    StateMutation, StateView,
 };
 use domain_types::{BlockHeight, ChainId, ProtocolTime, SourceId};
-use hl_core::{DurableApplyError, DurableApplyOutcome, apply_block_durably};
+use hl_core::{
+    DurableApplyError, DurableApplyOutcome, apply_block_durably, ingest_correction_record,
+};
 use storage_ports::{
     AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateCommitReceipt,
     StateStoreError,
@@ -90,6 +92,29 @@ fn successful_atomic_store_commit_precedes_visible_ledger_advance() {
     assert_eq!(store.calls.get(), 1);
 }
 
+#[test]
+fn correction_ingest_and_apply_fail_closed_without_touching_the_store() {
+    let mut ledger = ledger();
+    let before = ledger.state_image().canonical_bytes();
+    let store = RecordingStore::successful();
+    let corrected = classified_block(ConfirmationClass::Corrected);
+    let record = CorrectionRecord::try_from_block(&corrected).expect("typed correction");
+
+    let ingest = ingest_correction_record(&ledger, &store, &record)
+        .expect_err("typed correction ingest denied");
+    assert_eq!(ingest.reason_code(), "ledger.correction_unimplemented");
+    assert_eq!(store.calls.get(), 0);
+    assert_eq!(ledger.state_image().canonical_bytes(), before);
+    assert!(ledger.checkpoint().is_none());
+
+    let apply = apply_block_durably(&mut ledger, &store, &corrected)
+        .expect_err("corrected block durable apply denied");
+    assert_eq!(apply.reason_code(), "ledger.correction_unimplemented");
+    assert_eq!(store.calls.get(), 0);
+    assert_eq!(ledger.state_image().canonical_bytes(), before);
+    assert!(ledger.checkpoint().is_none());
+}
+
 struct RecordingStore {
     behavior: StoreBehavior,
     calls: Cell<u64>,
@@ -167,11 +192,15 @@ fn ledger() -> CanonicalLedger<EmptyReducer> {
 }
 
 fn block() -> BlockEnvelope {
+    classified_block(ConfirmationClass::CommittedPrimary)
+}
+
+fn classified_block(confirmation: ConfirmationClass) -> BlockEnvelope {
     BlockEnvelope::try_new(
         ChainId::new("mainnet").expect("chain"),
         BlockHeight::new(200),
         ProtocolTime::from_unix_micros(200).expect("time"),
-        ConfirmationClass::CommittedPrimary,
+        confirmation,
         Vec::new(),
         BTreeMap::from([(
             SourceId::new("durable-apply-test").expect("source"),

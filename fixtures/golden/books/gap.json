@@ -1,0 +1,38 @@
+{
+  "schema": "hl.orderbook.fixture.v1",
+  "id": "gap",
+  "source_qualification": "synthetic_unassessed",
+  "stage_1_qualified": false,
+  "stage_2_qualified": false,
+  "market_id": "perp:ETH",
+  "start_block": 1,
+  "price_scale": 0,
+  "quantity_scale": 0,
+  "ops": [
+    {
+      "op": "Snapshot",
+      "sequence": 5,
+      "as_of_block": 5,
+      "orders": [
+        {"order_id": "bid", "side": "buy", "price": "100", "remaining": "1", "sequence": 1}
+      ]
+    },
+    {
+      "op": "Diff",
+      "sequence": 7,
+      "as_of_block": 7,
+      "diff": {
+        "kind": "Add",
+        "order": {"order_id": "ask", "side": "sell", "price": "101", "remaining": "1", "sequence": 2}
+      }
+    }
+  ],
+  "expected": {
+    "health": {"kind": "Red", "reason": "sequence gap"},
+    "sequence": 5,
+    "as_of_block": 5,
+    "active_order_ids": [],
+    "l2_bids": [],
+    "l2_asks": []
+  }
+}

@@ -11,6 +11,7 @@ members = [
   "crates/margin-models",
   "crates/entity-graph",
   "crates/feature-core",
+  "crates/intelligence-replay",
   "crates/wallet-intelligence",
   "crates/market-intelligence",
   "crates/signal-core",
@@ -31,6 +32,7 @@ members = [
   "tools/spool-inspect",
   "tools/canonical-inspect",
   "tools/archive-inspect",
+  "tools/book-inspect",
   "tools/build-info",
   "tools/architecture-check",
   "tools/stage-gate",
@@ -57,8 +59,12 @@ cargo_metadata = "=0.23.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 datafusion = { version = "=54.1.0", default-features = false, features = ["parquet"] }
 crc32c = "=0.6.8"
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 hex = "0.4"
 http = "=1.4.2"
+http-body-util = "=0.1.4"
+hyper = { version = "=1.11.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "=0.1.20", default-features = false, features = ["http1", "server", "tokio"] }
 jsonschema = { version = "=0.48.5", default-features = false }
 num-bigint = "0.4"
 num-traits = "0.2"
@@ -68,7 +74,7 @@ prost-types = "0.14"
 prometheus = "=0.14.0"
 rustc_version = "=0.4.1"
 getrandom = "=0.3.4"
-rustix = { version = "=1.1.4", features = ["event", "fs"] }
+rustix = { version = "=1.1.4", features = ["event", "fs", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"

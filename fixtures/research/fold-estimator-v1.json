@@ -1,0 +1,122 @@
+{
+  "policy": {
+    "label_horizon_blocks": 5,
+    "embargo_blocks": 2
+  },
+  "experiment": {
+    "hypothesis": "synthetic univariate linear fold fit",
+    "owner": "research-fixture",
+    "code_commit": "synthetic",
+    "rust_toolchain": "1.97.1",
+    "feature_set_version": "features-v1",
+    "label_definition": "executable-net-return-v1",
+    "market_universe_version": "synth-btc-v1",
+    "wallet_score_version": "none",
+    "cluster_version_policy": "none",
+    "training_range": { "start_inclusive": 1, "end_inclusive": 20 },
+    "validation_ranges": [
+      { "start_inclusive": 21, "end_inclusive": 25 },
+      { "start_inclusive": 26, "end_inclusive": 30 }
+    ],
+    "holdout_range": { "start_inclusive": 40, "end_inclusive": 45 },
+    "data_manifest_hash": "00",
+    "model_config_hash": "00",
+    "random_seed": 7,
+    "cost_model_version": "synthetic-cost-v1",
+    "execution_latency_assumptions": "fixed-zero",
+    "promotion_metrics": ["net_pnl"],
+    "reviewers": ["fixture"]
+  },
+  "rows": [
+    {
+      "id": "train-1",
+      "feature_height": 2,
+      "label_start": 2,
+      "label_end": 3,
+      "payload": "y=2x+1",
+      "features": ["1.00000000"],
+      "outcome": "3.00000000"
+    },
+    {
+      "id": "train-2",
+      "feature_height": 3,
+      "label_start": 3,
+      "label_end": 4,
+      "payload": "y=2x+1",
+      "features": ["2.00000000"],
+      "outcome": "5.00000000"
+    },
+    {
+      "id": "train-3",
+      "feature_height": 4,
+      "label_start": 4,
+      "label_end": 5,
+      "payload": "y=2x+1",
+      "features": ["3.00000000"],
+      "outcome": "7.00000000"
+    },
+    {
+      "id": "train-4",
+      "feature_height": 5,
+      "label_start": 5,
+      "label_end": 6,
+      "payload": "y=2x+1",
+      "features": ["4.00000000"],
+      "outcome": "9.00000000"
+    },
+    {
+      "id": "train-5",
+      "feature_height": 6,
+      "label_start": 6,
+      "label_end": 7,
+      "payload": "y=2x+1",
+      "features": ["5.00000000"],
+      "outcome": "11.00000000"
+    },
+    {
+      "id": "val-0a",
+      "feature_height": 21,
+      "label_start": 21,
+      "label_end": 22,
+      "payload": "y=2x+1",
+      "features": ["10.00000000"],
+      "outcome": "21.00000000"
+    },
+    {
+      "id": "val-0b",
+      "feature_height": 22,
+      "label_start": 22,
+      "label_end": 23,
+      "payload": "y=2x+1",
+      "features": ["11.00000000"],
+      "outcome": "23.00000000"
+    },
+    {
+      "id": "val-1a",
+      "feature_height": 26,
+      "label_start": 26,
+      "label_end": 27,
+      "payload": "y=2x+1",
+      "features": ["12.00000000"],
+      "outcome": "25.00000000"
+    },
+    {
+      "id": "val-1b",
+      "feature_height": 27,
+      "label_start": 27,
+      "label_end": 28,
+      "payload": "y=2x+1",
+      "features": ["13.00000000"],
+      "outcome": "27.00000000"
+    },
+    {
+      "id": "holdout-secret",
+      "feature_height": 40,
+      "label_start": 40,
+      "label_end": 41,
+      "payload": "must-not-enter-train",
+      "features": ["100.00000000"],
+      "outcome": "201.00000000"
+    }
+  ]
+}

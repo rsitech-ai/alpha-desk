@@ -14,11 +14,20 @@ use hl_capture::bus::{
 };
 use storage_ports::ArchiveReceipt;
 
+const FROZEN_COMMITTED_PRIMARY_MARKER_SHA256: &str =
+    "f4ec375bab6832c6ca3c06b5b736ab827a0b96024e5af0f6578d1a4d2abc8704";
+const FROZEN_COMMITTED_INDEPENDENT_MARKER_SHA256: &str =
+    "544a2aab99608aa308ce25a064c0eca22ef586338fd640942183012e7f619f6e";
+
 fn known(micros: i64) -> KnownTime {
     KnownTime::from_unix_micros(micros).expect("known time")
 }
 
 fn canonical_block(height: u64, seed: u64) -> BlockEnvelope {
+    classified_block(height, seed, ConfirmationClass::CommittedPrimary)
+}
+
+fn classified_block(height: u64, seed: u64, confirmation: ConfirmationClass) -> BlockEnvelope {
     let block_time_micros = 1_721_779_200_000_000_i64
         .checked_add(i64::try_from(height).expect("height fits i64"))
         .expect("block time");
@@ -44,7 +53,7 @@ fn canonical_block(height: u64, seed: u64) -> BlockEnvelope {
             )
             .expect("source evidence"),
         ],
-        confirmation_class: ConfirmationClass::CommittedPrimary,
+        confirmation_class: confirmation,
         observed_at: known(block_time_micros),
         ingested_at: known(block_time_micros + 1),
         canonicalized_at: known(block_time_micros + 2),
@@ -61,7 +70,7 @@ fn canonical_block(height: u64, seed: u64) -> BlockEnvelope {
         ChainId::new("mainnet").expect("chain ID"),
         BlockHeight::new(height),
         block_time,
-        ConfirmationClass::CommittedPrimary,
+        confirmation,
         vec![event],
         BTreeMap::from([(source_id, [0x55; 32])]),
     )
@@ -244,4 +253,56 @@ fn publication_ledger_is_explicitly_bounded() {
         .expect_err("ledger capacity must fail closed");
     assert_eq!(error, PublicationError::LedgerCapacityExceeded { limit: 1 });
     assert_eq!(ledger.len(), 1);
+}
+
+#[test]
+fn marker_encoding_covers_every_confirmation_class() {
+    for class in [
+        ConfirmationClass::ProvisionalSource,
+        ConfirmationClass::CommittedPrimary,
+        ConfirmationClass::CommittedIndependent,
+        ConfirmationClass::ReconciledSnapshot,
+        ConfirmationClass::Corrected,
+        ConfirmationClass::Expired,
+    ] {
+        let block = classified_block(42, 7, class);
+        let receipt = archive_receipt(&block);
+        match class {
+            ConfirmationClass::CommittedPrimary => {
+                let batch = CommittedPublicationBatch::try_new(&block, &receipt)
+                    .expect("committed primary still encodes");
+                assert_eq!(
+                    hex::encode(batch.block().publication_sha256()),
+                    FROZEN_COMMITTED_PRIMARY_MARKER_SHA256,
+                    "committed-primary marker bytes must stay frozen"
+                );
+            }
+            ConfirmationClass::CommittedIndependent => {
+                let batch = CommittedPublicationBatch::try_new(&block, &receipt)
+                    .expect("committed independent still encodes");
+                assert_eq!(
+                    hex::encode(batch.block().publication_sha256()),
+                    FROZEN_COMMITTED_INDEPENDENT_MARKER_SHA256,
+                    "committed-independent marker bytes must stay frozen"
+                );
+            }
+            ConfirmationClass::ProvisionalSource
+            | ConfirmationClass::ReconciledSnapshot
+            | ConfirmationClass::Corrected
+            | ConfirmationClass::Expired => {
+                let error = CommittedPublicationBatch::try_new(&block, &receipt)
+                    .expect_err("non-committed lanes fail closed");
+                assert_eq!(
+                    error,
+                    PublicationError::NotCommitted,
+                    "{class:?} must not blur into the committed publication lane"
+                );
+                assert_eq!(
+                    error.reason_code(),
+                    "publication.not_committed",
+                    "{class:?} must reuse the existing not-committed reason"
+                );
+            }
+        }
+    }
 }

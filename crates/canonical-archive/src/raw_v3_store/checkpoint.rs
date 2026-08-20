@@ -261,10 +261,21 @@ pub fn publish_checkpoint_v2(
 ) -> Result<[u8; 32], ArchiveError> {
     let (root, journal_bytes) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
-    let _lease = lease_root(archive, chain, source, &root)?;
-    authenticate_v2_entries(archive, &root, &journal_bytes, &entries)?;
+    publish_checkpoint_v2_on(archive, chain, source, &root, &journal_bytes, entries)
+}
+
+pub fn publish_checkpoint_v2_on(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    root: &RootBundleV3,
+    journal_bytes: &[u8],
+    entries: RawArchiveCheckpointEntriesV2,
+) -> Result<[u8; 32], ArchiveError> {
+    let _lease = lease_root(archive, chain, source, root)?;
+    authenticate_v2_entries(archive, root, journal_bytes, &entries)?;
     let checkpoint = RawArchiveCheckpointV2::try_new(
-        root_bundle_hash(&root)?,
+        root_bundle_hash(root)?,
         chain.clone(),
         source.clone(),
         entries,

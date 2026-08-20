@@ -149,7 +149,7 @@ docker run -d --name "$nats_container" \
   -p 127.0.0.1::4222 \
   -p 127.0.0.1::8222 \
   -v "${repository_root}/infra/docker-compose/nats/nats.conf:/etc/nats/nats.conf:ro" \
-  docker.io/library/nats:2.14.3-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0 \
+  docker.io/library/nats:2.14.5-alpine@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da \
   nats-server --config /etc/nats/nats.conf >/dev/null
 nats_client_port="$(docker port "$nats_container" 4222/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
 nats_monitor_port="$(docker port "$nats_container" 8222/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
