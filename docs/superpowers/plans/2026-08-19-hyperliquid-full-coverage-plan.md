@@ -19,7 +19,7 @@
 - Canonical accounting and identity never use `f64`.
 - Canonical reducers remain synchronous and deterministic.
 - Live and replay use the same parser, mapping, reducer, feature, and signal paths.
-- No `/exchange`, signing, execution, credentials, or private keys.
+- No `/exchange`, signing, execution, credentials, private keys, order placement, or copy trading.
 - Official WebSocket/REST remain provisional/reconciliation sources; committed node evidence remains primary.
 - Third-party providers never silently overwrite canonical truth.
 - Unknown state-affecting variants are quarantined and fail the affected health gate.
@@ -132,7 +132,7 @@ The optional-provider lane never blocks the own-node/official-source core unless
 - Create `docs/superpowers/specs/2026-08-19-hyperliquid-full-coverage-expansion.md`
 - Create `docs/superpowers/plans/2026-08-19-hyperliquid-full-coverage-plan.md`
 - Create `docs/superpowers/plans/2026-08-19-hyperliquid-full-coverage-traceability.md`
-- Update `docs/superpowers/plans/2026-07-24-00-hyperliquid-alpha-desk-program-roadmap.md`
+- Update `docs/superpowers/plans/2026-07-24-00-hyperliquid-alpha-desk-program-roadmap.md` [absent on this branch; do not invent it; contributor roadmap is `docs/ROADMAP.md`]
 - Update `docs/STATUS.md` with a dated note that it is a snapshot and runtime maturity differs by component
 
 **Failing check first**

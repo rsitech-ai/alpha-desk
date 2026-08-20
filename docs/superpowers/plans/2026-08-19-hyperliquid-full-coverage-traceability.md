@@ -19,6 +19,7 @@ Read-only scope is unchanged: no `/exchange`, signing, private keys, order place
 - First release profile enables no third-party providers.
 - Do not add duplicate `canonical-archive` or `canonical-state-store` crates.
 - Do not create a second web app.
+- Plan T01 still lists `docs/superpowers/plans/2026-07-24-00-hyperliquid-alpha-desk-program-roadmap.md`. That file is absent here. Do not invent it. Contributor roadmap is `docs/ROADMAP.md`.
 
 | ID | Spec | Task | Target test/check | Acceptance evidence |
 | --- | --- | --- | --- | --- |
@@ -87,7 +88,7 @@ Read-only scope is unchanged: no `/exchange`, signing, private keys, order place
 | HLCOV-API-004 | §22.7 | T33 | stream resume fixture | Reconnect cannot present stale data as current. |
 | HLCOV-API-005 | §23 | T34 | existing AlphaDesk / operator dashboard tests | Four workspaces are present in the existing apps. |
 | HLCOV-API-006 | §28.20 | T34 | dashboard health/coverage fixture | Health, coverage, and limitations are visible. |
-| HLCOV-API-007 | §23 | T34 | workspace layout check | No second web application crate/app is added. |
+| HLCOV-API-007 | parent adjudication L | T34 | workspace layout check | No second web application crate/app is added. |
 | HLCOV-API-008 | §3.2 | T33 | OpenAPI fixture review | GraphQL is not introduced as the primary contract. |
 | HLCOV-OPS-001 | §3.2, §30.14 | T01, T39 | `just hyperliquid-full-coverage-docs`; read-only release scan | Spec/plan/docs check preserve read-only language. Release graph has no signer/`/exchange`. |
 | HLCOV-OPS-002 | §3.2 | T16, T23, T33 | coverage fields in API fixture | Truncated sources cannot be reported as complete. |
@@ -98,6 +99,6 @@ Read-only scope is unchanged: no `/exchange`, signing, private keys, order place
 | HLCOV-OPS-007 | §26 | T02-T40 | `just` recipes in §26.6, introduced per task | Each shipped capability has the matching just/cargo check. |
 | HLCOV-OPS-008 | §27.1 | T37, T40 | topology/runbook review; `just full-coverage-soak` | Initial topology matches §27.1. |
 | HLCOV-OPS-009 | §28.19 | T38, T40 | `just full-coverage-soak`; chaos/restore gates | Expansion is not complete without those gates. |
-| HLCOV-OPS-010 | T01 | T01 | `just hyperliquid-full-coverage-docs` | Renamed spec/plan, IDs, traceability, plans README, ROADMAP, and 2026-08-20 STATUS snapshot. |
-| HLCOV-OPS-011 | T35, T39 | T35, T39 | coverage check; release profile fixture | First release enables no third-party providers. |
+| HLCOV-OPS-010 | T01 brief | T01 | `just hyperliquid-full-coverage-docs` | Renamed spec/plan, IDs, traceability, plans README, ROADMAP, and 2026-08-20 STATUS snapshot. |
+| HLCOV-OPS-011 | parent adjudication M | T35, T39 | coverage check; release profile fixture | First release enables no third-party providers. |
 | HLCOV-OPS-012 | T36, T37 | T36, T37 | out-of-repo T36 gate; `just` observability checks | T36 is not implemented in alpha-desk. T37 may ship without it. |

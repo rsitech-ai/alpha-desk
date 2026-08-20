@@ -2099,7 +2099,7 @@ Provider statements are treated as vendor claims until independently qualified.
 
 ## Appendix D. Requirement IDs
 
-These IDs index requirements already stated above. They do not add product behavior.
+These IDs index the spec plus recorded parent adjudications. They do not add product behavior.
 
 Approved base design: `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md`. Frozen V1 review tags: `design-approved-v1.0.0`, `spec-v1.0.0`.
 
@@ -2172,7 +2172,7 @@ Task mapping, target tests, and acceptance evidence live in `docs/superpowers/pl
 | HLCOV-API-004 | §22.7 | Resumable streams carry sequence, watermark, snapshot/resume token, and stale-state markers. |
 | HLCOV-API-005 | §23 | Dashboard workspaces: market, wallet, ecosystem, operations. |
 | HLCOV-API-006 | §28.20 | Dashboard exposes data health, source coverage, and limitations alongside intelligence. |
-| HLCOV-API-007 | §23 | Do not create a second web app. Extend existing `apps/AlphaDesk` / operator dashboard. |
+| HLCOV-API-007 | parent adjudication L | Do not create a second web app. Extend existing `apps/AlphaDesk` / operator dashboard. |
 | HLCOV-API-008 | §3.2 | No GraphQL-first rewrite of the existing OpenAPI service. |
 | HLCOV-OPS-001 | §3.2, §30.14 | Read-only: no `/exchange`, signing, private keys, order placement, copy-trading execution, or vault actions. |
 | HLCOV-OPS-002 | §3.2 | No claim of complete historical coverage when the source is truncated or gapped. |
@@ -2183,6 +2183,6 @@ Task mapping, target tests, and acceptance evidence live in `docs/superpowers/pl
 | HLCOV-OPS-007 | §26 | Protocol, differential, replay, chaos, and research tests, plus the verification commands in §26.6. |
 | HLCOV-OPS-008 | §27.1 | Initial production topology in §27.1. |
 | HLCOV-OPS-009 | §28.19 | Load, soak, chaos, restore, and replay gates pass before calling the expansion complete. |
-| HLCOV-OPS-010 | T01 | Design addendum, renamed spec/plan, traceability, plans index, ROADMAP note, and STATUS snapshot. Docs check is `just hyperliquid-full-coverage-docs`. |
-| HLCOV-OPS-011 | §20.4, T35, T39 | First release profile enables no third-party providers. |
+| HLCOV-OPS-010 | T01 brief | Design addendum, renamed spec/plan, traceability, plans index, ROADMAP note, and STATUS snapshot. Docs check is `just hyperliquid-full-coverage-docs`. |
+| HLCOV-OPS-011 | parent adjudication M | First release profile enables no third-party providers. |
 | HLCOV-OPS-012 | §8, T36 | `hlscreen` Alpha Desk API source mode stays in `rsitech-ai/hlscreen`. Observability may ship without that work. |

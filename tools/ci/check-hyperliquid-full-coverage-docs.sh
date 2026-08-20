@@ -28,10 +28,11 @@ done
 
 for doc in "$SPEC" "$PLAN"; do
   grep -Fq '/exchange' "$doc" || fail "$doc does not preserve /exchange exclusion"
-  grep -Ei -q 'sign(ing|er)|action signing' "$doc" || fail "$doc does not preserve signing exclusion"
+  grep -Fiq 'signing' "$doc" || fail "$doc does not preserve signing exclusion"
   grep -Fiq 'private key' "$doc" || fail "$doc does not preserve private-key exclusion"
-  grep -Ei -q 'order placement|copy-trad|execution' "$doc" ||
-    fail "$doc does not preserve order-placement/copy-trading/execution exclusion"
+  # Both phrases required. A bare "execution" heading must not satisfy this line.
+  grep -Fiq 'order placement' "$doc" || fail "$doc does not preserve order-placement exclusion"
+  grep -Ei -q 'copy-trad|copy trading' "$doc" || fail "$doc does not preserve copy-trading exclusion"
 done
 
 grep -Fq 'design-approved-v1.0.0' "$SPEC" || fail "$SPEC does not cite tag design-approved-v1.0.0"
@@ -61,8 +62,14 @@ fi
 grep -Fq '2026-08-20' "$STATUS" || fail "$STATUS missing 2026-08-20 snapshot date"
 grep -Fiq 'snapshot' "$STATUS" || fail "$STATUS missing snapshot language"
 grep -Ei -q 'full[- ]coverage' "$STATUS" || fail "$STATUS does not mention the full-coverage expansion"
-grep -Ei -q 'planned|in progress|in-progress' "$STATUS" ||
-  fail "$STATUS does not mark full-coverage as planned/in-progress"
+status_snapshot="$(awk '
+  /^## 2026-08-20 snapshot$/ {p=1}
+  p && /^## / && $0 != "## 2026-08-20 snapshot" {exit}
+  p
+' "$STATUS")"
+[[ -n "$status_snapshot" ]] || fail "$STATUS missing ## 2026-08-20 snapshot section"
+printf '%s\n' "$status_snapshot" | grep -Ei -q 'planned|in progress|in-progress' ||
+  fail "$STATUS snapshot section does not mark full-coverage as planned/in-progress"
 
 if ! id_count="$(
   python3 - "$SPEC" "$TRACE" <<'PY'
