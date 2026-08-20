@@ -28,8 +28,8 @@ use storage_ports::{
 
 pub use inspection::{ArchiveDataset, ArchiveInspection, InspectedObject};
 pub use raw_v3_store::{
-    RawArchiveCheckpoint, RawArchiveCheckpointV1, RawArchiveCheckpointV2, RawArchiveGcPlan,
-    RawArchiveGcReceipt, RawArchiveRestoreReceipt, RawArchiveRetentionReport,
+    RawArchiveBackupReceipt, RawArchiveCheckpoint, RawArchiveCheckpointV1, RawArchiveCheckpointV2,
+    RawArchiveGcPlan, RawArchiveGcReceipt, RawArchiveRestoreReceipt, RawArchiveRetentionReport,
     RawArchiveRetentionRequest, RawArchiveScrubReport, RawV3Archive, RawV3SourceInspection,
     UncompactedLogicalLeafV3,
 };

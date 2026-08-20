@@ -545,6 +545,19 @@ fn open_retention_archive(path: &std::path::Path, micros: i64) -> RawV3Archive {
     .unwrap()
 }
 
+fn library_backup(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+) -> (tempfile::TempDir, [u8; 32]) {
+    let root = tempfile::tempdir().unwrap();
+    let digest = archive
+        .backup_eligible_objects(chain, source, root.path())
+        .unwrap()
+        .digest();
+    (root, digest)
+}
+
 fn collect_parquet(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -667,10 +680,10 @@ fn packed_object_gc_unlinks_through_a_crash_recoverable_journal() {
             .unwrap(),
         )
         .unwrap();
-    let backup = [0xAB; 32];
+    let (_early_backup_root, early_backup) = library_backup(&archive, &chain, &source);
     assert!(
         archive
-            .plan_packed_object_gc(&chain, &source, backup)
+            .plan_packed_object_gc(&chain, &source, early_backup)
             .unwrap()
             .is_empty()
     );
@@ -679,7 +692,7 @@ fn packed_object_gc_unlinks_through_a_crash_recoverable_journal() {
     let too_early = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
     assert!(
         too_early
-            .plan_packed_object_gc(&chain, &source, backup)
+            .plan_packed_object_gc(&chain, &source, early_backup)
             .unwrap()
             .is_empty()
     );
@@ -690,6 +703,11 @@ fn packed_object_gc_unlinks_through_a_crash_recoverable_journal() {
         later.plan_packed_object_gc(&chain, &source, [0; 32]),
         Err(ArchiveError::InvalidInput(_))
     ));
+    assert!(matches!(
+        later.plan_packed_object_gc(&chain, &source, [0xAB; 32]),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
         .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
@@ -816,8 +834,9 @@ fn packed_object_gc_fails_closed_while_an_old_root_lease_is_held() {
         Err(ArchiveError::WriterBusy)
     ));
     drop(iterator);
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
-        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
     assert!(!plan.is_empty());
 }
@@ -876,13 +895,14 @@ fn gc_fails_closed_when_an_eligible_object_vanishes_before_unlink() {
         .unwrap();
     drop(archive);
     let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
-        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
     let (path, _, _) = plan.files().next().expect("eligible file");
     std::fs::remove_file(temporary.path().join(path)).unwrap();
     assert!(matches!(
-        later.execute_packed_object_gc(&chain, &source, plan.digest(), [0xAB; 32]),
+        later.execute_packed_object_gc(&chain, &source, plan.digest(), backup),
         Err(ArchiveError::ManifestVerification(_))
     ));
 }
@@ -943,8 +963,9 @@ fn gc_resumes_when_a_journaled_planned_file_is_already_gone() {
         .unwrap();
     drop(archive);
     let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
-        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
     let (path, object_sha256, byte_len) = plan
         .files()
@@ -963,7 +984,7 @@ fn gc_resumes_when_a_journaled_planned_file_is_already_gone() {
     .unwrap();
     std::fs::remove_file(temporary.path().join(&path)).unwrap();
     let receipt = later
-        .execute_packed_object_gc(&chain, &source, plan.digest(), [0xAB; 32])
+        .execute_packed_object_gc(&chain, &source, plan.digest(), backup)
         .unwrap();
     assert_eq!(receipt.unlinked_files(), plan.files().count() as u64);
 }
@@ -989,7 +1010,7 @@ fn gc_reclaims_exclusive_leases_after_their_roots_are_gone() {
         .unwrap();
     drop(archive);
     let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
-    let backup = [0xAB; 32];
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
         .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
@@ -1013,8 +1034,9 @@ fn gc_reclaims_exclusive_leases_after_their_roots_are_gone() {
         .join(format!("root-{name}.lease"));
     std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
     std::fs::write(&leftover, b"stale-exclusive-lease").unwrap();
+    let (_leftover_backup_root, leftover_backup) = library_backup(&later, &chain, &source);
     let leftover_plan = later
-        .plan_packed_object_gc(&chain, &source, backup)
+        .plan_packed_object_gc(&chain, &source, leftover_backup)
         .unwrap();
     assert!(
         leftover_plan
@@ -1022,7 +1044,7 @@ fn gc_reclaims_exclusive_leases_after_their_roots_are_gone() {
             .any(|(path, _, _)| path.ends_with(&format!("leases/root-{name}.lease")))
     );
     later
-        .execute_packed_object_gc(&chain, &source, leftover_plan.digest(), backup)
+        .execute_packed_object_gc(&chain, &source, leftover_plan.digest(), leftover_backup)
         .unwrap();
     assert!(!leftover.exists());
 }
@@ -1072,15 +1094,16 @@ fn gc_reclaims_standalone_hint_pages_after_pack_embedded_hints_exist() {
     assert!(!standalone_hint_pages(temporary.path()).is_empty());
     drop(archive);
     let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
-        .plan_packed_object_gc(&chain, &source, [0xAB; 32])
+        .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
     assert!(
         plan.files()
             .any(|(path, _, _)| path.contains("/hints/hint-") && path.ends_with(".json"))
     );
     later
-        .execute_packed_object_gc(&chain, &source, plan.digest(), [0xAB; 32])
+        .execute_packed_object_gc(&chain, &source, plan.digest(), backup)
         .unwrap();
     assert!(standalone_hint_pages(temporary.path()).is_empty());
     let (first_seq, last_seq) = later
@@ -1179,8 +1202,12 @@ fn authorized_retention_worker_requires_the_exact_plan_digest() {
         .unwrap();
     drop(archive);
     let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
-    let backup = [0xAB; 32];
-    assert!(RawArchiveRetentionRequest::try_new([0; 32], backup).is_err());
+    assert!(RawArchiveRetentionRequest::try_new([0; 32], [0xAB; 32]).is_err());
+    assert!(matches!(
+        later.plan_packed_object_gc(&chain, &source, [0xAB; 32]),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
         .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
@@ -1227,7 +1254,7 @@ fn restore_replays_journaled_missing_files_and_keeps_unjournaled_vanish_fail_clo
         .unwrap();
     drop(archive);
     let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
-    let backup = [0xAB; 32];
+    let (backup_root, backup) = library_backup(&later, &chain, &source);
     let plan = later
         .plan_packed_object_gc(&chain, &source, backup)
         .unwrap();
@@ -1236,10 +1263,6 @@ fn restore_replays_journaled_missing_files_and_keeps_unjournaled_vanish_fail_clo
         .find(|(path, _, _)| !path.contains("/leases/"))
         .map(|(path, hash, len)| (path.to_owned(), hash.to_owned(), len))
         .expect("eligible file");
-    let backup_root = tempfile::tempdir().unwrap();
-    let backup_file = backup_root.path().join(&path);
-    std::fs::create_dir_all(backup_file.parent().unwrap()).unwrap();
-    std::fs::copy(temporary.path().join(&path), &backup_file).unwrap();
     let journal = dataset_dir(temporary.path())
         .join("gc")
         .join(format!("deletion-{}.log", encode_sha256(plan.digest())));
@@ -1263,7 +1286,7 @@ fn restore_replays_journaled_missing_files_and_keeps_unjournaled_vanish_fail_clo
     assert_eq!(restored.restored_files(), 1);
     assert!(temporary.path().join(&path).is_file());
 
-    let vanish_backup = [0xEF; 32];
+    let (vanish_root, vanish_backup) = library_backup(&later, &chain, &source);
     let vanish = later
         .plan_packed_object_gc(&chain, &source, vanish_backup)
         .unwrap();
@@ -1279,7 +1302,7 @@ fn restore_replays_journaled_missing_files_and_keeps_unjournaled_vanish_fail_clo
             &source,
             vanish.digest(),
             vanish_backup,
-            backup_root.path(),
+            vanish_root.path(),
         ),
         Err(ArchiveError::ManifestVerification(_))
     ));
@@ -1287,4 +1310,44 @@ fn restore_replays_journaled_missing_files_and_keeps_unjournaled_vanish_fail_clo
         later.execute_packed_object_gc(&chain, &source, vanish.digest(), vanish_backup),
         Err(ArchiveError::ManifestVerification(_))
     ));
+}
+
+#[test]
+fn random_hex_does_not_unlink_and_library_backup_receipt_does() {
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS);
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    archive.append_batch(&batch(1, &[10], b"ab")).unwrap();
+    archive.append_batch(&batch(2, &[20], b"cd")).unwrap();
+    archive
+        .pack_logical_range(
+            &chain,
+            &source,
+            LocalRecordSequenceRange::try_new(
+                LocalRecordSequence::try_new(1).unwrap(),
+                LocalRecordSequence::try_new(2).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(archive);
+    let later = open_retention_archive(temporary.path(), FIXTURE_TIME_MICROS + 1_000_000);
+    assert!(matches!(
+        later.plan_packed_object_gc(&chain, &source, [0xAB; 32]),
+        Err(ArchiveError::ManifestVerification(_))
+    ));
+    let (_backup_root, backup) = library_backup(&later, &chain, &source);
+    let plan = later
+        .plan_packed_object_gc(&chain, &source, backup)
+        .unwrap();
+    assert!(!plan.is_empty());
+    let report = later
+        .apply_authorized_retention(
+            &chain,
+            &source,
+            RawArchiveRetentionRequest::try_new(backup, plan.digest()).unwrap(),
+        )
+        .unwrap();
+    assert!(report.gc().unlinked_files() > 0);
 }

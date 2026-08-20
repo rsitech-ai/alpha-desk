@@ -5,7 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use domain_types::{BlockHeight, ChainId, KnownTime};
 use serde::{Deserialize, Serialize};
 
-const STATUS_SCHEMA_VERSION: &str = "hl.capture.status.v4";
+const STATUS_SCHEMA_V4: &str = "hl.capture.status.v4";
+const STATUS_SCHEMA_V5: &str = "hl.capture.status.v5";
 const MAX_STATUS_BYTES: usize = 16 * 1024;
 const MAX_STATUS_TEXT_BYTES: usize = 512;
 const MAX_AUXILIARY_SOURCES: usize = 16;
@@ -534,7 +535,7 @@ impl CaptureStatus {
         health: CaptureHealth,
     ) -> Self {
         Self {
-            schema_version: STATUS_SCHEMA_VERSION.to_owned(),
+            schema_version: STATUS_SCHEMA_V4.to_owned(),
             snapshot_at_micros: snapshot_at.unix_micros(),
             build_id: build_id.into(),
             chain_id: chain_id.to_string(),
@@ -626,6 +627,11 @@ impl CaptureStatus {
     #[must_use]
     pub fn with_maintenance(mut self, maintenance: Option<CaptureMaintenanceStatus>) -> Self {
         self.maintenance = maintenance;
+        self.schema_version = if self.maintenance.is_some() {
+            STATUS_SCHEMA_V5.to_owned()
+        } else {
+            STATUS_SCHEMA_V4.to_owned()
+        };
         self
     }
 
@@ -653,8 +659,10 @@ impl CaptureStatus {
     }
 
     fn validate(&self) -> Result<(), StatusError> {
-        if self.schema_version != STATUS_SCHEMA_VERSION {
-            return Err(StatusError::InvalidSchema);
+        match (self.schema_version.as_str(), self.maintenance.as_ref()) {
+            (STATUS_SCHEMA_V4, None) => {}
+            (STATUS_SCHEMA_V5, Some(maintenance)) => maintenance.validate()?,
+            _ => return Err(StatusError::InvalidSchema),
         }
         validate_status_text(&self.build_id)?;
         validate_status_text(&self.chain_id)?;
@@ -674,9 +682,6 @@ impl CaptureStatus {
                 return Err(StatusError::InvalidField);
             }
             previous = Some(source.source_id());
-        }
-        if let Some(maintenance) = &self.maintenance {
-            maintenance.validate()?;
         }
         if self
             .disk_free_basis_points
@@ -863,7 +868,7 @@ mod tests {
 
     use super::{
         AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
-        CaptureStatus, StatusError, read_status,
+        CaptureMaintenanceStatus, CaptureStatus, StatusError, read_status,
     };
 
     #[test]
@@ -1003,5 +1008,87 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
         assert_eq!(read_status(&path), Err(StatusError::InvalidField));
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[expect(dead_code)]
+    struct FrozenCaptureStatusV4 {
+        schema_version: String,
+        snapshot_at_micros: i64,
+        build_id: String,
+        chain_id: String,
+        health: CaptureHealth,
+        ready: bool,
+        active_committed_source: super::CommittedSourceClass,
+        primary_source_health: super::CaptureSourceHealth,
+        #[serde(default)]
+        independent_source_health: Option<super::CaptureSourceHealth>,
+        #[serde(default)]
+        failover_height: Option<u64>,
+        #[serde(default)]
+        failover_reason: Option<crate::FailoverReason>,
+        #[serde(default)]
+        durable_height: Option<u64>,
+        pending_blocks: u64,
+        #[serde(default)]
+        capture_backlog_records: u64,
+        #[serde(default)]
+        oldest_pending_capture_height: Option<u64>,
+        #[serde(default)]
+        disk_free_basis_points: Option<u16>,
+        #[serde(default)]
+        archive_manifest_id: Option<String>,
+        #[serde(default)]
+        last_error_reason: Option<String>,
+        #[serde(default)]
+        auxiliary_sources: Vec<AuxiliarySourceStatus>,
+    }
+
+    fn inactive_status() -> CaptureStatus {
+        CaptureStatus::new(
+            KnownTime::from_unix_micros(1_000).unwrap(),
+            "build-v1",
+            ChainId::new("mainnet").unwrap(),
+            CaptureHealth::Yellow,
+        )
+    }
+
+    #[test]
+    fn frozen_v4_reader_accepts_snapshots_when_maintenance_is_inactive() {
+        let status = inactive_status();
+        status.validate().unwrap();
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert!(value.get("maintenance").is_none());
+        let decoded: FrozenCaptureStatusV4 = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.schema_version, "hl.capture.status.v4");
+        assert_eq!(decoded.build_id, "build-v1");
+    }
+
+    #[test]
+    fn maintenance_is_published_only_on_status_v5() {
+        let status =
+            inactive_status().with_maintenance(Some(CaptureMaintenanceStatus::idle(true, false)));
+        status.validate().unwrap();
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v5");
+        assert_eq!(value["maintenance"]["enabled"], true);
+        assert_eq!(value["maintenance"]["retention_authorized"], false);
+        let decoded: CaptureStatus = serde_json::from_value(value.clone()).unwrap();
+        decoded.validate().unwrap();
+        assert!(decoded.maintenance().is_some());
+        assert!(serde_json::from_value::<FrozenCaptureStatusV4>(value).is_err());
+    }
+
+    #[test]
+    fn frozen_v4_and_current_readers_reject_maintenance_under_the_v4_schema_id() {
+        let mut value = serde_json::to_value(inactive_status()).unwrap();
+        value["maintenance"] =
+            serde_json::to_value(CaptureMaintenanceStatus::idle(true, false)).unwrap();
+        assert_eq!(value["schema_version"], "hl.capture.status.v4");
+        assert!(serde_json::from_value::<FrozenCaptureStatusV4>(value.clone()).is_err());
+        let decoded: CaptureStatus = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.validate(), Err(StatusError::InvalidSchema));
     }
 }

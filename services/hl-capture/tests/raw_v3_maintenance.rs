@@ -211,8 +211,25 @@ fn authorized_retention_unlinks_only_with_backup_receipt() {
     drop(unauthorized);
 
     let authorized = open_archive(root.path(), 1_722_000_002_000_000, 1);
-    let config = packing_config()
+    let chain = ChainId::new("mainnet").unwrap();
+    let source = SourceId::new("node-fills").unwrap();
+    let random_hex = packing_config()
         .with_backup_receipt_sha256(Some(hex::encode([0xAB; 32])))
+        .unwrap();
+    let blocked_hex = run_maintenance_cycle(&authorized, &random_hex, &ample_disk(), 1);
+    assert_eq!(
+        blocked_hex.status().reason_code(),
+        Some("capture_maintenance.retention_unauthorized")
+    );
+    assert!(!blocked_hex.status().retention_authorized());
+    assert!(blocked_hex.status().last_retention_at_micros().is_none());
+
+    let backup_root = tempfile::TempDir::new().unwrap();
+    let receipt = authorized
+        .backup_eligible_objects(&chain, &source, backup_root.path())
+        .unwrap();
+    let config = packing_config()
+        .with_backup_receipt_sha256(Some(hex::encode(receipt.digest())))
         .unwrap();
     let report = run_maintenance_cycle(&authorized, &config, &ample_disk(), 1);
     assert!(report.status().retention_authorized());

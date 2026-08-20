@@ -21,9 +21,13 @@ use crate::{
 };
 
 const RAW_GC_PLAN_SCHEMA_V3: &str = "hyperliquid-alpha-desk/archive-raw-gc-plan/v3";
+const RAW_BACKUP_RECEIPT_SCHEMA_V3: &str = "hyperliquid-alpha-desk/archive-raw-backup-receipt/v3";
 const GC_PLAN_HASH_DOMAIN_V3: &[u8] = b"hyperliquid-alpha-desk:archive-raw-gc-plan:v3\0";
+const BACKUP_RECEIPT_HASH_DOMAIN_V3: &[u8] =
+    b"hyperliquid-alpha-desk:archive-raw-backup-receipt:v3\0";
 const MAX_DELETION_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GC_PLAN_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_BACKUP_RECEIPT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -156,6 +160,111 @@ impl RawArchiveRestoreReceipt {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawArchiveBackupReceipt {
+    schema: String,
+    root_sha256: String,
+    chain_id: String,
+    source_id: String,
+    created_at_micros: i64,
+    files: Vec<GcPlanFileV3>,
+    #[serde(skip)]
+    digest: [u8; 32],
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupReceiptWireV3 {
+    schema: String,
+    root_sha256: String,
+    chain_id: String,
+    source_id: String,
+    created_at_micros: i64,
+    files: Vec<GcPlanFileV3>,
+}
+
+impl RawArchiveBackupReceipt {
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    #[must_use]
+    pub fn root_sha256(&self) -> &str {
+        &self.root_sha256
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = (&str, &str, u64)> {
+        self.files.iter().map(|file| {
+            (
+                file.relative_path.as_str(),
+                file.object_sha256.as_str(),
+                file.byte_len,
+            )
+        })
+    }
+}
+
+pub fn backup_eligible_objects(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    backup_root: &Path,
+) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+    let backup_root = canonicalize_backup_root(backup_root)?;
+    let (root, journal_bytes) =
+        load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let current_hash = root_bundle_hash(&root)?;
+    let now = archive.now()?;
+    let files = eligible_files(
+        archive,
+        chain,
+        source,
+        &root,
+        &journal_bytes,
+        current_hash,
+        now,
+    )?;
+    for file in &files {
+        let path = PathBuf::from(&file.relative_path);
+        fs::validate_relative(&path)?;
+        let bytes = fs::read_regular(&archive.root, &path, file.byte_len.max(1))?;
+        if u64::try_from(bytes.len()).ok() != Some(file.byte_len)
+            || manifest::sha256(&bytes) != manifest::parse_hash(&file.object_sha256)?
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "eligible object changed while writing the backup receipt",
+            ));
+        }
+        fs::publish_immutable(&backup_root, &path, &bytes)?;
+    }
+    let receipt = RawArchiveBackupReceipt {
+        schema: RAW_BACKUP_RECEIPT_SCHEMA_V3.to_owned(),
+        root_sha256: hex::encode(current_hash),
+        chain_id: chain.as_str().to_owned(),
+        source_id: source.as_str().to_owned(),
+        created_at_micros: now.unix_micros(),
+        files,
+        digest: [0; 32],
+    };
+    let digest = backup_receipt_digest(&receipt)?;
+    let receipt = RawArchiveBackupReceipt { digest, ..receipt };
+    let bytes = manifest::canonical_json(&receipt)?;
+    let dataset = dataset_relative(chain, source);
+    fs::publish_immutable(
+        &archive.root,
+        &backup_receipt_relative(&dataset, digest),
+        &bytes,
+    )?;
+    fs::publish_immutable(
+        &backup_root,
+        &backup_receipt_relative(&dataset, digest),
+        &bytes,
+    )?;
+    Ok(receipt)
+}
+
 pub fn plan_packed_object_gc(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -172,7 +281,26 @@ pub fn plan_packed_object_gc(
     let current_hash = root_bundle_hash(&root)?;
     let now = archive.now()?;
     let _leases = exclusive_gc_leases(archive, chain, source, current_hash)?;
-    let files = eligible_files(
+    let receipt = load_verified_backup_receipt(archive, chain, source, backup_receipt)?;
+    if receipt.root_sha256 != hex::encode(current_hash)
+        || receipt.chain_id != chain.as_str()
+        || receipt.source_id != source.as_str()
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "backup receipt does not bind this archive root",
+        ));
+    }
+    let backed_up: BTreeMap<_, _> = receipt
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.relative_path.clone(),
+                (file.object_sha256.clone(), file.byte_len),
+            )
+        })
+        .collect();
+    let mut files = eligible_files(
         archive,
         chain,
         source,
@@ -181,6 +309,11 @@ pub fn plan_packed_object_gc(
         current_hash,
         now,
     )?;
+    files.retain(|file| {
+        backed_up
+            .get(&file.relative_path)
+            .is_some_and(|(hash, len)| *hash == file.object_sha256 && *len == file.byte_len)
+    });
     let plan = RawArchiveGcPlan {
         schema: RAW_GC_PLAN_SCHEMA_V3.to_owned(),
         root_sha256: hex::encode(current_hash),
@@ -221,12 +354,14 @@ pub fn execute_packed_object_gc(
         ));
     }
     let dataset = dataset_relative(chain, source);
+    let receipt = load_verified_backup_receipt(archive, chain, source, backup_receipt)?;
     let plan = load_plan(archive, &dataset, plan_digest)?;
     if manifest::parse_hash(&plan.backup_receipt_sha256)? != backup_receipt {
         return Err(ArchiveError::ManifestVerification(
             "GC backup receipt does not match the authorized plan",
         ));
     }
+    assert_plan_files_covered_by_backup(&plan, &receipt)?;
     let (root, _) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
     let current_hash = root_bundle_hash(&root)?;
@@ -342,12 +477,14 @@ pub fn restore_planned_files_from_backup(
     }
     let backup_root = canonicalize_backup_root(backup_root)?;
     let dataset = dataset_relative(chain, source);
+    let receipt = load_verified_backup_receipt(archive, chain, source, backup_receipt)?;
     let plan = load_plan(archive, &dataset, plan_digest)?;
     if manifest::parse_hash(&plan.backup_receipt_sha256)? != backup_receipt {
         return Err(ArchiveError::ManifestVerification(
             "GC backup receipt does not match the authorized plan",
         ));
     }
+    assert_plan_files_covered_by_backup(&plan, &receipt)?;
     let (root, _) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
     let current_hash = root_bundle_hash(&root)?;
@@ -788,6 +925,121 @@ fn load_plan(
     })
 }
 
+fn load_verified_backup_receipt(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    digest: [u8; 32],
+) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+    if digest == [0; 32] {
+        return Err(ArchiveError::InvalidInput(
+            "GC backup receipt must be a nonzero digest",
+        ));
+    }
+    let dataset = dataset_relative(chain, source);
+    let Some(bytes) = fs::try_read_regular(
+        &archive.root,
+        &backup_receipt_relative(&dataset, digest),
+        MAX_BACKUP_RECEIPT_BYTES,
+    )?
+    else {
+        return Err(ArchiveError::ManifestVerification(
+            "GC backup receipt artifact is missing or invalid",
+        ));
+    };
+    let wire: BackupReceiptWireV3 = serde_json::from_slice(&bytes).map_err(|_| {
+        ArchiveError::ManifestVerification("GC backup receipt artifact is missing or invalid")
+    })?;
+    if wire.schema != RAW_BACKUP_RECEIPT_SCHEMA_V3 {
+        return Err(ArchiveError::ManifestVerification(
+            "GC backup receipt artifact is missing or invalid",
+        ));
+    }
+    let receipt = RawArchiveBackupReceipt {
+        schema: wire.schema,
+        root_sha256: wire.root_sha256,
+        chain_id: wire.chain_id,
+        source_id: wire.source_id,
+        created_at_micros: wire.created_at_micros,
+        files: wire.files,
+        digest: [0; 32],
+    };
+    let computed = backup_receipt_digest(&receipt)?;
+    if computed != digest
+        || manifest::canonical_json(&RawArchiveBackupReceipt {
+            digest: computed,
+            ..receipt.clone()
+        })? != bytes
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "GC backup receipt artifact is missing or invalid",
+        ));
+    }
+    if receipt.chain_id != chain.as_str() || receipt.source_id != source.as_str() {
+        return Err(ArchiveError::ManifestVerification(
+            "backup receipt does not bind this archive root",
+        ));
+    }
+    Ok(RawArchiveBackupReceipt {
+        digest: computed,
+        ..receipt
+    })
+}
+
+fn backup_receipt_digest(receipt: &RawArchiveBackupReceipt) -> Result<[u8; 32], ArchiveError> {
+    let root = manifest::parse_hash(&receipt.root_sha256)?;
+    let mut evidence = Vec::new();
+    evidence.extend_from_slice(&root);
+    let chain = receipt.chain_id.as_bytes();
+    let chain_len = u64::try_from(chain.len())
+        .map_err(|_| ArchiveError::InvalidInput("backup receipt chain id exceeds u64"))?;
+    evidence.extend_from_slice(&chain_len.to_be_bytes());
+    evidence.extend_from_slice(chain);
+    let source = receipt.source_id.as_bytes();
+    let source_len = u64::try_from(source.len())
+        .map_err(|_| ArchiveError::InvalidInput("backup receipt source id exceeds u64"))?;
+    evidence.extend_from_slice(&source_len.to_be_bytes());
+    evidence.extend_from_slice(source);
+    evidence.extend_from_slice(&receipt.created_at_micros.to_be_bytes());
+    for file in &receipt.files {
+        let path = file.relative_path.as_bytes();
+        let path_len = u64::try_from(path.len())
+            .map_err(|_| ArchiveError::InvalidInput("backup receipt path exceeds u64"))?;
+        evidence.extend_from_slice(&path_len.to_be_bytes());
+        evidence.extend_from_slice(path);
+        evidence.extend_from_slice(&manifest::parse_hash(&file.object_sha256)?);
+        evidence.extend_from_slice(&file.byte_len.to_be_bytes());
+    }
+    raw_v3::domain_hash(BACKUP_RECEIPT_HASH_DOMAIN_V3, &evidence)
+}
+
+fn assert_plan_files_covered_by_backup(
+    plan: &RawArchiveGcPlan,
+    receipt: &RawArchiveBackupReceipt,
+) -> Result<(), ArchiveError> {
+    let backed_up: BTreeMap<_, _> = receipt
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.relative_path.as_str(),
+                (file.object_sha256.as_str(), file.byte_len),
+            )
+        })
+        .collect();
+    for file in &plan.files {
+        if !backed_up
+            .get(file.relative_path.as_str())
+            .is_some_and(|(hash, len)| *hash == file.object_sha256 && *len == file.byte_len)
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "GC plan file is not covered by the verified backup receipt",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn gc_plan_digest(plan: &RawArchiveGcPlan) -> Result<[u8; 32], ArchiveError> {
     let root = manifest::parse_hash(&plan.root_sha256)?;
     let backup = manifest::parse_hash(&plan.backup_receipt_sha256)?;
@@ -928,6 +1180,12 @@ fn plan_relative(dataset: &Path, digest: [u8; 32]) -> PathBuf {
     dataset
         .join("gc")
         .join(format!("plan-{}.json", hex::encode(digest)))
+}
+
+fn backup_receipt_relative(dataset: &Path, digest: [u8; 32]) -> PathBuf {
+    dataset
+        .join("gc")
+        .join(format!("backup-receipt-{}.json", hex::encode(digest)))
 }
 
 fn deletion_journal_relative(dataset: &Path, digest: [u8; 32]) -> PathBuf {
