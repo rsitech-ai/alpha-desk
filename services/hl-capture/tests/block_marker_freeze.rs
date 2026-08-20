@@ -174,13 +174,15 @@ fn independent_trade_block() -> BlockEnvelope {
         canonical_event_index: 0,
         market_ids: Vec::new(),
         account_ids: Vec::new(),
-        source_evidence: vec![SourceEvidence::try_new(
-            source_id.clone(),
-            "node-v1",
-            format!("block-{height}:0"),
-            [0x44; 32],
-        )
-        .expect("source evidence")],
+        source_evidence: vec![
+            SourceEvidence::try_new(
+                source_id.clone(),
+                "node-v1",
+                format!("block-{height}:0"),
+                [0x44; 32],
+            )
+            .expect("source evidence"),
+        ],
         confirmation_class: ConfirmationClass::CommittedIndependent,
         observed_at: KnownTime::from_unix_micros(202).expect("observed"),
         ingested_at: KnownTime::from_unix_micros(203).expect("ingested"),

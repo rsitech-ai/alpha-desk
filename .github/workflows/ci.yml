@@ -123,8 +123,25 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/bin/cargo-nextest"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
+      - name: Install just 1.58.0 from verified archive
+        timeout-minutes: 10
+        env:
+          JUST_SHA256: 4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d
+        run: |
+          mkdir -p "$RUNNER_TEMP/just" "$RUNNER_TEMP/bin"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/just.tar.gz" \
+            https://github.com/casey/just/releases/download/1.58.0/just-1.58.0-x86_64-unknown-linux-musl.tar.gz
+          echo "$JUST_SHA256  $RUNNER_TEMP/just.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/just.tar.gz" -C "$RUNNER_TEMP/just"
+          cp "$RUNNER_TEMP/just/just" "$RUNNER_TEMP/bin/just"
+          chmod 0755 "$RUNNER_TEMP/bin/just"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
       - name: Run nextest and doctests
         run: |
+          just --version | grep -F 'just 1.58.0'
           cargo +1.97.1 nextest --version | grep -F 'cargo-nextest 0.9.140 '
           cargo +1.97.1 nextest run --workspace --all-features --locked --offline
           cargo +1.97.1 test --workspace --all-features --doc --locked --offline

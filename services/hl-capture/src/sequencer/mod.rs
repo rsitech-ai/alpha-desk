@@ -17,8 +17,8 @@ use hl_protocol::{PublicationLane, SourceAdmission, SourceTrust};
 use divergence::{
     canonical_block_divergence, event_source_evidence_divergence, source_block_hash_divergence,
 };
-use gap::gap_incident_id;
 pub use gap::GapRange;
+use gap::gap_incident_id;
 use watermark::Watermark;
 
 use crate::QuarantineRecord;
@@ -657,13 +657,10 @@ mod tests {
             canonical_event_index: 0,
             market_ids: Vec::new(),
             account_ids: Vec::new(),
-            source_evidence: vec![SourceEvidence::try_new(
-                source_id.clone(),
-                "node-v1",
-                "block:100",
-                [1; 32],
-            )
-            .expect("source evidence")],
+            source_evidence: vec![
+                SourceEvidence::try_new(source_id.clone(), "node-v1", "block:100", [1; 32])
+                    .expect("source evidence"),
+            ],
             confirmation_class: confirmation,
             observed_at: known(2_000),
             ingested_at: known(3_000),
