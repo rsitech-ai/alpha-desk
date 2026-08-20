@@ -2,9 +2,13 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
-use domain_types::{BlockHeight, ChainId, SourceId};
+use domain_types::{BlockHeight, ChainId, KnownTime, SourceId};
 use hl_protocol::node::v1::NodeStreamKind;
-use hl_protocol::{ObservationClass, SourceAdmission, SourceTrust};
+use hl_protocol::{
+    AgreementStatus, NetworkId, ObservationClass, OperatorKind, ProviderLicense,
+    RedistributionPolicy, RetentionClass, SourceAdmission, SourceCatalogError, SourceCatalogRecord,
+    SourceDescriptor, SourceRole, SourceTrust, validate_role_trust,
+};
 use serde::{Deserialize, Serialize};
 
 const MAX_IDENTITY_BYTES: usize = 256;
@@ -137,6 +141,14 @@ impl CaptureConfig {
     #[must_use]
     pub fn payload_limit(&self, id: &str) -> Option<usize> {
         self.source(id).map(SourceConfig::max_payload_bytes)
+    }
+
+    #[must_use]
+    pub fn scheduled_sources(&self, at: KnownTime) -> Vec<&SourceConfig> {
+        self.sources
+            .iter()
+            .filter(|source| source.allows_scheduled_work(at))
+            .collect()
     }
 }
 
@@ -412,6 +424,8 @@ pub struct SourceConfig {
     adapter: Option<SourceAdapterConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credential_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog: Option<SourceCatalogConfig>,
 }
 
 impl SourceConfig {
@@ -435,6 +449,7 @@ impl SourceConfig {
         if let Some(adapter) = &self.adapter {
             adapter.validate(self.observation_class)?;
         }
+        let _ = self.catalog_record()?;
         Ok(())
     }
 
@@ -481,6 +496,164 @@ impl SourceConfig {
     #[must_use]
     pub fn credential_path(&self) -> Option<&Path> {
         self.credential_path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn catalog(&self) -> Option<&SourceCatalogConfig> {
+        self.catalog.as_ref()
+    }
+
+    pub fn catalog_record(&self) -> Result<Option<SourceCatalogRecord>, ConfigError> {
+        let Some(catalog) = &self.catalog else {
+            return Ok(None);
+        };
+        Ok(Some(catalog.record(self)?))
+    }
+
+    #[must_use]
+    pub fn allows_scheduled_work(&self, at: KnownTime) -> bool {
+        match self.catalog_record() {
+            Ok(None) => true,
+            Ok(Some(record)) => record.allows_scheduled_work(at),
+            Err(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCatalogConfig {
+    network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<SourceRole>,
+    operator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_kind: Option<OperatorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dataset_version: Option<String>,
+    retention_class: RetentionClass,
+    redistribution: RedistributionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    license_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agreement_status: Option<AgreementStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agreement_expires_at_micros: Option<i64>,
+}
+
+impl SourceCatalogConfig {
+    fn record(&self, source: &SourceConfig) -> Result<SourceCatalogRecord, ConfigError> {
+        let network = NetworkId::new(self.network.clone()).map_err(catalog_error)?;
+        let role = self
+            .role
+            .unwrap_or_else(|| SourceRole::from_trust(source.trust));
+        validate_role_trust(role, source.trust).map_err(catalog_error)?;
+        let operator_kind = self
+            .operator_kind
+            .unwrap_or_else(|| role.default_operator_kind());
+        let descriptor = SourceDescriptor::new(
+            SourceId::new(source.id.clone()).map_err(|_| ConfigError::InvalidSourceId)?,
+            network,
+            role,
+            self.operator.clone(),
+            self.dataset_version.clone(),
+            self.retention_class,
+            self.redistribution,
+        )
+        .map_err(catalog_error)?;
+        let license = match self.license_name.as_ref() {
+            Some(name) => Some(
+                ProviderLicense::new(
+                    name.clone(),
+                    self.agreement_status.unwrap_or(AgreementStatus::Active),
+                    match self.agreement_expires_at_micros {
+                        Some(micros) => Some(
+                            KnownTime::from_unix_micros(micros)
+                                .map_err(|_| ConfigError::InvalidSourceCatalog)?,
+                        ),
+                        None => None,
+                    },
+                )
+                .map_err(catalog_error)?,
+            ),
+            None => None,
+        };
+        SourceCatalogRecord::new(
+            descriptor,
+            1,
+            operator_kind,
+            source.observation_class,
+            license,
+            KnownTime::from_unix_micros(0).map_err(|_| ConfigError::InvalidSourceCatalog)?,
+            None,
+        )
+        .map_err(catalog_error)
+    }
+
+    #[must_use]
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> Option<SourceRole> {
+        self.role
+    }
+
+    #[must_use]
+    pub fn operator(&self) -> &str {
+        &self.operator
+    }
+
+    #[must_use]
+    pub const fn operator_kind(&self) -> Option<OperatorKind> {
+        self.operator_kind
+    }
+
+    #[must_use]
+    pub fn dataset_version(&self) -> Option<&str> {
+        self.dataset_version.as_deref()
+    }
+
+    #[must_use]
+    pub const fn retention_class(&self) -> RetentionClass {
+        self.retention_class
+    }
+
+    #[must_use]
+    pub const fn redistribution(&self) -> RedistributionPolicy {
+        self.redistribution
+    }
+
+    #[must_use]
+    pub fn license_name(&self) -> Option<&str> {
+        self.license_name.as_deref()
+    }
+
+    #[must_use]
+    pub const fn agreement_status(&self) -> Option<AgreementStatus> {
+        self.agreement_status
+    }
+
+    #[must_use]
+    pub const fn agreement_expires_at_micros(&self) -> Option<i64> {
+        self.agreement_expires_at_micros
+    }
+}
+
+fn catalog_error(error: SourceCatalogError) -> ConfigError {
+    match error {
+        SourceCatalogError::IncompatibleRole => ConfigError::IncompatibleSourceRole,
+        SourceCatalogError::MissingProviderLicense => ConfigError::MissingProviderLicense,
+        SourceCatalogError::InvalidNetwork
+        | SourceCatalogError::InvalidSourceId
+        | SourceCatalogError::InvalidOperator
+        | SourceCatalogError::InvalidDatasetVersion
+        | SourceCatalogError::InvalidLicense
+        | SourceCatalogError::MissingCommittedEvidence
+        | SourceCatalogError::InvalidVersion
+        | SourceCatalogError::InvalidValidityWindow
+        | SourceCatalogError::ConflictingIdentity => ConfigError::InvalidSourceCatalog,
     }
 }
 
@@ -596,6 +769,12 @@ pub enum ConfigError {
     InvalidSourceTrust,
     #[error("capture source adapter is invalid")]
     InvalidSourceAdapter,
+    #[error("capture source catalog is invalid")]
+    InvalidSourceCatalog,
+    #[error("capture source role is incompatible with source trust")]
+    IncompatibleSourceRole,
+    #[error("provider capture source requires licensing and redistribution policy")]
+    MissingProviderLicense,
     #[error("capture configuration requires exactly one primary committed source")]
     MissingPrimaryCommittedSource,
     #[error("capture configuration contains multiple primary committed sources")]
@@ -643,6 +822,9 @@ impl ConfigError {
             Self::InvalidPayloadLimit => "capture_config.invalid_payload_limit",
             Self::InvalidSourceTrust => "capture_config.invalid_source_trust",
             Self::InvalidSourceAdapter => "capture_config.invalid_source_adapter",
+            Self::InvalidSourceCatalog => "capture_config.invalid_source_catalog",
+            Self::IncompatibleSourceRole => "capture_config.incompatible_source_role",
+            Self::MissingProviderLicense => "capture_config.missing_provider_license",
             Self::MissingPrimaryCommittedSource => {
                 "capture_config.missing_primary_committed_source"
             }

@@ -3,6 +3,7 @@
 mod archive;
 mod capture_progress;
 mod checkpoint;
+mod source_catalog;
 mod state_store;
 
 pub use archive::{
@@ -29,6 +30,7 @@ pub use capture_progress::{
 pub use checkpoint::{
     CheckpointPublishDisposition, CheckpointReceipt, CheckpointStoreError, StateCheckpointStore,
 };
+pub use source_catalog::{SourceCatalogStore, SourceCatalogStoreError};
 pub use state_store::{
     AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateCommitReceipt,
     StateStoreError,

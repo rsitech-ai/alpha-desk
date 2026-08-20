@@ -922,3 +922,132 @@ adapter = {{ kind = "node-line", path = "/var/lib/hyperliquid/hl/data/node_fills
         })
     ));
 }
+
+fn catalog_source(id: &str, trust: &str, class: &str, catalog: &str) -> String {
+    format!(
+        r#"
+
+[[sources]]
+id = "{id}"
+source_version = "catalog-v1"
+trust = "{trust}"
+class = "{class}"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+catalog = {catalog}
+"#
+    )
+}
+
+#[test]
+fn catalog_rejects_conflating_committed_primary_with_discovery_only() {
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "discovery-as-primary",
+            "locally-verified-committed",
+            "committed-block",
+            r#"{ network = "mainnet", role = "discovery-only", operator = "hypurrscan", operator_kind = "community", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&source)
+            .expect_err("discovery-only cannot occupy committed trust")
+            .reason_code(),
+        "capture_config.incompatible_source_role"
+    );
+}
+
+#[test]
+fn catalog_requires_provider_license_and_redistribution() {
+    let missing = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "nansen-labels",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", role = "attribution-enrichment", operator = "nansen", operator_kind = "provider", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing)
+            .expect_err("provider without license")
+            .reason_code(),
+        "capture_config.missing_provider_license"
+    );
+
+    let licensed = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "nansen-labels",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", role = "attribution-enrichment", operator = "nansen", operator_kind = "provider", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "nansen-api-tos", agreement_status = "active" }"#,
+        )
+    );
+    let config = CaptureConfig::from_toml(&licensed).expect("licensed provider");
+    let record = config
+        .source("nansen-labels")
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(record.descriptor().stable_id(), "mainnet:nansen-labels");
+    assert_eq!(
+        record.descriptor().redistribution(),
+        hl_protocol::RedistributionPolicy::InternalOnly
+    );
+}
+
+#[test]
+fn catalog_rejects_committed_role_without_qualifying_evidence() {
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "aux-primary",
+            "locally-verified-committed",
+            "auxiliary-ledger",
+            r#"{ network = "mainnet", role = "committed-primary", operator = "alpha-desk", retention_class = "raw-indefinite", redistribution = "private-operator-evidence" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&source)
+            .expect_err("auxiliary evidence cannot mark committed")
+            .reason_code(),
+        "capture_config.invalid_source_catalog"
+    );
+}
+
+#[test]
+fn catalog_disabled_provider_is_omitted_from_scheduled_sources() {
+    use domain_types::KnownTime;
+
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "nansen-labels",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", role = "attribution-enrichment", operator = "nansen", operator_kind = "provider", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "nansen-api-tos", agreement_status = "disabled" }"#,
+        )
+    );
+    let config = CaptureConfig::from_toml(&source).expect("disabled provider still parses");
+    let at = KnownTime::from_unix_micros(1).expect("time");
+    let scheduled = config
+        .scheduled_sources(at)
+        .into_iter()
+        .map(hl_capture::SourceConfig::id)
+        .collect::<Vec<_>>();
+    assert_eq!(scheduled, vec!["primary-node", "public-market"]);
+    assert!(
+        !config
+            .source("nansen-labels")
+            .expect("source")
+            .allows_scheduled_work(at)
+    );
+}
