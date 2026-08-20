@@ -140,6 +140,6 @@ web-dashboard:
     npm --prefix apps/web-dashboard install
     npm --prefix apps/web-dashboard run dev
 
-# Presence greps for full-coverage spec/plan/traceability. Does not prove prohibition polarity.
+# Full-coverage spec/plan/traceability gate, including inverse-claim fail-closed.
 hyperliquid-full-coverage-docs:
     ./tools/ci/check-hyperliquid-full-coverage-docs.sh

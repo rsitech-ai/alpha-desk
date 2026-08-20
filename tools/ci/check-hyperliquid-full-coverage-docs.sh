@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# ponytail: HLCOV_DOCS_ROOT is a fixture hook (temp tree). Unset in CI; the script directory is the repo.
+repo_root="${HLCOV_DOCS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
 readonly SPEC='docs/superpowers/specs/2026-08-19-hyperliquid-full-coverage-expansion.md'
@@ -70,6 +71,162 @@ status_snapshot="$(awk '
 [[ -n "$status_snapshot" ]] || fail "$STATUS missing ## 2026-08-20 snapshot section"
 printf '%s\n' "$status_snapshot" | grep -Ei -q 'planned|in progress|in-progress' ||
   fail "$STATUS snapshot section does not mark full-coverage as planned/in-progress"
+
+python3 - "$SPEC" "$PLAN" "$STATUS" <<'PY'
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+spec_path, plan_path, status_path = (Path(p) for p in sys.argv[1:4])
+neg_re = re.compile(r"\b(?:no|not|never)\b|forbid", re.I)
+exclusion_needles = (
+    ("/exchange", re.compile(r"/exchange")),
+    ("order placement", re.compile(r"order placement", re.I)),
+    ("copy trad", re.compile(r"copy[- ]trad", re.I)),
+)
+inverse_res = (
+    re.compile(r"places orders", re.I),
+    re.compile(r"place orders", re.I),
+    re.compile(r"via\s+`?/exchange", re.I),
+    re.compile(r"\b(?:calls?|calling|called|POST)\s+`?/exchange", re.I),
+    re.compile(r"\b(?:writes?|writing)\s+(?:to\s+)?`?/exchange", re.I),
+    re.compile(r"/exchange writes", re.I),
+    re.compile(r"automatic copy[- ]trad", re.I),
+    re.compile(r"copy[- ]trad(?:e|ing)\s+(?:is\s+)?enabled", re.I),
+    re.compile(r"us(?:e|ing)\s+action signing", re.I),
+    re.compile(r"us(?:e|ing)\s+.{0,80}private keys", re.I),
+)
+usage_near_exchange = re.compile(
+    r"\b(?:use|used|uses|using|call|calls|calling|called|write|writes|writing|POST|enable|enabled)\b",
+    re.I,
+)
+radius = 160
+
+
+def window(text: str, match: re.Match[str]) -> str:
+    return text[max(0, match.start() - radius) : min(len(text), match.end() + radius)]
+
+
+def has_negation(text: str, match: re.Match[str]) -> bool:
+    return bool(neg_re.search(window(text, match)))
+
+
+def doc_errors(label: str, text: str) -> list[str]:
+    errors: list[str] = []
+    for name, needle in exclusion_needles:
+        matches = list(needle.finditer(text))
+        if not any(has_negation(text, match) for match in matches):
+            errors.append(f"{label} has no no/not/never/forbid exclusion near {name}")
+    for inverse in inverse_res:
+        for match in inverse.finditer(text):
+            if not has_negation(text, match):
+                errors.append(f"{label} inverse claim {match.group(0)!r}")
+                break
+    for match in re.finditer(r"/exchange", text):
+        chunk = window(text, match)
+        if not neg_re.search(chunk) and usage_near_exchange.search(chunk):
+            errors.append(f"{label} treats /exchange as something to call or write")
+            break
+    return errors
+
+
+def snapshot_section(status_text: str) -> str:
+    lines = status_text.splitlines()
+    collected: list[str] = []
+    in_section = False
+    for line in lines:
+        if line == "## 2026-08-20 snapshot":
+            in_section = True
+            collected.append(line)
+            continue
+        if in_section and line.startswith("## ") and line != "## 2026-08-20 snapshot":
+            break
+        if in_section:
+            collected.append(line)
+    return "\n".join(collected)
+
+
+def snapshot_errors(label: str, text: str) -> list[str]:
+    errors: list[str] = []
+    for part in re.split(r"(?<=[.!?])\s+|\n+", text):
+        if not part.strip() or neg_re.search(part):
+            continue
+        gate_passed = re.search(r"\bgate\s+(?:had\s+|has\s+)?PASSED\b", part)
+        full_passed = re.search(r"full[- ]coverage", part, re.I) and re.search(
+            r"\bPASSED\b", part
+        )
+        if gate_passed or full_passed:
+            errors.append(f"{label} claims the full-coverage gate PASSED")
+            break
+    return errors
+
+
+def fail_if(condition: bool, message: str, errors: list[str]) -> None:
+    if condition:
+        errors.append(message)
+
+
+spec_text = spec_path.read_text()
+plan_text = plan_path.read_text()
+status_text = status_path.read_text()
+snap_text = snapshot_section(status_text)
+errors = (
+    doc_errors(str(spec_path), spec_text)
+    + doc_errors(str(plan_path), plan_text)
+    + snapshot_errors(str(status_path), snap_text)
+)
+
+good_s11 = (
+    "### 1.1 Non-negotiable constraints\n"
+    "- No `/exchange`, signing, execution, credentials, private keys, "
+    "order placement, or copy trading.\n"
+)
+good_snap = (
+    "## 2026-08-20 snapshot\n"
+    "STATUS is a snapshot. Runtime maturity differs by component. Capture and some "
+    "Stage 2 replay paths are implemented locally. Wallet, analytics, API, and desk "
+    "surfaces remain scaffold or planned. The Hyperliquid full-coverage expansion is "
+    "planned and in progress on this branch. It is not a passed gate.\n"
+)
+bad_plan = (
+    "The project now places orders via `/exchange` using action signing and private keys "
+    "with automatic copy trading enabled. Order placement is a product capability.\n"
+)
+bad_snap = (
+    "## 2026-08-20 snapshot\n"
+    "Wallet, analytics, API, and desk surfaces remain scaffold or planned. "
+    "The Hyperliquid full-coverage expansion gate PASSED.\n"
+)
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp_path = Path(tmp)
+    cases = (
+        ("inverse-plan.md", bad_plan, "doc", True),
+        ("plan-s11.md", good_s11, "doc", False),
+        ("status-passed.md", bad_snap, "status", True),
+        ("status-snapshot.md", good_snap, "status", False),
+    )
+    for name, body, kind, must_fail in cases:
+        path = tmp_path / name
+        path.write_text(body)
+        text = path.read_text()
+        found = (
+            snapshot_errors(str(path), text)
+            if kind == "status"
+            else doc_errors(str(path), text)
+        )
+        if must_fail:
+            fail_if(not found, f"polarity self-check: {name} must fail", errors)
+        else:
+            fail_if(bool(found), f"polarity self-check: {name} must pass: {found}", errors)
+
+if errors:
+    print("hlcov-docs:error " + errors[0], file=sys.stderr)
+    for extra in errors[1:]:
+        print("hlcov-docs:error " + extra, file=sys.stderr)
+    raise SystemExit(1)
+PY
 
 if ! id_count="$(
   python3 - "$SPEC" "$TRACE" <<'PY'
