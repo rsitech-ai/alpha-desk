@@ -10,9 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coordinator::{CaptureCoordinator, CoordinatorError};
 use crate::{
-    AppError, AuxiliarySourceStatus, CaptureHealth, CaptureSourceHealth, CaptureStatus,
-    CommittedSourceClass, FailoverDecision, FailoverReason, OwnedTask, StatusError, StatusWriter,
-    read_status, run_owned_tasks,
+    AppError, AuxiliarySourceStatus, CaptureHealth, CaptureMaintenanceStatus, CaptureSourceHealth,
+    CaptureStatus, CommittedSourceClass, FailoverDecision, FailoverReason, OwnedTask, StatusError,
+    StatusWriter, read_status, run_owned_tasks,
 };
 
 const MAX_RECOVERY_BLOCKS: usize = 10_000_000;
@@ -23,6 +23,7 @@ const RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(250);
 const RECOVERING_REASON: &str = "capture_runtime.recovering";
 const DISK_HEALTHY_BASIS_POINTS: u16 = 2_000;
 const LOW_DISK_REASON: &str = "capture_disk.low_space";
+const MAINTENANCE_DEGRADED_REASON: &str = "capture_maintenance.degraded";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeHealthSnapshot {
@@ -41,6 +42,7 @@ pub(crate) struct RuntimeHealthSnapshot {
     oldest_pending_capture_height: Option<BlockHeight>,
     disk_free_basis_points: Option<u16>,
     auxiliary_sources: BTreeMap<String, AuxiliarySourceStatus>,
+    maintenance: Option<CaptureMaintenanceStatus>,
 }
 
 #[derive(Debug)]
@@ -66,6 +68,7 @@ impl CaptureRuntimeHealth {
             oldest_pending_capture_height: None,
             disk_free_basis_points: None,
             auxiliary_sources: BTreeMap::new(),
+            maintenance: None,
         });
         Self { sender }
     }
@@ -114,6 +117,7 @@ impl CaptureRuntimeHealth {
                 snapshot.reason_code = None;
             }
             snapshot.ready = true;
+            apply_maintenance_degradation(snapshot);
         });
     }
 
@@ -353,6 +357,13 @@ impl CaptureRuntimeHealth {
         });
     }
 
+    pub(crate) fn record_maintenance(&self, maintenance: CaptureMaintenanceStatus) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.maintenance = Some(maintenance);
+            apply_maintenance_degradation(snapshot);
+        });
+    }
+
     #[cfg(test)]
     pub(crate) fn auxiliary_source_status(&self, source_id: &str) -> Option<AuxiliarySourceStatus> {
         self.sender
@@ -364,6 +375,25 @@ impl CaptureRuntimeHealth {
 
     fn snapshot(&self) -> RuntimeHealthSnapshot {
         self.sender.borrow().clone()
+    }
+}
+
+fn apply_maintenance_degradation(snapshot: &mut RuntimeHealthSnapshot) {
+    if !snapshot.ready {
+        return;
+    }
+    let Some(maintenance) = snapshot.maintenance.as_ref() else {
+        return;
+    };
+    if snapshot.health != CaptureHealth::Green {
+        return;
+    }
+    match maintenance.health() {
+        CaptureHealth::Green => {}
+        CaptureHealth::Yellow | CaptureHealth::Red => {
+            snapshot.health = CaptureHealth::Yellow;
+            snapshot.reason_code = Some(MAINTENANCE_DEGRADED_REASON);
+        }
     }
 }
 
@@ -608,7 +638,8 @@ impl CaptureRuntime {
             )
             .with_last_error_reason(final_reason),
         }
-        .with_auxiliary_sources(terminal_auxiliary_sources);
+        .with_auxiliary_sources(terminal_auxiliary_sources)
+        .with_maintenance(terminal_source_state.maintenance);
         self.status_writer.write(&terminal).map_err(status_error)?;
         result.map_err(CaptureRuntimeError::Lifecycle)
     }
@@ -691,7 +722,8 @@ impl StatusContext {
         )
         .with_archive_manifest_id(archive_manifest_id)
         .with_last_error_reason(runtime_health.reason_code.map(str::to_owned))
-        .with_auxiliary_sources(auxiliary_sources))
+        .with_auxiliary_sources(auxiliary_sources)
+        .with_maintenance(runtime_health.maintenance))
     }
 
     fn write_without_progress(
@@ -728,7 +760,8 @@ impl StatusContext {
             runtime_health.oldest_pending_capture_height,
             runtime_health.disk_free_basis_points,
         )
-        .with_auxiliary_sources(auxiliary_sources);
+        .with_auxiliary_sources(auxiliary_sources)
+        .with_maintenance(runtime_health.maintenance);
         self.writer.write(&status)
     }
 }
@@ -879,6 +912,30 @@ mod tests {
         assert_eq!(
             snapshot.independent_source_health,
             Some(crate::CaptureSourceHealth::Healthy)
+        );
+    }
+
+    #[test]
+    fn maintenance_failure_degrades_ready_capture_without_latching_red() {
+        let health = CaptureRuntimeHealth::new();
+        health.record_source_healthy(CommittedSourceClass::LocallyVerifiedCommitted);
+        health.set_ready();
+        assert_eq!(health.snapshot().health, super::CaptureHealth::Green);
+
+        let mut maintenance = crate::CaptureMaintenanceStatus::idle(true, false);
+        maintenance.degrade(
+            super::CaptureHealth::Red,
+            "capture_maintenance.scrub_failed",
+        );
+        health.record_maintenance(maintenance);
+
+        let snapshot = health.snapshot();
+        assert!(snapshot.ready);
+        assert_eq!(snapshot.health, super::CaptureHealth::Yellow);
+        assert_eq!(snapshot.reason_code, Some("capture_maintenance.degraded"));
+        assert_eq!(
+            snapshot.maintenance.as_ref().unwrap().health(),
+            super::CaptureHealth::Red
         );
     }
 }

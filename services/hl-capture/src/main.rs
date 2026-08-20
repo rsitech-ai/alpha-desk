@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use hl_capture::{CaptureConfig, connect_capture, read_status};
+use hl_capture::{CaptureConfig, connect_capture, read_status, run_configured_maintenance_cycle};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-const USAGE: &str = "usage: hl-capture <check-config|status|run> --config <path> [--json]\n       hl-capture fixture-replay --config <path> --blocks <count> [--block-delay-millis <ms>]";
+const USAGE: &str = "usage: hl-capture <check-config|status|run|maintain> --config <path> [--json]\n       hl-capture fixture-replay --config <path> --blocks <count> [--block-delay-millis <ms>]";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -62,6 +62,18 @@ async fn execute(arguments: Vec<OsString>) -> Result<(), CliError> {
             let config = load_config(&config_path)?;
             run_capture(&config).await
         }
+        Command::Maintain { config_path } => {
+            let config = load_config(&config_path)?;
+            let report = run_configured_maintenance_cycle(&config)
+                .map_err(|error| CliError::Stable(error.reason_code()))?;
+            let encoded = serde_json::to_string(&MaintainOutput {
+                schema_version: "hl.capture.maintain.v1",
+                status: report.status().clone(),
+            })
+            .map_err(|_| CliError::Stable("capture_cli.serialization"))?;
+            println!("{encoded}");
+            Ok(())
+        }
         Command::FixtureReplay {
             config_path,
             block_count,
@@ -83,6 +95,9 @@ enum Command {
         json: bool,
     },
     Run {
+        config_path: PathBuf,
+    },
+    Maintain {
         config_path: PathBuf,
     },
     FixtureReplay {
@@ -127,6 +142,9 @@ impl Command {
             "run" if !json && block_count.is_none() && block_delay_millis.is_none() => {
                 Ok(Self::Run { config_path })
             }
+            "maintain" if !json && block_count.is_none() && block_delay_millis.is_none() => {
+                Ok(Self::Maintain { config_path })
+            }
             "fixture-replay" if !json => {
                 let block_count = block_count
                     .filter(|count| (1..=10_000_000).contains(count))
@@ -144,6 +162,13 @@ impl Command {
             _ => Err(CliError::Usage),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct MaintainOutput {
+    schema_version: &'static str,
+    #[serde(flatten)]
+    status: hl_capture::CaptureMaintenanceStatus,
 }
 
 #[derive(Debug, Serialize)]
