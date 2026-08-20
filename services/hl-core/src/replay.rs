@@ -77,6 +77,13 @@ impl<R: EventReducer, S: AtomicStateStore> LocalReplaySession<R, S> {
         Ok(Self { ledger, store })
     }
 
+    pub fn apply_next(
+        &mut self,
+        block: &BlockEnvelope,
+    ) -> Result<DurableApplyOutcome, LocalReplayError> {
+        Ok(apply_block_durably(&mut self.ledger, &self.store, block)?)
+    }
+
     pub fn replay<Src: CanonicalBlockSource>(
         &mut self,
         source: &mut Src,
@@ -88,7 +95,7 @@ impl<R: EventReducer, S: AtomicStateStore> LocalReplaySession<R, S> {
             .checkpoint()
             .map(|checkpoint| checkpoint.block_height());
         while let Some(block) = source.next_block()? {
-            match apply_block_durably(&mut self.ledger, &self.store, &block)? {
+            match self.apply_next(&block)? {
                 DurableApplyOutcome::Applied { .. } => {
                     applied = applied.checked_add(1).ok_or(LocalReplayError::Overflow)?;
                     last_height = Some(block.block_height());
