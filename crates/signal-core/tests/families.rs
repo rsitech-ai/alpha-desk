@@ -350,9 +350,11 @@ fn only_three_v1_types_are_live_capable() {
     assert!(SignalType::IndependentSmartFlowAcceleration.can_enter_live());
     assert!(SignalType::SmartCrowdDivergence.can_enter_live());
     assert!(SignalType::LiquidationFragilityAsymmetry.can_enter_live());
-    assert!(!SignalType::research_only("trapped-cohort")
-        .unwrap()
-        .can_enter_live());
+    assert!(
+        !SignalType::research_only("trapped-cohort")
+            .unwrap()
+            .can_enter_live()
+    );
 }
 
 #[test]
@@ -402,9 +404,11 @@ fn missing_book_or_fills_suppresses_live_capable_families() {
         ] {
             match evaluation {
                 SignalEvaluation::Suppressed { reasons, .. } => {
-                    assert!(reasons
-                        .iter()
-                        .any(|reason| reason == "missing_book_or_fills"));
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|reason| reason == "missing_book_or_fills")
+                    );
                 }
                 other => panic!("missing book/fills must not emit {other:?}"),
             }
@@ -459,9 +463,11 @@ fn boolean_book_or_false_fills_cannot_emit_live_capable_families() {
         ] {
             match evaluation {
                 SignalEvaluation::Suppressed { reasons, .. } => {
-                    assert!(reasons
-                        .iter()
-                        .any(|reason| reason == "missing_book_or_fills"));
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|reason| reason == "missing_book_or_fills")
+                    );
                 }
                 other => panic!("cross-kind or false fills must not emit {other:?}"),
             }
@@ -563,9 +569,11 @@ fn assert_inventory_family_withhold(snapshot: &MarketFeatureSnapshot, expected_r
     match suppress_proof_withhold(snapshot) {
         Some(SignalEvaluation::Suppressed { reasons, .. }) => {
             assert_eq!(reasons.as_slice(), [expected_reason]);
-            assert!(!reasons
-                .iter()
-                .any(|reason| reason == "missing_book_or_fills"));
+            assert!(
+                !reasons
+                    .iter()
+                    .any(|reason| reason == "missing_book_or_fills")
+            );
         }
         other => panic!("expected inventory suppression, got {other:?}"),
     }
@@ -577,9 +585,11 @@ fn assert_inventory_family_withhold(snapshot: &MarketFeatureSnapshot, expected_r
         match evaluation {
             SignalEvaluation::Suppressed { reasons, .. } => {
                 assert_eq!(reasons.as_slice(), [expected_reason]);
-                assert!(!reasons
-                    .iter()
-                    .any(|reason| reason == "missing_book_or_fills"));
+                assert!(
+                    !reasons
+                        .iter()
+                        .any(|reason| reason == "missing_book_or_fills")
+                );
             }
             other => panic!("inventory withhold must not emit {other:?}"),
         }
