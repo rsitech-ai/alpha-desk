@@ -31,8 +31,8 @@ pub use disk::*;
 pub use failover::*;
 pub use fixture::{FixtureError, synthetic_fixture_block};
 pub use maintenance::{
-    MaintenanceCycleReport, restore_authorized, run_configured_maintenance_cycle,
-    run_maintenance_cycle,
+    AuthorizedRestoreRequest, MaintenanceCycleReport, restore_authorized,
+    run_configured_maintenance_cycle, run_configured_restore, run_maintenance_cycle,
 };
 pub use quarantine::*;
 pub use raw_archive::*;
