@@ -29,7 +29,7 @@ pub use committed_pipeline::*;
 pub use config::*;
 pub use disk::*;
 pub use failover::*;
-pub use fixture::{FixtureError, synthetic_fixture_block};
+pub use fixture::{FixtureError, synthetic_fixture_block, synthetic_independent_fixture_block};
 pub use operator::{OperatorError, accept_operator_status, serve_operator_status};
 pub use quarantine::*;
 pub use raw_archive::*;
