@@ -286,9 +286,19 @@ fn confirmation_boundary_covers_every_class() {
                     BlockHeight::new(40)
                 );
             }
+            ConfirmationClass::Corrected => {
+                let error = ledger
+                    .apply_block(&block)
+                    .expect_err("corrections fail closed");
+                assert_eq!(
+                    error.reason_code(),
+                    "ledger.correction_unimplemented",
+                    "Corrected must not blur into the committed ledger lane"
+                );
+                assert_eq!(ledger.state_image().canonical_bytes(), before);
+            }
             ConfirmationClass::ProvisionalSource
             | ConfirmationClass::ReconciledSnapshot
-            | ConfirmationClass::Corrected
             | ConfirmationClass::Expired => {
                 let error = ledger
                     .apply_block(&block)
