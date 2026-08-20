@@ -72,6 +72,7 @@ status_snapshot="$(awk '
 printf '%s\n' "$status_snapshot" | grep -Ei -q 'planned|in progress|in-progress' ||
   fail "$STATUS snapshot section does not mark full-coverage as planned/in-progress"
 
+# ponytail: sentence-scope polarity. Ceiling: a negation anywhere in the same sentence (comma-joined clause, or a markdown table row as one unit) disarms inverse-claim detection for that unit. Demonstrated: "There is no ambiguity that the desk places orders via /exchange ... and automatic copy trading is enabled." exits 0. Upgrade: T39 release scan / a match-local negation window.
 python3 - "$SPEC" "$PLAN" "$TRACE" "$STATUS" <<'PY'
 import re
 import sys
