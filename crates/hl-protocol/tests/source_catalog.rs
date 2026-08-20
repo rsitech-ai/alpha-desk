@@ -2,8 +2,9 @@ use domain_types::{KnownTime, SourceId};
 use hl_protocol::{
     AgreementStatus, NetworkId, ObservationClass, OperatorKind, ProviderLicense,
     RedistributionPolicy, RetentionClass, SourceCatalogError, SourceCatalogRecord,
-    SourceDescriptor, SourceRole, SourceTrust, network_scoped_source_identity,
-    observation_qualifies_committed_source, role_requires_provider_license,
+    SourceDescriptor, SourceRole, SourceTrust, inferred_operator_kind,
+    network_scoped_source_identity, observation_qualifies_committed_source,
+    role_requires_provider_license,
 };
 
 fn network(name: &str) -> NetworkId {
@@ -182,6 +183,68 @@ fn provider_source_requires_licensing_and_redistribution_policy_fields() {
         SourceRole::DiscoveryOnly,
         OperatorKind::Community
     ));
+}
+
+#[test]
+fn omitted_role_third_party_defaults_to_provider_and_requires_license() {
+    let role = SourceRole::from_trust(SourceTrust::ThirdPartyProvisional);
+    assert_eq!(role, SourceRole::ProvisionalRealtime);
+    let kind = inferred_operator_kind(SourceTrust::ThirdPartyProvisional, role);
+    assert_eq!(kind, OperatorKind::Provider);
+    assert!(role_requires_provider_license(role, kind));
+    assert_eq!(
+        record(
+            "third-party-feed",
+            "mainnet",
+            role,
+            kind,
+            ObservationClass::PublicMarketData,
+            None,
+        ),
+        Err(SourceCatalogError::MissingProviderLicense)
+    );
+
+    assert_eq!(
+        inferred_operator_kind(
+            SourceTrust::ThirdPartyProvisional,
+            SourceRole::DiscoveryOnly
+        ),
+        OperatorKind::Community
+    );
+    assert!(!role_requires_provider_license(
+        SourceRole::DiscoveryOnly,
+        inferred_operator_kind(
+            SourceTrust::ThirdPartyProvisional,
+            SourceRole::DiscoveryOnly
+        ),
+    ));
+
+    let committed_role = SourceRole::from_trust(SourceTrust::LocallyVerifiedCommitted);
+    let committed_kind =
+        inferred_operator_kind(SourceTrust::LocallyVerifiedCommitted, committed_role);
+    assert_eq!(committed_role, SourceRole::CommittedPrimary);
+    assert_eq!(committed_kind, OperatorKind::LocalNode);
+    assert!(!role_requires_provider_license(
+        committed_role,
+        committed_kind
+    ));
+    record(
+        "primary-node",
+        "mainnet",
+        committed_role,
+        committed_kind,
+        ObservationClass::CommittedBlock,
+        None,
+    )
+    .expect("committed node may omit a redundant role without a license");
+
+    assert_eq!(
+        inferred_operator_kind(
+            SourceTrust::MempoolProvisional,
+            SourceRole::from_trust(SourceTrust::MempoolProvisional),
+        ),
+        OperatorKind::Official
+    );
 }
 
 #[test]

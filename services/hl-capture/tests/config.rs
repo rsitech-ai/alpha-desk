@@ -1003,6 +1003,77 @@ fn catalog_requires_provider_license_and_redistribution() {
 }
 
 #[test]
+fn catalog_omitted_role_on_third_party_requires_provider_license() {
+    let missing = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "third-party-feed",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", operator = "nansen", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing)
+            .expect_err("omitted catalog.role cannot skip the provider license")
+            .reason_code(),
+        "capture_config.missing_provider_license"
+    );
+
+    let licensed = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "third-party-feed",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", operator = "nansen", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "nansen-api-tos", agreement_status = "active" }"#,
+        )
+    );
+    let config =
+        CaptureConfig::from_toml(&licensed).expect("licensed third-party may omit catalog.role");
+    let record = config
+        .source("third-party-feed")
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(
+        record.descriptor().role(),
+        hl_protocol::SourceRole::ProvisionalRealtime
+    );
+    assert_eq!(record.operator_kind(), hl_protocol::OperatorKind::Provider);
+    assert_eq!(
+        record.license().expect("license").license_name(),
+        "nansen-api-tos"
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_committed_source_does_not_require_license() {
+    let source = replace_once(
+        &valid_config(),
+        r#"adapter = { kind = "node-block-directory""#,
+        r#"catalog = { network = "mainnet", operator = "alpha-desk", retention_class = "raw-indefinite", redistribution = "private-operator-evidence" }
+adapter = { kind = "node-block-directory""#,
+    );
+    let config = CaptureConfig::from_toml(&source).expect("committed node may omit catalog.role");
+    let record = config
+        .source("primary-node")
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(
+        record.descriptor().role(),
+        hl_protocol::SourceRole::CommittedPrimary
+    );
+    assert_eq!(record.operator_kind(), hl_protocol::OperatorKind::LocalNode);
+    assert!(record.license().is_none());
+}
+
+#[test]
 fn catalog_rejects_committed_role_without_qualifying_evidence() {
     let source = format!(
         "{}{}",

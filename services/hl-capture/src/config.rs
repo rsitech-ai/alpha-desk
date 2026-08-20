@@ -7,7 +7,7 @@ use hl_protocol::node::v1::NodeStreamKind;
 use hl_protocol::{
     AgreementStatus, NetworkId, ObservationClass, OperatorKind, ProviderLicense,
     RedistributionPolicy, RetentionClass, SourceAdmission, SourceCatalogError, SourceCatalogRecord,
-    SourceDescriptor, SourceRole, SourceTrust, validate_role_trust,
+    SourceDescriptor, SourceRole, SourceTrust, inferred_operator_kind, validate_role_trust,
 };
 use serde::{Deserialize, Serialize};
 
@@ -550,7 +550,7 @@ impl SourceCatalogConfig {
         validate_role_trust(role, source.trust).map_err(catalog_error)?;
         let operator_kind = self
             .operator_kind
-            .unwrap_or_else(|| role.default_operator_kind());
+            .unwrap_or_else(|| inferred_operator_kind(source.trust, role));
         let descriptor = SourceDescriptor::new(
             SourceId::new(source.id.clone()).map_err(|_| ConfigError::InvalidSourceId)?,
             network,

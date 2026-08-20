@@ -396,6 +396,32 @@ pub const fn role_requires_provider_license(role: SourceRole, operator_kind: Ope
         || matches!(operator_kind, OperatorKind::Provider)
 }
 
+/// Operator kind used when capture TOML omits `operator_kind`.
+///
+/// `SourceTrust::ThirdPartyProvisional` infers [`OperatorKind::Provider`] so an omitted
+/// `catalog.role` cannot become Official and skip the provider license.
+/// [`SourceRole::DiscoveryOnly`] stays Community. Other trusts keep
+/// [`SourceRole::default_operator_kind`].
+#[must_use]
+pub const fn inferred_operator_kind(trust: SourceTrust, role: SourceRole) -> OperatorKind {
+    match trust {
+        SourceTrust::ThirdPartyProvisional => match role {
+            SourceRole::DiscoveryOnly => OperatorKind::Community,
+            SourceRole::CommittedPrimary
+            | SourceRole::CommittedIndependent
+            | SourceRole::ProvisionalRealtime
+            | SourceRole::ReconciliationSnapshot
+            | SourceRole::HistoricalBackfill
+            | SourceRole::AttributionEnrichment => OperatorKind::Provider,
+        },
+        SourceTrust::LocallyVerifiedCommitted
+        | SourceTrust::IndependentCommitted
+        | SourceTrust::ReconciledSnapshot
+        | SourceTrust::RecoveryOnly
+        | SourceTrust::MempoolProvisional => role.default_operator_kind(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceCatalogRecord {
     descriptor: SourceDescriptor,
