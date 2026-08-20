@@ -54,6 +54,7 @@ use api_contracts::{
     encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched,
     encode_trigger_order_activated, encode_twap_completed, encode_twap_slice_filled,
     encode_twap_started, encode_vault_deposit, encode_vault_withdrawal, encode_withdrawal_debited,
+    validate_event_payload,
 };
 use domain_types::{
     AccountAbstractionModeV1, Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId,
