@@ -1,5 +1,7 @@
 use canonical_events::{BlockError, ContractError, MappingError};
-use canonical_ledger::{AccountStateError, CanonicalStateError, LedgerError, MarketStateError};
+use canonical_ledger::{
+    AccountStateError, CanonicalStateError, LedgerError, MarketStateError, PositionStateError,
+};
 use domain_types::ValueError;
 use entity_graph::GraphError;
 use feature_core::FeatureError;
@@ -120,5 +122,13 @@ impl From<AccountStateError> for IntelligenceReplayError {
 impl From<MarketStateError> for IntelligenceReplayError {
     fn from(_error: MarketStateError) -> Self {
         Self::StateRecord { what: "market" }
+    }
+}
+
+impl From<PositionStateError> for IntelligenceReplayError {
+    fn from(_error: PositionStateError) -> Self {
+        Self::StateRecord {
+            what: "position_episode",
+        }
     }
 }
