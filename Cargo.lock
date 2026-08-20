@@ -473,6 +473,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "book-inspect"
+version = "0.1.0"
+dependencies = [
+ "orderbook",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "borrow-or-share"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2054,8 +2063,13 @@ dependencies = [
  "blake3",
  "canonical-events",
  "canonical-ledger",
+ "canonical-state-store",
  "domain-types",
+ "hex",
+ "serde",
+ "serde_json",
  "storage-ports",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -2593,6 +2607,13 @@ dependencies = [
 [[package]]
 name = "margin-models"
 version = "0.1.0"
+dependencies = [
+ "domain-types",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "market-intelligence"
@@ -2909,6 +2930,13 @@ dependencies = [
 [[package]]
 name = "orderbook"
 version = "0.1.0"
+dependencies = [
+ "domain-types",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "ordered-float"

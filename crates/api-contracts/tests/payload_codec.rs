@@ -9,18 +9,19 @@ use api_contracts::{
     WireOrderPartiallyFilled, WireOrderRejected, WireOrderRested, WireOutcomeCreated,
     WireOutcomeResolved, WirePerpTransfer, WirePositionSettled, WireReferralReward,
     WireSpotTransfer, WireSubaccountTransfer, WireTradeMatched, WireTradeParticipantV1,
-    WireVaultDeposit, WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
-    decode_asset_context_updated, decode_backstop_liquidation, decode_builder_fee_charged,
-    decode_deposit_credited, decode_dex_created, decode_fee_charged, decode_funding_paid,
-    decode_funding_rate_updated, decode_funding_received, decode_leverage_changed,
-    decode_liquidation_fill, decode_liquidation_started, decode_margin_mode_changed,
-    decode_margin_table_changed, decode_market_created, decode_market_halted,
-    decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
-    decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
-    decode_order_modified, decode_order_partially_filled, decode_order_rejected,
-    decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_perp_transfer,
-    decode_position_settled, decode_referral_reward, decode_spot_transfer,
-    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
+    WireTriggerOrderActivated, WireTwapStarted, WireVaultDeposit, WireVaultWithdrawal,
+    WireWithdrawalDebited, decode_account_mode_changed, decode_asset_context_updated,
+    decode_backstop_liquidation, decode_builder_fee_charged, decode_deposit_credited,
+    decode_dex_created, decode_fee_charged, decode_funding_paid, decode_funding_rate_updated,
+    decode_funding_received, decode_leverage_changed, decode_liquidation_fill,
+    decode_liquidation_started, decode_margin_mode_changed, decode_margin_table_changed,
+    decode_market_created, decode_market_halted, decode_market_metadata_changed,
+    decode_market_resumed, decode_open_interest_cap_changed, decode_oracle_updated,
+    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
+    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
+    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_position_settled,
+    decode_referral_reward, decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched,
+    decode_trigger_order_activated, decode_twap_started, decode_vault_deposit,
     decode_vault_withdrawal, decode_withdrawal_debited, encode_account_mode_changed,
     encode_asset_context_updated, encode_backstop_liquidation, encode_builder_fee_charged,
     encode_default_event_payload, encode_deposit_credited, encode_dex_created, encode_fee_charged,
@@ -33,8 +34,8 @@ use api_contracts::{
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
     encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_position_settled,
     encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched,
-    encode_vault_deposit, encode_vault_withdrawal, encode_withdrawal_debited,
-    validate_event_payload,
+    encode_trigger_order_activated, encode_twap_started, encode_vault_deposit,
+    encode_vault_withdrawal, encode_withdrawal_debited, validate_event_payload,
 };
 use prost::Message;
 
@@ -1436,6 +1437,28 @@ fn order_admission_wire_payloads_round_trip_exactly() {
     assert_eq!(
         decode_order_accepted(&encode_order_accepted(&accepted).unwrap()).unwrap(),
         accepted
+    );
+
+    let trigger = WireTriggerOrderActivated {
+        order_id: "order-17".to_owned(),
+        trigger_price: "65000.125000".to_owned(),
+        oracle_price: "64990.000000".to_owned(),
+    };
+    assert_eq!(
+        decode_trigger_order_activated(&encode_trigger_order_activated(&trigger).unwrap()).unwrap(),
+        trigger
+    );
+
+    let twap_started = WireTwapStarted {
+        order_id: "twap-9".to_owned(),
+        account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+        market_id: "perp:BTC".to_owned(),
+        total_quantity: "1.25000000".to_owned(),
+        end_time_micros: 1_700_000_000_000_000,
+    };
+    assert_eq!(
+        decode_twap_started(&encode_twap_started(&twap_started).unwrap()).unwrap(),
+        twap_started
     );
 
     let rested = WireOrderRested {

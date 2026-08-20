@@ -116,7 +116,7 @@ fn position_e2e_proves_only_the_frozen_synthetic_position_contract() {
     assert_eq!(report["source_qualification"], "synthetic_unassessed");
     assert_eq!(
         report["reducer_version"],
-        "hyperliquid-alpha-desk-canonical-state@1.0.0"
+        "hyperliquid-alpha-desk-canonical-state@1.1.0"
     );
     assert_eq!(report["synthetic_position_contract_proven"], true);
     for field in FALSE_QUALIFICATIONS {

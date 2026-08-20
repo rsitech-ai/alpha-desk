@@ -32,6 +32,7 @@ members = [
   "tools/spool-inspect",
   "tools/canonical-inspect",
   "tools/archive-inspect",
+  "tools/book-inspect",
   "tools/build-info",
   "tools/architecture-check",
   "tools/stage-gate",
