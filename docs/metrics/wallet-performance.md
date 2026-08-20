@@ -13,7 +13,9 @@ Spec 15.3 sibling calculators consume only caller-supplied observed fields:
   order limit. Missing fills or missing reference prices withhold (`None`).
   Mid/mark prices are not invented.
 - Concentration may include collateral and regime HHI when those series are
-  supplied. Empty series are omitted, not invented.
+  supplied. Empty series are omitted, not invented. Best-market dependence uses
+  an observed per-market PnL series the same way: missing markets withhold
+  (`None`); duplicate market IDs fail closed.
 - Entry and exit markouts evaluate only observed prices at labeled horizons.
   An empty point set withholds.
 - Long/short beta is computed per market only when that market's return is

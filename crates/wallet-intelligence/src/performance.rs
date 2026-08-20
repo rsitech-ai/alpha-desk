@@ -75,6 +75,7 @@ pub struct ConcentrationInput {
     pub dex_pnl: Vec<(DexId, UsdAmount)>,
     pub collateral_pnl: Vec<(AssetId, UsdAmount)>,
     pub regime_pnl: Vec<(RegimeId, UsdAmount)>,
+    pub market_pnl: Vec<(MarketId, UsdAmount)>,
     pub trade_pnl: Vec<UsdAmount>,
     pub month_pnl: Vec<UsdAmount>,
 }
@@ -87,6 +88,7 @@ pub struct ConcentrationBreakdown {
     pub regime_hhi_ppm: Option<ProbabilityPpm>,
     pub best_trade_share: ProbabilityPpm,
     pub best_month_share: ProbabilityPpm,
+    pub best_market_share: Option<ProbabilityPpm>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -681,6 +683,7 @@ fn downside_deviation(
 pub fn concentration_breakdown(
     input: &ConcentrationInput,
 ) -> Result<ConcentrationBreakdown, IntelligenceError> {
+    require_unique_markets(&input.market_pnl)?;
     Ok(ConcentrationBreakdown {
         asset_hhi_ppm: herfindahl(&input.asset_pnl)?,
         dex_hhi_ppm: herfindahl(&input.dex_pnl)?,
@@ -688,7 +691,20 @@ pub fn concentration_breakdown(
         regime_hhi_ppm: optional_herfindahl(&input.regime_pnl)?,
         best_trade_share: best_share(&input.trade_pnl)?,
         best_month_share: best_share(&input.month_pnl)?,
+        best_market_share: optional_best_share(&input.market_pnl)?,
     })
+}
+
+fn require_unique_markets(items: &[(MarketId, UsdAmount)]) -> Result<(), IntelligenceError> {
+    for (index, (market_id, _)) in items.iter().enumerate() {
+        if items[..index].iter().any(|(prior, _)| prior == market_id) {
+            return Err(IntelligenceError::Malformed {
+                what: "concentration",
+                reason: "duplicate market",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn optional_herfindahl<T>(
@@ -698,6 +714,18 @@ fn optional_herfindahl<T>(
         Ok(None)
     } else {
         Ok(Some(herfindahl(items)?))
+    }
+}
+
+fn optional_best_share<T>(
+    items: &[(T, UsdAmount)],
+) -> Result<Option<ProbabilityPpm>, IntelligenceError> {
+    if items.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(best_share(
+            &items.iter().map(|(_, amount)| *amount).collect::<Vec<_>>(),
+        )?))
     }
 }
 
