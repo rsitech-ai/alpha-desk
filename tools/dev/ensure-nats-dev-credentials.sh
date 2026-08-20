@@ -64,4 +64,4 @@ chmod 600 "$capture_password_file"
 } >"$environment_file"
 chmod 600 "$environment_file"
 
-printf 'nats-dev-credentials:ok directory=%s\n' "$secret_directory"
+printf 'nats-dev-credentials:ok directory=%s\n' "$secret_directory" >&2

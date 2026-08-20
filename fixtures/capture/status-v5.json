@@ -1,0 +1,37 @@
+{
+  "schema_version": "hl.capture.status.v5",
+  "snapshot_at_micros": 1,
+  "build_id": "synthetic-serve-status-fixture",
+  "chain_id": "mainnet",
+  "health": "green",
+  "ready": true,
+  "active_committed_source": "locally-verified-committed",
+  "primary_source_health": "healthy",
+  "pending_blocks": 0,
+  "auxiliary_sources": [
+    {
+      "source_id": "node-misc-events",
+      "health": "healthy",
+      "qualification": "unqualified",
+      "cursor_epoch": "node-file-v1:epoch",
+      "tail_cursor_epoch": "node-file-v1:epoch",
+      "durable_offset": 47,
+      "local_sequence": 3,
+      "spool_records": 3,
+      "unarchived_records": 0,
+      "partial_line": false,
+      "last_durable_wall_micros": 1000,
+      "restart_reconstruction": "complete"
+    }
+  ],
+  "maintenance": {
+    "enabled": true,
+    "kill_switch": false,
+    "health": "green",
+    "pending_pack_manifest_count": 0,
+    "packed_range_count": 0,
+    "logical_manifest_count": 0,
+    "physical_data_object_count": 0,
+    "retention_authorized": false
+  }
+}

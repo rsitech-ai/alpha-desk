@@ -7,7 +7,8 @@ use canonical_events::{
     TradeParticipantRoleV1, map_committed_node_v1_block, map_node_v1_record,
 };
 use domain_types::{BlockHeight, ChainId, KnownTime, MarketId, SourceId};
-use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
+use hl_protocol::SourceError;
+use hl_protocol::node::v1::{NodeRecordKind, NodeStreamKind, parse_node_record};
 
 fn fixture(name: &str) -> Vec<u8> {
     fs::read(
@@ -75,6 +76,51 @@ fn empty_transaction_block_maps_to_a_committed_source_bound_block() {
         first.source_block_hashes()[&SourceId::new("primary-node").unwrap()],
         *record.content_hash().as_bytes()
     );
+}
+
+#[test]
+fn committed_mapper_confirmation_covers_every_class() {
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        fixture("transaction-block.json").into(),
+    )
+    .unwrap();
+
+    for class in [
+        ConfirmationClass::ProvisionalSource,
+        ConfirmationClass::CommittedPrimary,
+        ConfirmationClass::CommittedIndependent,
+        ConfirmationClass::ReconciledSnapshot,
+        ConfirmationClass::Corrected,
+        ConfirmationClass::Expired,
+    ] {
+        let mut context = committed_context();
+        context.confirmation_class = class;
+        match class {
+            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => {
+                let block = map_committed_node_v1_block(&record, &context)
+                    .expect("empty committed blocks still map");
+                assert_eq!(block.confirmation_class(), class);
+                assert!(block.events().is_empty());
+            }
+            ConfirmationClass::ProvisionalSource
+            | ConfirmationClass::ReconciledSnapshot
+            | ConfirmationClass::Corrected
+            | ConfirmationClass::Expired => {
+                let error = map_committed_node_v1_block(&record, &context)
+                    .expect_err("non-committed lanes fail closed");
+                assert!(
+                    matches!(error, MappingError::InvalidCommittedConfirmation),
+                    "{class:?} must not blur into committed mapping"
+                );
+                assert_eq!(
+                    error.reason_code(),
+                    "canonical_mapping.invalid_committed_confirmation",
+                    "{class:?} must reuse the existing committed-mapping reason"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -395,13 +441,226 @@ fn repeated_transaction_hash_uses_contiguous_event_indices_and_source_sub_indice
 }
 
 #[test]
-fn known_but_unmapped_node_record_has_an_explicit_disposition() {
+fn known_one_sided_fill_is_evidence_only_and_never_a_complete_trade() {
     let record = parse_node_record(NodeStreamKind::Fills, fixture("fill.json").into()).unwrap();
 
     assert_eq!(
         map_node_v1_record(&record, &catalog(), &context()).unwrap(),
-        MappingDisposition::EvidenceOnly(EvidenceOnlyReason::UnsupportedCanonicalSemantics)
+        MappingDisposition::EvidenceOnly(EvidenceOnlyReason::OneSidedFill)
     );
+    assert_eq!(
+        EvidenceOnlyReason::OneSidedFill.reason_code(),
+        "canonical_mapping.one_sided_fill"
+    );
+}
+
+#[test]
+fn public_node_v1_corpus_has_an_explicit_disposition_for_every_fixture() {
+    #[derive(Debug)]
+    enum Expected {
+        MappedTrade,
+        EmptyCommittedBlock,
+        EvidenceOnly(EvidenceOnlyReason),
+        SourceSchemaDrift,
+    }
+
+    let cases = [
+        (
+            "trade-batch.json",
+            NodeStreamKind::Trades,
+            Expected::MappedTrade,
+        ),
+        (
+            "transaction-block.json",
+            NodeStreamKind::TransactionBlocks,
+            Expected::EmptyCommittedBlock,
+        ),
+        (
+            "fill.json",
+            NodeStreamKind::Fills,
+            Expected::EvidenceOnly(EvidenceOnlyReason::OneSidedFill),
+        ),
+        (
+            "order-status.json",
+            NodeStreamKind::OrderStatuses,
+            Expected::EvidenceOnly(EvidenceOnlyReason::AuxiliaryOrderStatus),
+        ),
+        (
+            "raw-book-diff.json",
+            NodeStreamKind::RawBookDiffs,
+            Expected::EvidenceOnly(EvidenceOnlyReason::AuxiliaryBookDiff),
+        ),
+        (
+            "transfer.json",
+            NodeStreamKind::MiscEvents,
+            Expected::EvidenceOnly(EvidenceOnlyReason::IncompleteLedgerTransfer),
+        ),
+        (
+            "liquidation.json",
+            NodeStreamKind::MiscEvents,
+            Expected::EvidenceOnly(EvidenceOnlyReason::IncompleteLiquidation),
+        ),
+        (
+            "market-metadata.json",
+            NodeStreamKind::MarketMetadata,
+            Expected::EvidenceOnly(EvidenceOnlyReason::AuxiliaryMarketMetadata),
+        ),
+        (
+            "unknown-variant.json",
+            NodeStreamKind::MiscEvents,
+            Expected::SourceSchemaDrift,
+        ),
+    ];
+    let corpus_json = cases.iter().map(|(file, _, _)| *file).collect::<Vec<_>>();
+    let mut on_disk = std::fs::read_dir(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures/source/node-v1"),
+    )
+    .unwrap()
+    .filter_map(|entry| {
+        let name = entry.ok()?.file_name().into_string().ok()?;
+        name.ends_with(".json").then_some(name)
+    })
+    .collect::<Vec<_>>();
+    on_disk.sort_unstable();
+    let mut expected_files = corpus_json.clone();
+    expected_files.sort_unstable();
+    assert_eq!(
+        on_disk, expected_files,
+        "every hashed public JSON fixture must have an explicit mapping disposition"
+    );
+
+    for (file, stream, expected) in cases {
+        let payload = fixture(file);
+        match expected {
+            Expected::SourceSchemaDrift => {
+                let error = parse_node_record(stream, payload.into()).expect_err(file);
+                assert!(
+                    matches!(error, SourceError::SchemaDrift(_)),
+                    "{file} must fail closed as schema drift, not map"
+                );
+                assert_eq!(error.reason_code(), "source.schema_drift");
+            }
+            Expected::EmptyCommittedBlock => {
+                let record = parse_node_record(stream, payload.into()).unwrap();
+                assert_eq!(record.kind(), NodeRecordKind::TransactionBlock);
+                let mapped = map_committed_node_v1_block(&record, &committed_context()).unwrap();
+                assert!(
+                    mapped.events().is_empty(),
+                    "{file} must stay an empty committed block"
+                );
+                assert_eq!(
+                    mapped.confirmation_class(),
+                    ConfirmationClass::CommittedPrimary
+                );
+                let auxiliary = map_node_v1_record(&record, &catalog(), &context()).unwrap();
+                assert_eq!(
+                    auxiliary,
+                    MappingDisposition::EvidenceOnly(
+                        EvidenceOnlyReason::UnsupportedCanonicalSemantics
+                    ),
+                    "committed blocks are not mapped through the auxiliary record mapper"
+                );
+            }
+            Expected::MappedTrade => {
+                let record = parse_node_record(stream, payload.into()).unwrap();
+                let MappingDisposition::Mapped(events) =
+                    map_node_v1_record(&record, &catalog(), &context()).unwrap()
+                else {
+                    panic!("{file} must map as a provisional trade");
+                };
+                assert_eq!(events.len(), 1);
+                assert_eq!(
+                    events[0].confirmation_class(),
+                    ConfirmationClass::ProvisionalSource
+                );
+            }
+            Expected::EvidenceOnly(reason) => {
+                let record = parse_node_record(stream, payload.into()).unwrap();
+                let disposition = map_node_v1_record(&record, &catalog(), &context()).unwrap();
+                assert_eq!(
+                    disposition,
+                    MappingDisposition::EvidenceOnly(reason),
+                    "{file} must keep an explicit evidence-only disposition"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn block_wrapped_one_sided_fill_still_does_not_become_a_trade() {
+    let fill: serde_json::Value = serde_json::from_slice(&fixture("fill.json")).unwrap();
+    let batched = serde_json::json!({
+        "local_time": "2026-07-28T12:00:00",
+        "block_time": "2026-07-28T12:00:00",
+        "block_number": 42,
+        "events": [fill]
+    });
+    let record = parse_node_record(
+        NodeStreamKind::Fills,
+        serde_json::to_vec(&batched).unwrap().into(),
+    )
+    .unwrap();
+    assert_eq!(record.block_number(), Some(42));
+    assert_eq!(
+        map_node_v1_record(&record, &catalog(), &context()).unwrap(),
+        MappingDisposition::EvidenceOnly(EvidenceOnlyReason::OneSidedFill)
+    );
+}
+
+#[test]
+fn independent_empty_committed_block_is_not_reconciled_truth() {
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        fixture("transaction-block.json").into(),
+    )
+    .unwrap();
+    let mut independent = committed_context();
+    independent.source_id = SourceId::new("independent-node").unwrap();
+    independent.confirmation_class = ConfirmationClass::CommittedIndependent;
+
+    let mapped = map_committed_node_v1_block(&record, &independent).unwrap();
+    assert!(mapped.events().is_empty());
+    assert_eq!(
+        mapped.confirmation_class(),
+        ConfirmationClass::CommittedIndependent
+    );
+    assert_ne!(
+        mapped.confirmation_class(),
+        ConfirmationClass::ReconciledSnapshot
+    );
+    assert_eq!(mapped.source_block_hashes().len(), 1);
+    assert!(
+        mapped
+            .source_block_hashes()
+            .contains_key(&independent.source_id)
+    );
+}
+
+#[test]
+fn committed_mapper_rejects_non_committed_confirmation_classes() {
+    let record = parse_node_record(
+        NodeStreamKind::TransactionBlocks,
+        fixture("transaction-block.json").into(),
+    )
+    .unwrap();
+    for confirmation_class in [
+        ConfirmationClass::ProvisionalSource,
+        ConfirmationClass::ReconciledSnapshot,
+        ConfirmationClass::Corrected,
+        ConfirmationClass::Expired,
+    ] {
+        let mut context = committed_context();
+        context.confirmation_class = confirmation_class;
+        let error = map_committed_node_v1_block(&record, &context).unwrap_err();
+        assert!(matches!(error, MappingError::InvalidCommittedConfirmation));
+        assert_eq!(
+            error.reason_code(),
+            "canonical_mapping.invalid_committed_confirmation"
+        );
+    }
 }
 
 #[test]

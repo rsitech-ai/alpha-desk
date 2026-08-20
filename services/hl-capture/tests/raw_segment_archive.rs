@@ -681,3 +681,159 @@ async fn v3_verify_requires_archive_side_checkpoint_current() {
         "capture_raw_archive.verification_mismatch"
     );
 }
+
+#[tokio::test]
+async fn last_local_sequence_check_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let archive = Arc::new(
+            LocalParquetArchive::open(
+                root.path().join("archive"),
+                ArchiveConfig::deterministic_fixture(
+                    "raw-segment-last-local-seq-test",
+                    domain_types::KnownTime::from_unix_micros(1_000).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+        let archiver = BlockingRawSegmentArchive::new(raw_port);
+        let mut source_spool = match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => spool(&root),
+            CursorPolicy::MonotonicByteOffset => byte_spool(&root),
+        };
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                source_spool.append(&observation(100, 1_000), 101).unwrap();
+                source_spool.append(&observation(101, 1_001), 102).unwrap();
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                source_spool
+                    .append(&byte_observation(19, 1_000), 101)
+                    .unwrap();
+                source_spool
+                    .append(&byte_observation(47, 1_001), 102)
+                    .unwrap();
+            }
+        }
+        let closed = source_spool.shutdown(200).unwrap().unwrap();
+
+        let summary = archiver
+            .archive_segment(
+                &ChainId::new("mainnet").unwrap(),
+                &closed,
+                archive_config(1024),
+            )
+            .await
+            .expect(
+                "last-local-sequence check still follows today's rule for this constructible cursor policy",
+            );
+
+        assert_eq!(summary.observation_count(), 2);
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                assert!(closed.manifest().last_local_sequence().is_none());
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                assert_eq!(closed.manifest().last_local_sequence().unwrap().get(), 2);
+            }
+        }
+        assert_eq!(archive.inspect().unwrap().raw_observations(), 2);
+    }
+}
+
+#[tokio::test]
+async fn verify_archived_segment_covers_every_constructible_cursor_policy() {
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let root = TempDir::new().unwrap();
+        let archive = Arc::new(
+            LocalParquetArchive::open(
+                root.path().join("archive"),
+                ArchiveConfig::deterministic_fixture(
+                    "raw-segment-verify-policy-test",
+                    domain_types::KnownTime::from_unix_micros(1_000).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let raw_port: Arc<dyn RawObservationArchive> = archive.clone();
+        let archiver = BlockingRawSegmentArchive::new(raw_port);
+        let mut source_spool = match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => spool(&root),
+            CursorPolicy::MonotonicByteOffset => byte_spool(&root),
+        };
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                source_spool.append(&observation(100, 1_000), 101).unwrap();
+                source_spool.append(&observation(101, 1_001), 102).unwrap();
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                source_spool
+                    .append(&byte_observation(19, 1_000), 101)
+                    .unwrap();
+                source_spool
+                    .append(&byte_observation(47, 1_001), 102)
+                    .unwrap();
+            }
+        }
+        let closed = source_spool.shutdown(200).unwrap().unwrap();
+        let summary = archiver
+            .archive_segment(
+                &ChainId::new("mainnet").unwrap(),
+                &closed,
+                archive_config(1024),
+            )
+            .await
+            .unwrap();
+
+        let first_local_sequence = match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => closed.manifest().first_local_sequence().unwrap(),
+            CursorPolicy::ContiguousNativeOffset => LocalRecordSequence::try_new(1).unwrap(),
+        };
+        let last_local_sequence = match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => closed.manifest().last_local_sequence().unwrap(),
+            CursorPolicy::ContiguousNativeOffset => LocalRecordSequence::try_new(2).unwrap(),
+        };
+        let source_id = match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => SourceId::new("primary-node").unwrap(),
+            CursorPolicy::MonotonicByteOffset => SourceId::new("node-fills").unwrap(),
+        };
+        let spool_evidence = RawSpoolArchiveEvidence::try_new(
+            closed.manifest_hash(),
+            closed.manifest().segment_blake3(),
+            first_local_sequence,
+            closed.manifest().max_cursor().clone(),
+            last_local_sequence,
+            closed.manifest().record_count(),
+        )
+        .unwrap();
+        let verification = RawSegmentArchiveVerification::new(
+            ChainId::new("mainnet").unwrap(),
+            source_id,
+            spool_evidence,
+            summary.manifest_ids().to_vec(),
+        );
+        let result = archiver.verify_archived_segment(&verification).await;
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                result.expect("verify_archived_segment still admits MonotonicByteOffset");
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                let error = result
+                    .expect_err("verify_archived_segment still mismatches ContiguousNativeOffset");
+                assert_eq!(
+                    error.reason_code(),
+                    "capture_raw_archive.verification_mismatch"
+                );
+            }
+        }
+    }
+}

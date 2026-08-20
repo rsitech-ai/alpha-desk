@@ -5,8 +5,9 @@ use canonical_events::{CanonicalEventEnvelope, EventKind, EventPayload};
 use crate::{
     ApplyContext, BlockDeltaView, CanonicalAccountReducerV1, CanonicalLiquidationReducerV1,
     CanonicalMarketReducerV1, CanonicalOrderReducerV1, CanonicalPositionEpisodeReducerV1,
-    CanonicalPositionReducerV1, CanonicalTradeReducerV1, CanonicalTradeReducerV2, EventReducer,
-    ReducerError, StateMutation, StateView,
+    CanonicalPositionReducerV1, CanonicalTradeReducerV1, CanonicalTradeReducerV2,
+    CanonicalTriggerReducerV1, CanonicalTwapReducerV1, EventReducer, ReducerError, StateMutation,
+    StateView,
 };
 
 const UNSUPPORTED_EVENT_REASON: &str = "canonical_state.unsupported_event";
@@ -35,7 +36,7 @@ impl CanonicalStateComponentVersionV1 {
     }
 }
 
-const EXPECTED_COMPONENT_MANIFEST: [CanonicalStateComponentVersionV1; 8] = [
+const EXPECTED_COMPONENT_MANIFEST: [CanonicalStateComponentVersionV1; 10] = [
     CanonicalStateComponentVersionV1::new(
         "market",
         "hyperliquid-alpha-desk-canonical-market@1.0.0",
@@ -65,6 +66,11 @@ const EXPECTED_COMPONENT_MANIFEST: [CanonicalStateComponentVersionV1; 8] = [
         "position_liquidation",
         "hyperliquid-alpha-desk-canonical-position-liquidation@1.0.0",
     ),
+    CanonicalStateComponentVersionV1::new(
+        "trigger",
+        "hyperliquid-alpha-desk-canonical-trigger@1.0.0",
+    ),
+    CanonicalStateComponentVersionV1::new("twap", "hyperliquid-alpha-desk-canonical-twap@1.0.0"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -89,6 +95,8 @@ enum Component {
     PositionQuantity,
     PositionEpisode,
     PositionLiquidation,
+    Trigger,
+    Twap,
 }
 
 const MARKET_OWNER: &[Component] = &[Component::Market];
@@ -103,8 +111,10 @@ const ENRICHED_TRADE_OWNERS: &[Component] = &[
 const FUNDING_OWNERS: &[Component] = &[Component::Account, Component::PositionEpisode];
 const ACCOUNT_OWNER: &[Component] = &[Component::Account];
 const LIQUIDATION_OWNER: &[Component] = &[Component::PositionLiquidation];
+const TRIGGER_OWNER: &[Component] = &[Component::Trigger];
+const TWAP_OWNER: &[Component] = &[Component::Twap];
 const NO_OWNERS: &[Component] = &[];
-const ALL_COMPONENTS: &[Component; 8] = &[
+const ALL_COMPONENTS: &[Component; 10] = &[
     Component::Market,
     Component::Order,
     Component::TradeV1,
@@ -113,6 +123,8 @@ const ALL_COMPONENTS: &[Component; 8] = &[
     Component::PositionQuantity,
     Component::PositionEpisode,
     Component::PositionLiquidation,
+    Component::Trigger,
+    Component::Twap,
 ];
 
 /// The sealed production reducer for canonical account state.
@@ -147,10 +159,12 @@ pub struct CanonicalStateReducerV1 {
     position_quantity: CanonicalPositionReducerV1,
     position_episode: CanonicalPositionEpisodeReducerV1,
     position_liquidation: CanonicalLiquidationReducerV1,
+    trigger: CanonicalTriggerReducerV1,
+    twap: CanonicalTwapReducerV1,
 }
 
 impl CanonicalStateReducerV1 {
-    pub const VERSION: &'static str = "hyperliquid-alpha-desk-canonical-state@1.0.0";
+    pub const VERSION: &'static str = "hyperliquid-alpha-desk-canonical-state@1.1.0";
 
     pub fn try_new() -> Result<Self, CanonicalStateError> {
         validate_component_manifest(&actual_component_manifest())?;
@@ -163,11 +177,13 @@ impl CanonicalStateReducerV1 {
             position_quantity: CanonicalPositionReducerV1,
             position_episode: CanonicalPositionEpisodeReducerV1,
             position_liquidation: CanonicalLiquidationReducerV1,
+            trigger: CanonicalTriggerReducerV1,
+            twap: CanonicalTwapReducerV1,
         })
     }
 
     #[must_use]
-    pub const fn component_manifest(&self) -> &'static [CanonicalStateComponentVersionV1; 8] {
+    pub const fn component_manifest(&self) -> &'static [CanonicalStateComponentVersionV1; 10] {
         &EXPECTED_COMPONENT_MANIFEST
     }
 
@@ -181,6 +197,8 @@ impl CanonicalStateReducerV1 {
             Component::PositionQuantity => self.position_quantity.supports(event),
             Component::PositionEpisode => self.position_episode.supports(event),
             Component::PositionLiquidation => self.position_liquidation.supports(event),
+            Component::Trigger => self.trigger.supports(event),
+            Component::Twap => self.twap.supports(event),
         }
     }
 
@@ -202,6 +220,8 @@ impl CanonicalStateReducerV1 {
             Component::PositionLiquidation => {
                 self.position_liquidation.reduce(state, event, context)
             }
+            Component::Trigger => self.trigger.reduce(state, event, context),
+            Component::Twap => self.twap.reduce(state, event, context),
         }
     }
 
@@ -222,6 +242,8 @@ impl CanonicalStateReducerV1 {
             Component::PositionLiquidation => {
                 self.position_liquidation.validate_block(state, context)
             }
+            Component::Trigger => self.trigger.validate_block(state, context),
+            Component::Twap => self.twap.validate_block(state, context),
         }
     }
 
@@ -258,6 +280,10 @@ impl CanonicalStateReducerV1 {
                 self.position_liquidation
                     .validate_block_delta(final_state, delta, context)
             }
+            Component::Trigger => self
+                .trigger
+                .validate_block_delta(final_state, delta, context),
+            Component::Twap => self.twap.validate_block_delta(final_state, delta, context),
         }
     }
 }
@@ -396,15 +422,15 @@ fn owners(event: &CanonicalEventEnvelope) -> &'static [Component] {
         | EventKind::LiquidationFill
         | EventKind::BackstopLiquidation
         | EventKind::PositionSettled => LIQUIDATION_OWNER,
-        EventKind::TriggerOrderActivated
-        | EventKind::TwapStarted
-        | EventKind::TwapSliceFilled
-        | EventKind::TwapCompleted => NO_OWNERS,
+        EventKind::TriggerOrderActivated => TRIGGER_OWNER,
+        EventKind::TwapStarted | EventKind::TwapSliceFilled | EventKind::TwapCompleted => {
+            TWAP_OWNER
+        }
     }
 }
 
 fn validate_component_manifest(
-    actual: &[CanonicalStateComponentVersionV1; 8],
+    actual: &[CanonicalStateComponentVersionV1; 10],
 ) -> Result<(), CanonicalStateError> {
     for (expected, actual) in EXPECTED_COMPONENT_MANIFEST.iter().zip(actual) {
         if expected.name != actual.name || expected.version != actual.version {
@@ -463,7 +489,7 @@ fn fanout_all_components<'a, S, D, C>(
     Ok(())
 }
 
-const fn actual_component_manifest() -> [CanonicalStateComponentVersionV1; 8] {
+const fn actual_component_manifest() -> [CanonicalStateComponentVersionV1; 10] {
     [
         CanonicalStateComponentVersionV1::new("market", CanonicalMarketReducerV1::VERSION),
         CanonicalStateComponentVersionV1::new("order", CanonicalOrderReducerV1::VERSION),
@@ -482,6 +508,8 @@ const fn actual_component_manifest() -> [CanonicalStateComponentVersionV1; 8] {
             "position_liquidation",
             CanonicalLiquidationReducerV1::VERSION,
         ),
+        CanonicalStateComponentVersionV1::new("trigger", CanonicalTriggerReducerV1::VERSION),
+        CanonicalStateComponentVersionV1::new("twap", CanonicalTwapReducerV1::VERSION),
     ]
 }
 
@@ -681,6 +709,8 @@ mod tests {
                 (Component::PositionQuantity, true, true, true),
                 (Component::PositionEpisode, true, true, true),
                 (Component::PositionLiquidation, true, true, true),
+                (Component::Trigger, true, true, true),
+                (Component::Twap, true, true, true),
             ]
         );
     }
@@ -758,10 +788,10 @@ mod tests {
             | EventKind::LiquidationFill
             | EventKind::BackstopLiquidation
             | EventKind::PositionSettled => LIQUIDATION_OWNER,
-            EventKind::TriggerOrderActivated
-            | EventKind::TwapStarted
-            | EventKind::TwapSliceFilled
-            | EventKind::TwapCompleted => NO_OWNERS,
+            EventKind::TriggerOrderActivated => TRIGGER_OWNER,
+            EventKind::TwapStarted | EventKind::TwapSliceFilled | EventKind::TwapCompleted => {
+                TWAP_OWNER
+            }
         }
     }
 
@@ -773,7 +803,7 @@ mod tests {
             .into_iter()
             .find(|payload| payload.kind() == EventKind::TriggerOrderActivated)
             .unwrap();
-        let event = fixture_event("1.0.0", trigger_payload);
+        let event = fixture_event("1.1.0", trigger_payload);
         let entries = BTreeMap::new();
         let chain_id = ChainId::new("mainnet").unwrap();
         let context = ApplyContext::new(
@@ -785,7 +815,7 @@ mod tests {
 
         let error = reducer
             .reduce(&view_entries(&entries), &event, &context)
-            .expect_err("trigger ownership is intentionally unsupported");
+            .expect_err("schema 1.1.0 trigger ownership remains unsupported");
 
         assert_eq!(error.reason_code(), UNSUPPORTED_EVENT_REASON);
     }

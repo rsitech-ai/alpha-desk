@@ -1,0 +1,6 @@
+version = "market-regime-v1"
+min_dwell_micros = 300000000
+vol_quiet_milli = 400
+vol_stress_milli = 1800
+leverage_oi_milli = 800
+liq_recovery_ppm = 500000

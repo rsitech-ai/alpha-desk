@@ -26,33 +26,34 @@ use api_contracts::{
     WireOrderFilled, WireOrderModified, WireOrderPartiallyFilled, WireOrderRejected,
     WireOrderRested, WireOutcomeCreated, WireOutcomeResolved, WirePerpTransfer,
     WirePositionSettled, WireReferralReward, WireSourceEvidence, WireSpotTransfer,
-    WireSubaccountTransfer, WireTradeMatched, WireTradeParticipantV1, WireVaultDeposit,
-    WireVaultWithdrawal, WireWithdrawalDebited, decode_account_mode_changed,
-    decode_asset_context_updated, decode_backstop_liquidation, decode_builder_fee_charged,
-    decode_deposit_credited, decode_dex_created, decode_fee_charged, decode_funding_paid,
-    decode_funding_rate_updated, decode_funding_received, decode_leverage_changed,
-    decode_liquidation_fill, decode_liquidation_started, decode_margin_mode_changed,
-    decode_margin_table_changed, decode_market_created, decode_market_halted,
-    decode_market_metadata_changed, decode_market_resumed, decode_open_interest_cap_changed,
-    decode_oracle_updated, decode_order_accepted, decode_order_cancelled, decode_order_filled,
-    decode_order_modified, decode_order_partially_filled, decode_order_rejected,
-    decode_order_rested, decode_outcome_created, decode_outcome_resolved, decode_perp_transfer,
-    decode_position_settled, decode_referral_reward, decode_spot_transfer,
-    decode_subaccount_transfer, decode_trade_matched, decode_vault_deposit,
-    decode_vault_withdrawal, decode_withdrawal_debited, encode_account_mode_changed,
-    encode_asset_context_updated, encode_backstop_liquidation, encode_builder_fee_charged,
-    encode_default_event_payload, encode_deposit_credited, encode_dex_created, encode_fee_charged,
-    encode_funding_paid, encode_funding_rate_updated, encode_funding_received,
-    encode_leverage_changed, encode_liquidation_fill, encode_liquidation_started,
-    encode_margin_mode_changed, encode_margin_table_changed, encode_market_created,
-    encode_market_halted, encode_market_metadata_changed, encode_market_resumed,
-    encode_open_interest_cap_changed, encode_oracle_updated, encode_order_accepted,
-    encode_order_cancelled, encode_order_filled, encode_order_modified,
+    WireSubaccountTransfer, WireTradeMatched, WireTradeParticipantV1, WireTriggerOrderActivated,
+    WireTwapCompleted, WireTwapSliceFilled, WireTwapStarted, WireVaultDeposit, WireVaultWithdrawal,
+    WireWithdrawalDebited, decode_account_mode_changed, decode_asset_context_updated,
+    decode_backstop_liquidation, decode_builder_fee_charged, decode_deposit_credited,
+    decode_dex_created, decode_fee_charged, decode_funding_paid, decode_funding_rate_updated,
+    decode_funding_received, decode_leverage_changed, decode_liquidation_fill,
+    decode_liquidation_started, decode_margin_mode_changed, decode_margin_table_changed,
+    decode_market_created, decode_market_halted, decode_market_metadata_changed,
+    decode_market_resumed, decode_open_interest_cap_changed, decode_oracle_updated,
+    decode_order_accepted, decode_order_cancelled, decode_order_filled, decode_order_modified,
+    decode_order_partially_filled, decode_order_rejected, decode_order_rested,
+    decode_outcome_created, decode_outcome_resolved, decode_perp_transfer, decode_position_settled,
+    decode_referral_reward, decode_spot_transfer, decode_subaccount_transfer, decode_trade_matched,
+    decode_trigger_order_activated, decode_twap_completed, decode_twap_slice_filled,
+    decode_twap_started, decode_vault_deposit, decode_vault_withdrawal, decode_withdrawal_debited,
+    encode_account_mode_changed, encode_asset_context_updated, encode_backstop_liquidation,
+    encode_builder_fee_charged, encode_default_event_payload, encode_deposit_credited,
+    encode_dex_created, encode_fee_charged, encode_funding_paid, encode_funding_rate_updated,
+    encode_funding_received, encode_leverage_changed, encode_liquidation_fill,
+    encode_liquidation_started, encode_margin_mode_changed, encode_margin_table_changed,
+    encode_market_created, encode_market_halted, encode_market_metadata_changed,
+    encode_market_resumed, encode_open_interest_cap_changed, encode_oracle_updated,
+    encode_order_accepted, encode_order_cancelled, encode_order_filled, encode_order_modified,
     encode_order_partially_filled, encode_order_rejected, encode_order_rested,
     encode_outcome_created, encode_outcome_resolved, encode_perp_transfer, encode_position_settled,
     encode_referral_reward, encode_spot_transfer, encode_subaccount_transfer, encode_trade_matched,
-    encode_vault_deposit, encode_vault_withdrawal, encode_withdrawal_debited,
-    validate_event_payload,
+    encode_trigger_order_activated, encode_twap_completed, encode_twap_slice_filled,
+    encode_twap_started, encode_vault_deposit, encode_vault_withdrawal, encode_withdrawal_debited,
 };
 use domain_types::{
     AccountAbstractionModeV1, Address, AssetId, BlockHeight, ChainId, ClientOrderId, DexId,
@@ -345,6 +346,37 @@ pub struct OrderRejected {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerOrderActivated {
+    pub order_id: OrderId,
+    pub trigger_price: Price,
+    pub oracle_price: Price,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwapStarted {
+    pub order_id: OrderId,
+    pub account_id: Address,
+    pub market_id: MarketId,
+    pub total_quantity: Quantity,
+    pub end_time: ProtocolTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwapSliceFilled {
+    pub order_id: OrderId,
+    pub slice_index: u32,
+    pub fill_price: Price,
+    pub fill_quantity: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwapCompleted {
+    pub order_id: OrderId,
+    pub filled_quantity: Quantity,
+    pub average_price: Price,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepositCredited {
     pub account_id: Address,
     pub asset_id: AssetId,
@@ -587,7 +619,7 @@ pub struct OutcomeResolved {
 }
 
 macro_rules! opaque_payloads {
-    ($($kind:ident),+ $(,)?) => {
+    ($($kind:ident),* $(,)?) => {
         $(
             /// Closed, schema-validated V1 payload.
             ///
@@ -597,11 +629,11 @@ macro_rules! opaque_payloads {
             pub struct $kind {
                 encoded: Vec<u8>,
             }
-        )+
+        )*
 
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub enum EventPayload {
-            $($kind($kind),)+
+            $($kind($kind),)*
             OrderAccepted(OrderAccepted),
             OrderRested(OrderRested),
             OrderModified(OrderModified),
@@ -609,6 +641,10 @@ macro_rules! opaque_payloads {
             OrderFilled(OrderFilled),
             OrderCancelled(OrderCancelled),
             OrderRejected(OrderRejected),
+            TriggerOrderActivated(TriggerOrderActivated),
+            TwapStarted(TwapStarted),
+            TwapSliceFilled(TwapSliceFilled),
+            TwapCompleted(TwapCompleted),
             DepositCredited(DepositCredited),
             WithdrawalDebited(WithdrawalDebited),
             SpotTransfer(SpotTransfer),
@@ -647,7 +683,7 @@ macro_rules! opaque_payloads {
             #[must_use]
             pub const fn kind(&self) -> EventKind {
                 match self {
-                    $(Self::$kind(_) => EventKind::$kind,)+
+                    $(Self::$kind(_) => EventKind::$kind,)*
                     Self::OrderAccepted(_) => EventKind::OrderAccepted,
                     Self::OrderRested(_) => EventKind::OrderRested,
                     Self::OrderModified(_) => EventKind::OrderModified,
@@ -655,6 +691,10 @@ macro_rules! opaque_payloads {
                     Self::OrderFilled(_) => EventKind::OrderFilled,
                     Self::OrderCancelled(_) => EventKind::OrderCancelled,
                     Self::OrderRejected(_) => EventKind::OrderRejected,
+                    Self::TriggerOrderActivated(_) => EventKind::TriggerOrderActivated,
+                    Self::TwapStarted(_) => EventKind::TwapStarted,
+                    Self::TwapSliceFilled(_) => EventKind::TwapSliceFilled,
+                    Self::TwapCompleted(_) => EventKind::TwapCompleted,
                     Self::DepositCredited(_) => EventKind::DepositCredited,
                     Self::WithdrawalDebited(_) => EventKind::WithdrawalDebited,
                     Self::SpotTransfer(_) => EventKind::SpotTransfer,
@@ -697,7 +737,7 @@ macro_rules! opaque_payloads {
                             validate_payload(EventKind::$kind, &value.encoded)?;
                             Ok(value.encoded.clone())
                         }
-                    )+
+                    )*
                     Self::OrderAccepted(value) => encode_order_accepted(&WireOrderAccepted {
                         order_id: value.order_id.to_string(),
                         account_id: value.account_id.to_api_string(),
@@ -752,6 +792,67 @@ macro_rules! opaque_payloads {
                         reason: value.reason.clone(),
                     })
                     .map_err(payload_error),
+                    Self::TriggerOrderActivated(value) => {
+                        require_positive_price(value.trigger_price, "TriggerOrderActivated trigger_price")?;
+                        require_positive_price(value.oracle_price, "TriggerOrderActivated oracle_price")?;
+                        encode_trigger_order_activated(&WireTriggerOrderActivated {
+                            order_id: value.order_id.to_string(),
+                            trigger_price: value.trigger_price.to_string(),
+                            oracle_price: value.oracle_price.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::TwapStarted(value) => {
+                        require_positive_quantity(value.total_quantity, "TwapStarted total_quantity")?;
+                        encode_twap_started(&WireTwapStarted {
+                            order_id: value.order_id.to_string(),
+                            account_id: value.account_id.to_api_string(),
+                            market_id: value.market_id.to_string(),
+                            total_quantity: value.total_quantity.to_string(),
+                            end_time_micros: value.end_time.unix_micros(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::TwapSliceFilled(value) => {
+                        require_positive_price(value.fill_price, "TwapSliceFilled fill_price")?;
+                        require_positive_quantity(value.fill_quantity, "TwapSliceFilled fill_quantity")?;
+                        encode_twap_slice_filled(&WireTwapSliceFilled {
+                            order_id: value.order_id.to_string(),
+                            slice_index: value.slice_index,
+                            fill_price: value.fill_price.to_string(),
+                            fill_quantity: value.fill_quantity.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
+                    Self::TwapCompleted(value) => {
+                        if value.filled_quantity.raw() < 0 {
+                            return Err(ContractError::Invalid {
+                                field: "payload",
+                                reason: "TwapCompleted filled_quantity must be nonnegative"
+                                    .to_owned(),
+                            });
+                        }
+                        if value.filled_quantity.raw() == 0 {
+                            if value.average_price.raw() != 0 {
+                                return Err(ContractError::Invalid {
+                                    field: "payload",
+                                    reason: "TwapCompleted average_price must be zero when filled_quantity is zero"
+                                        .to_owned(),
+                                });
+                            }
+                        } else {
+                            require_positive_price(
+                                value.average_price,
+                                "TwapCompleted average_price",
+                            )?;
+                        }
+                        encode_twap_completed(&WireTwapCompleted {
+                            order_id: value.order_id.to_string(),
+                            filled_quantity: value.filled_quantity.to_string(),
+                            average_price: value.average_price.to_string(),
+                        })
+                        .map_err(payload_error)
+                    }
                     Self::DepositCredited(value) => {
                         require_positive_quantity(value.amount, "DepositCredited amount")?;
                         encode_deposit_credited(&WireDepositCredited {
@@ -1191,6 +1292,19 @@ macro_rules! opaque_payloads {
                     EventKind::OrderRejected => {
                         decode_order_rejected_payload(bytes).map(Self::OrderRejected)
                     }
+                    EventKind::TriggerOrderActivated => {
+                        decode_trigger_order_activated_payload(bytes)
+                            .map(Self::TriggerOrderActivated)
+                    }
+                    EventKind::TwapStarted => {
+                        decode_twap_started_payload(bytes).map(Self::TwapStarted)
+                    }
+                    EventKind::TwapSliceFilled => {
+                        decode_twap_slice_filled_payload(bytes).map(Self::TwapSliceFilled)
+                    }
+                    EventKind::TwapCompleted => {
+                        decode_twap_completed_payload(bytes).map(Self::TwapCompleted)
+                    }
                     EventKind::DepositCredited => {
                         decode_deposit_credited_payload(bytes).map(Self::DepositCredited)
                     }
@@ -1289,7 +1403,7 @@ macro_rules! opaque_payloads {
                                 encoded: bytes.to_vec(),
                             }))
                         }
-                    )+
+                    )*
                     EventKind::TradeMatched => {
                         let value = decode_trade_matched(bytes).map_err(payload_error)?;
                         let trade = TradeMatched {
@@ -1371,12 +1485,7 @@ macro_rules! opaque_payloads {
     };
 }
 
-opaque_payloads!(
-    TriggerOrderActivated,
-    TwapStarted,
-    TwapSliceFilled,
-    TwapCompleted,
-);
+opaque_payloads!();
 
 fn decode_order_accepted_payload(bytes: &[u8]) -> Result<OrderAccepted, ContractError> {
     let value = decode_order_accepted(bytes).map_err(payload_error)?;
@@ -1461,6 +1570,60 @@ fn decode_order_rejected_payload(bytes: &[u8]) -> Result<OrderRejected, Contract
         account_id: payload_value(Address::parse_api(&value.account_id))?,
         reason_code: value.reason_code,
         reason: value.reason,
+    })
+}
+
+fn decode_trigger_order_activated_payload(
+    bytes: &[u8],
+) -> Result<TriggerOrderActivated, ContractError> {
+    let value = decode_trigger_order_activated(bytes).map_err(payload_error)?;
+    Ok(TriggerOrderActivated {
+        order_id: payload_value(OrderId::new(value.order_id))?,
+        trigger_price: parse_positive_price(&value.trigger_price)?,
+        oracle_price: parse_positive_price(&value.oracle_price)?,
+    })
+}
+
+fn decode_twap_started_payload(bytes: &[u8]) -> Result<TwapStarted, ContractError> {
+    let value = decode_twap_started(bytes).map_err(payload_error)?;
+    Ok(TwapStarted {
+        order_id: payload_value(OrderId::new(value.order_id))?,
+        account_id: payload_value(Address::parse_api(&value.account_id))?,
+        market_id: payload_value(MarketId::new(value.market_id))?,
+        total_quantity: parse_positive_quantity(&value.total_quantity)?,
+        end_time: payload_value(ProtocolTime::from_unix_micros(value.end_time_micros))?,
+    })
+}
+
+fn decode_twap_slice_filled_payload(bytes: &[u8]) -> Result<TwapSliceFilled, ContractError> {
+    let value = decode_twap_slice_filled(bytes).map_err(payload_error)?;
+    Ok(TwapSliceFilled {
+        order_id: payload_value(OrderId::new(value.order_id))?,
+        slice_index: value.slice_index,
+        fill_price: parse_positive_price(&value.fill_price)?,
+        fill_quantity: parse_positive_quantity(&value.fill_quantity)?,
+    })
+}
+
+fn decode_twap_completed_payload(bytes: &[u8]) -> Result<TwapCompleted, ContractError> {
+    let value = decode_twap_completed(bytes).map_err(payload_error)?;
+    let filled_quantity = parse_nonnegative_quantity(&value.filled_quantity)?;
+    let average_price = payload_value(Price::from_str(&value.average_price))?;
+    if filled_quantity.raw() == 0 {
+        if average_price.raw() != 0 {
+            return Err(ContractError::Invalid {
+                field: "payload",
+                reason: "TwapCompleted average_price must be zero when filled_quantity is zero"
+                    .to_owned(),
+            });
+        }
+    } else {
+        require_positive_price(average_price, "TwapCompleted average_price")?;
+    }
+    Ok(TwapCompleted {
+        order_id: payload_value(OrderId::new(value.order_id))?,
+        filled_quantity,
+        average_price,
     })
 }
 
@@ -2087,6 +2250,35 @@ fn fixture_payload_bytes(kind: EventKind) -> Result<Vec<u8>, ContractError> {
             account_id: Address::from_bytes([0x11; 20]).to_api_string(),
             reason_code: "fixture_rejection".to_owned(),
             reason: "fixture rejection".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::TriggerOrderActivated => {
+            encode_trigger_order_activated(&WireTriggerOrderActivated {
+                order_id: "fixture-order".to_owned(),
+                trigger_price: "1.000000".to_owned(),
+                oracle_price: "1.000000".to_owned(),
+            })
+            .map_err(payload_error)
+        }
+        EventKind::TwapStarted => encode_twap_started(&WireTwapStarted {
+            order_id: "fixture-order".to_owned(),
+            account_id: Address::from_bytes([0x11; 20]).to_api_string(),
+            market_id: "perp:BTC".to_owned(),
+            total_quantity: "1.00000000".to_owned(),
+            end_time_micros: 1_700_000_000_000_000,
+        })
+        .map_err(payload_error),
+        EventKind::TwapSliceFilled => encode_twap_slice_filled(&WireTwapSliceFilled {
+            order_id: "fixture-order".to_owned(),
+            slice_index: 0,
+            fill_price: "1.000000".to_owned(),
+            fill_quantity: "1.00000000".to_owned(),
+        })
+        .map_err(payload_error),
+        EventKind::TwapCompleted => encode_twap_completed(&WireTwapCompleted {
+            order_id: "fixture-order".to_owned(),
+            filled_quantity: "1.00000000".to_owned(),
+            average_price: "1.000000".to_owned(),
         })
         .map_err(payload_error),
         EventKind::DepositCredited => encode_deposit_credited(&WireDepositCredited {
@@ -3086,43 +3278,68 @@ fn validate_trade_account_binding(
     Ok(())
 }
 
-fn validate_payload(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
-    validate_event_payload(kind.as_wire_name(), bytes).map_err(payload_error)
+fn payload_size_limit(kind: EventKind) -> Option<(&'static str, usize)> {
+    match kind {
+        EventKind::TradeMatched => Some((
+            "canonical trade payload exceeds the 16384-byte limit",
+            MAX_CANONICAL_TRADE_PAYLOAD_BYTES,
+        )),
+        EventKind::DepositCredited
+        | EventKind::WithdrawalDebited
+        | EventKind::SpotTransfer
+        | EventKind::PerpTransfer
+        | EventKind::SubaccountTransfer
+        | EventKind::VaultDeposit
+        | EventKind::VaultWithdrawal
+        | EventKind::FeeCharged
+        | EventKind::BuilderFeeCharged
+        | EventKind::FundingPaid
+        | EventKind::FundingReceived
+        | EventKind::ReferralReward
+        | EventKind::AccountModeChanged
+        | EventKind::MarginModeChanged
+        | EventKind::LeverageChanged
+        | EventKind::LiquidationStarted
+        | EventKind::LiquidationFill
+        | EventKind::BackstopLiquidation
+        | EventKind::PositionSettled => Some((
+            "canonical account payload exceeds the 16384-byte limit",
+            MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES,
+        )),
+        EventKind::OrderAccepted
+        | EventKind::OrderRested
+        | EventKind::OrderModified
+        | EventKind::OrderPartiallyFilled
+        | EventKind::OrderFilled
+        | EventKind::OrderCancelled
+        | EventKind::OrderRejected
+        | EventKind::TriggerOrderActivated
+        | EventKind::TwapStarted
+        | EventKind::TwapSliceFilled
+        | EventKind::TwapCompleted
+        | EventKind::MarketHalted
+        | EventKind::MarketResumed
+        | EventKind::OpenInterestCapChanged
+        | EventKind::MarginTableChanged
+        | EventKind::MarketCreated
+        | EventKind::MarketMetadataChanged
+        | EventKind::OracleUpdated
+        | EventKind::FundingRateUpdated
+        | EventKind::AssetContextUpdated
+        | EventKind::DexCreated
+        | EventKind::OutcomeCreated
+        | EventKind::OutcomeResolved => None,
+    }
 }
 
 fn validate_account_payload_size(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
-    if kind == EventKind::TradeMatched && bytes.len() > MAX_CANONICAL_TRADE_PAYLOAD_BYTES {
+    let Some((reason, limit)) = payload_size_limit(kind) else {
+        return Ok(());
+    };
+    if bytes.len() > limit {
         return Err(ContractError::Invalid {
             field: "payload",
-            reason: "canonical trade payload exceeds the 16384-byte limit".to_owned(),
-        });
-    }
-    if matches!(
-        kind,
-        EventKind::DepositCredited
-            | EventKind::WithdrawalDebited
-            | EventKind::SpotTransfer
-            | EventKind::PerpTransfer
-            | EventKind::SubaccountTransfer
-            | EventKind::VaultDeposit
-            | EventKind::VaultWithdrawal
-            | EventKind::FeeCharged
-            | EventKind::BuilderFeeCharged
-            | EventKind::FundingPaid
-            | EventKind::FundingReceived
-            | EventKind::ReferralReward
-            | EventKind::AccountModeChanged
-            | EventKind::MarginModeChanged
-            | EventKind::LeverageChanged
-            | EventKind::LiquidationStarted
-            | EventKind::LiquidationFill
-            | EventKind::BackstopLiquidation
-            | EventKind::PositionSettled
-    ) && bytes.len() > MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES
-    {
-        return Err(ContractError::Invalid {
-            field: "payload",
-            reason: "canonical account payload exceeds the 16384-byte limit".to_owned(),
+            reason: reason.to_owned(),
         });
     }
     Ok(())

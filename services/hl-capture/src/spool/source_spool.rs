@@ -138,10 +138,15 @@ impl SourceSpoolConfig {
     ) -> Result<Self, SpoolError> {
         let source_version = source_version.into();
         let base_schema_version = schema_version.into();
-        if cursor_policy == CursorPolicy::MonotonicByteOffset
-            && durability != DurabilityPolicy::FsyncEveryRecord
-        {
-            return Err(SpoolError::InvalidDurabilityPolicy);
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => match durability {
+                DurabilityPolicy::FsyncEveryRecord => {}
+                DurabilityPolicy::FsyncEvery {
+                    max_records: _,
+                    max_delay: _,
+                } => return Err(SpoolError::InvalidDurabilityPolicy),
+            },
+            CursorPolicy::ContiguousNativeOffset => {}
         }
         SegmentHeaderV1::new(
             source_id.clone(),
@@ -176,10 +181,17 @@ impl SourceSpoolConfig {
     }
 
     pub fn with_baseline(mut self, baseline: SourceSpoolBaseline) -> Result<Self, SpoolError> {
-        if (self.cursor_policy == CursorPolicy::MonotonicByteOffset)
-            != baseline.last_local_sequence.is_some()
-        {
-            return Err(SpoolError::InvalidManifest);
+        match self.cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                if baseline.last_local_sequence.is_none() {
+                    return Err(SpoolError::InvalidManifest);
+                }
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                if baseline.last_local_sequence.is_some() {
+                    return Err(SpoolError::InvalidManifest);
+                }
+            }
         }
         self.baseline = Some(baseline);
         Ok(self)
@@ -339,25 +351,33 @@ impl SourceSpool {
                                 first_in_segment,
                             )?;
                         }
-                        let local_sequence = if first_in_segment
-                            && config.cursor_policy == CursorPolicy::MonotonicByteOffset
-                        {
-                            match closed_manifest.and_then(|value| value.first_local_sequence()) {
-                                Some(first) => {
-                                    if last_local_sequence.is_some()
-                                        && next_local_sequence(last_local_sequence)? != first
+                        let local_sequence = if first_in_segment {
+                            match config.cursor_policy {
+                                CursorPolicy::MonotonicByteOffset => {
+                                    match closed_manifest
+                                        .and_then(|value| value.first_local_sequence())
                                     {
-                                        return Err(SpoolError::ManifestChainBroken);
+                                        Some(first) => {
+                                            if last_local_sequence.is_some()
+                                                && next_local_sequence(last_local_sequence)?
+                                                    != first
+                                            {
+                                                return Err(SpoolError::ManifestChainBroken);
+                                            }
+                                            first
+                                        }
+                                        None => next_local_sequence(last_local_sequence)?,
                                     }
-                                    first
                                 }
-                                None => next_local_sequence(last_local_sequence)?,
+                                CursorPolicy::ContiguousNativeOffset => {
+                                    next_local_sequence(last_local_sequence)?
+                                }
                             }
                         } else {
                             next_local_sequence(last_local_sequence)?
                         };
-                        if config.cursor_policy == CursorPolicy::MonotonicByteOffset {
-                            match &mut retained_segment {
+                        match config.cursor_policy {
+                            CursorPolicy::MonotonicByteOffset => match &mut retained_segment {
                                 Some(index) => {
                                     if index.epoch != record.cursor().epoch()
                                         || record.cursor().offset() <= index.max_offset
@@ -375,7 +395,8 @@ impl SourceSpool {
                                         first_local_sequence: local_sequence,
                                     });
                                 }
-                            }
+                            },
+                            CursorPolicy::ContiguousNativeOffset => {}
                         }
                         last_local_sequence = Some(local_sequence);
                         last_record_identity = Some(LastRecordIdentity {
@@ -446,10 +467,13 @@ impl SourceSpool {
         observation: &SourceObservation,
         durable_at_micros: i64,
     ) -> Result<SourceSpoolAppend, SpoolError> {
-        if self.config.cursor_policy == CursorPolicy::MonotonicByteOffset {
-            self.append_byte_offset(observation, durable_at_micros)
-        } else {
-            self.append_legacy(observation, durable_at_micros)
+        match self.config.cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                self.append_byte_offset(observation, durable_at_micros)
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                self.append_legacy(observation, durable_at_micros)
+            }
         }
     }
 
@@ -824,14 +848,17 @@ fn validate_successor(
         .map_err(|_| SpoolError::CursorRegression)?
     {
         CursorTransition::Advanced { .. } => Ok(()),
-        CursorTransition::EpochChanged
-            if policy == CursorPolicy::MonotonicByteOffset && first_in_segment =>
-        {
-            Ok(())
-        }
-        CursorTransition::Duplicate | CursorTransition::EpochChanged => {
-            Err(SpoolError::CursorRegression)
-        }
+        CursorTransition::EpochChanged => match policy {
+            CursorPolicy::MonotonicByteOffset => {
+                if first_in_segment {
+                    Ok(())
+                } else {
+                    Err(SpoolError::CursorRegression)
+                }
+            }
+            CursorPolicy::ContiguousNativeOffset => Err(SpoolError::CursorRegression),
+        },
+        CursorTransition::Duplicate => Err(SpoolError::CursorRegression),
     }
 }
 
@@ -850,13 +877,13 @@ fn persisted_schema_identity(
     schema_version: String,
     policy: CursorPolicy,
 ) -> Result<String, SpoolError> {
-    if policy == CursorPolicy::ContiguousNativeOffset {
-        return Ok(schema_version);
+    match policy {
+        CursorPolicy::ContiguousNativeOffset => Ok(schema_version),
+        CursorPolicy::MonotonicByteOffset => Ok(format!(
+            "{POLICY_SCHEMA_PREFIX}monotonic-byte-offset:{}",
+            blake3::hash(schema_version.as_bytes()).to_hex()
+        )),
     }
-    Ok(format!(
-        "{POLICY_SCHEMA_PREFIX}monotonic-byte-offset:{}",
-        blake3::hash(schema_version.as_bytes()).to_hex()
-    ))
 }
 
 fn duplicate_append(
@@ -904,14 +931,27 @@ fn validate_observation_policy(
     policy: CursorPolicy,
     observation_class: ObservationClass,
 ) -> Result<(), SpoolError> {
-    if policy == CursorPolicy::MonotonicByteOffset
-        && matches!(
-            observation_class,
-            ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock
-        )
-    {
-        Err(SpoolError::CursorPolicyMismatch)
-    } else {
-        Ok(())
+    match policy {
+        CursorPolicy::MonotonicByteOffset => {
+            if byte_offset_rejects_block_height_class(observation_class) {
+                Err(SpoolError::CursorPolicyMismatch)
+            } else {
+                Ok(())
+            }
+        }
+        CursorPolicy::ContiguousNativeOffset => Ok(()),
+    }
+}
+
+fn byte_offset_rejects_block_height_class(class: ObservationClass) -> bool {
+    match class {
+        ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock => true,
+        ObservationClass::AuxiliaryOrderStatus
+        | ObservationClass::AuxiliaryBookDiff
+        | ObservationClass::AuxiliaryLedger
+        | ObservationClass::Snapshot
+        | ObservationClass::PublicMarketData
+        | ObservationClass::ProvisionalFeed
+        | ObservationClass::ProvisionalMempool => false,
     }
 }

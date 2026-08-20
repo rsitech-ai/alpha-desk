@@ -1,0 +1,52 @@
+{
+  "evaluation_known_at": 10000000000,
+  "signal": {
+    "signal_id": "sig-synthetic",
+    "market_id": "BTC",
+    "direction": "Long",
+    "detected_at": 0,
+    "known_at": 0,
+    "requested_quantity": "1.00000000"
+  },
+  "books": [
+    {
+      "effective_at": 0,
+      "known_at": 0,
+      "bids": [{ "price": "100.00000000", "quantity": "10.00000000" }],
+      "asks": [{ "price": "101.00000000", "quantity": "0.40000000" }]
+    },
+    {
+      "effective_at": 1000000,
+      "known_at": 1000000,
+      "bids": [{ "price": "100.00000000", "quantity": "10.00000000" }],
+      "asks": [{ "price": "101.00000000", "quantity": "10.00000000" }]
+    }
+  ],
+  "cost_model": {
+    "version": "synthetic-cost-v1",
+    "fees": { "taker_fee_rate": "0.00000000", "maker_fee_rate": "0.00000000" },
+    "funding": { "interval_micros": 3600000000, "rate": "0.00000000" },
+    "slippage": { "extra_bps": "0" },
+    "impact": { "bps_at_full_depth": "0" },
+    "latency": {
+      "detection": { "kind": "fixed", "delay_micros": 0 },
+      "network": { "kind": "fixed", "delay_micros": 0 },
+      "processing": { "kind": "fixed", "delay_micros": 0 },
+      "max_book_staleness_micros": 5000000
+    }
+  },
+  "order_policy": {
+    "order_type": "market",
+    "limit_price": null,
+    "queue_fill_min_ppm": null,
+    "queue_fill_max_ppm": null
+  },
+  "exit_policy": {
+    "time_hold_micros": 1000000,
+    "take_profit": null,
+    "stop": null
+  },
+  "portfolio": { "bankroll": "1000000.00000000", "participation_limit_ppm": 1000000 },
+  "failure": { "kind": "none" },
+  "seed": 7
+}

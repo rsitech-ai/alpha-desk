@@ -1,0 +1,43 @@
+{
+  "schema": "hl.orderbook.fixture.v1",
+  "id": "snapshot-diffs",
+  "source_qualification": "synthetic_unassessed",
+  "stage_1_qualified": false,
+  "stage_2_qualified": false,
+  "market_id": "perp:BTC",
+  "start_block": 1,
+  "price_scale": 0,
+  "quantity_scale": 0,
+  "ops": [
+    {
+      "op": "Snapshot",
+      "sequence": 10,
+      "as_of_block": 10,
+      "orders": [
+        {"order_id": "bid-a", "side": "buy", "price": "100", "remaining": "2", "sequence": 1},
+        {"order_id": "bid-b", "side": "buy", "price": "100", "remaining": "1", "sequence": 2},
+        {"order_id": "ask-a", "side": "sell", "price": "101", "remaining": "3", "sequence": 3}
+      ]
+    },
+    {
+      "op": "Diff",
+      "sequence": 11,
+      "as_of_block": 11,
+      "diff": {"kind": "Fill", "order_id": "ask-a", "fill_quantity": "1"}
+    },
+    {
+      "op": "Diff",
+      "sequence": 12,
+      "as_of_block": 12,
+      "diff": {"kind": "Cancel", "order_id": "bid-b"}
+    }
+  ],
+  "expected": {
+    "health": {"kind": "Healthy"},
+    "sequence": 12,
+    "as_of_block": 12,
+    "active_order_ids": ["ask-a", "bid-a"],
+    "l2_bids": [{"price": "100", "quantity": "2", "order_count": 1}],
+    "l2_asks": [{"price": "101", "quantity": "2", "order_count": 1}]
+  }
+}

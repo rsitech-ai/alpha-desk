@@ -1,0 +1,861 @@
+openapi: 3.1.0
+info:
+  title: Hyperliquid Alpha Desk API
+  version: "0.1.0"
+  description: >
+    Read-only local REST surface generated from hl.health.v1,
+    hl.capture.status.v4, hl.capture.status.v5, and the fail-closed HTTP router.
+    Query row, timeout, and concurrency budgets are loaded from
+    api-query-budgets.toml and reject oversized queries with typed 400/429.
+    hl.stream.v1 defines CanonicalEventBatch with next_cursor but does not
+    specify a WebSocket resume protocol, so stream paths return typed 501.
+    This document is not a production authentication, availability, or SLO
+    contract.
+servers:
+  - url: http://127.0.0.1:8788
+    description: Loopback development listener
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Process liveness as hl.health.v1
+      security: []
+      responses:
+        "200":
+          description: Process is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness aggregate as hl.health.v1
+      description: >
+        GREEN-only readiness as hl.health.v1. 200 is HEALTH_STATE_GREEN;
+        non-GREEN including typed AMBER lag is 503 health, not ApiError.
+        A valid /v1/health snapshot is not readiness. This is not Stage 2
+        PASS and not a live core.
+      responses:
+        "200":
+          description: >
+            Aggregate is HEALTH_STATE_GREEN. Readiness is GREEN-only and is
+            not implied by /v1/health 200. AMBER, including lag, is 503.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: >
+            Aggregate is not GREEN. Body is hl.health.v1 HealthAssessment,
+            including typed AMBER lag. Not ApiError. Canonical snapshot
+            validity is /v1/health 200; readiness is GREEN-only. This is
+            not Stage 2 PASS.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+  /v1/health:
+    get:
+      operationId: getCanonicalHealth
+      summary: Canonical health snapshot
+      description: >
+        Fail-closed read of the configured canonical health snapshot.
+        HEALTH_STATE_GREEN is accepted only with reason_code healthy.
+        Typed fail-closed reasons include CoreDeadLetterReasonCode values
+        such as core.deadletter_unsafe_path and core.deadletter_corrupt,
+        and LedgerUnsupportedEventReasonCode ledger.unsupported_event
+        (hl-core consume-poison / action-bearing reject); those documents
+        are HEALTH_STATE_RED and must not become ready. HEALTH_STATE_AMBER
+        with a core.deadletter_* family-prefix reason (frozen enum or
+        invented sibling) is 503 snapshot_invalid, not typed AMBER.
+        HEALTH_STATE_AMBER with ledger.unsupported_event is 503
+        snapshot_invalid. Unknown HEALTH_STATE_RED codes stay 200 typed
+        fail-closed and must not become ready. Missing or invalid
+        snapshots return 503. This is not a live core and not Stage 2 PASS.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Validated hl.health.v1 snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthAssessment"
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/capture/status:
+    get:
+      operationId: getCaptureStatus
+      summary: Capture status snapshot
+      description: >
+        Fail-closed read of the configured capture snapshot. Inactive
+        snapshots are hl.capture.status.v4 and omit maintenance.
+        Maintenance snapshots are hl.capture.status.v5 and require a typed
+        maintenance object. Missing files return 503 snapshot_missing;
+        fail-closed validation failures return 503 snapshot_invalid,
+        including v4 documents that smuggle maintenance and v5 documents
+        that omit it. The body is the snapshot as read. Optional
+        throughput_records_per_sec and throughput_blocks_per_sec are
+        last-heartbeat integers, not live-qualified. This surface does
+        not invent fills and does not mark sources live or qualified.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: >
+            Validated inactive hl.capture.status.v4 or maintenance
+            hl.capture.status.v5 snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureStatus"
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
+        "503":
+          description: >
+            Capture snapshot missing (reason_code snapshot_missing) or
+            fail-closed invalid (reason_code snapshot_invalid). No invented
+            fills.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/stream:
+    get:
+      operationId: getStream
+      summary: Reserved stream path
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+  /v1/stream/canonical-events:
+    get:
+      operationId: getCanonicalEventStream
+      summary: Reserved canonical event stream path
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+  /v1/openapi.yaml:
+    get:
+      operationId: getOpenapi
+      summary: OpenAPI document for this surface
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OpenAPI 3.1 document
+          content:
+            application/yaml:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/QueryBudgetExceeded"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Required when auth.mode = credential. loopback-dev binds loopback and
+        skips the bearer. This is not production OIDC or mTLS.
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: >
+        Requested row count. Values above the configured max_rows budget
+        fail closed with 400 query_budget_exceeded. Offset pagination is
+        rejected. This is not a production SLO.
+      schema:
+        type: integer
+        minimum: 1
+  schemas:
+    HealthAssessment:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - scope
+        - state
+        - reason_code
+        - observed_at_micros
+        - suppresses
+      properties:
+        schema_version:
+          type: string
+          const: hl.health.v1
+        scope:
+          type: string
+        state:
+          type: string
+          enum:
+            - HEALTH_STATE_GREEN
+            - HEALTH_STATE_AMBER
+            - HEALTH_STATE_RED
+        reason_code:
+          type: string
+          description: >
+            Ready only when this is healthy. Known fail-closed codes include
+            snapshot_missing, snapshot_invalid, CoreDeadLetterReasonCode
+            (core.deadletter_unsafe_path, core.deadletter_io,
+            core.deadletter_invalid_record, core.deadletter_serialization,
+            core.deadletter_corrupt), and LedgerUnsupportedEventReasonCode
+            (ledger.unsupported_event). AMBER core.deadletter_* family-prefix
+            reasons are 503 snapshot_invalid. AMBER plus
+            ledger.unsupported_event is 503 snapshot_invalid. This field
+            stays an unrestricted string: no $ref and no inline enum, so
+            unknown RED is not closed out. Unknown RED codes stay 200 typed
+            fail-closed and must not be treated as ready or as a generic
+            500. Unknown codes fail closed. This is not a live core and not
+            Stage 2 PASS.
+        observed_at_micros:
+          type: integer
+          minimum: 0
+        suppresses:
+          type: array
+          items:
+            type: string
+    CoreDeadLetterReasonCode:
+      description: >
+        Frozen hl-core file dead-letter fail-closed reasons. Documented so
+        clients type them instead of treating them as a generic 500. RED
+        values and unknown RED siblings stay 200 typed fail-closed and must
+        not become ready. AMBER plus any core.deadletter_* family-prefix
+        reason is 503 snapshot_invalid. Unknown codes fail closed. This
+        document does not vendor hl-core, implement a live core, or claim
+        Stage 2 PASS.
+      type: string
+      enum:
+        - core.deadletter_unsafe_path
+        - core.deadletter_io
+        - core.deadletter_invalid_record
+        - core.deadletter_serialization
+        - core.deadletter_corrupt
+    LedgerUnsupportedEventReasonCode:
+      description: >
+        Frozen hl-core consume-poison / action-bearing reject reason.
+        Documented so clients type ledger.unsupported_event instead of
+        treating it as a generic 500. RED stays 200 typed fail-closed and
+        must not become ready. GREEN plus this code is 503 snapshot_invalid.
+        AMBER plus this code is 503 snapshot_invalid. Unknown RED codes stay
+        200 typed fail-closed. Unknown codes fail closed. This document does
+        not vendor hl-core, implement a live core, or claim Stage 2 PASS.
+        HealthAssessment.reason_code stays a free string so unknown RED is
+        not closed out by this enum.
+      type: string
+      enum:
+        - ledger.unsupported_event
+    CaptureStatus:
+      description: >
+        Fail-closed capture operator snapshot. Inactive documents use
+        hl.capture.status.v4 and omit maintenance. Maintenance documents use
+        hl.capture.status.v5 and require CaptureMaintenance. Extra snapshot
+        fields such as auxiliary_sources are passed through when present.
+        Present auxiliary_sources arrays longer than 16 (capture writer
+        MAX_AUXILIARY_SOURCES) are snapshot_invalid. Omitted and empty
+        arrays stay valid.
+        Nested source_id is a required non-empty string; present non-string,
+        omitted, or empty object items are snapshot_invalid. Nested spool_records
+        is a required u64 integer; present non-number or non-u64 values, and
+        omitted, are snapshot_invalid. Nested unarchived_records is a required
+        u64 integer; present non-number or non-u64 values, and omitted, are
+        snapshot_invalid. Nested partial_line is a required boolean; present
+        non-boolean values, and omitted, are snapshot_invalid. Nested cursor_epoch
+        is an optional string; present non-string values, and empty present
+        strings, are snapshot_invalid. Omitted stays omitted. Nested tail_cursor_epoch
+        is an optional string; present non-string values, and empty present
+        strings, are snapshot_invalid. Omitted stays omitted. Nested durable_offset
+        is an optional u64 integer; present non-number or non-u64 values are
+        snapshot_invalid. Omitted stays omitted. Nested local_sequence is an
+        optional u64 integer; present non-number or non-u64 values are
+        snapshot_invalid. Omitted stays omitted. Nested last_durable_wall_micros
+        is an optional i64 integer; present non-number or non-i64 values are
+        snapshot_invalid. Omitted stays omitted. Nested quarantine_reason is
+        an optional string; present non-string values, and empty present
+        strings, are snapshot_invalid. Omitted stays omitted. Nested
+        last_error_reason is an optional string; present non-string values,
+        and empty present strings, are snapshot_invalid. Omitted stays
+        omitted. Top-level failover_height is an optional u64 integer;
+        present non-number or non-u64 values are snapshot_invalid. Omitted
+        stays omitted. Top-level failover_reason is an optional kebab-case
+        string enum; present unknown or non-string values, and empty present
+        strings, are snapshot_invalid. Omitted stays omitted. Top-level
+        durable_height is an optional u64 integer; present non-number or
+        non-u64 values are snapshot_invalid. Omitted stays omitted. Top-level
+        capture_backlog_records is a required u64 integer; present non-number
+        or non-u64 values, and omitted, are snapshot_invalid. Top-level
+        oldest_pending_capture_height is an optional u64 integer; present
+        non-number or non-u64 values are snapshot_invalid. Omitted stays
+        omitted. Top-level disk_free_basis_points is an optional u16 integer;
+        present non-number or non-u16 values are snapshot_invalid. Omitted
+        stays omitted. Top-level archive_manifest_id is an optional string;
+        present non-string values, and empty present strings, are
+        snapshot_invalid. Omitted stays omitted. Top-level last_error_reason is an optional string; present
+        non-string values, and empty present strings, are snapshot_invalid.
+        Omitted stays omitted. Present unknown nested properties are snapshot_invalid.
+        Known objects without extras stay valid. Present unknown top-level properties are snapshot_invalid.
+        Known CaptureStatusBase objects without extras stay valid. Nested health,
+        restart_reconstruction, and qualification, when present, use closed
+        kebab-case sets; unknown values are snapshot_invalid. Omitted optional
+        nested fields stay omitted.
+        Optional throughput_records_per_sec and throughput_blocks_per_sec are
+        last-heartbeat integers, not live-qualified. This is not a fills feed
+        and does not mark sources live or qualified.
+      oneOf:
+        - $ref: "#/components/schemas/CaptureStatusV4"
+        - $ref: "#/components/schemas/CaptureStatusV5"
+    CaptureStatusBase:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - snapshot_at_micros
+        - build_id
+        - chain_id
+        - health
+        - ready
+        - active_committed_source
+        - primary_source_health
+        - pending_blocks
+        - capture_backlog_records
+      properties:
+        schema_version:
+          type: string
+        snapshot_at_micros:
+          type: integer
+          minimum: 0
+        build_id:
+          type: string
+        chain_id:
+          type: string
+        health:
+          type: string
+          enum:
+            - green
+            - yellow
+            - red
+        ready:
+          type: boolean
+        active_committed_source:
+          description: >
+            Capture writer kebab-case committed source class. Unknown values
+            are snapshot_invalid. HealthAssessment.reason_code stays a free
+            string so unknown RED is not closed out. This document does not
+            claim Stage PASS.
+          type: string
+          enum:
+            - locally-verified-committed
+            - independent-committed
+        primary_source_health:
+          description: >
+            Capture writer kebab-case committed source health. Unknown values
+            are snapshot_invalid. HealthAssessment.reason_code stays a free
+            string so unknown RED is not closed out. This document does not
+            claim Stage PASS.
+          type: string
+          enum:
+            - starting
+            - healthy
+            - range-unavailable
+        independent_source_health:
+          description: >
+            Optional capture writer kebab-case independent source health.
+            Present values use the same closed set as primary_source_health.
+            Unknown values are snapshot_invalid. HealthAssessment.reason_code
+            stays a free string so unknown RED is not closed out. This
+            document does not claim Stage PASS.
+          type: string
+          enum:
+            - starting
+            - healthy
+            - range-unavailable
+        failover_height:
+          description: >
+            Optional capture writer failover height. Present non-number or
+            non-u64 values are snapshot_invalid. Omitted stays omitted. This
+            is the top-level field. Capture writer emits Option<u64> with
+            skip_serializing_if. This document does not invent extra numeric
+            bounds. HealthAssessment.reason_code stays a free string so
+            unknown RED is not closed out. This document does not claim
+            Stage PASS.
+          type: integer
+          minimum: 0
+        failover_reason:
+          description: >
+            Optional capture writer kebab-case failover reason. Present values
+            use the closed set primary-range-unavailable. Unknown values are
+            snapshot_invalid. Present non-string values are snapshot_invalid.
+            Empty present strings are snapshot_invalid. Omitted stays omitted.
+            This is the top-level field. Capture writer emits Option with
+            skip_serializing_if and rename_all kebab-case. This document does
+            not invent extra failover reason names. HealthAssessment.reason_code
+            stays a free string so unknown RED is not closed out. This
+            document does not claim Stage PASS.
+          type: string
+          enum:
+            - primary-range-unavailable
+        durable_height:
+          description: >
+            Optional capture writer durable height. Present non-number or
+            non-u64 values are snapshot_invalid. Omitted stays omitted. This
+            is the top-level field. Capture writer emits Option<u64> with
+            skip_serializing_if. This document does not invent extra numeric
+            bounds. HealthAssessment.reason_code stays a free string so
+            unknown RED is not closed out. This document does not claim
+            Stage PASS.
+          type: integer
+          minimum: 0
+        last_error_reason:
+          description: >
+            Optional capture writer last error reason string. Present
+            non-string values are snapshot_invalid. Empty present
+            strings are snapshot_invalid. Omitted stays omitted. This
+            document does not claim a closed enum of error reasons.
+            This is the top-level field, not nested
+            auxiliary_sources[].last_error_reason.
+            HealthAssessment.reason_code stays a free string so unknown
+            RED is not closed out. This document does not claim Stage
+            PASS.
+          type: string
+        auxiliary_sources:
+          description: >
+            Extra snapshot sources passed through when present. Present arrays
+            longer than 16 (capture writer MAX_AUXILIARY_SOURCES) are
+            snapshot_invalid. Omitted and empty arrays stay valid. Duplicate
+            present source_id values are snapshot_invalid. Distinct source_id
+            values must be strictly increasing in lexicographic string order.
+            Out-of-order present source_id values are snapshot_invalid. This is
+            uniqueness and sort of source_id, not uniqueItems on the whole
+            object. Nested source_id
+            is a required non-empty string; present non-string, omitted, or
+            empty object items are snapshot_invalid. Nested spool_records is a
+            required u64 integer; present non-number or non-u64 values, and
+            omitted, are snapshot_invalid. Nested unarchived_records is a
+            required u64 integer; present non-number or non-u64 values, and
+            omitted, are snapshot_invalid. Nested partial_line is a required
+            boolean; present non-boolean values, and omitted, are
+            snapshot_invalid. Nested cursor_epoch is an optional string;
+            present non-string values, and empty present strings, are
+            snapshot_invalid. Omitted stays omitted. Nested tail_cursor_epoch is
+            an optional string; present non-string values, and empty present
+            strings, are snapshot_invalid. Omitted stays omitted. Nested
+            durable_offset is
+            an optional u64 integer; present non-number or non-u64 values are
+            snapshot_invalid. Omitted stays omitted. Nested local_sequence is
+            an optional u64 integer; present non-number or non-u64 values are
+            snapshot_invalid. Omitted stays omitted. Nested last_durable_wall_micros
+            is an optional i64 integer; present non-number or non-i64 values
+            are snapshot_invalid. Omitted stays omitted. Nested quarantine_reason
+            is an optional string; present non-string values, and empty present
+            strings, are snapshot_invalid. Omitted stays omitted. Nested
+            last_error_reason is an optional string; present non-string values,
+            and empty present strings, are snapshot_invalid. Omitted stays
+            omitted. Present unknown nested properties are snapshot_invalid.
+            Known objects without extras stay valid. Present unknown top-level properties are snapshot_invalid.
+            Known CaptureStatusBase objects without extras stay valid. Nested health,
+            restart_reconstruction, and qualification are optional; present
+            values use closed kebab-case sets. Unknown values are
+            snapshot_invalid. Omitted optional nested fields stay omitted.
+            HealthAssessment.reason_code stays a free string so unknown RED is
+            not closed out. This document does not claim Stage PASS.
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - source_id
+              - spool_records
+              - unarchived_records
+              - partial_line
+            properties:
+              source_id:
+                description: >
+                  Capture writer public source identity. Required non-empty
+                  string. Present non-string values are snapshot_invalid.
+                  Omitted or empty object items are snapshot_invalid.
+                  Duplicate present source_id across auxiliary_sources is
+                  snapshot_invalid. Distinct ids stay valid when strictly
+                  increasing. Out-of-order present ids are snapshot_invalid.
+                  This is not uniqueItems on the whole item. This document does
+                  not claim extra identity formats. HealthAssessment.reason_code
+                  stays a free string so unknown RED is not closed out. This
+                  document does not claim Stage PASS.
+                type: string
+              spool_records:
+                description: >
+                  Capture writer cumulative fsynced spool record count.
+                  Required u64 integer. Present non-number or non-u64 values
+                  are snapshot_invalid. Omitted is snapshot_invalid.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: integer
+                minimum: 0
+              unarchived_records:
+                description: >
+                  Capture writer fsynced records not yet acknowledged as
+                  archived. Required u64 integer. Present non-number or
+                  non-u64 values are snapshot_invalid. Omitted is
+                  snapshot_invalid. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
+                type: integer
+                minimum: 0
+              partial_line:
+                description: >
+                  Capture writer unread suffix lacks a newline. Required
+                  boolean. Present non-boolean values are snapshot_invalid.
+                  Omitted is snapshot_invalid. This document does not claim
+                  extra boolean encodings. HealthAssessment.reason_code stays
+                  a free string so unknown RED is not closed out. This
+                  document does not claim Stage PASS.
+                type: boolean
+              health:
+                description: >
+                  Optional capture writer kebab-case auxiliary source health.
+                  Present values are starting, healthy, quarantined, or
+                  latched. Unknown values are snapshot_invalid. Omitted
+                  stays omitted. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS. This is not committed source health.
+                type: string
+                enum:
+                  - starting
+                  - healthy
+                  - quarantined
+                  - latched
+              restart_reconstruction:
+                description: >
+                  Optional capture writer kebab-case auxiliary restart
+                  reconstruction. Present values are not-required, incomplete,
+                  or complete. Unknown values are snapshot_invalid. Omitted
+                  stays omitted. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
+                type: string
+                enum:
+                  - not-required
+                  - incomplete
+                  - complete
+              qualification:
+                description: >
+                  Optional capture writer kebab-case auxiliary source
+                  qualification. Present values are unqualified or qualified.
+                  Unknown values are snapshot_invalid. Omitted stays omitted.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+                enum:
+                  - unqualified
+                  - qualified
+              cursor_epoch:
+                description: >
+                  Optional capture writer durable file-cursor identity string.
+                  Present non-string values are snapshot_invalid. Empty present
+                  strings are snapshot_invalid. Omitted stays omitted. This
+                  document does not claim extra identity formats.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+              tail_cursor_epoch:
+                description: >
+                  Optional capture writer tailed-file identity string.
+                  Present non-string values are snapshot_invalid. Empty present
+                  strings are snapshot_invalid. Omitted stays omitted. This
+                  document does not claim extra identity formats.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+              durable_offset:
+                description: >
+                  Optional capture writer durable cluster byte offset.
+                  Present non-number or non-u64 values are snapshot_invalid.
+                  Omitted stays omitted. This document does not invent extra
+                  numeric bounds. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
+                type: integer
+                minimum: 0
+              local_sequence:
+                description: >
+                  Optional capture writer durable cluster local sequence.
+                  Present non-number or non-u64 values are snapshot_invalid.
+                  Omitted stays omitted. This document does not invent extra
+                  numeric bounds. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
+                type: integer
+                minimum: 0
+              unread_bytes:
+                description: >
+                  Optional capture writer adapter unread byte count.
+                  Present non-number or non-u64 values are snapshot_invalid.
+                  Omitted stays omitted. This document does not invent extra
+                  numeric bounds. HealthAssessment.reason_code stays a free
+                  string so unknown RED is not closed out. This document does
+                  not claim Stage PASS.
+                type: integer
+                minimum: 0
+              last_durable_wall_micros:
+                description: >
+                  Optional capture writer durable cluster last-durable receive
+                  time. Present non-number or non-i64 values are
+                  snapshot_invalid. Omitted stays omitted. Capture writer
+                  emits Option<i64>; this document does not invent extra
+                  numeric bounds and does not copy u64 minimum: 0.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: integer
+              quarantine_reason:
+                description: >
+                  Optional capture writer quarantine reason string. Present
+                  non-string values are snapshot_invalid. Empty present
+                  strings are snapshot_invalid. Omitted stays omitted. This
+                  document does not claim a closed enum of quarantine reasons.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+              last_error_reason:
+                description: >
+                  Optional capture writer last error reason string. Present
+                  non-string values are snapshot_invalid. Empty present
+                  strings are snapshot_invalid. Omitted stays omitted. This
+                  document does not claim a closed enum of error reasons.
+                  HealthAssessment.reason_code stays a free string so unknown
+                  RED is not closed out. This document does not claim Stage
+                  PASS.
+                type: string
+        pending_blocks:
+          type: integer
+          minimum: 0
+        capture_backlog_records:
+          description: >
+            Capture writer fsynced source-record backlog count. Required u64
+            integer. Present non-number or non-u64 values are snapshot_invalid.
+            Omitted is snapshot_invalid. Capture writer always emits this u64.
+            This document does not invent extra numeric bounds.
+            HealthAssessment.reason_code stays a free string so unknown RED is
+            not closed out. This document does not claim Stage PASS.
+          type: integer
+          minimum: 0
+        oldest_pending_capture_height:
+          description: >
+            Optional capture writer oldest pending capture height. Present
+            non-number or non-u64 values are snapshot_invalid. Omitted stays
+            omitted. This is the top-level field. Capture writer emits
+            Option<u64> with skip_serializing_if. This document does not invent
+            extra numeric bounds. HealthAssessment.reason_code stays a free
+            string so unknown RED is not closed out. This document does not
+            claim Stage PASS.
+          type: integer
+          minimum: 0
+        disk_free_basis_points:
+          description: >
+            Optional capture writer disk free basis points. Present
+            non-number or non-u16 values are snapshot_invalid. Omitted stays
+            omitted. This is the top-level field. Capture writer emits
+            Option<u16> with skip_serializing_if. This document types width,
+            not capture writer range, and does not invent extra numeric bounds.
+            HealthAssessment.reason_code stays a free string so unknown RED is
+            not closed out. This document does not claim Stage PASS.
+          type: integer
+          minimum: 0
+        archive_manifest_id:
+          description: >
+            Optional capture writer archive manifest identity string. Present
+            non-string values are snapshot_invalid. Empty present strings are
+            snapshot_invalid. Omitted stays omitted. This is the top-level
+            field. Capture writer emits Option with skip_serializing_if.
+            Present writer values use validate_status_text (empty / trim /
+            control / 512); those rules are not copied here. This document
+            does not claim a closed enum of manifest ids.
+            HealthAssessment.reason_code stays a free string so unknown RED
+            is not closed out. This document does not claim Stage PASS.
+          type: string
+        throughput_records_per_sec:
+          type: integer
+          minimum: 0
+          description: >
+            Last-heartbeat archive-acknowledged auxiliary record rate for the
+            completed status-heartbeat window. Optional integer; not live-qualified.
+        throughput_blocks_per_sec:
+          type: integer
+          minimum: 0
+          description: >
+            Last-heartbeat captured committed-block rate for the completed
+            status-heartbeat window. Optional integer; not live-qualified.
+        maintenance:
+          $ref: "#/components/schemas/CaptureMaintenance"
+    CaptureStatusV4:
+      description: >
+        Inactive capture status. maintenance is omitted; documents that
+        smuggle it are snapshot_invalid.
+      allOf:
+        - $ref: "#/components/schemas/CaptureStatusBase"
+        - type: object
+          properties:
+            schema_version:
+              type: string
+              const: hl.capture.status.v4
+          not:
+            required:
+              - maintenance
+    CaptureStatusV5:
+      description: >
+        Capture status with required maintenance visibility. Omitting
+        maintenance is snapshot_invalid.
+      allOf:
+        - $ref: "#/components/schemas/CaptureStatusBase"
+        - type: object
+          required:
+            - maintenance
+          properties:
+            schema_version:
+              type: string
+              const: hl.capture.status.v5
+            maintenance:
+              $ref: "#/components/schemas/CaptureMaintenance"
+    CaptureMaintenance:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - kill_switch
+        - health
+        - pending_pack_manifest_count
+        - packed_range_count
+        - logical_manifest_count
+        - physical_data_object_count
+        - retention_authorized
+      properties:
+        enabled:
+          type: boolean
+        kill_switch:
+          type: boolean
+        health:
+          type: string
+          enum:
+            - green
+            - yellow
+            - red
+        reason_code:
+          type: string
+          description: Omitted when health is green; required when yellow or red.
+        pending_pack_manifest_count:
+          type: integer
+          minimum: 0
+        packed_range_count:
+          type: integer
+          minimum: 0
+        logical_manifest_count:
+          type: integer
+          minimum: 0
+        physical_data_object_count:
+          type: integer
+          minimum: 0
+        last_scrub_at_micros:
+          type: integer
+          minimum: 0
+        last_pack_index_at_micros:
+          type: integer
+          minimum: 0
+        last_pack_data_at_micros:
+          type: integer
+          minimum: 0
+        last_retention_at_micros:
+          type: integer
+          minimum: 0
+        retention_authorized:
+          type: boolean
+          description: >
+            Whether a verified backup-receipt artifact currently authorizes
+            packed-object retention. A configured token is not enough.
+    ApiError:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - code
+        - reason_code
+      properties:
+        schema_version:
+          type: string
+          const: hl.api.error.v1
+        code:
+          type: string
+        reason_code:
+          type: string
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer credential
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Unavailable:
+      description: Snapshot missing or invalid; no invented fills
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    NotImplemented:
+      description: Stream transport is unspecified by proto and fail-closes
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    InvalidQuery:
+      description: Query string is invalid or uses forbidden offset pagination
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    QueryBudgetExceeded:
+      description: >
+        Requested rows exceed max_rows (400) or timeout/concurrency budget
+        is exhausted (429). Fail-closed; this is not a production SLO.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"

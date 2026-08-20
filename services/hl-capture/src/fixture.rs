@@ -9,11 +9,53 @@ use domain_types::{
 };
 
 const FIXTURE_TIME_BASE_MICROS: i64 = 1_700_000_000_000_000;
+const PRIMARY_SOURCE_ID: &str = "synthetic-fixture";
+const PRIMARY_SOURCE_VERSION: &str = "synthetic-fixture-v1";
+const INDEPENDENT_SOURCE_ID: &str = "synthetic-independent-fixture";
+const INDEPENDENT_SOURCE_VERSION: &str = "synthetic-independent-fixture-v1";
 
 pub fn synthetic_fixture_block(
     chain_id: &ChainId,
     block_height: BlockHeight,
 ) -> Result<BlockEnvelope, FixtureError> {
+    synthetic_committed_fixture_block(
+        chain_id,
+        block_height,
+        PRIMARY_SOURCE_ID,
+        PRIMARY_SOURCE_VERSION,
+        ConfirmationClass::CommittedPrimary,
+    )
+}
+
+pub fn synthetic_independent_fixture_block(
+    chain_id: &ChainId,
+    block_height: BlockHeight,
+) -> Result<BlockEnvelope, FixtureError> {
+    synthetic_committed_fixture_block(
+        chain_id,
+        block_height,
+        INDEPENDENT_SOURCE_ID,
+        INDEPENDENT_SOURCE_VERSION,
+        ConfirmationClass::CommittedIndependent,
+    )
+}
+
+fn synthetic_committed_fixture_block(
+    chain_id: &ChainId,
+    block_height: BlockHeight,
+    source_id: &str,
+    source_version: &str,
+    confirmation_class: ConfirmationClass,
+) -> Result<BlockEnvelope, FixtureError> {
+    match confirmation_class {
+        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => {}
+        ConfirmationClass::ProvisionalSource
+        | ConfirmationClass::ReconciledSnapshot
+        | ConfirmationClass::Corrected
+        | ConfirmationClass::Expired => {
+            return Err(FixtureError::UnsupportedConfirmation);
+        }
+    }
     let height_micros = i64::try_from(block_height.get())
         .ok()
         .and_then(|height| height.checked_mul(1_000))
@@ -35,14 +77,13 @@ pub fn synthetic_fixture_block(
             .ok_or(FixtureError::HeightOverflow)?,
     )
     .map_err(|_| FixtureError::InvalidTime)?;
-    let source_id =
-        SourceId::new("synthetic-fixture").map_err(|_| FixtureError::InvalidIdentity)?;
+    let source_id = SourceId::new(source_id).map_err(|_| FixtureError::InvalidIdentity)?;
     let transaction_id = TransactionId::new(format!("fixture-tx-{}", block_height.get()))
         .map_err(|_| FixtureError::InvalidIdentity)?;
     let source_hash = fixture_hash(b"source-block", block_height);
     let source_evidence = SourceEvidence::try_new(
         source_id.clone(),
-        "synthetic-fixture-v1",
+        source_version,
         format!("block:{}", block_height.get()),
         fixture_hash(b"source-event", block_height),
     )
@@ -58,7 +99,7 @@ pub fn synthetic_fixture_block(
         market_ids: Vec::new(),
         account_ids: Vec::new(),
         source_evidence: vec![source_evidence],
-        confirmation_class: ConfirmationClass::CommittedPrimary,
+        confirmation_class,
         observed_at,
         ingested_at,
         canonicalized_at,
@@ -74,7 +115,7 @@ pub fn synthetic_fixture_block(
         chain_id.clone(),
         block_height,
         block_time,
-        ConfirmationClass::CommittedPrimary,
+        confirmation_class,
         vec![event],
         BTreeMap::from([(source_id, source_hash)]),
     )
@@ -103,6 +144,8 @@ pub enum FixtureError {
     InvalidEvent,
     #[error("fixture block is invalid")]
     InvalidBlock,
+    #[error("synthetic fixtures do not emit reconciliation confirmation classes")]
+    UnsupportedConfirmation,
 }
 
 impl FixtureError {
@@ -115,6 +158,60 @@ impl FixtureError {
             Self::InvalidDecimal => "capture_fixture.invalid_decimal",
             Self::InvalidEvent => "capture_fixture.invalid_event",
             Self::InvalidBlock => "capture_fixture.invalid_block",
+            Self::UnsupportedConfirmation => "capture_fixture.unsupported_confirmation",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain() -> ChainId {
+        ChainId::new("mainnet").expect("chain")
+    }
+
+    #[test]
+    fn independent_and_primary_fixtures_differ_in_lane_and_source() {
+        let height = BlockHeight::new(7);
+        let primary = synthetic_fixture_block(&chain(), height).expect("primary");
+        let independent =
+            synthetic_independent_fixture_block(&chain(), height).expect("independent");
+
+        assert_eq!(
+            primary.confirmation_class(),
+            ConfirmationClass::CommittedPrimary
+        );
+        assert_eq!(
+            independent.confirmation_class(),
+            ConfirmationClass::CommittedIndependent
+        );
+        assert_ne!(
+            primary.source_block_hashes().keys().collect::<Vec<_>>(),
+            independent.source_block_hashes().keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn non_committed_classes_are_refused() {
+        for class in [
+            ConfirmationClass::ProvisionalSource,
+            ConfirmationClass::ReconciledSnapshot,
+            ConfirmationClass::Corrected,
+            ConfirmationClass::Expired,
+        ] {
+            let error = synthetic_committed_fixture_block(
+                &chain(),
+                BlockHeight::new(7),
+                INDEPENDENT_SOURCE_ID,
+                INDEPENDENT_SOURCE_VERSION,
+                class,
+            )
+            .expect_err("non-committed fixture");
+            assert_eq!(
+                error.reason_code(),
+                "capture_fixture.unsupported_confirmation"
+            );
         }
     }
 }

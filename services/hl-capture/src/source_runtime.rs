@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use domain_types::{BlockHeight, ChainId, SourceId};
 use hl_protocol::{
@@ -10,6 +10,7 @@ use hl_protocol::{
 use storage_ports::{CaptureProgressStore, CursorPolicy, ProgressError};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::{
@@ -25,8 +26,8 @@ use crate::spool::{
 use crate::{
     AppError, BacklogError, BacklogRead, CaptureConfig, CommittedNodePipeline,
     CommittedNodePipelineConfig, DiskReserveError, DiskReserveGuard, DiskSpaceProbe,
-    FilesystemDiskSpaceProbe, OwnedTask, PipelineError, PipelineOutcome, RawArchiveFormat,
-    RawSegmentArchive, RawSegmentArchiveConfig, RawSegmentArchiveError,
+    FilesystemDiskSpaceProbe, NodeReplicaCmdsStyle, OwnedTask, PipelineError, PipelineOutcome,
+    RawArchiveFormat, RawSegmentArchive, RawSegmentArchiveConfig, RawSegmentArchiveError,
     RawSegmentArchiveVerification, RawSpoolArchiveEvidence, SourceAdapterConfig, SpoolBacklog,
 };
 
@@ -77,6 +78,37 @@ fn prepare_source_spool_path(
         return Err(SourceRuntimeError::InvalidConfig);
     }
     Ok(configured_path.to_path_buf())
+}
+
+fn auxiliary_commit_policy(
+    durability: crate::config::DurabilityPolicy,
+    queue_capacity: usize,
+    backpressure_timeout: Duration,
+) -> Result<(usize, Duration), SourceRuntimeError> {
+    match durability {
+        crate::config::DurabilityPolicy::FsyncEveryRecord => Ok((1, backpressure_timeout)),
+        crate::config::DurabilityPolicy::Batched {
+            max_records,
+            max_delay_millis,
+        } => {
+            let max_records =
+                usize::try_from(max_records).map_err(|_| SourceRuntimeError::InvalidConfig)?;
+            Ok((
+                max_records.min(queue_capacity),
+                Duration::from_millis(max_delay_millis),
+            ))
+        }
+    }
+}
+
+fn group_commit_due(
+    pending_len: usize,
+    max_records: usize,
+    deadline: Option<Instant>,
+    now: Instant,
+) -> bool {
+    pending_len != 0
+        && (pending_len >= max_records || deadline.is_some_and(|deadline| deadline <= now))
 }
 
 fn archive_lineage_identity(path: &Path) -> Result<String, SourceRuntimeError> {
@@ -274,6 +306,26 @@ struct CommittedDrainConfig {
     failover_decision: Option<crate::FailoverDecision>,
 }
 
+fn committed_source_role(trust: SourceTrust) -> Result<CommittedSourceRole, SourceRuntimeError> {
+    match trust {
+        SourceTrust::LocallyVerifiedCommitted => Ok(CommittedSourceRole::Primary),
+        SourceTrust::IndependentCommitted => Ok(CommittedSourceRole::Independent),
+        SourceTrust::ReconciledSnapshot
+        | SourceTrust::RecoveryOnly
+        | SourceTrust::ThirdPartyProvisional
+        | SourceTrust::MempoolProvisional => Err(SourceRuntimeError::InvalidConfig),
+    }
+}
+
+fn committed_replica_cmds_style(style: NodeReplicaCmdsStyle) -> Result<(), SourceRuntimeError> {
+    match style {
+        NodeReplicaCmdsStyle::ActionsAndResponses => Ok(()),
+        NodeReplicaCmdsStyle::Actions | NodeReplicaCmdsStyle::RecentActions => {
+            Err(SourceRuntimeError::InvalidConfig)
+        }
+    }
+}
+
 pub(crate) fn committed_node_tasks(
     config: &CaptureConfig,
     progress: Arc<dyn CaptureProgressStore>,
@@ -286,15 +338,18 @@ pub(crate) fn committed_node_tasks(
     let mut primary = None;
     let mut independent = None;
     for source in config.sources() {
-        let Some(SourceAdapterConfig::NodeBlockDirectory {
-            path,
-            stream_name,
-            start_height,
-            poll_interval_millis,
-            replica_cmds_style: _,
-        }) = source.adapter()
-        else {
-            continue;
+        let (path, stream_name, start_height, poll_interval_millis) = match source.adapter() {
+            Some(SourceAdapterConfig::NodeBlockDirectory {
+                path,
+                stream_name,
+                start_height,
+                poll_interval_millis,
+                replica_cmds_style,
+            }) => {
+                committed_replica_cmds_style(*replica_cmds_style)?;
+                (path, stream_name, start_height, poll_interval_millis)
+            }
+            Some(SourceAdapterConfig::NodeLine { .. }) | None => continue,
         };
         let admission = source
             .admission()
@@ -302,11 +357,7 @@ pub(crate) fn committed_node_tasks(
         if !admission.can_advance_committed_watermark() {
             return Err(SourceRuntimeError::InvalidConfig);
         }
-        let role = match source.trust() {
-            SourceTrust::LocallyVerifiedCommitted => CommittedSourceRole::Primary,
-            SourceTrust::IndependentCommitted => CommittedSourceRole::Independent,
-            _ => return Err(SourceRuntimeError::InvalidConfig),
-        };
+        let role = committed_source_role(source.trust())?;
         let selected = NodeSourceTaskConfig {
             role,
             chain_id: config.runtime().chain_id(),
@@ -421,14 +472,14 @@ pub(crate) fn auxiliary_node_task(
 ) -> Result<Option<OwnedTask>, SourceRuntimeError> {
     let mut sources = Vec::new();
     for source in config.sources() {
-        let Some(SourceAdapterConfig::NodeLine {
-            path,
-            stream_name,
-            stream,
-            poll_interval_millis,
-        }) = source.adapter()
-        else {
-            continue;
+        let (path, stream_name, stream, poll_interval_millis) = match source.adapter() {
+            Some(SourceAdapterConfig::NodeLine {
+                path,
+                stream_name,
+                stream,
+                poll_interval_millis,
+            }) => (path, stream_name, stream, poll_interval_millis),
+            Some(SourceAdapterConfig::NodeBlockDirectory { .. }) | None => continue,
         };
         let admission = source
             .admission()
@@ -438,17 +489,11 @@ pub(crate) fn auxiliary_node_task(
         }
         let backpressure_timeout =
             Duration::from_millis(config.runtime().backpressure_timeout_millis());
-        let (archive_commit_max_records, archive_commit_max_delay) =
-            match *config.spool().provisional_durability() {
-                crate::config::DurabilityPolicy::FsyncEveryRecord => (1, backpressure_timeout),
-                crate::config::DurabilityPolicy::Batched {
-                    max_records,
-                    max_delay_millis,
-                } => (
-                    usize::try_from(max_records).map_err(|_| SourceRuntimeError::InvalidConfig)?,
-                    Duration::from_millis(max_delay_millis),
-                ),
-            };
+        let (archive_commit_max_records, archive_commit_max_delay) = auxiliary_commit_policy(
+            *config.spool().provisional_durability(),
+            source.queue_capacity(),
+            backpressure_timeout,
+        )?;
         sources.push(AuxiliaryNodeSourceTaskConfig {
             chain_id: config.runtime().chain_id(),
             source_id: SourceId::new(source.id().to_owned())
@@ -465,7 +510,7 @@ pub(crate) fn auxiliary_node_task(
             segment_target_bytes: config.spool().segment_target_bytes(),
             rotation_interval: Duration::from_secs(config.spool().rotation_interval_seconds()),
             backpressure_timeout,
-            archive_commit_max_records: archive_commit_max_records.min(source.queue_capacity()),
+            archive_commit_max_records,
             archive_commit_max_delay,
             disk_reserve_bytes: config.runtime().disk_reserve_bytes(),
             raw_archive_format: config.runtime().raw_archive_format(),
@@ -817,7 +862,12 @@ where
 
     loop {
         let now = Instant::now();
-        if !pending.is_empty() && group_commit_deadline.is_some_and(|deadline| deadline <= now) {
+        if group_commit_due(
+            pending.len(),
+            config.archive_commit_max_records,
+            group_commit_deadline,
+            now,
+        ) {
             spool = flush_auxiliary_observations(
                 spool,
                 &mut source,
@@ -837,9 +887,11 @@ where
         let request_deadline = now
             .checked_add(config.backpressure_timeout)
             .ok_or(SourceRuntimeError::InvalidConfig)?;
-        let deadline = group_commit_deadline.map_or(request_deadline, |group_deadline| {
-            request_deadline.min(group_deadline)
-        });
+        let deadline = if pending.is_empty() {
+            request_deadline
+        } else {
+            group_commit_deadline.unwrap_or(request_deadline)
+        };
         let context = SourceRequestContext::new(cancellation.child_token(), deadline);
         let observation = match source.next_observation(&context).await {
             Ok(observation) => observation,
@@ -868,9 +920,12 @@ where
                 return Ok(());
             }
             Err(SourceError::BackpressureTimeout) => {
-                if pending.is_empty() {
-                    record_auxiliary_tail(&health, &config.source_id, &source)?;
-                } else {
+                if group_commit_due(
+                    pending.len(),
+                    config.archive_commit_max_records,
+                    group_commit_deadline,
+                    Instant::now(),
+                ) {
                     spool = flush_auxiliary_observations(
                         spool,
                         &mut source,
@@ -885,6 +940,8 @@ where
                     )
                     .await?;
                     group_commit_deadline = None;
+                } else {
+                    record_auxiliary_tail(&health, &config.source_id, &source)?;
                 }
                 continue;
             }
@@ -1877,16 +1934,56 @@ async fn drain_backlog_once(
 
 fn classify_backlog_error(error: BacklogError) -> DrainSessionError {
     match &error {
-        BacklogError::Spool(SpoolError::IncompleteTail { .. }) => {
-            DrainSessionError::Retryable("capture_spool.incomplete_tail")
-        }
-        BacklogError::Spool(SpoolError::Io { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            DrainSessionError::Retryable("capture_spool.io")
-        }
+        BacklogError::Spool(spool_error) => match spool_error {
+            SpoolError::IncompleteTail { .. } => {
+                DrainSessionError::Retryable("capture_spool.incomplete_tail")
+            }
+            SpoolError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                DrainSessionError::Retryable("capture_spool.io")
+            }
+            SpoolError::Io { .. }
+            | SpoolError::InvalidHeader
+            | SpoolError::IncompleteHeader
+            | SpoolError::CorruptRecord { .. }
+            | SpoolError::SourceMismatch
+            | SpoolError::UnsupportedWarnings
+            | SpoolError::CursorRegression
+            | SpoolError::CursorConflict
+            | SpoolError::CursorPolicyMismatch
+            | SpoolError::InvalidDurabilityPolicy
+            | SpoolError::InvalidTimestamp
+            | SpoolError::EmptySegment
+            | SpoolError::InvalidManifest
+            | SpoolError::ManifestAlreadyExists
+            | SpoolError::UnsafeSpoolEntry
+            | SpoolError::IncompleteManifestPublication
+            | SpoolError::DuplicateSegmentSequence
+            | SpoolError::ManifestSegmentMissing
+            | SpoolError::ManifestChainBroken
+            | SpoolError::ManifestContentMismatch
+            | SpoolError::SegmentSizeMismatch
+            | SpoolError::SegmentHashMismatch
+            | SpoolError::UnexpectedOpenSegment
+            | SpoolError::SegmentClosed
+            | SpoolError::ClosedSegment
+            | SpoolError::SegmentAlreadyExists
+            | SpoolError::SizeOverflow => {
+                DrainSessionError::Fatal(SourceRuntimeError::Backlog(error))
+            }
+        },
         BacklogError::Gap { .. } => DrainSessionError::Latched(error.reason_code()),
-        _ => DrainSessionError::Fatal(SourceRuntimeError::Backlog(error)),
+        BacklogError::InvalidConfig
+        | BacklogError::SourceMismatch
+        | BacklogError::CursorPolicyMismatch
+        | BacklogError::Observation
+        | BacklogError::PendingAcknowledgement
+        | BacklogError::AcknowledgementMismatch
+        | BacklogError::OffsetOverflow
+        | BacklogError::SequenceOverflow
+        | BacklogError::SequenceGap { .. }
+        | BacklogError::InvalidState => {
+            DrainSessionError::Fatal(SourceRuntimeError::Backlog(error))
+        }
     }
 }
 
@@ -2060,7 +2157,7 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -2083,21 +2180,24 @@ mod tests {
     use crate::app::CaptureRuntimeHealth;
     use crate::progress::InMemoryProgressStore;
     use crate::spool::{
-        DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolRotationPolicy, inspect_spool,
+        DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError, SpoolRotationPolicy,
+        inspect_spool,
     };
     use crate::{
-        AuxiliaryQualificationState, AuxiliarySourceHealth, BlockingRawSegmentArchive,
-        CaptureConfig, DiskReserveError, DiskReserveGuard, DiskSpaceProbe, FailoverStore,
-        RawSegmentArchive,
+        AuxiliaryQualificationState, AuxiliarySourceHealth, BacklogError,
+        BlockingRawSegmentArchive, CaptureConfig, DiskReserveError, DiskReserveGuard,
+        DiskSpaceProbe, FailoverStore, NodeReplicaCmdsStyle, RawSegmentArchive,
+        RestartReconstruction,
     };
 
     use super::{
         AuxiliaryNodeSourceTaskConfig, CommittedSourceRole, DrainSessionError,
         NodeSourceTaskConfig, RetryBackoff, SourceNotification, SourceRuntimeError,
-        append_auxiliary_observation, attempt_failover, auxiliary_node_task,
-        open_auxiliary_node_source, prepare_source_spool_path,
-        run_auxiliary_node_acquisition_with_probe, run_committed_node_acquisition_with_probe,
-        supervise_auxiliary_tasks,
+        append_auxiliary_observation, attempt_failover, auxiliary_commit_policy,
+        auxiliary_node_task, classify_backlog_error, committed_replica_cmds_style,
+        committed_source_role, group_commit_due, open_auxiliary_node_source,
+        prepare_source_spool_path, run_auxiliary_node_acquisition_with_probe,
+        run_committed_node_acquisition_with_probe, supervise_auxiliary_tasks,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -2106,7 +2206,11 @@ mod tests {
     #[derive(Debug)]
     struct PendingRawArchive {
         started: Arc<Notify>,
+        flushed: Arc<AtomicBool>,
     }
+
+    #[derive(Debug)]
+    struct FailingRawArchive;
 
     struct GateRawArchive {
         inner: Arc<dyn RawSegmentArchive>,
@@ -2289,6 +2393,7 @@ mod tests {
             _segment: &crate::spool::CloseReceipt,
             _config: crate::RawSegmentArchiveConfig,
         ) -> Result<crate::RawSegmentArchiveSummary, crate::RawSegmentArchiveError> {
+            self.flushed.store(true, Ordering::SeqCst);
             self.started.notify_one();
             std::future::pending().await
         }
@@ -2309,18 +2414,6 @@ mod tests {
             Ok(false)
         }
     }
-
-    impl DiskSpaceProbe for TestDiskSpaceProbe {
-        fn minimum_available_bytes(&self) -> Result<u64, DiskReserveError> {
-            Ok(u64::MAX)
-        }
-
-        fn minimum_free_basis_points(&self) -> Result<u16, DiskReserveError> {
-            Ok(10_000)
-        }
-    }
-
-    struct FailingRawArchive;
 
     #[async_trait]
     impl RawSegmentArchive for FailingRawArchive {
@@ -2347,6 +2440,16 @@ mod tests {
             _cursor_epoch: &str,
         ) -> Result<bool, crate::RawSegmentArchiveError> {
             Ok(false)
+        }
+    }
+
+    impl DiskSpaceProbe for TestDiskSpaceProbe {
+        fn minimum_available_bytes(&self) -> Result<u64, DiskReserveError> {
+            Ok(u64::MAX)
+        }
+
+        fn minimum_free_basis_points(&self) -> Result<u16, DiskReserveError> {
+            Ok(10_000)
         }
     }
 
@@ -2391,6 +2494,217 @@ mod tests {
         assert_eq!(backoff.next_delay(), first);
     }
 
+    #[test]
+    fn committed_source_role_fail_closes_every_constructible_trust() {
+        for trust in SourceTrust::ALL {
+            let result = committed_source_role(trust);
+            match trust {
+                SourceTrust::LocallyVerifiedCommitted => {
+                    assert_eq!(
+                        result.expect("primary remains admitted"),
+                        CommittedSourceRole::Primary
+                    );
+                }
+                SourceTrust::IndependentCommitted => {
+                    assert_eq!(
+                        result.expect("independent remains admitted"),
+                        CommittedSourceRole::Independent
+                    );
+                }
+                SourceTrust::ReconciledSnapshot
+                | SourceTrust::RecoveryOnly
+                | SourceTrust::ThirdPartyProvisional
+                | SourceTrust::MempoolProvisional => {
+                    let error = result.expect_err("non-committed trusts fail closed");
+                    assert!(
+                        matches!(error, SourceRuntimeError::InvalidConfig),
+                        "{trust:?} must reuse InvalidConfig"
+                    );
+                    assert_eq!(
+                        error.reason_code(),
+                        "capture_source.invalid_config",
+                        "{trust:?} must reuse the existing invalid-config reason"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn committed_replica_cmds_style_fail_closes_every_constructible_style() {
+        for style in [
+            NodeReplicaCmdsStyle::Actions,
+            NodeReplicaCmdsStyle::ActionsAndResponses,
+            NodeReplicaCmdsStyle::RecentActions,
+        ] {
+            let result = committed_replica_cmds_style(style);
+            match style {
+                NodeReplicaCmdsStyle::ActionsAndResponses => {
+                    result.expect("actions-and-responses remains the admitted replica_cmds style");
+                }
+                NodeReplicaCmdsStyle::Actions | NodeReplicaCmdsStyle::RecentActions => {
+                    let error = result.expect_err(
+                        "config-rejected replica_cmds styles fail closed if they reach runtime",
+                    );
+                    assert!(
+                        matches!(error, SourceRuntimeError::InvalidConfig),
+                        "{style:?} must reuse InvalidConfig"
+                    );
+                    assert_eq!(
+                        error.reason_code(),
+                        "capture_source.invalid_config",
+                        "{style:?} must reuse the existing invalid-config reason"
+                    );
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum BacklogDrainClass {
+        Retryable(&'static str),
+        Latched(&'static str),
+        Fatal(&'static str),
+    }
+
+    fn backlog_drain_class(error: DrainSessionError) -> BacklogDrainClass {
+        match error {
+            DrainSessionError::Retryable(code) => BacklogDrainClass::Retryable(code),
+            DrainSessionError::Latched(code) => BacklogDrainClass::Latched(code),
+            DrainSessionError::Fatal(inner) => {
+                assert!(
+                    matches!(inner, SourceRuntimeError::Backlog(_)),
+                    "fatal classification must remain SourceRuntimeError::Backlog, got {inner:?}"
+                );
+                BacklogDrainClass::Fatal(inner.reason_code())
+            }
+        }
+    }
+
+    fn expected_backlog_drain_class(error: &BacklogError) -> BacklogDrainClass {
+        match error {
+            BacklogError::Spool(spool_error) => match spool_error {
+                SpoolError::IncompleteTail { .. } => {
+                    BacklogDrainClass::Retryable("capture_spool.incomplete_tail")
+                }
+                SpoolError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                    BacklogDrainClass::Retryable("capture_spool.io")
+                }
+                SpoolError::Io { .. }
+                | SpoolError::InvalidHeader
+                | SpoolError::IncompleteHeader
+                | SpoolError::CorruptRecord { .. }
+                | SpoolError::SourceMismatch
+                | SpoolError::UnsupportedWarnings
+                | SpoolError::CursorRegression
+                | SpoolError::CursorConflict
+                | SpoolError::CursorPolicyMismatch
+                | SpoolError::InvalidDurabilityPolicy
+                | SpoolError::InvalidTimestamp
+                | SpoolError::EmptySegment
+                | SpoolError::InvalidManifest
+                | SpoolError::ManifestAlreadyExists
+                | SpoolError::UnsafeSpoolEntry
+                | SpoolError::IncompleteManifestPublication
+                | SpoolError::DuplicateSegmentSequence
+                | SpoolError::ManifestSegmentMissing
+                | SpoolError::ManifestChainBroken
+                | SpoolError::ManifestContentMismatch
+                | SpoolError::SegmentSizeMismatch
+                | SpoolError::SegmentHashMismatch
+                | SpoolError::UnexpectedOpenSegment
+                | SpoolError::SegmentClosed
+                | SpoolError::ClosedSegment
+                | SpoolError::SegmentAlreadyExists
+                | SpoolError::SizeOverflow => BacklogDrainClass::Fatal(error.reason_code()),
+            },
+            BacklogError::Gap { .. } => BacklogDrainClass::Latched(error.reason_code()),
+            BacklogError::InvalidConfig
+            | BacklogError::SourceMismatch
+            | BacklogError::CursorPolicyMismatch
+            | BacklogError::Observation
+            | BacklogError::PendingAcknowledgement
+            | BacklogError::AcknowledgementMismatch
+            | BacklogError::OffsetOverflow
+            | BacklogError::SequenceOverflow
+            | BacklogError::SequenceGap { .. }
+            | BacklogError::InvalidState => BacklogDrainClass::Fatal(error.reason_code()),
+        }
+    }
+
+    fn spool_io(kind: std::io::ErrorKind) -> SpoolError {
+        SpoolError::Io {
+            operation: "open",
+            source: std::io::Error::from(kind),
+        }
+    }
+
+    fn every_spool_error() -> Vec<SpoolError> {
+        vec![
+            spool_io(std::io::ErrorKind::NotFound),
+            spool_io(std::io::ErrorKind::PermissionDenied),
+            SpoolError::InvalidHeader,
+            SpoolError::IncompleteHeader,
+            SpoolError::CorruptRecord { record_offset: 1 },
+            SpoolError::IncompleteTail { record_offset: 8 },
+            SpoolError::SourceMismatch,
+            SpoolError::UnsupportedWarnings,
+            SpoolError::CursorRegression,
+            SpoolError::CursorConflict,
+            SpoolError::CursorPolicyMismatch,
+            SpoolError::InvalidDurabilityPolicy,
+            SpoolError::InvalidTimestamp,
+            SpoolError::EmptySegment,
+            SpoolError::InvalidManifest,
+            SpoolError::ManifestAlreadyExists,
+            SpoolError::UnsafeSpoolEntry,
+            SpoolError::IncompleteManifestPublication,
+            SpoolError::DuplicateSegmentSequence,
+            SpoolError::ManifestSegmentMissing,
+            SpoolError::ManifestChainBroken,
+            SpoolError::ManifestContentMismatch,
+            SpoolError::SegmentSizeMismatch,
+            SpoolError::SegmentHashMismatch,
+            SpoolError::UnexpectedOpenSegment,
+            SpoolError::SegmentClosed,
+            SpoolError::ClosedSegment,
+            SpoolError::SegmentAlreadyExists,
+            SpoolError::SizeOverflow,
+        ]
+    }
+
+    fn every_backlog_error() -> Vec<BacklogError> {
+        let mut errors = vec![
+            BacklogError::InvalidConfig,
+            BacklogError::SourceMismatch,
+            BacklogError::CursorPolicyMismatch,
+            BacklogError::Observation,
+            BacklogError::PendingAcknowledgement,
+            BacklogError::AcknowledgementMismatch,
+            BacklogError::OffsetOverflow,
+            BacklogError::SequenceOverflow,
+            BacklogError::Gap {
+                expected: 1,
+                observed: 2,
+            },
+            BacklogError::SequenceGap {
+                expected: 1,
+                observed: 2,
+            },
+            BacklogError::InvalidState,
+        ];
+        errors.extend(every_spool_error().into_iter().map(BacklogError::Spool));
+        errors
+    }
+
+    #[test]
+    fn classify_backlog_error_pins_every_backlog_variant() {
+        for error in every_backlog_error() {
+            let expected = expected_backlog_drain_class(&error);
+            assert_eq!(backlog_drain_class(classify_backlog_error(error)), expected);
+        }
+    }
+
     #[tokio::test]
     async fn auxiliary_duplicate_is_latched_instead_of_being_acknowledged_again() {
         let root = TempDir::new().unwrap();
@@ -2427,6 +2741,7 @@ mod tests {
 
         let raw_archive = PendingRawArchive {
             started: Arc::new(Notify::new()),
+            flushed: Arc::new(AtomicBool::new(false)),
         };
         let error = append_auxiliary_observation(
             spool,
@@ -2843,6 +3158,8 @@ mod tests {
                     .unwrap();
                 if status.health() == AuxiliarySourceHealth::Healthy
                     && status.local_sequence() == Some(3)
+                    && status.tail_cursor_epoch().is_some()
+                    && status.restart_reconstruction() == RestartReconstruction::Complete
                 {
                     break;
                 }
@@ -2904,6 +3221,10 @@ mod tests {
         assert_eq!(source_status.unarchived_records(), 0);
         assert_eq!(source_status.unread_bytes(), Some(0));
         assert!(!source_status.partial_line());
+        assert_eq!(
+            source_status.restart_reconstruction(),
+            RestartReconstruction::Complete
+        );
         assert!(source_status.last_error_reason().is_none());
     }
 
@@ -3411,6 +3732,7 @@ mod tests {
             config,
             Arc::new(PendingRawArchive {
                 started: Arc::clone(&archive_started),
+                flushed: Arc::new(AtomicBool::new(false)),
             }),
             Arc::clone(&health),
             cancellation.child_token(),
@@ -3788,6 +4110,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
         let started = Arc::new(Notify::new());
         let stalled_archive: Arc<dyn RawSegmentArchive> = Arc::new(PendingRawArchive {
             started: Arc::clone(&started),
+            flushed: Arc::new(AtomicBool::new(false)),
         });
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -3879,6 +4202,11 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
                     assert_eq!(status.health(), AuxiliarySourceHealth::Starting);
                     assert!(status.cursor_epoch().is_some());
                     assert!(status.durable_offset().is_some());
+                    assert_eq!(status.tail_cursor_epoch(), status.cursor_epoch());
+                    assert_eq!(
+                        status.restart_reconstruction(),
+                        RestartReconstruction::Incomplete
+                    );
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -3895,6 +4223,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
                 if status.health() == AuxiliarySourceHealth::Healthy
                     && status.local_sequence() == Some(1)
                     && status.last_error_reason().is_none()
+                    && status.restart_reconstruction() == RestartReconstruction::Complete
                 {
                     break;
                 }
@@ -3911,6 +4240,42 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             .expect("missing-source retry stops after cancellation")
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn batched_provisional_durability_is_the_auxiliary_group_commit_window() {
+        let (records, delay) = auxiliary_commit_policy(
+            crate::config::DurabilityPolicy::Batched {
+                max_records: 128,
+                max_delay_millis: 100,
+            },
+            32,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(records, 32);
+        assert_eq!(delay, Duration::from_millis(100));
+
+        let (immediate_records, immediate_delay) = auxiliary_commit_policy(
+            crate::config::DurabilityPolicy::FsyncEveryRecord,
+            32,
+            Duration::from_millis(20),
+        )
+        .unwrap();
+        assert_eq!(immediate_records, 1);
+        assert_eq!(immediate_delay, Duration::from_millis(20));
+        assert!(!group_commit_due(
+            1,
+            128,
+            Some(tokio::time::Instant::now() + Duration::from_millis(50)),
+            tokio::time::Instant::now()
+        ));
+        assert!(group_commit_due(
+            128,
+            128,
+            None,
+            tokio::time::Instant::now()
+        ));
     }
 
     #[tokio::test]
@@ -3985,6 +4350,183 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
                 .is_file()
         );
         assert_eq!(inspect_spool(&config.spool_path).unwrap().records(), 1);
+    }
+
+    #[tokio::test]
+    async fn raw_archive_failure_produces_zero_acknowledgements() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("node-fills-archive-fail");
+        let mut fill = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source/node-v1/fill.json"),
+        )
+        .unwrap();
+        if fill.last() != Some(&b'\n') {
+            fill.push(b'\n');
+        }
+        fs::write(&source_path, fill).unwrap();
+        let config = AuxiliaryNodeSourceTaskConfig {
+            chain_id: ChainId::new("mainnet").unwrap(),
+            source_id: SourceId::new("node-fills-archive-fail").unwrap(),
+            source_version: "hyperliquid-node-v1".to_owned(),
+            parser_version: "parser-v1".to_owned(),
+            source_path,
+            stream_name: "node-fills-archive-fail".to_owned(),
+            stream: hl_protocol::node::v1::NodeStreamKind::Fills,
+            poll_interval: Duration::from_millis(5),
+            max_payload_bytes: 1024 * 1024,
+            spool_path: root.path().join("spool/node-fills-archive-fail"),
+            archive_path: root.path().join("archive"),
+            segment_target_bytes: 1024 * 1024,
+            rotation_interval: Duration::from_secs(60),
+            backpressure_timeout: Duration::from_millis(20),
+            archive_commit_max_records: 1,
+            archive_commit_max_delay: Duration::from_millis(20),
+            disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
+        };
+        fs::create_dir_all(&config.archive_path).unwrap();
+        let health = Arc::new(CaptureRuntimeHealth::new());
+        health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let error = run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::new(FailingRawArchive),
+            Arc::clone(&health),
+            CancellationToken::new(),
+            |_| Ok(TestDiskSpaceProbe),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.reason_code(),
+            "capture_raw_archive.verification_mismatch"
+        );
+        let status = health
+            .auxiliary_source_status(config.source_id.as_str())
+            .unwrap();
+        assert!(status.local_sequence().is_none());
+        assert!(status.durable_offset().is_none());
+        assert_eq!(status.spool_records(), 1);
+        assert_eq!(status.unarchived_records(), 1);
+        assert_eq!(inspect_spool(&config.spool_path).unwrap().records(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auxiliary_group_commit_waits_for_configured_delay_despite_shorter_backpressure() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("delayed-node-fills");
+        let mut fill = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source/node-v1/fill.json"),
+        )
+        .unwrap();
+        if fill.last() == Some(&b'\n') {
+            fill.pop();
+        }
+        let mut first_line = fill.clone();
+        first_line.push(b'\n');
+        fs::write(&source_path, first_line).unwrap();
+        let archive_path = root.path().join("archive");
+        fs::create_dir_all(&archive_path).unwrap();
+        let archive_started = Arc::new(Notify::new());
+        let archive_flushed = Arc::new(AtomicBool::new(false));
+        let config = AuxiliaryNodeSourceTaskConfig {
+            chain_id: ChainId::new("mainnet").unwrap(),
+            source_id: SourceId::new("delayed-node-fills").unwrap(),
+            source_version: "hyperliquid-node-v1".to_owned(),
+            parser_version: "parser-v1".to_owned(),
+            source_path,
+            stream_name: "delayed-node-fills".to_owned(),
+            stream: hl_protocol::node::v1::NodeStreamKind::Fills,
+            poll_interval: Duration::from_millis(5),
+            max_payload_bytes: 1024 * 1024,
+            spool_path: root.path().join("spool/delayed-node-fills"),
+            archive_path,
+            segment_target_bytes: 1024 * 1024,
+            rotation_interval: Duration::from_secs(60),
+            backpressure_timeout: Duration::from_millis(20),
+            archive_commit_max_records: 128,
+            archive_commit_max_delay: Duration::from_millis(150),
+            disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
+        };
+        let health = Arc::new(CaptureRuntimeHealth::new());
+        health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let cancellation = CancellationToken::new();
+        let acquisition = tokio::spawn(run_auxiliary_node_acquisition_with_probe(
+            config,
+            Arc::new(PendingRawArchive {
+                started: Arc::clone(&archive_started),
+                flushed: Arc::clone(&archive_flushed),
+            }),
+            Arc::clone(&health),
+            cancellation.child_token(),
+            |_| Ok(TestDiskSpaceProbe),
+        ));
+
+        let mut polls = 0_u32;
+        loop {
+            let spooled = health
+                .auxiliary_source_status("delayed-node-fills")
+                .is_some_and(|status| status.spool_records() > 0);
+            if spooled {
+                break;
+            }
+            assert!(
+                !acquisition.is_finished(),
+                "acquisition exited before spooling the first record"
+            );
+            polls += 1;
+            assert!(
+                polls < 10_000,
+                "first record was not spooled before the group-commit delay"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !archive_flushed.load(Ordering::SeqCst),
+            "group commit must not flush before the configured delay starts"
+        );
+
+        tokio::time::advance(Duration::from_millis(70)).await;
+        for _ in 0..64 {
+            assert!(
+                !archive_flushed.load(Ordering::SeqCst),
+                "group commit must not flush on a shorter backpressure timeout"
+            );
+            assert!(
+                !acquisition.is_finished(),
+                "acquisition exited before the configured delay"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(Duration::from_millis(80)).await;
+        polls = 0;
+        loop {
+            if archive_flushed.load(Ordering::SeqCst) {
+                break;
+            }
+            assert!(
+                !acquisition.is_finished(),
+                "acquisition exited before the configured delay flushed"
+            );
+            polls += 1;
+            assert!(
+                polls < 10_000,
+                "absolute group-commit delay still flushes the pending window"
+            );
+            tokio::task::yield_now().await;
+        }
+        let status = health
+            .auxiliary_source_status("delayed-node-fills")
+            .unwrap();
+        assert!(status.local_sequence().is_none());
+        assert_eq!(status.spool_records(), status.unarchived_records());
+        assert!(status.spool_records() > 0);
+
+        cancellation.cancel();
+        acquisition.abort();
+        let _ = acquisition.await;
     }
 
     async fn wait_for_raw_observations(

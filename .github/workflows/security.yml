@@ -39,34 +39,36 @@ jobs:
         timeout-minutes: 10
         run: cargo +1.97.1 fetch --locked
 
-      - name: Install pinned Rust security tools from verified crates
-        timeout-minutes: 30
+      - name: Install pinned Rust security tools from verified GitHub releases
+        timeout-minutes: 10
         env:
-          CARGO_AUDIT_SHA256: 700c2b240f7fd330c24b675fe429f73a5b676531fcc6300400b2b67f155ba12a
-          CARGO_CYCLONEDX_SHA256: 5d162f67705f0f5038759d73bf546a083bf30e8677c2e944b416bca48d9d69a8
+          CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+          CARGO_CYCLONEDX_SHA256: 9bd3e599314f50810c9d98b8b68a617ff9d3cc20873968d90b29d121f6b226ff
           CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
         run: |
-          curl --fail --location --proto '=https' --tlsv1.2 \
-            --connect-timeout 15 --max-time 180 \
-            --output "$RUNNER_TEMP/cargo-audit.crate" \
-            https://crates.io/api/v1/crates/cargo-audit/0.22.2/download
-          echo "$CARGO_AUDIT_SHA256  $RUNNER_TEMP/cargo-audit.crate" | sha256sum --check -
-          mkdir -p "$RUNNER_TEMP/cargo-audit-src"
-          tar -xzf "$RUNNER_TEMP/cargo-audit.crate" -C "$RUNNER_TEMP/cargo-audit-src"
-          cargo +1.97.1 install \
-            --path "$RUNNER_TEMP/cargo-audit-src/cargo-audit-0.22.2" \
-            --locked --root "$RUNNER_TEMP/cargo-tools"
+          mkdir -p "$RUNNER_TEMP/cargo-tools/bin"
 
           curl --fail --location --proto '=https' --tlsv1.2 \
             --connect-timeout 15 --max-time 180 \
-            --output "$RUNNER_TEMP/cargo-cyclonedx.crate" \
-            https://crates.io/api/v1/crates/cargo-cyclonedx/0.5.9/download
-          echo "$CARGO_CYCLONEDX_SHA256  $RUNNER_TEMP/cargo-cyclonedx.crate" | sha256sum --check -
-          mkdir -p "$RUNNER_TEMP/cargo-cyclonedx-src"
-          tar -xzf "$RUNNER_TEMP/cargo-cyclonedx.crate" -C "$RUNNER_TEMP/cargo-cyclonedx-src"
-          cargo +1.97.1 install \
-            --path "$RUNNER_TEMP/cargo-cyclonedx-src/cargo-cyclonedx-0.5.9" \
-            --locked --root "$RUNNER_TEMP/cargo-tools"
+            --output "$RUNNER_TEMP/cargo-audit.tar.gz" \
+            https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+          echo "$CARGO_AUDIT_SHA256  $RUNNER_TEMP/cargo-audit.tar.gz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/cargo-audit"
+          tar -xzf "$RUNNER_TEMP/cargo-audit.tar.gz" -C "$RUNNER_TEMP/cargo-audit"
+          find "$RUNNER_TEMP/cargo-audit" -type f -name cargo-audit \
+            -exec cp '{}' "$RUNNER_TEMP/cargo-tools/bin/cargo-audit" \;
+          chmod 0755 "$RUNNER_TEMP/cargo-tools/bin/cargo-audit"
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 180 \
+            --output "$RUNNER_TEMP/cargo-cyclonedx.tar.xz" \
+            https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-0.5.9/cargo-cyclonedx-x86_64-unknown-linux-musl.tar.xz
+          echo "$CARGO_CYCLONEDX_SHA256  $RUNNER_TEMP/cargo-cyclonedx.tar.xz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/cargo-cyclonedx"
+          tar -xJf "$RUNNER_TEMP/cargo-cyclonedx.tar.xz" -C "$RUNNER_TEMP/cargo-cyclonedx"
+          find "$RUNNER_TEMP/cargo-cyclonedx" -type f -name cargo-cyclonedx \
+            -exec cp '{}' "$RUNNER_TEMP/cargo-tools/bin/cargo-cyclonedx" \;
+          chmod 0755 "$RUNNER_TEMP/cargo-tools/bin/cargo-cyclonedx"
 
           curl --fail --location --proto '=https' --tlsv1.2 \
             --connect-timeout 15 --max-time 180 \
@@ -255,9 +257,12 @@ jobs:
               -o "cyclonedx-json@1.6=$RUNNER_TEMP/security-artifacts/image-$index.cdx.json" ||
               syft_status=$?
             trivy_status=0
+            # --ignorefile lists only unfixed OSS MinIO CVEs; see that file.
+            # Severity and exit-code stay HIGH,CRITICAL / 1.
             trivy image \
               --cache-dir "$RUNNER_TEMP/trivy-cache" \
               --skip-db-update \
+              --ignorefile infra/docker-compose/.trivyignore \
               --exit-code 1 \
               --severity HIGH,CRITICAL \
               --format json \

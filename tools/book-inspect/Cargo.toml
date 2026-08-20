@@ -1,0 +1,18 @@
+[package]
+name = "book-inspect"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Replay inspector for synthetic order-book fixtures."
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+
+[dependencies]
+orderbook = { path = "../../crates/orderbook", version = "=0.1.0" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

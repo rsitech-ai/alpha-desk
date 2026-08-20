@@ -22,6 +22,7 @@ publish_timeout_millis = 5000
 backpressure_timeout_millis = 5000
 shutdown_grace_millis = 15000
 disk_reserve_bytes = 10737418240
+status_listen = "127.0.0.1:8741"
 # Default raw_archive_format is v2 (legacy contiguous + byte-offset V2).
 # Set raw_archive_format = "v3" and a [runtime.raw_v3] capacity table to attach RawV3Archive.
 

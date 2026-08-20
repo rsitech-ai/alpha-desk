@@ -243,7 +243,11 @@ fn start_state_mismatch_is_rejected_before_any_state_mutation() {
 
 #[test]
 fn wrong_chain_manifest_is_rejected_during_preflight() {
-    let fixture = ReplayFixture::with_blocks(vec![empty_block_on("testnet", 526)]);
+    let fixture = ReplayFixture::with_blocks(vec![empty_block_on(
+        "testnet",
+        526,
+        ConfirmationClass::CommittedPrimary,
+    )]);
     let mut ledger = ledger(526);
     let before = ledger.state_hash();
     let request = fixture.request(526, 526, fixture.manifests.clone(), before);
@@ -281,6 +285,28 @@ fn unsupported_block_is_quarantined_after_only_prior_blocks_commit() {
         ledger.checkpoint().expect("height 530").block_height(),
         BlockHeight::new(530)
     );
+}
+
+#[test]
+fn corrected_archive_block_is_quarantined_without_mutating_state() {
+    let fixture = ReplayFixture::with_blocks(vec![corrected_block(550)]);
+    let mut ledger = ledger(550);
+    let before = ledger.state_image().canonical_bytes();
+    let request = fixture.request(550, 550, fixture.manifests.clone(), ledger.state_hash());
+
+    let error = SerialReplayEngine::new(&fixture.archive, &mut ledger, ReplayLimits::production())
+        .run(&request, &NeverCancel)
+        .expect_err("correction quarantined");
+
+    assert_eq!(error.reason_code(), "replay.block_quarantined");
+    assert_eq!(
+        error.source_reason_code(),
+        Some("ledger.correction_unimplemented")
+    );
+    assert_eq!(error.quarantine_height(), Some(BlockHeight::new(550)));
+    assert_eq!(error.progress().applied_block_count(), 0);
+    assert_eq!(ledger.state_image().canonical_bytes(), before);
+    assert!(ledger.checkpoint().is_none());
 }
 
 #[test]
@@ -421,15 +447,19 @@ fn trade_ledger(first_height: u64) -> CanonicalLedger<CanonicalTradeReducerV1> {
 }
 
 fn empty_block(height: u64) -> BlockEnvelope {
-    empty_block_on("mainnet", height)
+    empty_block_on("mainnet", height, ConfirmationClass::CommittedPrimary)
 }
 
-fn empty_block_on(chain: &str, height: u64) -> BlockEnvelope {
+fn corrected_block(height: u64) -> BlockEnvelope {
+    empty_block_on("mainnet", height, ConfirmationClass::Corrected)
+}
+
+fn empty_block_on(chain: &str, height: u64, confirmation: ConfirmationClass) -> BlockEnvelope {
     BlockEnvelope::try_new(
         ChainId::new(chain).expect("chain"),
         BlockHeight::new(height),
         ProtocolTime::from_unix_micros(height as i64).expect("time"),
-        ConfirmationClass::CommittedPrimary,
+        confirmation,
         Vec::new(),
         source_hashes(height),
     )

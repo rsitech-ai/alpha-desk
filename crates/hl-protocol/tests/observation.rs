@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use domain_types::SourceId;
@@ -6,6 +6,7 @@ use hl_protocol::{
     CursorTransition, ErrorDisposition, ObservationClass, ObservationError, ParseWarning,
     ReceiveTimestamps, SourceCursor, SourceError, SourceObservation, SourceRequestContext,
 };
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 fn source_id() -> SourceId {
@@ -91,6 +92,73 @@ fn payload_limits_fail_closed_for_each_observation_class() {
             .expect_err("class payload limit must be enforced");
         assert_eq!(error.reason_code(), "observation.payload_too_large");
         assert_eq!(error.observation_class(), Some(class));
+    }
+}
+
+fn expected_observation_class(error: &ObservationError) -> Option<ObservationClass> {
+    match error {
+        ObservationError::PayloadTooLarge {
+            observation_class, ..
+        } => Some(*observation_class),
+        ObservationError::InvalidSourceVersion
+        | ObservationError::InvalidParserSchemaVersion
+        | ObservationError::InvalidCursorEpoch
+        | ObservationError::InvalidWallTimestamp
+        | ObservationError::InvalidWarningCode
+        | ObservationError::InvalidWarningDetail
+        | ObservationError::InvalidPayloadLimit
+        | ObservationError::EmptyPayload
+        | ObservationError::CursorRegression => None,
+    }
+}
+
+fn every_observation_error() -> Vec<ObservationError> {
+    let mut errors = vec![
+        ObservationError::InvalidSourceVersion,
+        ObservationError::InvalidParserSchemaVersion,
+        ObservationError::InvalidCursorEpoch,
+        ObservationError::InvalidWallTimestamp,
+        ObservationError::InvalidWarningCode,
+        ObservationError::InvalidWarningDetail,
+        ObservationError::InvalidPayloadLimit,
+        ObservationError::EmptyPayload,
+        ObservationError::CursorRegression,
+    ];
+    errors.extend(ObservationClass::ALL.into_iter().map(|observation_class| {
+        ObservationError::PayloadTooLarge {
+            observation_class,
+            actual: 5,
+            maximum: 4,
+        }
+    }));
+    errors
+}
+
+#[test]
+fn observation_error_observation_class_pins_every_variant() {
+    for error in every_observation_error() {
+        match &error {
+            ObservationError::PayloadTooLarge {
+                observation_class, ..
+            } => {
+                assert_eq!(error.observation_class(), Some(*observation_class));
+            }
+            ObservationError::InvalidSourceVersion
+            | ObservationError::InvalidParserSchemaVersion
+            | ObservationError::InvalidCursorEpoch
+            | ObservationError::InvalidWallTimestamp
+            | ObservationError::InvalidWarningCode
+            | ObservationError::InvalidWarningDetail
+            | ObservationError::InvalidPayloadLimit
+            | ObservationError::EmptyPayload
+            | ObservationError::CursorRegression => {
+                assert_eq!(error.observation_class(), None);
+            }
+        }
+        assert_eq!(
+            error.observation_class(),
+            expected_observation_class(&error)
+        );
     }
 }
 

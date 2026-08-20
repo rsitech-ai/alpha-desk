@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use storage_ports::{ArchiveError, RawArchiveRootLeaseIdentity};
 
 use super::{
-    RawV3Archive, dataset_relative, load_current_root, load_logical_commit, load_pack_manifest,
-    load_packs_for_tree, load_verified_root, root_relative, walk_logical_leaves,
+    RawArchiveBackupReceipt, RawV3Archive, dataset_relative, load_current_root,
+    load_logical_commit, load_pack_manifest, load_packs_for_tree, load_verified_root,
+    root_relative, walk_logical_leaves,
 };
 use crate::{
     fs, manifest,
@@ -156,6 +157,54 @@ impl RawArchiveRestoreReceipt {
     }
 }
 
+pub fn backup_eligible_objects(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    backup_root: &Path,
+) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+    let backup_root = canonicalize_backup_root(backup_root)?;
+    let (root, journal_bytes) =
+        load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
+    let current_hash = root_bundle_hash(&root)?;
+    let now = archive.now()?;
+    let files = eligible_files(
+        archive,
+        chain,
+        source,
+        &root,
+        &journal_bytes,
+        current_hash,
+        now,
+    )?;
+    for file in &files {
+        let path = PathBuf::from(&file.relative_path);
+        fs::validate_relative(&path)?;
+        let bytes = fs::read_regular(&archive.root, &path, file.byte_len.max(1))?;
+        if u64::try_from(bytes.len()).ok() != Some(file.byte_len)
+            || manifest::sha256(&bytes) != manifest::parse_hash(&file.object_sha256)?
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "eligible object changed while writing the backup receipt",
+            ));
+        }
+        fs::publish_immutable(&backup_root, &path, &bytes)?;
+    }
+    let dataset = dataset_relative(chain, source);
+    super::import_reclaim::write_backup_receipt_files(
+        archive,
+        chain,
+        source,
+        current_hash,
+        files
+            .into_iter()
+            .map(|file| (file.relative_path, file.object_sha256, file.byte_len))
+            .collect(),
+        &backup_root,
+        &dataset.join("gc"),
+    )
+}
+
 pub fn plan_packed_object_gc(
     archive: &RawV3Archive,
     chain: &ChainId,
@@ -172,7 +221,20 @@ pub fn plan_packed_object_gc(
     let current_hash = root_bundle_hash(&root)?;
     let now = archive.now()?;
     let _leases = exclusive_gc_leases(archive, chain, source, current_hash)?;
-    let files = eligible_files(
+    let receipt = load_gc_backup_receipt(archive, chain, source, backup_receipt)?;
+    if receipt.root_sha256() != hex::encode(current_hash)
+        || receipt.chain_id() != chain.as_str()
+        || receipt.source_id() != source.as_str()
+    {
+        return Err(ArchiveError::ManifestVerification(
+            "backup receipt does not bind this archive root",
+        ));
+    }
+    let backed_up: BTreeMap<_, _> = receipt
+        .files()
+        .map(|(path, hash, len)| (path.to_owned(), (hash.to_owned(), len)))
+        .collect();
+    let mut files = eligible_files(
         archive,
         chain,
         source,
@@ -181,6 +243,11 @@ pub fn plan_packed_object_gc(
         current_hash,
         now,
     )?;
+    files.retain(|file| {
+        backed_up
+            .get(&file.relative_path)
+            .is_some_and(|(hash, len)| *hash == file.object_sha256 && *len == file.byte_len)
+    });
     let plan = RawArchiveGcPlan {
         schema: RAW_GC_PLAN_SCHEMA_V3.to_owned(),
         root_sha256: hex::encode(current_hash),
@@ -221,12 +288,14 @@ pub fn execute_packed_object_gc(
         ));
     }
     let dataset = dataset_relative(chain, source);
+    let receipt = load_gc_backup_receipt(archive, chain, source, backup_receipt)?;
     let plan = load_plan(archive, &dataset, plan_digest)?;
     if manifest::parse_hash(&plan.backup_receipt_sha256)? != backup_receipt {
         return Err(ArchiveError::ManifestVerification(
             "GC backup receipt does not match the authorized plan",
         ));
     }
+    assert_plan_files_covered_by_backup(&plan, &receipt)?;
     let (root, _) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
     let current_hash = root_bundle_hash(&root)?;
@@ -342,12 +411,14 @@ pub fn restore_planned_files_from_backup(
     }
     let backup_root = canonicalize_backup_root(backup_root)?;
     let dataset = dataset_relative(chain, source);
+    let receipt = load_gc_backup_receipt(archive, chain, source, backup_receipt)?;
     let plan = load_plan(archive, &dataset, plan_digest)?;
     if manifest::parse_hash(&plan.backup_receipt_sha256)? != backup_receipt {
         return Err(ArchiveError::ManifestVerification(
             "GC backup receipt does not match the authorized plan",
         ));
     }
+    assert_plan_files_covered_by_backup(&plan, &receipt)?;
     let (root, _) =
         load_current_root(archive, chain, source)?.ok_or(ArchiveError::RangeUnavailable)?;
     let current_hash = root_bundle_hash(&root)?;
@@ -567,6 +638,9 @@ fn collect_packed_input_objects(
             return Ok(false);
         }
         for input in pack.inputs() {
+            if input.original_schema() == "raw-v2" {
+                continue;
+            }
             let commit = parse_logical_commit_manifest(input.canonical_manifest_json().as_bytes())?;
             insert_eligible(
                 archive,
@@ -640,7 +714,7 @@ fn protect_leaf(
             let pack = load_pack_manifest(archive, chain, source, entry)?;
             protected.insert(dataset.join(pack.object().relative_path()));
             for input in pack.inputs() {
-                if skip_packed_inputs {
+                if skip_packed_inputs || input.original_schema() == "raw-v2" {
                     continue;
                 }
                 let commit =
@@ -788,6 +862,43 @@ fn load_plan(
     })
 }
 
+fn load_gc_backup_receipt(
+    archive: &RawV3Archive,
+    chain: &ChainId,
+    source: &SourceId,
+    digest: [u8; 32],
+) -> Result<RawArchiveBackupReceipt, ArchiveError> {
+    let dataset = dataset_relative(chain, source);
+    super::import_reclaim::load_verified_backup_receipt_at(
+        archive,
+        chain,
+        source,
+        digest,
+        &backup_receipt_relative(&dataset, digest),
+    )
+}
+
+fn assert_plan_files_covered_by_backup(
+    plan: &RawArchiveGcPlan,
+    receipt: &RawArchiveBackupReceipt,
+) -> Result<(), ArchiveError> {
+    let backed_up: BTreeMap<_, _> = receipt
+        .files()
+        .map(|(path, hash, len)| (path, (hash, len)))
+        .collect();
+    for file in &plan.files {
+        if !backed_up
+            .get(file.relative_path.as_str())
+            .is_some_and(|(hash, len)| *hash == file.object_sha256 && *len == file.byte_len)
+        {
+            return Err(ArchiveError::ManifestVerification(
+                "GC plan file is not covered by the verified backup receipt",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn gc_plan_digest(plan: &RawArchiveGcPlan) -> Result<[u8; 32], ArchiveError> {
     let root = manifest::parse_hash(&plan.root_sha256)?;
     let backup = manifest::parse_hash(&plan.backup_receipt_sha256)?;
@@ -928,6 +1039,12 @@ fn plan_relative(dataset: &Path, digest: [u8; 32]) -> PathBuf {
     dataset
         .join("gc")
         .join(format!("plan-{}.json", hex::encode(digest)))
+}
+
+fn backup_receipt_relative(dataset: &Path, digest: [u8; 32]) -> PathBuf {
+    dataset
+        .join("gc")
+        .join(format!("backup-receipt-{}.json", hex::encode(digest)))
 }
 
 fn deletion_journal_relative(dataset: &Path, digest: [u8; 32]) -> PathBuf {

@@ -136,8 +136,11 @@ pub fn append_batch(
     batch: &RawObservationBatch,
     durable_at: KnownTime,
 ) -> Result<RawObservationReceipt, ArchiveError> {
-    if batch.cursor_policy() == CursorPolicy::MonotonicByteOffset {
-        return super::raw_v2::append_batch(archive, batch, durable_at);
+    match batch.cursor_policy() {
+        CursorPolicy::MonotonicByteOffset => {
+            return super::raw_v2::append_batch(archive, batch, durable_at);
+        }
+        CursorPolicy::ContiguousNativeOffset => {}
     }
     let first = batch
         .observations()
