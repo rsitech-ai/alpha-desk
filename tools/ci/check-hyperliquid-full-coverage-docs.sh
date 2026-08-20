@@ -72,14 +72,15 @@ status_snapshot="$(awk '
 printf '%s\n' "$status_snapshot" | grep -Ei -q 'planned|in progress|in-progress' ||
   fail "$STATUS snapshot section does not mark full-coverage as planned/in-progress"
 
-python3 - "$SPEC" "$PLAN" "$STATUS" <<'PY'
+python3 - "$SPEC" "$PLAN" "$TRACE" "$STATUS" <<'PY'
 import re
 import sys
 import tempfile
 from pathlib import Path
 
-spec_path, plan_path, status_path = (Path(p) for p in sys.argv[1:4])
+spec_path, plan_path, trace_path, status_path = (Path(p) for p in sys.argv[1:5])
 neg_re = re.compile(r"\b(?:no|not|never)\b|forbid", re.I)
+sentence_split_re = re.compile(r"(?<=[.!?])\s+|\n+")
 exclusion_needles = (
     ("/exchange", re.compile(r"/exchange")),
     ("order placement", re.compile(r"order placement", re.I)),
@@ -101,31 +102,30 @@ usage_near_exchange = re.compile(
     r"\b(?:use|used|uses|using|call|calls|calling|called|write|writes|writing|POST|enable|enabled)\b",
     re.I,
 )
-radius = 160
 
 
-def window(text: str, match: re.Match[str]) -> str:
-    return text[max(0, match.start() - radius) : min(len(text), match.end() + radius)]
-
-
-def has_negation(text: str, match: re.Match[str]) -> bool:
-    return bool(neg_re.search(window(text, match)))
+def sentences(text: str) -> list[str]:
+    return [part for part in sentence_split_re.split(text) if part.strip()]
 
 
 def doc_errors(label: str, text: str) -> list[str]:
     errors: list[str] = []
+    parts = sentences(text)
     for name, needle in exclusion_needles:
-        matches = list(needle.finditer(text))
-        if not any(has_negation(text, match) for match in matches):
+        if not any(needle.search(part) and neg_re.search(part) for part in parts):
             errors.append(f"{label} has no no/not/never/forbid exclusion near {name}")
     for inverse in inverse_res:
-        for match in inverse.finditer(text):
-            if not has_negation(text, match):
+        for part in parts:
+            if neg_re.search(part):
+                continue
+            match = inverse.search(part)
+            if match:
                 errors.append(f"{label} inverse claim {match.group(0)!r}")
                 break
-    for match in re.finditer(r"/exchange", text):
-        chunk = window(text, match)
-        if not neg_re.search(chunk) and usage_near_exchange.search(chunk):
+    for part in parts:
+        if "/exchange" not in part or neg_re.search(part):
+            continue
+        if usage_near_exchange.search(part):
             errors.append(f"{label} treats /exchange as something to call or write")
             break
     return errors
@@ -149,12 +149,12 @@ def snapshot_section(status_text: str) -> str:
 
 def snapshot_errors(label: str, text: str) -> list[str]:
     errors: list[str] = []
-    for part in re.split(r"(?<=[.!?])\s+|\n+", text):
-        if not part.strip() or neg_re.search(part):
+    for part in sentences(text):
+        if neg_re.search(part):
             continue
-        gate_passed = re.search(r"\bgate\s+(?:had\s+|has\s+)?PASSED\b", part)
+        gate_passed = re.search(r"\bgate\s+(?:had\s+|has\s+)?passed\b", part, re.I)
         full_passed = re.search(r"full[- ]coverage", part, re.I) and re.search(
-            r"\bPASSED\b", part
+            r"\bpassed\b", part, re.I
         )
         if gate_passed or full_passed:
             errors.append(f"{label} claims the full-coverage gate PASSED")
@@ -169,11 +169,13 @@ def fail_if(condition: bool, message: str, errors: list[str]) -> None:
 
 spec_text = spec_path.read_text()
 plan_text = plan_path.read_text()
+trace_text = trace_path.read_text()
 status_text = status_path.read_text()
 snap_text = snapshot_section(status_text)
 errors = (
     doc_errors(str(spec_path), spec_text)
     + doc_errors(str(plan_path), plan_text)
+    + doc_errors(str(trace_path), trace_text)
     + snapshot_errors(str(status_path), snap_text)
 )
 
@@ -193,10 +195,27 @@ bad_plan = (
     "The project now places orders via `/exchange` using action signing and private keys "
     "with automatic copy trading enabled. Order placement is a product capability.\n"
 )
+bad_ambiguity = (
+    "There is no ambiguity here. The desk places orders via `/exchange` for tracked "
+    "wallets, and automatic copy trading is enabled by default for tier-1 accounts.\n"
+)
+good_trace = (
+    "Read-only scope is unchanged: no `/exchange`, signing, private keys, "
+    "order placement, or copy-trading execution.\n"
+)
+bad_trace = (
+    "Read-only scope is lifted: the desk places orders via /exchange and "
+    "automatic copy trading is enabled.\n"
+)
 bad_snap = (
     "## 2026-08-20 snapshot\n"
     "Wallet, analytics, API, and desk surfaces remain scaffold or planned. "
     "The Hyperliquid full-coverage expansion gate PASSED.\n"
+)
+bad_snap_lower = (
+    "## 2026-08-20 snapshot\n"
+    "Wallet, analytics, API, and desk surfaces remain scaffold or planned. "
+    "The full-coverage expansion gate passed.\n"
 )
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -204,7 +223,11 @@ with tempfile.TemporaryDirectory() as tmp:
     cases = (
         ("inverse-plan.md", bad_plan, "doc", True),
         ("plan-s11.md", good_s11, "doc", False),
+        ("no-ambiguity.md", bad_ambiguity, "doc", True),
+        ("trace-ok.md", good_trace, "doc", False),
+        ("trace-inverse.md", bad_trace, "doc", True),
         ("status-passed.md", bad_snap, "status", True),
+        ("status-passed-lower.md", bad_snap_lower, "status", True),
         ("status-snapshot.md", good_snap, "status", False),
     )
     for name, body, kind, must_fail in cases:
