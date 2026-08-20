@@ -105,6 +105,12 @@ pub trait RawSegmentArchive: Send + Sync {
         source_id: &SourceId,
         cursor_epoch: &str,
     ) -> Result<bool, RawSegmentArchiveError>;
+
+    async fn load_checkpoint_entries(
+        &self,
+        chain_id: &ChainId,
+        source_id: &SourceId,
+    ) -> Result<Option<RawArchiveCheckpointEntriesV2>, RawSegmentArchiveError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +375,47 @@ impl RawSegmentArchive for BlockingRawSegmentArchive {
         })
         .await
         .map_err(|_| RawSegmentArchiveError::BlockingTask)?
+    }
+
+    async fn load_checkpoint_entries(
+        &self,
+        chain_id: &ChainId,
+        source_id: &SourceId,
+    ) -> Result<Option<RawArchiveCheckpointEntriesV2>, RawSegmentArchiveError> {
+        let v3 = self.v3.clone();
+        let chain_id = chain_id.clone();
+        let source_id = source_id.clone();
+        tokio::task::spawn_blocking(move || {
+            load_v3_checkpoint_entries(v3.as_deref(), chain_id, source_id)
+        })
+        .await
+        .map_err(|_| RawSegmentArchiveError::BlockingTask)?
+    }
+}
+
+fn load_v3_checkpoint_entries(
+    v3: Option<&RawV3Archive>,
+    chain_id: ChainId,
+    source_id: SourceId,
+) -> Result<Option<RawArchiveCheckpointEntriesV2>, RawSegmentArchiveError> {
+    let Some(v3) = v3 else {
+        return Ok(None);
+    };
+    let has_v3_current = v3
+        .maintenance_statistics(&chain_id, &source_id)
+        .map_err(RawSegmentArchiveError::Archive)?
+        .logical_manifest_count()
+        > 0;
+    match (
+        has_v3_current,
+        v3.load_checkpoint(&chain_id, &source_id)
+            .map_err(RawSegmentArchiveError::Archive)?,
+    ) {
+        (false, None) => Ok(None),
+        (true, Some(RawArchiveCheckpoint::V2(loaded))) => Ok(Some(loaded.entries().clone())),
+        (false, Some(_)) | (true, None) | (true, Some(RawArchiveCheckpoint::V1(_))) => {
+            Err(RawSegmentArchiveError::VerificationMismatch)
+        }
     }
 }
 

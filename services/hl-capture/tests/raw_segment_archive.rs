@@ -525,6 +525,14 @@ async fn v3_byte_offset_segment_archives_and_open_scrubs() {
         }
         other => panic!("expected archive-side V2 CURRENT, got {other:?}"),
     }
+    assert_eq!(
+        archiver
+            .load_checkpoint_entries(&chain, &source)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&entries)
+    );
     let scrub = archive.scrub(&chain, &source).unwrap();
     assert_eq!(scrub.logical_manifest_count(), 2);
     let spool_evidence = RawSpoolArchiveEvidence::try_new(
@@ -655,6 +663,14 @@ async fn v3_verify_requires_archive_side_checkpoint_current() {
     let chain = ChainId::new("mainnet").unwrap();
     let source = SourceId::new("node-fills").unwrap();
     assert!(archive.load_checkpoint(&chain, &source).unwrap().is_none());
+    let error = BlockingRawSegmentArchive::from_v3(archive.clone())
+        .load_checkpoint_entries(&chain, &source)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.reason_code(),
+        "capture_raw_archive.verification_mismatch"
+    );
 
     let spool_evidence = RawSpoolArchiveEvidence::try_new(
         closed.manifest_hash(),

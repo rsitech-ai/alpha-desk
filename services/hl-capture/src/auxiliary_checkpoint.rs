@@ -351,6 +351,90 @@ impl AuxiliaryArchiveCheckpoint {
             .collect()
     }
 
+    pub(crate) fn is_v2(&self) -> bool {
+        self.schema_version == CHECKPOINT_SCHEMA_V2
+    }
+
+    pub(crate) fn bind_v3(
+        directory: &Path,
+        source_id: &SourceId,
+        source_version: &str,
+        archive_identity: &str,
+        archive_entries: Option<RawArchiveCheckpointEntriesV2>,
+    ) -> Result<Option<Self>, SpoolError> {
+        let loaded = Self::load(directory, source_id, source_version, archive_identity)?;
+        match (loaded, archive_entries) {
+            (None, None) => Ok(None),
+            (None, Some(_)) | (Some(_), None) => Err(SpoolError::InvalidManifest),
+            (Some(checkpoint), Some(archive_entries)) => {
+                let covering = entries_covering_checkpoint(&archive_entries, &checkpoint)?;
+                match checkpoint.checkpoint_entries()? {
+                    Some(existing) if existing == covering => Ok(Some(checkpoint)),
+                    Some(_) => Err(SpoolError::InvalidManifest),
+                    None => Ok(Some(checkpoint.promote_to_v2(directory, covering)?)),
+                }
+            }
+        }
+    }
+
+    fn promote_to_v2(
+        self,
+        directory: &Path,
+        entries: RawArchiveCheckpointEntriesV2,
+    ) -> Result<Self, SpoolError> {
+        if self.schema_version != CHECKPOINT_SCHEMA || !self.raw_manifest_entries.is_empty() {
+            return Err(SpoolError::InvalidManifest);
+        }
+        if entries.first_local_sequence().get() != self.first_local_sequence
+            || entries.last_local_sequence().get() != self.local_sequence
+            || entries.entries().len() != self.raw_manifest_ids.len()
+        {
+            return Err(SpoolError::InvalidManifest);
+        }
+        let raw_manifest_entries = entries
+            .entries()
+            .iter()
+            .map(|entry| AuxiliaryManifestEntry {
+                manifest_id: entry.manifest_id().as_str().to_owned(),
+                manifest_sha256: hex::encode(entry.manifest_sha256()),
+                first_local_sequence: entry.local_sequence_range().start().get(),
+                last_local_sequence: entry.local_sequence_range().end().get(),
+            })
+            .collect();
+        let promoted = Self {
+            schema_version: CHECKPOINT_SCHEMA_V2.to_owned(),
+            raw_manifest_entries,
+            ..self
+        };
+        let source_id =
+            SourceId::new(promoted.source_id.clone()).map_err(|_| SpoolError::InvalidManifest)?;
+        let source_version = promoted.source_version.clone();
+        let archive_identity = promoted.archive_identity.clone();
+        promoted.validate(directory, &source_id, &source_version, &archive_identity)?;
+        match read_optional_checkpoint_file(directory, CHECKPOINT_V2_FILE)? {
+            Some(existing) if existing == promoted => {}
+            Some(_) => return Err(SpoolError::InvalidManifest),
+            None => {
+                persist_checkpoint_file(
+                    directory,
+                    CHECKPOINT_V2_TEMP_FILE,
+                    CHECKPOINT_V2_FILE,
+                    &promoted,
+                )?;
+                let readback = read_checkpoint_file(directory, CHECKPOINT_V2_FILE)?;
+                if readback != promoted {
+                    return Err(SpoolError::InvalidManifest);
+                }
+            }
+        }
+        persist_current_pointer(directory, ActiveCheckpoint::V2)?;
+        let current = load_current_pointer(directory)?.ok_or(SpoolError::InvalidManifest)?;
+        if current != ActiveCheckpoint::V2 {
+            return Err(SpoolError::InvalidManifest);
+        }
+        Ok(promoted)
+    }
+
     pub(crate) fn checkpoint_entries(
         &self,
     ) -> Result<Option<RawArchiveCheckpointEntriesV2>, SpoolError> {
@@ -491,6 +575,35 @@ impl AuxiliaryArchiveCheckpoint {
         }
         Ok(())
     }
+}
+
+fn entries_covering_checkpoint(
+    archive_entries: &RawArchiveCheckpointEntriesV2,
+    checkpoint: &AuxiliaryArchiveCheckpoint,
+) -> Result<RawArchiveCheckpointEntriesV2, SpoolError> {
+    let sliced = archive_entries
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry.local_sequence_range().end().get() >= checkpoint.first_local_sequence
+                && entry.local_sequence_range().start().get() <= checkpoint.local_sequence
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let covering =
+        RawArchiveCheckpointEntriesV2::try_new(sliced).map_err(|_| SpoolError::InvalidManifest)?;
+    if covering.first_local_sequence().get() != checkpoint.first_local_sequence
+        || covering.last_local_sequence().get() != checkpoint.local_sequence
+        || covering.entries().len() != checkpoint.raw_manifest_ids.len()
+    {
+        return Err(SpoolError::InvalidManifest);
+    }
+    for (expected_id, entry) in checkpoint.raw_manifest_ids.iter().zip(covering.entries()) {
+        if entry.manifest_id().as_str() != expected_id {
+            return Err(SpoolError::InvalidManifest);
+        }
+    }
+    Ok(covering)
 }
 
 fn decode_hash(value: &str) -> Result<[u8; 32], SpoolError> {
@@ -653,13 +766,21 @@ fn sync_directory(path: &Path) -> Result<(), SpoolError> {
 mod tests {
     use std::fs;
 
-    use domain_types::SourceId;
+    use domain_types::{ManifestId, SourceId};
+    use storage_ports::{
+        CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange, RawArchiveCheckpointEntriesV2,
+        RawArchiveCheckpointEntryV2,
+    };
     use tempfile::TempDir;
 
     use super::{
-        AuxiliaryArchiveCheckpoint, CHECKPOINT_FILE, CHECKPOINT_TEMP_FILE, CHECKPOINT_V2_TEMP_FILE,
+        AuxiliaryArchiveCheckpoint, CHECKPOINT_CURRENT_FILE, CHECKPOINT_FILE, CHECKPOINT_TEMP_FILE,
+        CHECKPOINT_V2_FILE, CHECKPOINT_V2_TEMP_FILE,
     };
-    use crate::spool::SpoolError;
+    use crate::spool::{
+        CloseReceipt, DurabilityPolicy, SourceSpool, SourceSpoolConfig, SpoolError,
+        SpoolRotationPolicy,
+    };
 
     #[test]
     fn uncommitted_checkpoint_temp_is_discarded_without_advancing_the_baseline() {
@@ -713,5 +834,288 @@ mod tests {
         assert!(loaded.is_none());
         assert!(!temporary.exists());
         assert!(!root.path().join(CHECKPOINT_FILE).exists());
+    }
+
+    #[test]
+    fn v3_publish_persists_checkpoint_v2_and_current_without_mutating_v1() {
+        let root = TempDir::new().unwrap();
+        let identity = "00".repeat(32);
+        let segment = sealed_fill_segment(root.path());
+        let v1_ids = [ManifestId::new("head").unwrap()];
+        AuxiliaryArchiveCheckpoint::publish(root.path(), &identity, &segment, &v1_ids, 1_000, None)
+            .unwrap();
+        let entries = matching_entries(&segment, "head", [0x11; 32]);
+
+        let published = AuxiliaryArchiveCheckpoint::publish_v2(
+            root.path(),
+            &identity,
+            &segment,
+            entries.clone(),
+            1_000,
+            None,
+        )
+        .unwrap();
+
+        assert!(published.is_v2());
+        assert_eq!(published.checkpoint_entries().unwrap().unwrap(), entries);
+        assert!(root.path().join(CHECKPOINT_FILE).is_file());
+        assert!(root.path().join(CHECKPOINT_V2_FILE).is_file());
+        assert!(root.path().join(CHECKPOINT_CURRENT_FILE).is_file());
+        let loaded = AuxiliaryArchiveCheckpoint::load(
+            root.path(),
+            &SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            &identity,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(loaded.is_v2());
+        assert_eq!(loaded, published);
+    }
+
+    #[test]
+    fn v1_stays_authoritative_until_checkpoint_current_switches() {
+        let root = TempDir::new().unwrap();
+        let identity = "00".repeat(32);
+        let segment = sealed_fill_segment(root.path());
+        let v1 = AuxiliaryArchiveCheckpoint::publish(
+            root.path(),
+            &identity,
+            &segment,
+            &[ManifestId::new("head").unwrap()],
+            1_000,
+            None,
+        )
+        .unwrap();
+        AuxiliaryArchiveCheckpoint::publish_v2(
+            root.path(),
+            &identity,
+            &segment,
+            matching_entries(&segment, "head", [0x11; 32]),
+            1_000,
+            None,
+        )
+        .unwrap();
+        fs::remove_file(root.path().join(CHECKPOINT_CURRENT_FILE)).unwrap();
+
+        let loaded = AuxiliaryArchiveCheckpoint::load(
+            root.path(),
+            &SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            &identity,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(!loaded.is_v2());
+        assert_eq!(loaded, v1);
+        assert!(root.path().join(CHECKPOINT_V2_FILE).is_file());
+    }
+
+    #[test]
+    fn current_v2_without_checkpoint_file_fails_closed() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join(CHECKPOINT_CURRENT_FILE),
+            "{\n  \"schema_version\": \"hl.auxiliary-archive-checkpoint-current.v1\",\n  \"active\": \"v2\"\n}\n",
+        )
+        .unwrap();
+
+        let error = AuxiliaryArchiveCheckpoint::load(
+            root.path(),
+            &SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            &"00".repeat(32),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, SpoolError::InvalidManifest));
+    }
+
+    #[test]
+    fn bind_v3_promotes_v1_from_archive_suffix_without_dropping_v1() {
+        let root = TempDir::new().unwrap();
+        let identity = "00".repeat(32);
+        let segment = sealed_fill_segment(root.path());
+        AuxiliaryArchiveCheckpoint::publish(
+            root.path(),
+            &identity,
+            &segment,
+            &[ManifestId::new("tail").unwrap()],
+            1_000,
+            None,
+        )
+        .unwrap();
+        rewrite_v1_sequence(root.path(), 2, 2, 1);
+        let archive_entries = RawArchiveCheckpointEntriesV2::try_new(vec![
+            RawArchiveCheckpointEntryV2::new(
+                ManifestId::new("head").unwrap(),
+                [0x11; 32],
+                LocalRecordSequenceRange::try_new(
+                    LocalRecordSequence::try_new(1).unwrap(),
+                    LocalRecordSequence::try_new(1).unwrap(),
+                )
+                .unwrap(),
+            ),
+            RawArchiveCheckpointEntryV2::new(
+                ManifestId::new("tail").unwrap(),
+                [0x22; 32],
+                LocalRecordSequenceRange::try_new(
+                    LocalRecordSequence::try_new(2).unwrap(),
+                    LocalRecordSequence::try_new(2).unwrap(),
+                )
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+
+        let bound = AuxiliaryArchiveCheckpoint::bind_v3(
+            root.path(),
+            &SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            &identity,
+            Some(archive_entries),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(bound.is_v2());
+        assert_eq!(
+            bound.checkpoint_entries().unwrap().unwrap().entries().len(),
+            1
+        );
+        assert_eq!(
+            bound.checkpoint_entries().unwrap().unwrap().entries()[0]
+                .manifest_id()
+                .as_str(),
+            "tail"
+        );
+        assert!(root.path().join(CHECKPOINT_FILE).is_file());
+        let reloaded = AuxiliaryArchiveCheckpoint::load(
+            root.path(),
+            &SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            &identity,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reloaded, bound);
+    }
+
+    #[test]
+    fn bind_v3_fails_closed_if_v3_current_exists_without_spool_checkpoint() {
+        let root = TempDir::new().unwrap();
+        let identity = "00".repeat(32);
+        let segment = sealed_fill_segment(root.path());
+        let entries = matching_entries(&segment, "head", [0x11; 32]);
+
+        let error = AuxiliaryArchiveCheckpoint::bind_v3(
+            root.path(),
+            &SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            &identity,
+            Some(entries),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, SpoolError::InvalidManifest));
+        assert!(!root.path().join(CHECKPOINT_V2_FILE).exists());
+        assert!(!root.path().join(CHECKPOINT_CURRENT_FILE).exists());
+    }
+
+    #[test]
+    fn bind_v3_fails_closed_if_spool_v1_would_move_v3_without_archive_cutover() {
+        let root = TempDir::new().unwrap();
+        let identity = "00".repeat(32);
+        let segment = sealed_fill_segment(root.path());
+        AuxiliaryArchiveCheckpoint::publish(
+            root.path(),
+            &identity,
+            &segment,
+            &[ManifestId::new("head").unwrap()],
+            1_000,
+            None,
+        )
+        .unwrap();
+
+        let error = AuxiliaryArchiveCheckpoint::bind_v3(
+            root.path(),
+            &SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            &identity,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, SpoolError::InvalidManifest));
+        assert!(!root.path().join(CHECKPOINT_V2_FILE).exists());
+        assert!(!root.path().join(CHECKPOINT_CURRENT_FILE).exists());
+        assert!(root.path().join(CHECKPOINT_FILE).is_file());
+    }
+
+    fn sealed_fill_segment(root: &std::path::Path) -> CloseReceipt {
+        use bytes::Bytes;
+        use hl_protocol::{ObservationClass, ReceiveTimestamps, SourceCursor, SourceObservation};
+
+        let mut spool = SourceSpool::open(
+            SourceSpoolConfig::try_new_with_cursor_policy(
+                root.join("spool/node-fills"),
+                SourceId::new("node-fills").unwrap(),
+                "hyperliquid-node-v1",
+                "spool-v1",
+                [0x43; 32],
+                DurabilityPolicy::FsyncEveryRecord,
+                SpoolRotationPolicy::try_new(u64::MAX, std::time::Duration::from_secs(3600))
+                    .unwrap(),
+                CursorPolicy::MonotonicByteOffset,
+            )
+            .unwrap(),
+            100,
+        )
+        .unwrap();
+        let observation = SourceObservation::new(
+            SourceId::new("node-fills").unwrap(),
+            "hyperliquid-node-v1",
+            ObservationClass::AuxiliaryLedger,
+            SourceCursor::new("node-fills-epoch", 19).unwrap(),
+            ReceiveTimestamps::new(1_000, 19).unwrap(),
+            "node-v1",
+            Bytes::from("fill-19"),
+            Vec::new(),
+            1024,
+        )
+        .unwrap();
+        spool.append(&observation, 1_000).unwrap();
+        spool.shutdown(200).unwrap().unwrap()
+    }
+
+    fn matching_entries(
+        segment: &CloseReceipt,
+        manifest_id: &str,
+        hash: [u8; 32],
+    ) -> RawArchiveCheckpointEntriesV2 {
+        let range = LocalRecordSequenceRange::try_new(
+            segment.manifest().first_local_sequence().unwrap(),
+            segment.manifest().last_local_sequence().unwrap(),
+        )
+        .unwrap();
+        RawArchiveCheckpointEntriesV2::try_new(vec![RawArchiveCheckpointEntryV2::new(
+            ManifestId::new(manifest_id).unwrap(),
+            hash,
+            range,
+        )])
+        .unwrap()
+    }
+
+    fn rewrite_v1_sequence(directory: &std::path::Path, first: u64, last: u64, record_count: u64) {
+        let path = directory.join(CHECKPOINT_FILE);
+        let encoded = fs::read(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["first_local_sequence"] = first.into();
+        value["local_sequence"] = last.into();
+        value["record_count"] = record_count.into();
+        let mut rewritten = serde_json::to_vec_pretty(&value).unwrap();
+        rewritten.push(b'\n');
+        fs::write(path, rewritten).unwrap();
     }
 }
