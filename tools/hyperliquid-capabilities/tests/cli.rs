@@ -167,6 +167,13 @@ fn coverage_and_diff_round_trip() {
 }
 
 #[test]
+fn coverage_report_rejects_unknown_fields() {
+    let error = parse_coverage_report(r#"{"schema_version":1,"rows":[],"unexpected":true}"#)
+        .expect_err("unknown fields must fail");
+    assert!(error.contains("invalid coverage report"), "{error}");
+}
+
+#[test]
 fn library_diff_detects_added_and_removed_rows() {
     let manifest = parse_manifest(&sample_manifest()).expect("sample");
     let left = coverage_report(&manifest);

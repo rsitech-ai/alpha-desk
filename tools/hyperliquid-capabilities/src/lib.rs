@@ -11,6 +11,15 @@ pub const MATRIX_RELATIVE: &str = "docs/hyperliquid/coverage-matrix.md";
 const SCHEMA_VERSION: u32 = 1;
 const KNOWN_NETWORKS: [&str; 2] = ["mainnet", "testnet"];
 
+pub const REST_INFO_WEIGHT_2: &[&str] = &[
+    "allMids",
+    "clearinghouseState",
+    "exchangeStatus",
+    "l2Book",
+    "orderStatus",
+    "spotClearinghouseState",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -48,8 +57,85 @@ impl Status {
     }
 
     #[must_use]
-    pub fn requires_fixture_set(self) -> bool {
-        self.as_str().starts_with("implemented")
+    pub const fn requires_fixture_set(self) -> bool {
+        match self {
+            Self::Implemented
+            | Self::ImplementedUnqualified
+            | Self::QualifiedLive
+            | Self::QualifiedReplay => true,
+            Self::Degraded
+            | Self::Partial
+            | Self::Planned
+            | Self::Unsupported
+            | Self::UnsupportedByNetwork
+            | Self::SourceUnavailable
+            | Self::SchemaUnknown
+            | Self::DisabledByPolicy => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRole {
+    Committed,
+    Provisional,
+    Reconciliation,
+    Enrichment,
+    #[serde(rename = "evidence-only")]
+    EvidenceOnly,
+}
+
+impl SourceRole {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::Provisional => "provisional",
+            Self::Reconciliation => "reconciliation",
+            Self::Enrichment => "enrichment",
+            Self::EvidenceOnly => "evidence-only",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateTarget {
+    CommittedState,
+    ReconciledSnapshot,
+    CanonicalState,
+    L4Book,
+    PositionState,
+    CanonicalEvent,
+    ReferenceSnapshot,
+}
+
+impl StateTarget {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CommittedState => "committed_state",
+            Self::ReconciledSnapshot => "reconciled_snapshot",
+            Self::CanonicalState => "canonical_state",
+            Self::L4Book => "l4_book",
+            Self::PositionState => "position_state",
+            Self::CanonicalEvent => "canonical_event",
+            Self::ReferenceSnapshot => "reference_snapshot",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_state_affecting(self) -> bool {
+        match self {
+            Self::CommittedState
+            | Self::ReconciledSnapshot
+            | Self::CanonicalState
+            | Self::L4Book
+            | Self::PositionState
+            | Self::CanonicalEvent => true,
+            Self::ReferenceSnapshot => false,
+        }
     }
 }
 
@@ -69,7 +155,7 @@ pub struct Capability {
     pub transport: String,
     pub identifier: String,
     pub domain: String,
-    pub source_role: String,
+    pub source_role: SourceRole,
     pub request_cost: String,
     pub pagination: String,
     pub parser: String,
@@ -78,7 +164,7 @@ pub struct Capability {
     pub retention: String,
     pub freshness_target_ms: u64,
     pub owner: String,
-    pub state_target: String,
+    pub state_target: StateTarget,
     pub status: Status,
     #[serde(default)]
     pub limitations: String,
@@ -94,6 +180,7 @@ pub struct Manifest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CoverageRow {
     pub id: String,
     pub source: String,
@@ -105,6 +192,7 @@ pub struct CoverageRow {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CoverageReport {
     pub schema_version: u32,
     pub rows: Vec<CoverageRow>,
@@ -122,6 +210,27 @@ impl CoverageDiff {
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
     }
+}
+
+#[must_use]
+pub fn rest_info_base_weight(identifier: &str) -> u32 {
+    if REST_INFO_WEIGHT_2.contains(&identifier) {
+        2
+    } else if identifier == "userRole" {
+        60
+    } else {
+        20
+    }
+}
+
+#[must_use]
+pub fn parse_request_cost_base_weight(request_cost: &str) -> Option<u32> {
+    let rest = request_cost.strip_prefix("base:")?;
+    let number = rest.split_whitespace().next()?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    number.parse().ok()
 }
 
 pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
@@ -296,8 +405,11 @@ fn validate_capability(
     if !seen.insert(capability.id.clone()) {
         errors.push(format!("duplicate capability id: {}", capability.id));
     }
-    if capability.parser.trim().is_empty() || capability.owner.trim().is_empty() {
-        errors.push(format!("missing parser owner: {}", capability.id));
+    if capability.parser.trim().is_empty() {
+        errors.push(format!("missing parser: {}", capability.id));
+    }
+    if capability.owner.trim().is_empty() {
+        errors.push(format!("missing owner: {}", capability.id));
     }
     if capability.status.requires_fixture_set()
         && (capability.fixture_set.trim().is_empty() || capability.fixture_set == "none")
@@ -307,8 +419,23 @@ fn validate_capability(
     if capability.identifier.trim().is_empty() {
         errors.push(format!("missing identifier: {}", capability.id));
     }
+    if capability.freshness_target_ms == 0 {
+        errors.push(format!(
+            "freshness_target_ms must be greater than 0: {}",
+            capability.id
+        ));
+    }
+    if capability.transport == "rest_info" {
+        let expected = rest_info_base_weight(&capability.identifier);
+        if parse_request_cost_base_weight(&capability.request_cost) != Some(expected) {
+            errors.push(format!(
+                "request_cost must use base:{expected}: {}",
+                capability.id
+            ));
+        }
+    }
     validate_networks(capability, errors);
-    if capability.parser == "opaque_continue" && is_state_affecting(&capability.state_target) {
+    if capability.parser == "opaque_continue" && capability.state_target.is_state_affecting() {
         errors.push(format!(
             "state-affecting capability cannot be opaque_continue: {}",
             capability.id
@@ -328,10 +455,6 @@ fn validate_networks(capability: &Capability, errors: &mut Vec<String>) {
             ));
         }
     }
-    let status_reason = matches!(
-        capability.status,
-        Status::Unsupported | Status::UnsupportedByNetwork
-    ) && !capability.limitations.trim().is_empty();
     for network in KNOWN_NETWORKS {
         if capability.network.iter().any(|value| value == network) {
             continue;
@@ -339,8 +462,7 @@ fn validate_networks(capability: &Capability, errors: &mut Vec<String>) {
         let explained = capability
             .unsupported_networks
             .iter()
-            .any(|skipped| skipped.network == network && !skipped.reason.trim().is_empty())
-            || status_reason;
+            .any(|skipped| skipped.network == network && !skipped.reason.trim().is_empty());
         if !explained {
             errors.push(format!(
                 "unsupported network requires a reason: {} ({network})",
@@ -348,17 +470,6 @@ fn validate_networks(capability: &Capability, errors: &mut Vec<String>) {
             ));
         }
     }
-}
-
-fn is_state_affecting(state_target: &str) -> bool {
-    matches!(
-        state_target,
-        "committed_state"
-            | "reconciled_snapshot"
-            | "canonical_state"
-            | "l4_book"
-            | "position_state"
-    )
 }
 
 fn row_map(report: &CoverageReport) -> BTreeMap<&String, &CoverageRow> {

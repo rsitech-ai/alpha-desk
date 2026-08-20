@@ -65,9 +65,20 @@
         "parser": { "$ref": "#/$defs/nonEmpty" },
         "fixture_set": { "type": "string" },
         "retention": { "$ref": "#/$defs/nonEmpty" },
-        "freshness_target_ms": { "type": "integer", "minimum": 0 },
+        "freshness_target_ms": { "type": "integer", "minimum": 1 },
         "owner": { "$ref": "#/$defs/nonEmpty" },
-        "state_target": { "$ref": "#/$defs/nonEmpty" },
+        "state_target": {
+          "type": "string",
+          "enum": [
+            "committed_state",
+            "reconciled_snapshot",
+            "canonical_state",
+            "l4_book",
+            "position_state",
+            "canonical_event",
+            "reference_snapshot"
+          ]
+        },
         "status": {
           "type": "string",
           "enum": [
