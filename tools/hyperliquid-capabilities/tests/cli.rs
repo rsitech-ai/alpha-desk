@@ -158,6 +158,10 @@ fn cost_and_role_changes_are_visible_in_matrix_and_diff() {
         .output()
         .expect("render-docs --check cost");
     assert_eq!(cost_check.status.code(), Some(1));
+    assert_eq!(
+        stderr(&cost_check),
+        "coverage-matrix: generated output differs from docs/hyperliquid/coverage-matrix.md\n"
+    );
 
     let left_report = coverage_report(&parsed);
     assert_eq!(left_report.rows[0].source_role, "reconciliation");
@@ -222,6 +226,7 @@ fn coverage_and_diff_round_trip() {
         .expect("coverage");
     assert_eq!(coverage.status.code(), Some(0), "{}", stderr(&coverage));
     let report = parse_coverage_report(&stdout(&coverage)).expect("coverage json");
+    assert_eq!(report.schema_version, 2);
     assert_eq!(report.rows.len(), 1);
 
     let left_path = root.join("left.json");
@@ -266,9 +271,51 @@ fn coverage_and_diff_round_trip() {
 
 #[test]
 fn coverage_report_rejects_unknown_fields() {
-    let error = parse_coverage_report(r#"{"schema_version":1,"rows":[],"unexpected":true}"#)
+    let error = parse_coverage_report(r#"{"schema_version":2,"rows":[],"unexpected":true}"#)
         .expect_err("unknown fields must fail");
     assert!(error.contains("invalid coverage report"), "{error}");
+}
+
+#[test]
+fn coverage_report_rejects_schema_version_mismatch() {
+    let v1_missing_fields = r#"{"schema_version":1,"rows":[{"id":"official.info.all_mids","source":"official","transport":"rest_info","identifier":"allMids","domain":"market_data","status":"planned","owner":"hl-capture"}]}"#;
+    let error = parse_coverage_report(v1_missing_fields).expect_err("v1 must fail closed");
+    assert!(
+        error.contains("coverage report schema_version must be 2, got 1"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("missing field"),
+        "version mismatch must not look like a serde field error: {error}"
+    );
+
+    let root = temp_root();
+    write_workspace(&root, &sample_manifest(), None);
+    let left_path = root.join("left.json");
+    let right_path = root.join("right.json");
+    fs::write(&left_path, format!("{v1_missing_fields}\n")).expect("v1 left");
+    let current = coverage_report(&parse_manifest(&sample_manifest()).expect("sample"));
+    fs::write(
+        &right_path,
+        encode_coverage_report(&current).expect("encode"),
+    )
+    .expect("v2 right");
+    let mismatched = bin()
+        .args([
+            "diff",
+            "--left",
+            left_path.to_str().unwrap(),
+            "--right",
+            right_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("diff version mismatch");
+    assert_eq!(mismatched.status.code(), Some(1));
+    assert_eq!(
+        stderr(&mismatched),
+        "coverage report schema_version must be 2, got 1\n"
+    );
+    fs::remove_dir_all(&root).expect("cleanup");
 }
 
 #[test]

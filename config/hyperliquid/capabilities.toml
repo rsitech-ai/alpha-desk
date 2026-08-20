@@ -1851,6 +1851,8 @@ state_target = "canonical_event"
 status = "planned"
 limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
 
+# Official S3 explorer-blocks archive (§6.1 priority 4), not community explorers
+# (§6.1 priority 6). evidence-only / canonical_event is the honest pair.
 [[capability]]
 id = "s3.explorer_blocks"
 source = "s3"

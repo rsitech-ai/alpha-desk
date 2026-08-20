@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MANIFEST_RELATIVE: &str = "config/hyperliquid/capabilities.toml";
 pub const MATRIX_RELATIVE: &str = "docs/hyperliquid/coverage-matrix.md";
-const SCHEMA_VERSION: u32 = 1;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const COVERAGE_SCHEMA_VERSION: u32 = 2;
 const KNOWN_NETWORKS: [&str; 2] = ["mainnet", "testnet"];
 
 pub const REST_INFO_WEIGHT_2: &[&str] = &[
@@ -99,6 +100,10 @@ impl SourceRole {
     }
 }
 
+// §4.1 names five mapping targets: canonical_event, reconciled_snapshot,
+// reference_snapshot, evm_fact, discovery_only. committed_state and l4_book
+// are in-use extensions (node/L4 rows). canonical_state and position_state
+// are reserved for later waves (spec §5); keep them even at zero rows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StateTarget {
@@ -137,8 +142,9 @@ impl StateTarget {
             | Self::CanonicalState
             | Self::L4Book
             | Self::PositionState
-            | Self::CanonicalEvent => true,
-            Self::ReferenceSnapshot | Self::EvmFact | Self::DiscoveryOnly => false,
+            | Self::CanonicalEvent
+            | Self::EvmFact => true,
+            Self::ReferenceSnapshot | Self::DiscoveryOnly => false,
         }
     }
 }
@@ -253,9 +259,9 @@ pub fn load_manifest(path: &Path) -> Result<Manifest, String> {
 
 pub fn validate_manifest(manifest: &Manifest) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
-    if manifest.schema_version != SCHEMA_VERSION {
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
         errors.push(format!(
-            "schema_version must be {SCHEMA_VERSION}, got {}",
+            "schema_version must be {MANIFEST_SCHEMA_VERSION}, got {}",
             manifest.schema_version
         ));
     }
@@ -316,7 +322,7 @@ pub fn coverage_report(manifest: &Manifest) -> CoverageReport {
         .collect();
     rows.sort_by(|left, right| left.id.cmp(&right.id));
     CoverageReport {
-        schema_version: SCHEMA_VERSION,
+        schema_version: COVERAGE_SCHEMA_VERSION,
         rows,
     }
 }
@@ -383,6 +389,12 @@ pub fn diff_reports(left: &CoverageReport, right: &CoverageReport) -> CoverageDi
 }
 
 pub fn parse_coverage_report(text: &str) -> Result<CoverageReport, String> {
+    let version = peek_coverage_schema_version(text)?;
+    if version != COVERAGE_SCHEMA_VERSION {
+        return Err(format!(
+            "coverage report schema_version must be {COVERAGE_SCHEMA_VERSION}, got {version}"
+        ));
+    }
     serde_json::from_str(text).map_err(|error| format!("invalid coverage report: {error}"))
 }
 
@@ -433,12 +445,7 @@ fn validate_capability(
     if capability.identifier.trim().is_empty() {
         errors.push(format!("missing identifier: {}", capability.id));
     }
-    if capability.freshness_target_ms == Some(0) {
-        errors.push(format!(
-            "freshness_target_ms must be greater than 0: {}",
-            capability.id
-        ));
-    }
+    validate_freshness_target(capability, errors);
     if capability.transport == "rest_info" {
         let expected = rest_info_base_weight(&capability.identifier);
         if parse_request_cost_base_weight(&capability.request_cost) != Some(expected) {
@@ -455,6 +462,43 @@ fn validate_capability(
             capability.id
         ));
     }
+}
+
+fn validate_freshness_target(capability: &Capability, errors: &mut Vec<String>) {
+    if is_periodic_node_snapshot(capability) {
+        if capability.freshness_target_ms.is_some() {
+            errors.push(format!(
+                "periodic snapshot must omit freshness_target_ms: {}",
+                capability.id
+            ));
+        }
+        return;
+    }
+    match capability.freshness_target_ms {
+        None => errors.push(format!("missing freshness_target_ms: {}", capability.id)),
+        Some(0) => errors.push(format!(
+            "freshness_target_ms must be greater than 0: {}",
+            capability.id
+        )),
+        Some(_) => {}
+    }
+}
+
+fn is_periodic_node_snapshot(capability: &Capability) -> bool {
+    // ponytail: node_files + identifier ending in `-snapshots` is the live-stream vs
+    // periodic ABCI/L4 split. Ceiling: a node snapshot not named `*-snapshots`, or a
+    // live stream that is, needs an explicit access_mode field.
+    capability.transport == "node_files" && capability.identifier.ends_with("-snapshots")
+}
+
+fn peek_coverage_schema_version(text: &str) -> Result<u32, String> {
+    #[derive(Deserialize)]
+    struct VersionOnly {
+        schema_version: u32,
+    }
+    serde_json::from_str::<VersionOnly>(text)
+        .map(|value| value.schema_version)
+        .map_err(|error| format!("invalid coverage report: {error}"))
 }
 
 fn validate_networks(capability: &Capability, errors: &mut Vec<String>) {

@@ -3,8 +3,8 @@ use std::fs;
 use std::path::Path;
 
 use hyperliquid_capabilities::{
-    parse_manifest, parse_request_cost_base_weight, rest_info_base_weight, validate_manifest,
-    SourceRole, StateTarget, REST_INFO_WEIGHT_2,
+    REST_INFO_WEIGHT_2, SourceRole, StateTarget, parse_manifest, parse_request_cost_base_weight,
+    rest_info_base_weight, validate_manifest,
 };
 
 fn workspace_root() -> std::path::PathBuf {
@@ -304,8 +304,8 @@ fn hyperevm_s3_rows_are_evm_fact() {
             .unwrap_or_else(|| panic!("missing {id}"));
         assert_eq!(capability.state_target, StateTarget::EvmFact, "{id}");
         assert!(
-            !capability.state_target.is_state_affecting(),
-            "{id} must not be HyperCore state-affecting"
+            capability.state_target.is_state_affecting(),
+            "{id} is a canonical EVM chain fact"
         );
     }
 }
@@ -313,22 +313,56 @@ fn hyperevm_s3_rows_are_evm_fact() {
 #[test]
 fn periodic_node_snapshots_omit_freshness_target() {
     let manifest = committed_manifest();
-    for id in ["node.abci_state_snapshots", "node.l4_snapshots"] {
-        let capability = manifest
-            .capability
-            .iter()
-            .find(|row| row.id == *id)
-            .unwrap_or_else(|| panic!("missing {id}"));
-        assert_eq!(capability.freshness_target_ms, None, "{id}");
+    let omitting: Vec<_> = manifest
+        .capability
+        .iter()
+        .filter(|capability| capability.freshness_target_ms.is_none())
+        .map(|capability| capability.id.as_str())
+        .collect();
+    assert_eq!(omitting, ["node.abci_state_snapshots", "node.l4_snapshots"]);
+    for capability in &manifest.capability {
+        if omitting.contains(&capability.id.as_str()) {
+            continue;
+        }
+        assert!(
+            capability.freshness_target_ms.is_some(),
+            "{} must declare freshness_target_ms",
+            capability.id
+        );
     }
 }
 
 #[test]
 fn schema_lists_section_4_1_mapping_targets() {
-    let schema = fs::read_to_string(
-        workspace_root().join("schemas/hyperliquid/capability-manifest-v1.schema.json"),
+    let schema: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            workspace_root().join("schemas/hyperliquid/capability-manifest-v1.schema.json"),
+        )
+        .expect("schema"),
     )
-    .expect("schema");
+    .expect("schema json");
+    let listed: BTreeSet<&str> =
+        schema["$defs"]["capability"]["properties"]["state_target"]["enum"]
+            .as_array()
+            .expect("state_target enum")
+            .iter()
+            .map(|value| value.as_str().expect("enum string"))
+            .collect();
+    let rust: BTreeSet<&str> = [
+        StateTarget::CommittedState,
+        StateTarget::ReconciledSnapshot,
+        StateTarget::CanonicalState,
+        StateTarget::L4Book,
+        StateTarget::PositionState,
+        StateTarget::CanonicalEvent,
+        StateTarget::ReferenceSnapshot,
+        StateTarget::EvmFact,
+        StateTarget::DiscoveryOnly,
+    ]
+    .into_iter()
+    .map(StateTarget::as_str)
+    .collect();
+    assert_eq!(listed, rust);
     for name in [
         "canonical_event",
         "reconciled_snapshot",
@@ -336,10 +370,7 @@ fn schema_lists_section_4_1_mapping_targets() {
         "evm_fact",
         "discovery_only",
     ] {
-        assert!(
-            schema.contains(&format!("\"{name}\"")),
-            "schema must list {name}"
-        );
+        assert!(listed.contains(name), "schema must list {name}");
     }
 }
 

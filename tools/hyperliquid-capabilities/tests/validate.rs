@@ -1,6 +1,6 @@
 use hyperliquid_capabilities::{
-    parse_manifest, parse_request_cost_base_weight, rest_info_base_weight, validate_manifest,
-    Status, REST_INFO_WEIGHT_2,
+    REST_INFO_WEIGHT_2, Status, parse_manifest, parse_request_cost_base_weight,
+    rest_info_base_weight, validate_manifest,
 };
 
 fn valid_manifest() -> String {
@@ -27,6 +27,21 @@ status = "planned"
 limitations = "REST /info adapter is not on this tree"
 "#
     .to_owned()
+}
+
+fn periodic_snapshot_manifest() -> String {
+    valid_manifest()
+        .replace("transport = \"rest_info\"", "transport = \"node_files\"")
+        .replace(
+            "identifier = \"allMids\"",
+            "identifier = \"abci-state-snapshots\"",
+        )
+        .replace("request_cost = \"base:2\"", "request_cost = \"local_read\"")
+        .replace(
+            "state_target = \"reference_snapshot\"",
+            "state_target = \"committed_state\"",
+        )
+        .replace("freshness_target_ms = 1000\n", "")
 }
 
 fn assert_error_contains(source: &str, needle: &str) {
@@ -134,6 +149,9 @@ fn state_affecting_capabilities_cannot_be_opaque_continue() {
         "canonical_event",
         "reconciled_snapshot",
         "l4_book",
+        "canonical_state",
+        "position_state",
+        "evm_fact",
     ] {
         let source = valid_manifest()
             .replace("parser = \"planned\"", "parser = \"opaque_continue\"")
@@ -201,27 +219,56 @@ fn rest_info_request_cost_mismatch_fails() {
 }
 
 #[test]
-fn omitted_freshness_target_is_allowed() {
+fn streaming_row_must_have_freshness_target() {
     let source = valid_manifest().replace("freshness_target_ms = 1000\n", "");
-    let manifest = parse_manifest(&source).expect("omitted freshness must parse");
-    validate_manifest(&manifest).expect("omitted freshness must pass");
-    assert_eq!(manifest.capability[0].freshness_target_ms, None);
+    assert_error_contains(
+        &source,
+        "missing freshness_target_ms: official.info.all_mids",
+    );
 }
 
 #[test]
-fn evm_fact_and_discovery_only_may_be_opaque_continue() {
-    for target in ["evm_fact", "discovery_only"] {
-        let source = valid_manifest()
-            .replace("parser = \"planned\"", "parser = \"opaque_continue\"")
-            .replace(
-                "state_target = \"reference_snapshot\"",
-                &format!("state_target = \"{target}\""),
-            );
-        let manifest = parse_manifest(&source).expect("fixture must parse");
-        validate_manifest(&manifest)
-            .unwrap_or_else(|errors| panic!("{target} opaque_continue must pass: {errors:?}"));
-        assert!(!manifest.capability[0].state_target.is_state_affecting());
-    }
+fn periodic_snapshot_must_omit_freshness_target() {
+    let source = periodic_snapshot_manifest();
+    let manifest = parse_manifest(&source).expect("periodic snapshot must parse");
+    validate_manifest(&manifest).expect("periodic snapshot omitting freshness must pass");
+    assert_eq!(manifest.capability[0].freshness_target_ms, None);
+
+    let with_fake_slo = source.replace(
+        "retention = \"raw_indefinite\"\n",
+        "retention = \"raw_indefinite\"\nfreshness_target_ms = 1000\n",
+    );
+    assert_error_contains(
+        &with_fake_slo,
+        "periodic snapshot must omit freshness_target_ms: official.info.all_mids",
+    );
+}
+
+#[test]
+fn discovery_only_may_be_opaque_continue() {
+    let source = valid_manifest()
+        .replace("parser = \"planned\"", "parser = \"opaque_continue\"")
+        .replace(
+            "state_target = \"reference_snapshot\"",
+            "state_target = \"discovery_only\"",
+        );
+    let manifest = parse_manifest(&source).expect("fixture must parse");
+    validate_manifest(&manifest).expect("discovery_only opaque_continue must pass");
+    assert!(!manifest.capability[0].state_target.is_state_affecting());
+}
+
+#[test]
+fn evm_fact_cannot_be_opaque_continue() {
+    let source = valid_manifest()
+        .replace("parser = \"planned\"", "parser = \"opaque_continue\"")
+        .replace(
+            "state_target = \"reference_snapshot\"",
+            "state_target = \"evm_fact\"",
+        );
+    assert_error_contains(
+        &source,
+        "state-affecting capability cannot be opaque_continue: official.info.all_mids",
+    );
 }
 
 #[test]
