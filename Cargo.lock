@@ -2238,6 +2238,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperliquid-capabilities"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"

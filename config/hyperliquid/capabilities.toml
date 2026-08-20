@@ -1,0 +1,1927 @@
+schema_version = 1
+
+# Bootstrap inventory from spec Appendix B plus current node streams and S3 archives.
+# REST/WS/S3/EVM adapters are not on this tree. Node replica_cmds / NodeLine rows
+# are implemented_unqualified only when hl-protocol parsers and fixtures/source/node-v1 exist.
+
+[[capability]]
+id = "official.info.all_mids"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "allMids"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.open_orders"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "openOrders"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.frontend_open_orders"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "frontendOpenOrders"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_fills"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userFills"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_fills_by_time"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userFillsByTime"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20 variable:window"
+pagination = "by_time"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.recent_trades"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "recentTrades"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_rate_limit"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userRateLimit"
+domain = "system"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.order_status"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "orderStatus"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.l2_book"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "l2Book"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.candle_snapshot"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "candleSnapshot"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:20 variable:window"
+pagination = "by_time"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.exchange_status"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "exchangeStatus"
+domain = "system"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.historical_orders"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "historicalOrders"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20 variable:window"
+pagination = "by_time"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_twap_slice_fills"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userTwapSliceFills"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_twap_slice_fills_by_time"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userTwapSliceFillsByTime"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20 variable:window"
+pagination = "by_time"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.twap_history"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "twapHistory"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.sub_accounts"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "subAccounts"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_to_multi_sig_signers"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userToMultiSigSigners"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.portfolio"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "portfolio"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.referral"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "referral"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_fees"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userFees"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_role"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userRole"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_abstraction"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userAbstraction"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_dex_abstraction"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userDexAbstraction"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.extra_agents"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "extraAgents"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.approved_builders"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "approvedBuilders"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_vault_equities"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userVaultEquities"
+domain = "vault"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.vault_details"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "vaultDetails"
+domain = "vault"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.delegator_summary"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "delegatorSummary"
+domain = "staking"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.delegations"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "delegations"
+domain = "staking"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.delegator_history"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "delegatorHistory"
+domain = "staking"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.delegator_rewards"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "delegatorRewards"
+domain = "staking"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.validator_stats"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "validatorStats"
+domain = "staking"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.aligned_quote_token_info"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "alignedQuoteTokenInfo"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.borrow_lend_user_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "borrowLendUserState"
+domain = "borrow_lend"
+source_role = "reconciliation"
+request_cost = "base:20"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.borrow_lend_reserve_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "borrowLendReserveState"
+domain = "borrow_lend"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.all_borrow_lend_reserve_states"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "allBorrowLendReserveStates"
+domain = "borrow_lend"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perp_dexs"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpDexs"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.meta"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "meta"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.meta_and_asset_ctxs"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "metaAndAssetCtxs"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.all_perp_metas"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "allPerpMetas"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.clearinghouse_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "clearinghouseState"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_funding"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userFunding"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20 variable:window"
+pagination = "by_time"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.user_non_funding_ledger_updates"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "userNonFundingLedgerUpdates"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20 variable:window"
+pagination = "by_time"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.non_user_funding_updates"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "nonUserFundingUpdates"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.funding_history"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "fundingHistory"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:20 variable:window"
+pagination = "by_time"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.predicted_fundings"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "predictedFundings"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perps_at_open_interest_cap"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpsAtOpenInterestCap"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perp_deploy_auction_status"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpDeployAuctionStatus"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.active_asset_data"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "activeAssetData"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perp_dex_limits"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpDexLimits"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perp_dex_status"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpDexStatus"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perp_annotation"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpAnnotation"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perp_categories"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpCategories"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.perp_concise_annotations"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "perpConciseAnnotations"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.spot_meta"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "spotMeta"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.spot_meta_and_asset_ctxs"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "spotMetaAndAssetCtxs"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.spot_clearinghouse_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "spotClearinghouseState"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "base:20"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.spot_deploy_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "spotDeployState"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.spot_pair_deploy_auction_status"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "spotPairDeployAuctionStatus"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.token_details"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "rest_info"
+identifier = "tokenDetails"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree"
+
+[[capability]]
+id = "official.info.outcome_meta"
+source = "official"
+network = ["testnet"]
+transport = "rest_info"
+identifier = "outcomeMeta"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "base:2"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "REST /info adapter is not on this tree. outcomeMeta is documented as testnet-only"
+unsupported_networks = [
+  { network = "mainnet", reason = "official docs currently document outcomeMeta as testnet-only" },
+]
+
+[[capability]]
+id = "official.ws.all_mids"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "allMids"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.notification"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "notification"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.web_data3"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "webData3"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.twap_states"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "twapStates"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.clearinghouse_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "clearinghouseState"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.open_orders"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "openOrders"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.candle"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "candle"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.l2_book"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "l2Book"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.trades"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "trades"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.order_updates"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "orderUpdates"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.user_events"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "userEvents"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.user_fills"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "userFills"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.user_fundings"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "userFundings"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.user_non_funding_ledger_updates"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "userNonFundingLedgerUpdates"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.active_asset_ctx"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "activeAssetCtx"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.active_asset_data"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "activeAssetData"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.user_twap_slice_fills"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "userTwapSliceFills"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.user_twap_history"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "userTwapHistory"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.bbo"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "bbo"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.spot_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "spotState"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.all_dexs_clearinghouse_state"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "allDexsClearinghouseState"
+domain = "account"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reconciled_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "official.ws.all_dexs_asset_ctxs"
+source = "official"
+network = ["mainnet", "testnet"]
+transport = "websocket"
+identifier = "allDexsAssetCtxs"
+domain = "market_data"
+source_role = "reconciliation"
+request_cost = "ws_subscription"
+pagination = "none"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "WebSocket adapter is not on this tree. First message on history feeds may be a snapshot"
+
+[[capability]]
+id = "node.transaction_blocks"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "transaction-blocks"
+domain = "node"
+source_role = "committed"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "hl_protocol::node::v1::parse_node_record"
+fixture_set = "node_v1"
+retention = "raw_indefinite"
+freshness_target_ms = 0
+owner = "hl-capture"
+state_target = "committed_state"
+status = "implemented_unqualified"
+limitations = "Parser and fixtures/source/node-v1 exist. Not live-qualified"
+
+[[capability]]
+id = "node.trades"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "trades"
+domain = "node"
+source_role = "enrichment"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "hl_protocol::node::v1::parse_node_record"
+fixture_set = "node_v1"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "implemented_unqualified"
+limitations = "Parser and fixtures/source/node-v1 exist. Not live-qualified"
+
+[[capability]]
+id = "node.fills"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "fills"
+domain = "node"
+source_role = "enrichment"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "hl_protocol::node::v1::parse_node_record"
+fixture_set = "node_v1"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "implemented_unqualified"
+limitations = "Parser and fixtures/source/node-v1 exist. Not live-qualified"
+
+[[capability]]
+id = "node.order_statuses"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "order-statuses"
+domain = "node"
+source_role = "enrichment"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "hl_protocol::node::v1::parse_node_record"
+fixture_set = "node_v1"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "implemented_unqualified"
+limitations = "Parser and fixtures/source/node-v1 exist. Not live-qualified"
+
+[[capability]]
+id = "node.raw_book_diffs"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "raw-book-diffs"
+domain = "node"
+source_role = "committed"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "hl_protocol::node::v1::parse_node_record"
+fixture_set = "node_v1"
+retention = "raw_indefinite"
+freshness_target_ms = 0
+owner = "hl-capture"
+state_target = "l4_book"
+status = "implemented_unqualified"
+limitations = "Parser and fixtures/source/node-v1 exist. Not live-qualified"
+
+[[capability]]
+id = "node.misc_events"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "misc-events"
+domain = "node"
+source_role = "enrichment"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "hl_protocol::node::v1::parse_node_record"
+fixture_set = "node_v1"
+retention = "raw_indefinite"
+freshness_target_ms = 1000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "implemented_unqualified"
+limitations = "Parser and fixtures/source/node-v1 exist. Not live-qualified"
+
+[[capability]]
+id = "node.market_metadata"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "market-metadata"
+domain = "node"
+source_role = "reconciliation"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "hl_protocol::node::v1::parse_node_record"
+fixture_set = "node_v1"
+retention = "raw_indefinite"
+freshness_target_ms = 30000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "implemented_unqualified"
+limitations = "Parser and fixtures/source/node-v1 exist. Not live-qualified"
+
+[[capability]]
+id = "node.abci_state_snapshots"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "abci-state-snapshots"
+domain = "node"
+source_role = "committed"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 0
+owner = "hl-capture"
+state_target = "committed_state"
+status = "planned"
+limitations = "Node dataset is documented but has no dedicated parser or fixture set on this tree"
+
+[[capability]]
+id = "node.l4_snapshots"
+source = "node"
+network = ["mainnet", "testnet"]
+transport = "node_files"
+identifier = "l4-snapshots"
+domain = "node"
+source_role = "committed"
+request_cost = "local_read"
+pagination = "by_height"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 0
+owner = "hl-capture"
+state_target = "l4_book"
+status = "planned"
+limitations = "Node dataset is documented but has no dedicated parser or fixture set on this tree"
+
+[[capability]]
+id = "s3.l2_snapshots"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "l2-snapshots"
+domain = "market_data"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.asset_contexts"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "asset-contexts"
+domain = "market_data"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "reference_snapshot"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.node_fills_by_block"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "node_fills_by_block"
+domain = "account"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.node_fills_legacy"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "node-fills-legacy"
+domain = "account"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.node_trades_legacy"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "node-trades-legacy"
+domain = "market_data"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.explorer_blocks"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "explorer-blocks"
+domain = "node"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.replica_cmds"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "replica_cmds"
+domain = "node"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "committed_state"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.hyperevm_blocks"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "hyperevm-blocks"
+domain = "hyperevm"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+
+[[capability]]
+id = "s3.hyperevm_receipts"
+source = "s3"
+network = ["mainnet", "testnet"]
+transport = "s3"
+identifier = "hyperevm-receipts"
+domain = "hyperevm"
+source_role = "enrichment"
+request_cost = "requester_pays"
+pagination = "by_object"
+parser = "planned"
+fixture_set = "none"
+retention = "raw_indefinite"
+freshness_target_ms = 86400000
+owner = "hl-capture"
+state_target = "canonical_event"
+status = "planned"
+limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
