@@ -31,7 +31,6 @@
         "pagination",
         "parser",
         "retention",
-        "freshness_target_ms",
         "owner",
         "state_target",
         "status"
@@ -76,7 +75,9 @@
             "l4_book",
             "position_state",
             "canonical_event",
-            "reference_snapshot"
+            "reference_snapshot",
+            "evm_fact",
+            "discovery_only"
           ]
         },
         "status": {

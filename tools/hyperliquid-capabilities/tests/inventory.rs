@@ -3,8 +3,8 @@ use std::fs;
 use std::path::Path;
 
 use hyperliquid_capabilities::{
-    REST_INFO_WEIGHT_2, SourceRole, parse_manifest, parse_request_cost_base_weight,
-    rest_info_base_weight, validate_manifest,
+    parse_manifest, parse_request_cost_base_weight, rest_info_base_weight, validate_manifest,
+    SourceRole, StateTarget, REST_INFO_WEIGHT_2,
 };
 
 fn workspace_root() -> std::path::PathBuf {
@@ -270,25 +270,76 @@ fn rest_info_request_cost_follows_spec_12_1() {
 
 #[test]
 fn node_streams_and_replica_cmds_are_committed() {
-    const COMMITTED: &[&str] = &[
-        "node.transaction_blocks",
-        "node.trades",
-        "node.fills",
-        "node.order_statuses",
-        "node.raw_book_diffs",
-        "node.misc_events",
-        "node.abci_state_snapshots",
-        "node.l4_snapshots",
-        "s3.replica_cmds",
-    ];
     let manifest = committed_manifest();
-    for id in COMMITTED {
+    let node_files: Vec<_> = manifest
+        .capability
+        .iter()
+        .filter(|capability| capability.transport == "node_files")
+        .collect();
+    assert_eq!(node_files.len(), 9);
+    for capability in &node_files {
+        assert_eq!(
+            capability.source_role,
+            SourceRole::Committed,
+            "{}",
+            capability.id
+        );
+    }
+    let replica = manifest
+        .capability
+        .iter()
+        .find(|row| row.id == "s3.replica_cmds")
+        .expect("s3.replica_cmds");
+    assert_eq!(replica.source_role, SourceRole::Committed);
+}
+
+#[test]
+fn hyperevm_s3_rows_are_evm_fact() {
+    let manifest = committed_manifest();
+    for id in ["s3.hyperevm_blocks", "s3.hyperevm_receipts"] {
         let capability = manifest
             .capability
             .iter()
             .find(|row| row.id == *id)
             .unwrap_or_else(|| panic!("missing {id}"));
-        assert_eq!(capability.source_role, SourceRole::Committed, "{id}");
+        assert_eq!(capability.state_target, StateTarget::EvmFact, "{id}");
+        assert!(
+            !capability.state_target.is_state_affecting(),
+            "{id} must not be HyperCore state-affecting"
+        );
+    }
+}
+
+#[test]
+fn periodic_node_snapshots_omit_freshness_target() {
+    let manifest = committed_manifest();
+    for id in ["node.abci_state_snapshots", "node.l4_snapshots"] {
+        let capability = manifest
+            .capability
+            .iter()
+            .find(|row| row.id == *id)
+            .unwrap_or_else(|| panic!("missing {id}"));
+        assert_eq!(capability.freshness_target_ms, None, "{id}");
+    }
+}
+
+#[test]
+fn schema_lists_section_4_1_mapping_targets() {
+    let schema = fs::read_to_string(
+        workspace_root().join("schemas/hyperliquid/capability-manifest-v1.schema.json"),
+    )
+    .expect("schema");
+    for name in [
+        "canonical_event",
+        "reconciled_snapshot",
+        "reference_snapshot",
+        "evm_fact",
+        "discovery_only",
+    ] {
+        assert!(
+            schema.contains(&format!("\"{name}\"")),
+            "schema must list {name}"
+        );
     }
 }
 

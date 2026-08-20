@@ -1,6 +1,6 @@
 use hyperliquid_capabilities::{
-    REST_INFO_WEIGHT_2, Status, parse_manifest, parse_request_cost_base_weight,
-    rest_info_base_weight, validate_manifest,
+    parse_manifest, parse_request_cost_base_weight, rest_info_base_weight, validate_manifest,
+    Status, REST_INFO_WEIGHT_2,
 };
 
 fn valid_manifest() -> String {
@@ -198,6 +198,30 @@ fn rest_info_request_cost_mismatch_fails() {
         &source,
         "request_cost must use base:2: official.info.all_mids",
     );
+}
+
+#[test]
+fn omitted_freshness_target_is_allowed() {
+    let source = valid_manifest().replace("freshness_target_ms = 1000\n", "");
+    let manifest = parse_manifest(&source).expect("omitted freshness must parse");
+    validate_manifest(&manifest).expect("omitted freshness must pass");
+    assert_eq!(manifest.capability[0].freshness_target_ms, None);
+}
+
+#[test]
+fn evm_fact_and_discovery_only_may_be_opaque_continue() {
+    for target in ["evm_fact", "discovery_only"] {
+        let source = valid_manifest()
+            .replace("parser = \"planned\"", "parser = \"opaque_continue\"")
+            .replace(
+                "state_target = \"reference_snapshot\"",
+                &format!("state_target = \"{target}\""),
+            );
+        let manifest = parse_manifest(&source).expect("fixture must parse");
+        validate_manifest(&manifest)
+            .unwrap_or_else(|errors| panic!("{target} opaque_continue must pass: {errors:?}"));
+        assert!(!manifest.capability[0].state_target.is_state_affecting());
+    }
 }
 
 #[test]

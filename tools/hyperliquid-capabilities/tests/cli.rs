@@ -112,6 +112,104 @@ fn generated_matrix_differs_from_committed_matrix() {
 }
 
 #[test]
+fn cost_and_role_changes_are_visible_in_matrix_and_diff() {
+    let root = temp_root();
+    let original = sample_manifest();
+    let parsed = parse_manifest(&original).expect("sample");
+    validate_manifest(&parsed).expect("sample valid");
+    let generated = render_coverage_matrix(&parsed);
+    assert!(
+        generated.contains("| source_role | request_cost | state_target |"),
+        "matrix must render role/cost/target columns"
+    );
+    write_workspace(&root, &original, Some(&generated));
+
+    let matching = bin()
+        .args(["render-docs", "--check", "--root"])
+        .arg(&root)
+        .output()
+        .expect("render-docs --check matching");
+    assert_eq!(matching.status.code(), Some(0), "{}", stderr(&matching));
+
+    let role_shifted = original.replace(
+        "source_role = \"reconciliation\"",
+        "source_role = \"enrichment\"",
+    );
+    write_workspace(&root, &role_shifted, Some(&generated));
+    let role_check = bin()
+        .args(["render-docs", "--check", "--root"])
+        .arg(&root)
+        .output()
+        .expect("render-docs --check role");
+    assert_eq!(role_check.status.code(), Some(1));
+    assert_eq!(
+        stderr(&role_check),
+        "coverage-matrix: generated output differs from docs/hyperliquid/coverage-matrix.md\n"
+    );
+
+    let cost_shifted = original.replace(
+        "request_cost = \"base:2\"",
+        "request_cost = \"base:2 variable:window\"",
+    );
+    write_workspace(&root, &cost_shifted, Some(&generated));
+    let cost_check = bin()
+        .args(["render-docs", "--check", "--root"])
+        .arg(&root)
+        .output()
+        .expect("render-docs --check cost");
+    assert_eq!(cost_check.status.code(), Some(1));
+
+    let left_report = coverage_report(&parsed);
+    assert_eq!(left_report.rows[0].source_role, "reconciliation");
+    assert_eq!(left_report.rows[0].request_cost, "base:2");
+    assert_eq!(left_report.rows[0].state_target, "reference_snapshot");
+
+    let role_manifest = parse_manifest(&role_shifted).expect("role");
+    let cost_manifest = parse_manifest(&cost_shifted).expect("cost");
+    let target_manifest = parse_manifest(&original.replace(
+        "state_target = \"reference_snapshot\"",
+        "state_target = \"evm_fact\"",
+    ))
+    .expect("target");
+    let role_diff = diff_reports(&left_report, &coverage_report(&role_manifest));
+    assert_eq!(role_diff.changed, vec!["official.info.all_mids".to_owned()]);
+    let cost_diff = diff_reports(&left_report, &coverage_report(&cost_manifest));
+    assert_eq!(cost_diff.changed, vec!["official.info.all_mids".to_owned()]);
+    let target_diff = diff_reports(&left_report, &coverage_report(&target_manifest));
+    assert_eq!(
+        target_diff.changed,
+        vec!["official.info.all_mids".to_owned()]
+    );
+
+    let left_path = root.join("left.json");
+    let right_path = root.join("right.json");
+    fs::write(
+        &left_path,
+        encode_coverage_report(&left_report).expect("encode"),
+    )
+    .expect("left");
+    fs::write(
+        &right_path,
+        encode_coverage_report(&coverage_report(&role_manifest)).expect("encode"),
+    )
+    .expect("right");
+    let changed = bin()
+        .args([
+            "diff",
+            "--left",
+            left_path.to_str().unwrap(),
+            "--right",
+            right_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("diff");
+    assert_eq!(changed.status.code(), Some(1));
+    assert_eq!(stdout(&changed), "changed: official.info.all_mids\n");
+
+    fs::remove_dir_all(&root).expect("cleanup");
+}
+
+#[test]
 fn coverage_and_diff_round_trip() {
     let root = temp_root();
     let manifest = sample_manifest();

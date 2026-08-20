@@ -3,8 +3,9 @@ schema_version = 1
 # Bootstrap inventory from spec Appendix B plus current node streams and S3 archives.
 # REST/WS/S3/EVM adapters are not on this tree. Node replica_cmds / NodeLine rows
 # are implemented_unqualified only when hl-protocol parsers and fixtures/source/node-v1 exist.
-# Node streams and s3.replica_cmds are committed. Remaining official S3 archives are
-# historical backfill (spec §6.1 priority 4), mapped to evidence-only rather than enrichment.
+# All node_files rows (including market-metadata periodic state, spec §6.1) and
+# s3.replica_cmds are committed. Remaining official S3 archives are historical
+# backfill (spec §6.1 priority 4), mapped to evidence-only rather than enrichment.
 
 [[capability]]
 id = "official.info.all_mids"
@@ -1707,7 +1708,7 @@ network = ["mainnet", "testnet"]
 transport = "node_files"
 identifier = "market-metadata"
 domain = "node"
-source_role = "reconciliation"
+source_role = "committed"
 request_cost = "local_read"
 pagination = "by_height"
 parser = "hl_protocol::node::v1::parse_node_record"
@@ -1732,7 +1733,6 @@ pagination = "by_height"
 parser = "planned"
 fixture_set = "none"
 retention = "raw_indefinite"
-freshness_target_ms = 1000
 owner = "hl-capture"
 state_target = "committed_state"
 status = "planned"
@@ -1751,7 +1751,6 @@ pagination = "by_height"
 parser = "planned"
 fixture_set = "none"
 retention = "raw_indefinite"
-freshness_target_ms = 1000
 owner = "hl-capture"
 state_target = "l4_book"
 status = "planned"
@@ -1905,7 +1904,7 @@ fixture_set = "none"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
-state_target = "canonical_event"
+state_target = "evm_fact"
 status = "planned"
 limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
 
@@ -1924,6 +1923,6 @@ fixture_set = "none"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
-state_target = "canonical_event"
+state_target = "evm_fact"
 status = "planned"
 limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
