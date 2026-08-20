@@ -1,8 +1,8 @@
 use domain_types::{ChainId, KnownTime, ManifestId, SourceId};
 use storage_ports::{
-    ArchiveError, LocalRecordSequence, LocalRecordSequenceRange, RawArchiveCapacityBudgets,
-    RawArchiveCapacityRejection, RawArchiveCheckpointEntriesV2, RawArchiveCheckpointEntryV2,
-    RawArchiveDurableFormatEnvelope, RawArchiveIndexCapacityEstimate,
+    ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
+    RawArchiveCapacityBudgets, RawArchiveCapacityRejection, RawArchiveCheckpointEntriesV2,
+    RawArchiveCheckpointEntryV2, RawArchiveDurableFormatEnvelope, RawArchiveIndexCapacityEstimate,
     RawArchiveMaintenanceStatistics, RawArchivePackingPolicy,
     RawArchiveProductionCapacityAdmission, RawArchiveRootLeaseIdentity, RawArchiveWorkloadEnvelope,
     RawObservationReceipt, RawPackedRangeReceipt, SequenceBoundRawObservationReceipt,
@@ -216,51 +216,72 @@ fn sequence_range(start: u64, end: u64) -> LocalRecordSequenceRange {
 }
 
 #[test]
-fn sequence_bound_receipt_rejects_legacy_receipts_without_sequence_evidence() {
+fn sequence_bound_receipt_covers_every_constructible_cursor_policy() {
     let manifest_id = ManifestId::new("manifest-1").unwrap();
     let chain = ChainId::new("mainnet").unwrap();
     let source = SourceId::new("node-fills").unwrap();
-    let legacy = RawObservationReceipt::try_new(
-        "receipt-1",
-        manifest_id.clone(),
-        chain.clone(),
-        source.clone(),
-        "epoch-1",
-        0,
-        99,
-        [1; 32],
-        [2; 32],
-        [3; 32],
-        [4; 32],
-        [5; 32],
-        [6; 32],
-        KnownTime::from_unix_micros(1_000).unwrap(),
-    )
-    .unwrap();
-    assert!(SequenceBoundRawObservationReceipt::try_from(legacy).is_err());
-
     let range = sequence_range(10, 12);
-    let byte = RawObservationReceipt::try_new_byte_offsets(
-        "receipt-2",
-        manifest_id,
-        chain,
-        source,
-        "epoch-1",
-        0,
-        99,
-        range,
-        [1; 32],
-        [2; 32],
-        [3; 32],
-        [4; 32],
-        [5; 32],
-        [6; 32],
-        KnownTime::from_unix_micros(1_000).unwrap(),
-    )
-    .unwrap();
-    let bound = SequenceBoundRawObservationReceipt::try_from(byte).unwrap();
-    assert_eq!(bound.local_sequence_range(), range);
-    assert_eq!(bound.receipt().manifest_id().as_str(), "manifest-1");
+
+    for cursor_policy in [
+        CursorPolicy::ContiguousNativeOffset,
+        CursorPolicy::MonotonicByteOffset,
+    ] {
+        let receipt = match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => RawObservationReceipt::try_new(
+                "receipt-1",
+                manifest_id.clone(),
+                chain.clone(),
+                source.clone(),
+                "epoch-1",
+                0,
+                99,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 32],
+                [5; 32],
+                [6; 32],
+                KnownTime::from_unix_micros(1_000).unwrap(),
+            )
+            .unwrap(),
+            CursorPolicy::MonotonicByteOffset => RawObservationReceipt::try_new_byte_offsets(
+                "receipt-2",
+                manifest_id.clone(),
+                chain.clone(),
+                source.clone(),
+                "epoch-1",
+                0,
+                99,
+                range,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 32],
+                [5; 32],
+                [6; 32],
+                KnownTime::from_unix_micros(1_000).unwrap(),
+            )
+            .unwrap(),
+        };
+        assert_eq!(receipt.cursor_policy(), cursor_policy);
+
+        match cursor_policy {
+            CursorPolicy::ContiguousNativeOffset => {
+                let error = SequenceBoundRawObservationReceipt::try_from(receipt).unwrap_err();
+                assert!(matches!(error, ArchiveError::InvalidInput(_)));
+                assert_eq!(error.reason_code(), "archive.invalid_input");
+            }
+            CursorPolicy::MonotonicByteOffset => {
+                let bound = SequenceBoundRawObservationReceipt::try_from(receipt).unwrap();
+                assert_eq!(bound.local_sequence_range(), range);
+                assert_eq!(bound.receipt().manifest_id().as_str(), "manifest-1");
+                assert_eq!(
+                    bound.receipt().cursor_policy(),
+                    CursorPolicy::MonotonicByteOffset
+                );
+            }
+        }
+    }
 }
 
 #[test]

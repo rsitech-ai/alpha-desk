@@ -140,8 +140,11 @@ impl SegmentHeader {
         push_text(&mut encoded, self.source_id.as_str())?;
         push_text(&mut encoded, &self.source_version)?;
         push_text(&mut encoded, &self.schema_version)?;
-        if self.cursor_policy == CursorPolicy::MonotonicByteOffset {
-            encoded.push(BYTE_OFFSET_POLICY);
+        match self.cursor_policy {
+            CursorPolicy::MonotonicByteOffset => encoded.push(BYTE_OFFSET_POLICY),
+            CursorPolicy::ContiguousNativeOffset => {
+                // Legacy HLSPV001 headers omit the policy byte.
+            }
         }
         encoded.extend_from_slice(&self.segment_sequence.to_le_bytes());
         encoded.extend_from_slice(&self.created_at_micros.to_le_bytes());
@@ -202,10 +205,15 @@ impl SegmentHeader {
         let source_id = read_text(encoded, &mut cursor)?;
         let source_version = read_text(encoded, &mut cursor)?;
         let schema_version = read_text(encoded, &mut cursor)?;
-        if cursor_policy == CursorPolicy::MonotonicByteOffset
-            && read_u8(encoded, &mut cursor)? != BYTE_OFFSET_POLICY
-        {
-            return Err(SpoolError::InvalidHeader);
+        match cursor_policy {
+            CursorPolicy::MonotonicByteOffset => {
+                if read_u8(encoded, &mut cursor)? != BYTE_OFFSET_POLICY {
+                    return Err(SpoolError::InvalidHeader);
+                }
+            }
+            CursorPolicy::ContiguousNativeOffset => {
+                // Legacy HLSPV001 headers omit the policy byte.
+            }
         }
         let segment_sequence = read_u64(encoded, &mut cursor)?;
         let created_at_micros = read_i64(encoded, &mut cursor)?;
@@ -315,4 +323,86 @@ fn read_exact_header(file: &mut File, output: &mut [u8]) -> Result<(), SpoolErro
             io_error("reading the segment header", source)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn example_header(cursor_policy: CursorPolicy) -> SegmentHeader {
+        SegmentHeader::new_with_cursor_policy(
+            SourceId::new("primary-node").unwrap(),
+            "hyperliquid-node-v1",
+            "spool-v1",
+            1,
+            100,
+            [0x31; 32],
+            cursor_policy,
+        )
+        .unwrap()
+    }
+
+    fn after_identities(encoded: &[u8]) -> usize {
+        let mut cursor = 12;
+        for _ in 0..3 {
+            let length = usize::from(u16::from_le_bytes(
+                encoded[cursor..cursor + 2]
+                    .try_into()
+                    .expect("identity length prefix"),
+            ));
+            cursor += 2 + length;
+        }
+        cursor
+    }
+
+    #[test]
+    fn encode_decode_covers_every_constructible_cursor_policy() {
+        for cursor_policy in [
+            CursorPolicy::ContiguousNativeOffset,
+            CursorPolicy::MonotonicByteOffset,
+        ] {
+            let header = example_header(cursor_policy);
+            let encoded = header
+                .encode()
+                .expect("constructible policies still encode");
+            let after = after_identities(&encoded);
+            let identity_bytes = header.source_id().as_str().len()
+                + header.source_version().len()
+                + header.schema_version().len();
+            match cursor_policy {
+                CursorPolicy::ContiguousNativeOffset => {
+                    assert_eq!(&encoded[..8], MAGIC_V1);
+                    assert_eq!(encoded.len(), FIXED_HEADER_V1_BYTES + identity_bytes);
+                    assert_eq!(&encoded[after..after + 8], 1_u64.to_le_bytes().as_slice());
+                }
+                CursorPolicy::MonotonicByteOffset => {
+                    assert_eq!(&encoded[..8], MAGIC_V2);
+                    assert_eq!(encoded.len(), FIXED_HEADER_V2_BYTES + identity_bytes);
+                    assert_eq!(encoded[after], BYTE_OFFSET_POLICY);
+                    assert_eq!(
+                        &encoded[after + 1..after + 9],
+                        1_u64.to_le_bytes().as_slice()
+                    );
+                }
+            }
+
+            let (decoded, header_len) = SegmentHeader::read_from_slice(&encoded)
+                .expect("constructible policies still decode today's wire bytes");
+            assert_eq!(header_len, encoded.len());
+            assert_eq!(decoded, header);
+            assert_eq!(decoded.cursor_policy(), cursor_policy);
+        }
+    }
+
+    #[test]
+    fn v2_unknown_policy_byte_still_fails_as_invalid_header() {
+        let header = example_header(CursorPolicy::MonotonicByteOffset);
+        let mut encoded = header.encode().unwrap();
+        let after = after_identities(&encoded);
+        encoded[after] = 0;
+        let error =
+            SegmentHeader::decode(&encoded).expect_err("unknown V2 policy bytes fail closed");
+        assert!(matches!(error, SpoolError::InvalidHeader));
+        assert_eq!(error.reason_code(), "spool.invalid_header");
+    }
 }

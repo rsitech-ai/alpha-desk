@@ -1,0 +1,4 @@
+version = "entity-link-policy-v1"
+min_distinct_families = 2
+posterior_threshold_ppm = 800000
+stability_duration_micros = 60000000

@@ -1,0 +1,88 @@
+{
+  "policy": {
+    "label_horizon_blocks": 5,
+    "embargo_blocks": 2
+  },
+  "experiment": {
+    "hypothesis": "synthetic purged walk-forward isolation",
+    "owner": "research-fixture",
+    "code_commit": "synthetic",
+    "rust_toolchain": "1.97.1",
+    "feature_set_version": "features-v1",
+    "label_definition": "executable-net-return-v1",
+    "market_universe_version": "synth-btc-v1",
+    "wallet_score_version": "none",
+    "cluster_version_policy": "none",
+    "training_range": { "start_inclusive": 1, "end_inclusive": 100 },
+    "validation_ranges": [
+      { "start_inclusive": 101, "end_inclusive": 110 },
+      { "start_inclusive": 111, "end_inclusive": 120 }
+    ],
+    "holdout_range": { "start_inclusive": 151, "end_inclusive": 160 },
+    "data_manifest_hash": "00",
+    "model_config_hash": "00",
+    "random_seed": 7,
+    "cost_model_version": "synthetic-cost-v1",
+    "execution_latency_assumptions": "fixed-zero",
+    "promotion_metrics": ["net_pnl"],
+    "reviewers": ["fixture"]
+  },
+  "rows": [
+    {
+      "id": "train-safe",
+      "feature_height": 50,
+      "label_start": 50,
+      "label_end": 55,
+      "payload": "train-only"
+    },
+    {
+      "id": "train-embargo-fold0",
+      "feature_height": 94,
+      "label_start": 94,
+      "label_end": 94,
+      "payload": "embargo-fold0"
+    },
+    {
+      "id": "train-purge-fold0",
+      "feature_height": 98,
+      "label_start": 98,
+      "label_end": 103,
+      "payload": "purge-fold0"
+    },
+    {
+      "id": "val-fold0",
+      "feature_height": 105,
+      "label_start": 105,
+      "label_end": 110,
+      "payload": "validation-fold0"
+    },
+    {
+      "id": "train-embargo-fold1",
+      "feature_height": 104,
+      "label_start": 104,
+      "label_end": 104,
+      "payload": "embargo-fold1"
+    },
+    {
+      "id": "train-purge-fold1",
+      "feature_height": 108,
+      "label_start": 108,
+      "label_end": 113,
+      "payload": "purge-fold1"
+    },
+    {
+      "id": "val-fold1",
+      "feature_height": 115,
+      "label_start": 115,
+      "label_end": 120,
+      "payload": "validation-fold1"
+    },
+    {
+      "id": "holdout-secret",
+      "feature_height": 155,
+      "label_start": 155,
+      "label_end": 160,
+      "payload": "must-not-enter-train"
+    }
+  ]
+}

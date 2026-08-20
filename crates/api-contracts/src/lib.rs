@@ -31,6 +31,10 @@ mod generated {
     }
 }
 
+mod health;
+
+pub use health::{HealthCodecError, WireHealthAssessment, WireHealthState};
+
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/alpha-desk-v1.pb"));
 pub const MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES: usize = 16 * 1024;

@@ -19,6 +19,8 @@ pub use subjects::{
     STATE_STREAM, Subject, subject_for_event_kind,
 };
 
+// Frozen JetStream marker schema. Layout lock: tests/block_marker_freeze.rs
+// (empty-primary digest, Independent tag `3`, and one event-row payload).
 const BLOCK_MARKER_SCHEMA_V1: &str = "hyperliquid-alpha-desk/block-publication/v1";
 const MAX_IDENTITY_BYTES: usize = 512;
 const MAX_PUBLICATION_PAYLOAD_BYTES: usize = 7_500_000;
@@ -175,12 +177,7 @@ impl CommittedPublicationBatch {
         {
             return Err(PublicationError::ArchiveReceiptMismatch);
         }
-        if !matches!(
-            block.confirmation_class(),
-            ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent
-        ) {
-            return Err(PublicationError::NotCommitted);
-        }
+        admit_committed_publication(block.confirmation_class())?;
 
         let block_payload = encode_block_marker(block, receipt)?;
         let block_message = PublicationMessage::try_new(
@@ -401,6 +398,19 @@ fn validate_identity(value: &str) -> Result<(), PublicationError> {
     }
 }
 
+fn admit_committed_publication(class: ConfirmationClass) -> Result<(), PublicationError> {
+    match class {
+        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => Ok(()),
+        ConfirmationClass::ProvisionalSource
+        | ConfirmationClass::ReconciledSnapshot
+        | ConfirmationClass::Corrected
+        | ConfirmationClass::Expired => Err(PublicationError::NotCommitted),
+    }
+}
+
+// Frozen `hyperliquid-alpha-desk/block-publication/v1` layout. Field order,
+// confirmation-class tags `2`/`3`, counted identities, and SHA-256 envelope
+// hashes must not change without a schema version bump.
 fn encode_block_marker(
     block: &BlockEnvelope,
     receipt: &ArchiveReceipt,
@@ -413,7 +423,10 @@ fn encode_block_marker(
     output.push(match block.confirmation_class() {
         ConfirmationClass::CommittedPrimary => 2,
         ConfirmationClass::CommittedIndependent => 3,
-        _ => return Err(PublicationError::NotCommitted),
+        ConfirmationClass::ProvisionalSource
+        | ConfirmationClass::ReconciledSnapshot
+        | ConfirmationClass::Corrected
+        | ConfirmationClass::Expired => return Err(PublicationError::NotCommitted),
     });
     output.extend_from_slice(&block.canonical_block_hash());
     push_bytes(&mut output, receipt.receipt_id().as_bytes())?;

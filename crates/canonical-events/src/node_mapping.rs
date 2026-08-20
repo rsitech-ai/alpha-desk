@@ -29,6 +29,30 @@ pub enum MappingDisposition {
 pub enum EvidenceOnlyReason {
     MissingBlockContext,
     UnsupportedCanonicalSemantics,
+    OneSidedFill,
+    AuxiliaryOrderStatus,
+    AuxiliaryBookDiff,
+    IncompleteLedgerTransfer,
+    IncompleteLiquidation,
+    AuxiliaryMarketMetadata,
+}
+
+impl EvidenceOnlyReason {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::MissingBlockContext => "canonical_mapping.missing_block_context",
+            Self::UnsupportedCanonicalSemantics => {
+                "canonical_mapping.unsupported_canonical_semantics"
+            }
+            Self::OneSidedFill => "canonical_mapping.one_sided_fill",
+            Self::AuxiliaryOrderStatus => "canonical_mapping.auxiliary_order_status",
+            Self::AuxiliaryBookDiff => "canonical_mapping.auxiliary_book_diff",
+            Self::IncompleteLedgerTransfer => "canonical_mapping.incomplete_ledger_transfer",
+            Self::IncompleteLiquidation => "canonical_mapping.incomplete_liquidation",
+            Self::AuxiliaryMarketMetadata => "canonical_mapping.auxiliary_market_metadata",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -204,12 +228,7 @@ pub fn map_committed_node_v1_block(
             reason: "committed mapping requires a transaction-block record".to_owned(),
         });
     }
-    if !matches!(
-        context.confirmation_class,
-        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent
-    ) {
-        return Err(MappingError::InvalidCommittedConfirmation);
-    }
+    admit_committed_confirmation(context.confirmation_class)?;
 
     let root: serde_json::Value = serde_json::from_slice(record.payload()).map_err(|error| {
         MappingError::MalformedRecord {
@@ -264,18 +283,27 @@ pub fn map_committed_node_v1_block(
     .map_err(Into::into)
 }
 
+/// Admit only committed primary and independent lanes into committed mapping.
+///
+/// Provisional, reconciled, corrected, and expired classes fail closed with
+/// `InvalidCommittedConfirmation`. This does not qualify those lanes.
+fn admit_committed_confirmation(class: ConfirmationClass) -> Result<(), MappingError> {
+    match class {
+        ConfirmationClass::CommittedPrimary | ConfirmationClass::CommittedIndependent => Ok(()),
+        ConfirmationClass::ProvisionalSource
+        | ConfirmationClass::ReconciledSnapshot
+        | ConfirmationClass::Corrected
+        | ConfirmationClass::Expired => Err(MappingError::InvalidCommittedConfirmation),
+    }
+}
+
 pub fn map_node_v1_record(
     record: &NodeRecordV1,
     catalog: &MarketCatalogV1,
     context: &NodeV1MappingContext,
 ) -> Result<MappingDisposition, MappingError> {
-    if record.kind() == NodeRecordKind::EmptyBatch {
-        return Ok(MappingDisposition::EmptyBlock);
-    }
-    if record.stream() != NodeStreamKind::Trades || record.kind() != NodeRecordKind::Trade {
-        return Ok(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::UnsupportedCanonicalSemantics,
-        ));
+    if let Some(disposition) = non_trade_disposition(record.stream(), record.kind()) {
+        return Ok(disposition);
     }
     let Some(block_number) = record.block_number() else {
         return Ok(MappingDisposition::EvidenceOnly(
@@ -337,6 +365,39 @@ pub fn map_node_v1_record(
     }
 
     Ok(MappingDisposition::Mapped(events))
+}
+
+fn non_trade_disposition(
+    stream: NodeStreamKind,
+    kind: NodeRecordKind,
+) -> Option<MappingDisposition> {
+    match kind {
+        NodeRecordKind::EmptyBatch => Some(MappingDisposition::EmptyBlock),
+        NodeRecordKind::Trade if stream == NodeStreamKind::Trades => None,
+        NodeRecordKind::Fill => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::OneSidedFill,
+        )),
+        NodeRecordKind::OrderStatus => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryOrderStatus,
+        )),
+        NodeRecordKind::RawBookDiff => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryBookDiff,
+        )),
+        NodeRecordKind::Transfer => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::IncompleteLedgerTransfer,
+        )),
+        NodeRecordKind::Liquidation => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::IncompleteLiquidation,
+        )),
+        NodeRecordKind::MarketMetadata => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryMarketMetadata,
+        )),
+        NodeRecordKind::Trade | NodeRecordKind::TransactionBlock | NodeRecordKind::MiscEvent => {
+            Some(MappingDisposition::EvidenceOnly(
+                EvidenceOnlyReason::UnsupportedCanonicalSemantics,
+            ))
+        }
+    }
 }
 
 fn required_u64(

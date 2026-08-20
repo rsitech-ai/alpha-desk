@@ -121,6 +121,18 @@ pub fn decode_local_replay_block(json: &str) -> Result<BlockEnvelope, BlockSourc
     .map_err(|_| BlockSourceError::Decode("invalid block envelope"))
 }
 
+#[must_use]
+pub const fn confirmation_label(class: ConfirmationClass) -> &'static str {
+    match class {
+        ConfirmationClass::ProvisionalSource => "provisional-source",
+        ConfirmationClass::CommittedPrimary => "committed-primary",
+        ConfirmationClass::CommittedIndependent => "committed-independent",
+        ConfirmationClass::ReconciledSnapshot => "reconciled-snapshot",
+        ConfirmationClass::Corrected => "corrected",
+        ConfirmationClass::Expired => "expired",
+    }
+}
+
 fn parse_confirmation(value: &str) -> Result<ConfirmationClass, BlockSourceError> {
     match value {
         "provisional-source" => Ok(ConfirmationClass::ProvisionalSource),

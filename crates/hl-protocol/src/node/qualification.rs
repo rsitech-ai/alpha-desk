@@ -850,18 +850,32 @@ fn valid_cursor_range(
     last: &NodeNativeCursorV1,
     size_bytes: u64,
 ) -> bool {
-    match (role, first.position, last.position) {
-        (
-            NodeRecordingFileRoleV1::Committed,
-            NodeNativePositionV1::BlockHeight { height: first },
-            NodeNativePositionV1::BlockHeight { height: last },
-        ) => first <= last,
-        (
-            NodeRecordingFileRoleV1::Trade,
-            NodeNativePositionV1::ByteOffset { end_offset: first },
-            NodeNativePositionV1::ByteOffset { end_offset: last },
-        ) => first > 0 && first <= last && last <= size_bytes,
-        _ => false,
+    match role {
+        NodeRecordingFileRoleV1::Committed => match (first.position, last.position) {
+            (
+                NodeNativePositionV1::BlockHeight { height: first },
+                NodeNativePositionV1::BlockHeight { height: last },
+            ) => first <= last,
+            (NodeNativePositionV1::BlockHeight { .. }, NodeNativePositionV1::ByteOffset { .. })
+            | (NodeNativePositionV1::ByteOffset { .. }, NodeNativePositionV1::BlockHeight { .. })
+            | (NodeNativePositionV1::ByteOffset { .. }, NodeNativePositionV1::ByteOffset { .. }) => {
+                false
+            }
+        },
+        NodeRecordingFileRoleV1::Trade => match (first.position, last.position) {
+            (
+                NodeNativePositionV1::ByteOffset { end_offset: first },
+                NodeNativePositionV1::ByteOffset { end_offset: last },
+            ) => first > 0 && first <= last && last <= size_bytes,
+            (
+                NodeNativePositionV1::BlockHeight { .. },
+                NodeNativePositionV1::BlockHeight { .. },
+            )
+            | (NodeNativePositionV1::BlockHeight { .. }, NodeNativePositionV1::ByteOffset { .. })
+            | (NodeNativePositionV1::ByteOffset { .. }, NodeNativePositionV1::BlockHeight { .. }) => {
+                false
+            }
+        },
     }
 }
 
@@ -1031,6 +1045,131 @@ mod tests {
             error.reason_code(),
             "source_join.unqualified_source_profile"
         );
+    }
+
+    fn native_test_cursor(position: NodeNativePositionV1) -> NodeNativeCursorV1 {
+        NodeNativeCursorV1 {
+            epoch: BoundedIdentity::new("epoch-a").expect("epoch"),
+            position,
+            content_blake3: Blake3Digest::from_bytes([0x11; 32]),
+        }
+    }
+
+    fn every_recording_file_role() -> [NodeRecordingFileRoleV1; 2] {
+        [
+            NodeRecordingFileRoleV1::Committed,
+            NodeRecordingFileRoleV1::Trade,
+        ]
+    }
+
+    fn every_native_position(value: u64) -> [NodeNativePositionV1; 2] {
+        [
+            NodeNativePositionV1::BlockHeight { height: value },
+            NodeNativePositionV1::ByteOffset { end_offset: value },
+        ]
+    }
+
+    fn expected_valid_cursor_range(
+        role: NodeRecordingFileRoleV1,
+        first: NodeNativePositionV1,
+        last: NodeNativePositionV1,
+        size_bytes: u64,
+    ) -> bool {
+        match role {
+            NodeRecordingFileRoleV1::Committed => match (first, last) {
+                (
+                    NodeNativePositionV1::BlockHeight { height: first },
+                    NodeNativePositionV1::BlockHeight { height: last },
+                ) => first <= last,
+                (
+                    NodeNativePositionV1::BlockHeight { .. },
+                    NodeNativePositionV1::ByteOffset { .. },
+                )
+                | (
+                    NodeNativePositionV1::ByteOffset { .. },
+                    NodeNativePositionV1::BlockHeight { .. },
+                )
+                | (
+                    NodeNativePositionV1::ByteOffset { .. },
+                    NodeNativePositionV1::ByteOffset { .. },
+                ) => false,
+            },
+            NodeRecordingFileRoleV1::Trade => match (first, last) {
+                (
+                    NodeNativePositionV1::ByteOffset { end_offset: first },
+                    NodeNativePositionV1::ByteOffset { end_offset: last },
+                ) => first > 0 && first <= last && last <= size_bytes,
+                (
+                    NodeNativePositionV1::BlockHeight { .. },
+                    NodeNativePositionV1::BlockHeight { .. },
+                )
+                | (
+                    NodeNativePositionV1::BlockHeight { .. },
+                    NodeNativePositionV1::ByteOffset { .. },
+                )
+                | (
+                    NodeNativePositionV1::ByteOffset { .. },
+                    NodeNativePositionV1::BlockHeight { .. },
+                ) => false,
+            },
+        }
+    }
+
+    #[test]
+    fn valid_cursor_range_pins_every_role_and_position_kind() {
+        const SIZE_BYTES: u64 = 100;
+        for role in every_recording_file_role() {
+            match role {
+                NodeRecordingFileRoleV1::Committed | NodeRecordingFileRoleV1::Trade => {}
+            }
+            for first in every_native_position(10) {
+                match first {
+                    NodeNativePositionV1::BlockHeight { .. }
+                    | NodeNativePositionV1::ByteOffset { .. } => {}
+                }
+                for last in every_native_position(20) {
+                    match last {
+                        NodeNativePositionV1::BlockHeight { .. }
+                        | NodeNativePositionV1::ByteOffset { .. } => {}
+                    }
+                    let first_cursor = native_test_cursor(first);
+                    let last_cursor = native_test_cursor(last);
+                    assert_eq!(
+                        valid_cursor_range(role, &first_cursor, &last_cursor, SIZE_BYTES),
+                        expected_valid_cursor_range(role, first, last, SIZE_BYTES),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn valid_cursor_range_keeps_existing_role_bounds() {
+        let committed = |first, last| {
+            valid_cursor_range(
+                NodeRecordingFileRoleV1::Committed,
+                &native_test_cursor(NodeNativePositionV1::BlockHeight { height: first }),
+                &native_test_cursor(NodeNativePositionV1::BlockHeight { height: last }),
+                100,
+            )
+        };
+        assert!(committed(0, 0));
+        assert!(committed(10, 20));
+        assert!(!committed(21, 20));
+
+        let trade = |first, last, size| {
+            valid_cursor_range(
+                NodeRecordingFileRoleV1::Trade,
+                &native_test_cursor(NodeNativePositionV1::ByteOffset { end_offset: first }),
+                &native_test_cursor(NodeNativePositionV1::ByteOffset { end_offset: last }),
+                size,
+            )
+        };
+        assert!(!trade(0, 10, 100));
+        assert!(trade(1, 10, 100));
+        assert!(trade(10, 10, 10));
+        assert!(!trade(10, 9, 100));
+        assert!(!trade(1, 101, 100));
     }
 
     fn file_wire(role: NodeRecordingFileRoleV1, path: &str, digest: &str) -> WireRecordingFileV1 {

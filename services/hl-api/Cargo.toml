@@ -12,5 +12,21 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+api-contracts = { path = "../../crates/api-contracts", version = "=0.1.0" }
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+toml.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+http.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

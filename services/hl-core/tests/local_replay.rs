@@ -5,9 +5,9 @@ use canonical_ledger::{LedgerLimits, StateImageLimits, WatermarkOnlyReducerV1};
 use canonical_state_store::SyncedWriteBatchStore;
 use domain_types::{BlockHeight, ChainId, ProtocolTime, SourceId};
 use hl_core::{
-    DirectoryBlockSource, DurableApplyError, InMemoryBlockSource, LocalReplayError,
-    LocalReplaySession,
+    DirectoryBlockSource, InMemoryBlockSource, LocalReplaySession, inspect_local_replay_block,
 };
+use storage_ports::AtomicStateStore;
 
 #[test]
 fn in_memory_source_applies_block_atomically_to_the_file_backed_store_and_survives_restart() {
@@ -78,14 +78,65 @@ fn corrected_source_blocks_fail_closed_and_do_not_advance_durable_state() {
     let mut source =
         InMemoryBlockSource::new([empty_block_class(200, 1, ConfirmationClass::Corrected)]);
     let error = session.replay(&mut source).expect_err("correction denied");
-    match error {
-        LocalReplayError::Durable(DurableApplyError::Ledger(ledger)) => {
-            assert_eq!(ledger.reason_code(), "ledger.correction_unimplemented");
-        }
-        other => panic!("expected ledger correction denial, got {other:?}"),
-    }
+    assert_eq!(error.reason_code(), "ledger.correction_unimplemented");
     assert_eq!(session.ledger().state_image().canonical_bytes(), before);
     assert!(session.ledger().checkpoint().is_none());
+    drop(session);
+    let restored =
+        SyncedWriteBatchStore::open(root.path().join("state"), StateImageLimits::production())
+            .expect("reopen store");
+    assert!(
+        restored
+            .load_latest(StateImageLimits::production())
+            .expect("load")
+            .is_none()
+    );
+}
+
+#[test]
+fn directory_corrected_blocks_fail_closed_and_leave_the_file_store_empty() {
+    let root = private_root();
+    let blocks = root.path().join("blocks");
+    let state = root.path().join("state");
+    fs::create_dir_all(&blocks).expect("blocks dir");
+    fs::write(
+        blocks.join("00000000000000000200.json"),
+        block_json(200, "corrected"),
+    )
+    .expect("corrected block");
+
+    let store = SyncedWriteBatchStore::open(&state, StateImageLimits::production()).expect("store");
+    let mut session = open_session(store);
+    let before = session.ledger().state_image().canonical_bytes();
+    let mut source = DirectoryBlockSource::open(&blocks).expect("directory source");
+    let error = session
+        .replay(&mut source)
+        .expect_err("directory correction");
+    assert_eq!(error.reason_code(), "ledger.correction_unimplemented");
+    assert_eq!(session.ledger().state_image().canonical_bytes(), before);
+    assert!(session.ledger().checkpoint().is_none());
+    drop(session);
+    let restored =
+        SyncedWriteBatchStore::open(&state, StateImageLimits::production()).expect("reopen store");
+    assert!(
+        restored
+            .load_latest(StateImageLimits::production())
+            .expect("load")
+            .is_none()
+    );
+}
+
+#[test]
+fn inspect_local_replay_json_denies_corrections_without_applying() {
+    let denied = inspect_local_replay_block(&block_json(200, "corrected"))
+        .expect_err("inspect correction denied");
+    assert_eq!(denied.reason_code(), "ledger.correction_unimplemented");
+
+    let admitted = inspect_local_replay_block(&block_json(200, "committed-primary"))
+        .expect("inspect committed");
+    assert!(admitted.admitted());
+    assert!(!admitted.applied());
+    assert_eq!(admitted.confirmation(), "committed-primary");
 }
 
 #[test]

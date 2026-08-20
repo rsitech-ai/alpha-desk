@@ -1,0 +1,6 @@
+min_independent_entities = 3
+min_acceleration_milli = 250
+min_markout_bps = 15
+max_crowding_ppm = 700000
+min_divergence_usd_raw = 1
+min_asymmetry_usd_raw = 1

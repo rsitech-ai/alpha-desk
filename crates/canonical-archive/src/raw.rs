@@ -136,8 +136,11 @@ pub fn append_batch(
     batch: &RawObservationBatch,
     durable_at: KnownTime,
 ) -> Result<RawObservationReceipt, ArchiveError> {
-    if batch.cursor_policy() == CursorPolicy::MonotonicByteOffset {
-        return super::raw_v2::append_batch(archive, batch, durable_at);
+    match batch.cursor_policy() {
+        CursorPolicy::MonotonicByteOffset => {
+            return super::raw_v2::append_batch(archive, batch, durable_at);
+        }
+        CursorPolicy::ContiguousNativeOffset => {}
     }
     let first = batch
         .observations()
@@ -511,11 +514,15 @@ fn write_object(
 }
 
 pub(super) fn raw_record_batch(batch: &RawObservationBatch) -> Result<RecordBatch, ArchiveError> {
-    let observations = batch.observations();
-    let chain_ids = StringArray::from_iter_values(std::iter::repeat_n(
-        batch.chain_id().as_str(),
-        observations.len(),
-    ));
+    raw_record_batch_from_observations(batch.chain_id(), batch.observations())
+}
+
+pub(super) fn raw_record_batch_from_observations(
+    chain_id: &ChainId,
+    observations: &[SourceObservation],
+) -> Result<RecordBatch, ArchiveError> {
+    let chain_ids =
+        StringArray::from_iter_values(std::iter::repeat_n(chain_id.as_str(), observations.len()));
     let source_ids =
         StringArray::from_iter_values(observations.iter().map(|value| value.source_id().as_str()));
     let versions =

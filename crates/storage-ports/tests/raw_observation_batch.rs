@@ -362,27 +362,43 @@ fn byte_offset_batches_reject_local_sequence_overflow() {
 }
 
 #[test]
-fn byte_offset_policy_rejects_block_height_observation_classes() {
-    for observation_class in [
-        ObservationClass::CommittedBlock,
-        ObservationClass::HistoricalBlock,
-    ] {
-        let error = byte_offset_batch(
+fn byte_offset_policy_covers_every_constructible_observation_class() {
+    const INCOMPATIBLE: &str =
+        "byte-offset cursor policy is incompatible with block-height observation class";
+    for observation_class in ObservationClass::ALL {
+        let batch = byte_offset_batch(
             vec![observation_with(
-                "node-blocks",
+                "node-source",
                 "node-v1",
                 observation_class,
                 "node-session-7",
                 19,
-                "node-block-v1",
+                "node-schema-v1",
             )],
             1,
-        )
-        .expect_err("block-height classes cannot claim byte-offset cursor semantics");
-        assert_invalid(
-            error,
-            "byte-offset cursor policy is incompatible with block-height observation class",
         );
+        match observation_class {
+            ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock => {
+                let error = batch
+                    .expect_err("block-height classes cannot claim byte-offset cursor semantics");
+                assert_invalid(error, INCOMPATIBLE);
+            }
+            ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::Snapshot
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => {
+                let batch =
+                    batch.expect("non-block-height classes still skip this incompatibility check");
+                assert_eq!(batch.cursor_policy(), CursorPolicy::MonotonicByteOffset);
+                assert_eq!(
+                    batch.observations()[0].observation_class(),
+                    observation_class
+                );
+            }
+        }
     }
 }
 

@@ -270,6 +270,45 @@ fn durability_receipts_cover_only_records_in_the_completed_sync_batch() {
 }
 
 #[test]
+fn next_sync_deadline_covers_every_constructible_writer_policy() {
+    for policy in [
+        DurabilityPolicy::FsyncEveryRecord,
+        DurabilityPolicy::FsyncEvery {
+            max_records: 2,
+            max_delay: Duration::from_secs(60),
+        },
+    ] {
+        let fixture = TempDir::new().expect("fixture");
+        let mut writer =
+            SpoolWriter::create(fixture.path(), header(15), policy).expect("create writer");
+        let receipt = writer
+            .append(&observation(70, Bytes::from_static(b"pending")), 300)
+            .expect("append");
+        match policy {
+            DurabilityPolicy::FsyncEveryRecord => {
+                assert!(
+                    receipt.is_some(),
+                    "fsync-every-record still commits immediately"
+                );
+                assert_eq!(writer.next_sync_deadline(), None);
+            }
+            DurabilityPolicy::FsyncEvery {
+                max_records: _,
+                max_delay: _,
+            } => {
+                assert!(
+                    receipt.is_none(),
+                    "bounded FsyncEvery still defers durability until the batch bound"
+                );
+                writer
+                    .next_sync_deadline()
+                    .expect("a pending FsyncEvery batch must expose its sync deadline");
+            }
+        }
+    }
+}
+
+#[test]
 fn a_due_batch_can_be_synced_by_the_runtime_timer_without_another_append() {
     let fixture = TempDir::new().expect("fixture");
     let mut writer = SpoolWriter::create(
