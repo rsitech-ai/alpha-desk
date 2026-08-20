@@ -27,7 +27,10 @@ pub use checkpoint::{CheckpointArtifact, CheckpointCompatibility};
 pub use composite::{
     CanonicalStateComponentVersionV1, CanonicalStateError, CanonicalStateReducerV1,
 };
-pub use correction::{ConfirmationAdmission, admit_confirmation, require_committed_confirmation};
+pub use correction::{
+    ConfirmationAdmission, CorrectionInspectReport, CorrectionRecord, admit_confirmation,
+    apply_correction, inspect_correction, require_committed_confirmation,
+};
 pub use error::{CheckpointError, LedgerError, ReducerError, StateImageError, StateKeyError};
 pub use ledger::{
     ApplyOutcome, CanonicalLedger, LedgerLimits, MAX_BLOCK_DELTA_ENTRIES,

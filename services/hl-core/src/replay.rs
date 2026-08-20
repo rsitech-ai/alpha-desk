@@ -1,11 +1,16 @@
 use canonical_events::BlockEnvelope;
-use canonical_ledger::{CanonicalLedger, EventReducer, LedgerLimits, StateImageLimits};
+use canonical_ledger::{
+    CanonicalLedger, ConfirmationAdmission, EventReducer, LedgerError, LedgerLimits,
+    StateImageLimits, admit_confirmation,
+};
 use domain_types::{BlockHeight, ChainId};
 use storage_ports::AtomicStateStore;
 
 use crate::{
     DurableApplyError, DurableApplyOutcome, apply_block_durably,
-    source::{BlockSourceError, CanonicalBlockSource},
+    source::{
+        BlockSourceError, CanonicalBlockSource, confirmation_label, decode_local_replay_block,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,4 +119,47 @@ pub fn replay_block_durably<R: EventReducer, S: AtomicStateStore>(
     block: &BlockEnvelope,
 ) -> Result<DurableApplyOutcome, DurableApplyError> {
     apply_block_durably(ledger, store, block)
+}
+
+/// Inspection of a local-replay block file. Inspection never applies or stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalBlockInspectReport {
+    admitted: bool,
+    applied: bool,
+    confirmation: &'static str,
+}
+
+impl LocalBlockInspectReport {
+    #[must_use]
+    pub const fn admitted(self) -> bool {
+        self.admitted
+    }
+
+    #[must_use]
+    pub const fn applied(self) -> bool {
+        self.applied
+    }
+
+    #[must_use]
+    pub const fn confirmation(self) -> &'static str {
+        self.confirmation
+    }
+}
+
+/// Decode and classify a local-replay JSON block without mutating state.
+pub fn inspect_local_replay_block(json: &str) -> Result<LocalBlockInspectReport, LocalReplayError> {
+    let block = decode_local_replay_block(json)?;
+    match admit_confirmation(block.confirmation_class()) {
+        ConfirmationAdmission::Committed => Ok(LocalBlockInspectReport {
+            admitted: true,
+            applied: false,
+            confirmation: confirmation_label(block.confirmation_class()),
+        }),
+        ConfirmationAdmission::NonCommitted => Err(LocalReplayError::Durable(
+            DurableApplyError::Ledger(LedgerError::NonCommittedBlock),
+        )),
+        ConfirmationAdmission::CorrectionUnimplemented => Err(LocalReplayError::Durable(
+            DurableApplyError::Ledger(LedgerError::CorrectionUnimplemented),
+        )),
+    }
 }
