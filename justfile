@@ -38,9 +38,9 @@ reproducible:
 reproducible-environment:
     CC=/tmp/ambient-cc-must-not-run CFLAGS=-Dambient_cflags_must_not_apply CARGO_PROFILE_RELEASE_LTO=false RUSTC_WRAPPER=/tmp/ambient-rustc-wrapper-must-not-run ./tools/ci/verify-reproducible-build.sh --check-environment-seal
 
-ci-verify: check-workspace hyperliquid-full-coverage-docs quality ci-test
+ci-verify: check-workspace hyperliquid-full-coverage-docs hyperliquid-coverage-check quality ci-test
 
-verify: check-workspace hyperliquid-full-coverage-docs quality test
+verify: check-workspace hyperliquid-full-coverage-docs hyperliquid-coverage-check quality test
 
 oss-audit:
     cargo +1.97.1 run -p open-source-audit --locked --offline -- check --policy config/open-source-policy.toml --root .
