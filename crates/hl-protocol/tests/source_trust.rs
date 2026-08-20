@@ -11,31 +11,96 @@ const COMMITTED_CLASSES: [ObservationClass; 4] = [
 ];
 
 fn expected_pair(trust: SourceTrust, class: ObservationClass) -> Option<PublicationLane> {
-    match (trust, class) {
-        (
-            SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted,
-            ObservationClass::CommittedBlock,
-        ) => Some(PublicationLane::CommittedCandidate),
-        (
-            SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted,
+    match trust {
+        SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted => match class {
+            ObservationClass::CommittedBlock => Some(PublicationLane::CommittedCandidate),
             ObservationClass::AuxiliaryOrderStatus
             | ObservationClass::AuxiliaryBookDiff
-            | ObservationClass::AuxiliaryLedger,
-        )
-        | (SourceTrust::ReconciledSnapshot, ObservationClass::Snapshot) => {
-            Some(PublicationLane::Reconciliation)
+            | ObservationClass::AuxiliaryLedger => Some(PublicationLane::Reconciliation),
+            ObservationClass::Snapshot
+            | ObservationClass::HistoricalBlock
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => None,
+        },
+        SourceTrust::ReconciledSnapshot => match class {
+            ObservationClass::Snapshot => Some(PublicationLane::Reconciliation),
+            ObservationClass::CommittedBlock
+            | ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::HistoricalBlock
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => None,
+        },
+        SourceTrust::RecoveryOnly => match class {
+            ObservationClass::HistoricalBlock => Some(PublicationLane::Recovery),
+            ObservationClass::CommittedBlock
+            | ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::Snapshot
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => None,
+        },
+        SourceTrust::ThirdPartyProvisional => match class {
+            ObservationClass::PublicMarketData | ObservationClass::ProvisionalFeed => {
+                Some(PublicationLane::Provisional)
+            }
+            ObservationClass::CommittedBlock
+            | ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::Snapshot
+            | ObservationClass::HistoricalBlock
+            | ObservationClass::ProvisionalMempool => None,
+        },
+        SourceTrust::MempoolProvisional => match class {
+            ObservationClass::ProvisionalMempool => Some(PublicationLane::Mempool),
+            ObservationClass::CommittedBlock
+            | ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::Snapshot
+            | ObservationClass::HistoricalBlock
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed => None,
+        },
+    }
+}
+
+fn assert_admitted(trust: SourceTrust, class: ObservationClass, lane: PublicationLane) {
+    let admission = SourceAdmission::new(trust, class).expect("allowed pair");
+    assert_eq!(admission.trust(), trust);
+    assert_eq!(admission.observation_class(), class);
+    assert_eq!(admission.publication_lane(), lane);
+}
+
+fn assert_incompatible(trust: SourceTrust, class: ObservationClass) {
+    assert_eq!(
+        SourceAdmission::new(trust, class).expect_err("unlisted pair must fail"),
+        SourceTrustError::IncompatibleObservationClass
+    );
+}
+
+fn pin_incompatible_classes(trust: SourceTrust, allowed: &[ObservationClass]) {
+    for class in ObservationClass::ALL {
+        if allowed.contains(&class) {
+            continue;
         }
-        (SourceTrust::RecoveryOnly, ObservationClass::HistoricalBlock) => {
-            Some(PublicationLane::Recovery)
+        match class {
+            ObservationClass::CommittedBlock
+            | ObservationClass::AuxiliaryOrderStatus
+            | ObservationClass::AuxiliaryBookDiff
+            | ObservationClass::AuxiliaryLedger
+            | ObservationClass::Snapshot
+            | ObservationClass::HistoricalBlock
+            | ObservationClass::PublicMarketData
+            | ObservationClass::ProvisionalFeed
+            | ObservationClass::ProvisionalMempool => assert_incompatible(trust, class),
         }
-        (
-            SourceTrust::ThirdPartyProvisional,
-            ObservationClass::PublicMarketData | ObservationClass::ProvisionalFeed,
-        ) => Some(PublicationLane::Provisional),
-        (SourceTrust::MempoolProvisional, ObservationClass::ProvisionalMempool) => {
-            Some(PublicationLane::Mempool)
-        }
-        _ => None,
     }
 }
 
@@ -43,18 +108,122 @@ fn expected_pair(trust: SourceTrust, class: ObservationClass) -> Option<Publicat
 fn every_trust_and_observation_class_pair_has_one_fail_closed_admission_outcome() {
     for trust in SourceTrust::ALL {
         for class in ObservationClass::ALL {
-            let actual = SourceAdmission::new(trust, class);
             match expected_pair(trust, class) {
-                Some(expected_lane) => {
-                    let admission = actual.expect("allowed pair");
-                    assert_eq!(admission.trust(), trust);
-                    assert_eq!(admission.observation_class(), class);
-                    assert_eq!(admission.publication_lane(), expected_lane);
-                }
-                None => assert_eq!(
-                    actual.expect_err("unlisted pair must fail"),
-                    SourceTrustError::IncompatibleObservationClass
-                ),
+                Some(expected_lane) => assert_admitted(trust, class, expected_lane),
+                None => assert_incompatible(trust, class),
+            }
+        }
+    }
+}
+
+#[test]
+fn every_source_trust_arm_pins_constructible_pairs() {
+    for trust in SourceTrust::ALL {
+        match trust {
+            SourceTrust::LocallyVerifiedCommitted => {
+                assert_admitted(
+                    trust,
+                    ObservationClass::CommittedBlock,
+                    PublicationLane::CommittedCandidate,
+                );
+                assert_admitted(
+                    trust,
+                    ObservationClass::AuxiliaryOrderStatus,
+                    PublicationLane::Reconciliation,
+                );
+                assert_admitted(
+                    trust,
+                    ObservationClass::AuxiliaryBookDiff,
+                    PublicationLane::Reconciliation,
+                );
+                assert_admitted(
+                    trust,
+                    ObservationClass::AuxiliaryLedger,
+                    PublicationLane::Reconciliation,
+                );
+                pin_incompatible_classes(
+                    trust,
+                    &[
+                        ObservationClass::CommittedBlock,
+                        ObservationClass::AuxiliaryOrderStatus,
+                        ObservationClass::AuxiliaryBookDiff,
+                        ObservationClass::AuxiliaryLedger,
+                    ],
+                );
+            }
+            SourceTrust::IndependentCommitted => {
+                assert_admitted(
+                    trust,
+                    ObservationClass::CommittedBlock,
+                    PublicationLane::CommittedCandidate,
+                );
+                assert_admitted(
+                    trust,
+                    ObservationClass::AuxiliaryOrderStatus,
+                    PublicationLane::Reconciliation,
+                );
+                assert_admitted(
+                    trust,
+                    ObservationClass::AuxiliaryBookDiff,
+                    PublicationLane::Reconciliation,
+                );
+                assert_admitted(
+                    trust,
+                    ObservationClass::AuxiliaryLedger,
+                    PublicationLane::Reconciliation,
+                );
+                pin_incompatible_classes(
+                    trust,
+                    &[
+                        ObservationClass::CommittedBlock,
+                        ObservationClass::AuxiliaryOrderStatus,
+                        ObservationClass::AuxiliaryBookDiff,
+                        ObservationClass::AuxiliaryLedger,
+                    ],
+                );
+            }
+            SourceTrust::ReconciledSnapshot => {
+                assert_admitted(
+                    trust,
+                    ObservationClass::Snapshot,
+                    PublicationLane::Reconciliation,
+                );
+                pin_incompatible_classes(trust, &[ObservationClass::Snapshot]);
+            }
+            SourceTrust::RecoveryOnly => {
+                assert_admitted(
+                    trust,
+                    ObservationClass::HistoricalBlock,
+                    PublicationLane::Recovery,
+                );
+                pin_incompatible_classes(trust, &[ObservationClass::HistoricalBlock]);
+            }
+            SourceTrust::ThirdPartyProvisional => {
+                assert_admitted(
+                    trust,
+                    ObservationClass::PublicMarketData,
+                    PublicationLane::Provisional,
+                );
+                assert_admitted(
+                    trust,
+                    ObservationClass::ProvisionalFeed,
+                    PublicationLane::Provisional,
+                );
+                pin_incompatible_classes(
+                    trust,
+                    &[
+                        ObservationClass::PublicMarketData,
+                        ObservationClass::ProvisionalFeed,
+                    ],
+                );
+            }
+            SourceTrust::MempoolProvisional => {
+                assert_admitted(
+                    trust,
+                    ObservationClass::ProvisionalMempool,
+                    PublicationLane::Mempool,
+                );
+                pin_incompatible_classes(trust, &[ObservationClass::ProvisionalMempool]);
             }
         }
     }

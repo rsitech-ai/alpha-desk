@@ -7,7 +7,8 @@ use canonical_events::{
 };
 use canonical_ledger::{
     ApplyOutcome, CanonicalLedger, CanonicalOrderReducerV1, LedgerLimits, OrderCurrentRecordV1,
-    OrderFactRecordV1, OrderLifecycleV1, OrderTransitionRecordV1, OrderTransitionStatusV1,
+    OrderFactRecordV1, OrderLifecycleV1, OrderStateError, OrderTransitionRecordV1,
+    OrderTransitionStatusV1,
 };
 use domain_types::{
     Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, OrderSide, Price,
@@ -620,6 +621,102 @@ fn reducer_preserves_valid_nondefault_decimal_scale_and_rejects_zero_admission()
         ledger.apply_block(&block(701, vec![zero])).unwrap_err(),
         "order_state.invalid_quantity",
     );
+}
+
+#[test]
+fn filled_remaining_admission_covers_every_constructible_order_lifecycle() {
+    fn lifecycle_wire(lifecycle: OrderLifecycleV1) -> &'static str {
+        match lifecycle {
+            OrderLifecycleV1::Accepted => "accepted",
+            OrderLifecycleV1::Rested => "rested",
+            OrderLifecycleV1::Modified => "modified",
+            OrderLifecycleV1::PartiallyFilled => "partially_filled",
+            OrderLifecycleV1::Filled => "filled",
+            OrderLifecycleV1::Cancelled => "cancelled",
+        }
+    }
+
+    fn current_bytes(
+        lifecycle: OrderLifecycleV1,
+        accepted: Quantity,
+        filled: Quantity,
+        remaining: Quantity,
+    ) -> Vec<u8> {
+        format!(
+            concat!(
+                r#"{{"schema":"hyperliquid-alpha-desk/order-current/v1","#,
+                r#""order_id":"order-lifecycle-remaining","#,
+                r#""account_id":"{account}","#,
+                r#""market_id":"perp:BTC","#,
+                r#""side":"buy","#,
+                r#""lifecycle":"{lifecycle}","#,
+                r#""limit_price":"{limit_price}","#,
+                r#""accepted_quantity":"{accepted}","#,
+                r#""filled_quantity":"{filled}","#,
+                r#""remaining_quantity":"{remaining}","#,
+                r#""accepted_event_id":"accepted-event","#,
+                r#""last_event_id":"last-event","#,
+                r#""last_block_height":100}}"#
+            ),
+            account = Address::from_bytes(ACCOUNT_BYTES).to_api_string(),
+            lifecycle = lifecycle_wire(lifecycle),
+            limit_price = price("65000"),
+            accepted = accepted,
+            filled = filled,
+            remaining = remaining,
+        )
+        .into_bytes()
+    }
+
+    fn pin(lifecycle: OrderLifecycleV1) {
+        match lifecycle {
+            OrderLifecycleV1::Filled => {
+                let rejected = OrderCurrentRecordV1::decode(&current_bytes(
+                    lifecycle,
+                    quantity("2"),
+                    quantity("1"),
+                    quantity("1"),
+                ));
+                assert!(
+                    matches!(rejected, Err(OrderStateError::InvalidRecord)),
+                    "filled still fail-closes nonzero remaining: {rejected:?}"
+                );
+                let admitted = OrderCurrentRecordV1::decode(&current_bytes(
+                    lifecycle,
+                    quantity("1"),
+                    quantity("1"),
+                    quantity("0"),
+                ))
+                .expect("filled still admits zero remaining");
+                assert_eq!(admitted.lifecycle(), OrderLifecycleV1::Filled);
+                assert_eq!(admitted.remaining_quantity().raw(), 0);
+            }
+            OrderLifecycleV1::Accepted
+            | OrderLifecycleV1::Rested
+            | OrderLifecycleV1::Modified
+            | OrderLifecycleV1::PartiallyFilled
+            | OrderLifecycleV1::Cancelled => {
+                let admitted = OrderCurrentRecordV1::decode(&current_bytes(
+                    lifecycle,
+                    quantity("2"),
+                    quantity("1"),
+                    quantity("1"),
+                ))
+                .unwrap_or_else(|error| {
+                    panic!("{lifecycle:?} still skips the filled remaining-zero gate: {error:?}")
+                });
+                assert_eq!(admitted.lifecycle(), lifecycle);
+                assert_ne!(admitted.remaining_quantity().raw(), 0);
+            }
+        }
+    }
+
+    pin(OrderLifecycleV1::Accepted);
+    pin(OrderLifecycleV1::Rested);
+    pin(OrderLifecycleV1::Modified);
+    pin(OrderLifecycleV1::PartiallyFilled);
+    pin(OrderLifecycleV1::Filled);
+    pin(OrderLifecycleV1::Cancelled);
 }
 
 fn assert_reducer_failure(error: canonical_ledger::LedgerError, expected: &str) {

@@ -33,7 +33,6 @@ public = [
 # workflow, or operational configuration.
 generated_review_required = [
   ".github",
-  ".rsitech",
   "config",
   "infra",
 ]

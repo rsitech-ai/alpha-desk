@@ -252,14 +252,20 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
             config.stream_name(),
             config.max_payload_bytes,
         )?;
-        let read_offset = if let Some(cursor) = &durable_cursor {
-            if cursor.epoch() != active.epoch {
-                return Err(SourceError::CursorRegression);
+        let read_offset = match &durable_cursor {
+            Some(cursor) if cursor.epoch() == active.epoch => {
+                validate_resume_boundary(&mut active.file, cursor.offset())?;
+                cursor.offset()
             }
-            validate_resume_boundary(&mut active.file, cursor.offset())?;
-            cursor.offset()
-        } else {
-            0
+            Some(_) => {
+                // The path now names a successor file identity (log rotation while
+                // this process was down). Resume at byte 0 of the new epoch and
+                // keep the prior epoch's ACK in `durable_cursor` until the new
+                // epoch is archive-acknowledged. Same-epoch truncation is still
+                // CursorRegression via validate_resume_boundary / size checks.
+                0
+            }
+            None => 0,
         };
         Ok(Self {
             config,
@@ -375,15 +381,14 @@ impl<C: NodeReceiveClock> NodeLineFileSource<C> {
 
     async fn wait_for_progress(&self, context: &SourceRequestContext) -> Result<(), SourceError> {
         context.check()?;
-        let now = Instant::now();
+        let now = tokio::time::Instant::now();
+        let deadline = context.backpressure_deadline();
         let wake = now
             .checked_add(self.config.poll_interval)
-            .map_or(context.backpressure_deadline(), |poll| {
-                poll.min(context.backpressure_deadline())
-            });
+            .map_or(deadline, |poll| poll.min(deadline));
         tokio::select! {
             () = context.cancellation().cancelled() => Err(SourceError::Cancelled),
-            () = tokio::time::sleep_until(wake.into()) => context.check(),
+            () = tokio::time::sleep_until(wake) => context.check(),
         }
     }
 

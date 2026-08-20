@@ -32,3 +32,4 @@ state/
 *.tgz
 *.zip
 *.bundle
+node_modules/

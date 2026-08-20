@@ -1,7 +1,6 @@
-use std::time::Instant;
-
 use async_trait::async_trait;
 use domain_types::{AccountId, MarketId, SourceId};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{SourceCursor, SourceError, SourceObservation};

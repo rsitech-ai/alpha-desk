@@ -175,13 +175,25 @@ cargo +1.97.1 run -p hl-capture --locked --offline -- \
   status --config <retained-capture-config> --json
 ```
 
-The V4 status contract separates downstream publication plans from the active
-source's fsynced
-source backlog, reports the oldest pending capture height, and exposes the
-lowest spool/archive filesystem free percentage in basis points. It also
-reports bounded Node V1 auxiliary-source byte lag, archive depth, partial-line,
-qualification, quarantine, and durable cursor state. See
+The V5 status contract is what `hl-capture run` writes. It keeps every V4
+field, requires a fail-closed `maintenance` object, and omits last-heartbeat
+rates until a window is sampled. Readers still accept inactive
+`hl.capture.status.v4` (no `maintenance`). See
+[`contracts/capture-status-v5.md`](contracts/capture-status-v5.md) and
 [`contracts/capture-status-v4.md`](contracts/capture-status-v4.md).
+
+When `runtime.status_listen` is a loopback address, `hl-capture run` also
+serves that snapshot over HTTP (`GET /status`, `GET /healthz`, SSE
+`GET /events`). `hl-capture serve-status --config <path> [--listen <addr>]`
+serves the same file without starting capture. Bind addresses must be
+loopback. `GET /status` fail-closed-reads inactive `hl.capture.status.v4`
+(no `maintenance`) and `hl.capture.status.v5` (`maintenance` required), and
+returns the snapshot bytes as read. `GET /healthz` returns HTTP 200 only when
+the snapshot is V5 with fail-closed `maintenance` and `ready: true`. A valid
+V5 with `ready: false` is 503, same as a leftover V4 snapshot. This HTTP
+surface does not replace
+`hl-api` `/v1/capture/status`, which reads the status file on disk. Writer
+schema V5 is not Stage 1 PASS or live-source qualification.
 
 The self-contained runtime E2E creates fresh test-owned PostgreSQL 18.4 and
 authenticated NATS 2.14.3 containers on Docker-assigned loopback ports. It
@@ -265,7 +277,7 @@ evidence and restart diagnosis.
 
 ## Stage plans
 
-The detailed implementation plans live under `docs/superpowers/plans/`. They are approved design inputs and retain their original checklist state. Current implementation evidence is recorded in `docs/STATUS.md`.
+Current implementation evidence is recorded in `docs/STATUS.md`.
 
 Stage 1 normally requires a verified signed `stage-0-foundations` tag. Work developed before that external gate closes must remain clearly labeled as unreleased development and cannot be used to claim the gate passed.
 

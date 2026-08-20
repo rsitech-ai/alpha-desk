@@ -12,12 +12,14 @@ pub(super) const BYTE_V2_DATASET: &str = "raw_source_observations_byte_v2";
 pub(super) enum RawPolicy {
     LegacyContiguous,
     MonotonicByteV2,
+    MonotonicByteV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ActivePolicies {
     legacy: bool,
     byte_v2: bool,
+    byte_v3: bool,
 }
 
 impl ActivePolicies {
@@ -25,11 +27,36 @@ impl ActivePolicies {
         match policy {
             RawPolicy::LegacyContiguous => self.legacy,
             RawPolicy::MonotonicByteV2 => self.byte_v2,
+            RawPolicy::MonotonicByteV3 => self.byte_v3,
         }
     }
 
     pub(super) const fn conflicts(self) -> bool {
-        self.legacy && self.byte_v2
+        self.legacy as u32 + self.byte_v2 as u32 + self.byte_v3 as u32 > 1
+    }
+}
+
+pub(super) fn cutover_relative(chain: &ChainId, source: &SourceId) -> PathBuf {
+    dataset_relative(chain, source, RawPolicy::LegacyContiguous).join("CUTOVER")
+}
+
+pub(super) fn cutover_exists(
+    root: &Path,
+    chain: &ChainId,
+    source: &SourceId,
+) -> Result<bool, ArchiveError> {
+    let relative = cutover_relative(chain, source);
+    super::fs::validate_relative(&relative)?;
+    match std::fs::symlink_metadata(root.join(&relative)) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                Err(ArchiveError::UnsafePath)
+            } else {
+                Ok(true)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(ArchiveError::Io("inspecting raw archive cutover pointer")),
     }
 }
 
@@ -38,15 +65,34 @@ pub(super) fn active_policies(
     chain: &ChainId,
     source: &SourceId,
 ) -> Result<ActivePolicies, ArchiveError> {
+    let byte_v2 = checked_current_exists(
+        root,
+        &dataset_relative(chain, source, RawPolicy::MonotonicByteV2),
+    )?;
+    let byte_v3 = checked_current_exists(
+        root,
+        &dataset_relative(chain, source, RawPolicy::MonotonicByteV3),
+    )?;
+    let legacy = checked_current_exists(
+        root,
+        &dataset_relative(chain, source, RawPolicy::LegacyContiguous),
+    )?;
+    if cutover_exists(root, chain, source)? {
+        if !byte_v3 {
+            return Err(ArchiveError::ManifestVerification(
+                "raw V2 cutover exists without a V3 CURRENT pointer",
+            ));
+        }
+        return Ok(ActivePolicies {
+            legacy: false,
+            byte_v2: false,
+            byte_v3: true,
+        });
+    }
     Ok(ActivePolicies {
-        legacy: checked_current_exists(
-            root,
-            &dataset_relative(chain, source, RawPolicy::LegacyContiguous),
-        )?,
-        byte_v2: checked_current_exists(
-            root,
-            &dataset_relative(chain, source, RawPolicy::MonotonicByteV2),
-        )?,
+        legacy,
+        byte_v2,
+        byte_v3,
     })
 }
 
@@ -62,11 +108,12 @@ pub(super) fn ensure_append_policy(
             "raw source has more than one active cursor policy",
         ));
     }
-    let other = match requested {
-        RawPolicy::LegacyContiguous => RawPolicy::MonotonicByteV2,
-        RawPolicy::MonotonicByteV2 => RawPolicy::LegacyContiguous,
+    let other_active = match requested {
+        RawPolicy::LegacyContiguous => active.byte_v2 || active.byte_v3,
+        RawPolicy::MonotonicByteV2 => active.legacy || active.byte_v3,
+        RawPolicy::MonotonicByteV3 => active.legacy || active.byte_v2,
     };
-    if active.active(other) {
+    if other_active {
         return Err(ArchiveError::InvalidInput(
             "raw source already uses a different archive cursor policy",
         ));
@@ -97,6 +144,7 @@ pub(super) fn dataset_relative(chain: &ChainId, source: &SourceId, policy: RawPo
     let dataset = match policy {
         RawPolicy::LegacyContiguous => LEGACY_DATASET,
         RawPolicy::MonotonicByteV2 => BYTE_V2_DATASET,
+        RawPolicy::MonotonicByteV3 => super::raw_v3::RAW_BYTE_DATASET_V3,
     };
     PathBuf::from(format!(
         "chain={}",

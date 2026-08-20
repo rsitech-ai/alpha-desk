@@ -1,0 +1,11 @@
+version = "market-flow-v1"
+volume_weight_ppm = 400000
+oi_weight_ppm = 300000
+depth_weight_ppm = 300000
+usd_scale = 8
+recent_volume_raw = 1000000000000
+open_interest_raw = 2000000000000
+executable_depth_raw = 500000000000
+min_volume_raw = 100000000
+min_open_interest_raw = 100000000
+min_depth_raw = 100000000

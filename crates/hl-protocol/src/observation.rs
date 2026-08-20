@@ -297,7 +297,15 @@ impl ObservationError {
             Self::PayloadTooLarge {
                 observation_class, ..
             } => Some(*observation_class),
-            _ => None,
+            Self::InvalidSourceVersion
+            | Self::InvalidParserSchemaVersion
+            | Self::InvalidCursorEpoch
+            | Self::InvalidWallTimestamp
+            | Self::InvalidWarningCode
+            | Self::InvalidWarningDetail
+            | Self::InvalidPayloadLimit
+            | Self::EmptyPayload
+            | Self::CursorRegression => None,
         }
     }
 }

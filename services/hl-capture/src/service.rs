@@ -201,7 +201,8 @@ pub async fn connect_capture(
         Duration::from_millis(config.runtime().shutdown_grace_millis()),
         BUILD_ID,
     )
-    .map_err(|_| RuntimeConnectError::RuntimeConfig)?;
+    .map_err(|_| RuntimeConnectError::RuntimeConfig)?
+    .with_status_listen(config.runtime().status_listen());
     let status_writer = Arc::new(
         StatusWriter::new(config.runtime().status_path().to_path_buf())
             .map_err(|_| RuntimeConnectError::Status)?,

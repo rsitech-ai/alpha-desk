@@ -9,3 +9,16 @@ homepage.workspace = true
 repository.workspace = true
 readme.workspace = true
 publish = false
+
+[dependencies]
+blake3.workspace = true
+domain-types = { path = "../domain-types", version = "=0.1.0" }
+feature-core = { path = "../feature-core", version = "=0.1.0" }
+market-intelligence = { path = "../market-intelligence", version = "=0.1.0" }
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+wallet-intelligence = { path = "../wallet-intelligence", version = "=0.1.0" }
+
+[dev-dependencies]
+serde_json.workspace = true

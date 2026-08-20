@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use domain_types::{BlockHeight, ChainId, KnownTime};
 use storage_ports::{CaptureProgressStore, ProgressError};
@@ -41,6 +42,11 @@ pub(crate) struct RuntimeHealthSnapshot {
     oldest_pending_capture_height: Option<BlockHeight>,
     disk_free_basis_points: Option<u16>,
     auxiliary_sources: BTreeMap<String, AuxiliarySourceStatus>,
+    archived_records_in_window: u64,
+    captured_blocks_in_window: u64,
+    throughput_records_per_sec: Option<u32>,
+    throughput_blocks_per_sec: Option<u32>,
+    rate_window_started: Instant,
 }
 
 #[derive(Debug)]
@@ -66,6 +72,11 @@ impl CaptureRuntimeHealth {
             oldest_pending_capture_height: None,
             disk_free_basis_points: None,
             auxiliary_sources: BTreeMap::new(),
+            archived_records_in_window: 0,
+            captured_blocks_in_window: 0,
+            throughput_records_per_sec: None,
+            throughput_blocks_per_sec: None,
+            rate_window_started: Instant::now(),
         });
         Self { sender }
     }
@@ -212,6 +223,8 @@ impl CaptureRuntimeHealth {
                 }
             }
             snapshot.disk_free_basis_points = Some(disk_free_basis_points);
+            snapshot.captured_blocks_in_window =
+                snapshot.captured_blocks_in_window.saturating_add(1);
             refresh_capture_backlog(snapshot);
         });
     }
@@ -258,6 +271,8 @@ impl CaptureRuntimeHealth {
     ) {
         self.sender.send_modify(|snapshot| {
             if let Some(source) = snapshot.auxiliary_sources.get_mut(source_id) {
+                let previous = source.local_sequence().unwrap_or(0);
+                let archived = local_sequence.saturating_sub(previous);
                 source.record_durable(
                     cursor_epoch,
                     tail_cursor_epoch,
@@ -268,6 +283,8 @@ impl CaptureRuntimeHealth {
                     last_durable_wall_micros,
                     quarantine_reason,
                 );
+                snapshot.archived_records_in_window =
+                    snapshot.archived_records_in_window.saturating_add(archived);
             }
         });
     }
@@ -362,6 +379,25 @@ impl CaptureRuntimeHealth {
             .cloned()
     }
 
+    pub(crate) fn sample_throughput(&self) {
+        self.sender.send_modify(|snapshot| {
+            let elapsed_millis = u64::try_from(snapshot.rate_window_started.elapsed().as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            snapshot.throughput_records_per_sec = Some(per_second_rate(
+                snapshot.archived_records_in_window,
+                elapsed_millis,
+            ));
+            snapshot.throughput_blocks_per_sec = Some(per_second_rate(
+                snapshot.captured_blocks_in_window,
+                elapsed_millis,
+            ));
+            snapshot.archived_records_in_window = 0;
+            snapshot.captured_blocks_in_window = 0;
+            snapshot.rate_window_started = Instant::now();
+        });
+    }
+
     fn snapshot(&self) -> RuntimeHealthSnapshot {
         self.sender.borrow().clone()
     }
@@ -391,6 +427,12 @@ fn refresh_capture_backlog(snapshot: &mut RuntimeHealthSnapshot) {
     snapshot.oldest_pending_capture_height = Some(next);
 }
 
+fn per_second_rate(count: u64, elapsed_millis: u64) -> u32 {
+    let elapsed_millis = elapsed_millis.max(1);
+    let scaled = count.saturating_mul(1_000);
+    u32::try_from(scaled / elapsed_millis).unwrap_or(u32::MAX)
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureRuntimeConfig {
     chain_id: ChainId,
@@ -399,6 +441,7 @@ pub struct CaptureRuntimeConfig {
     heartbeat_interval: Duration,
     shutdown_grace: Duration,
     build_id: String,
+    status_listen: Option<SocketAddr>,
 }
 
 impl CaptureRuntimeConfig {
@@ -430,7 +473,14 @@ impl CaptureRuntimeConfig {
             heartbeat_interval,
             shutdown_grace,
             build_id,
+            status_listen: None,
         })
+    }
+
+    #[must_use]
+    pub const fn with_status_listen(mut self, status_listen: Option<SocketAddr>) -> Self {
+        self.status_listen = status_listen;
+        self
     }
 }
 
@@ -562,6 +612,7 @@ impl CaptureRuntime {
                 tokio::select! {
                     () = status_cancellation.cancelled() => return Ok(()),
                     _ = heartbeat.tick() => {
+                        status_health.sample_throughput();
                         status_context
                             .write_current(status_health.snapshot())
                             .await
@@ -573,6 +624,19 @@ impl CaptureRuntime {
                 }
             }
         }));
+
+        if let Some(listen) = self.config.status_listen {
+            let status_path = self.status_writer.path().to_path_buf();
+            let operator_cancellation = cancellation.child_token();
+            tasks.push(OwnedTask::new("operator-status", async move {
+                crate::operator::serve_operator_status(status_path, listen, operator_cancellation)
+                    .await
+                    .map_err(|error| AppError::TaskFailed {
+                        task: "operator-status",
+                        reason_code: error.reason_code(),
+                    })
+            }));
+        }
 
         let result = run_owned_tasks(cancellation, self.config.shutdown_grace, tasks).await;
         let final_health = if result.is_ok() {
@@ -691,6 +755,10 @@ impl StatusContext {
         )
         .with_archive_manifest_id(archive_manifest_id)
         .with_last_error_reason(runtime_health.reason_code.map(str::to_owned))
+        .with_optional_throughput(
+            runtime_health.throughput_records_per_sec,
+            runtime_health.throughput_blocks_per_sec,
+        )
         .with_auxiliary_sources(auxiliary_sources))
     }
 
@@ -727,6 +795,10 @@ impl StatusContext {
             runtime_health.capture_backlog_records,
             runtime_health.oldest_pending_capture_height,
             runtime_health.disk_free_basis_points,
+        )
+        .with_optional_throughput(
+            runtime_health.throughput_records_per_sec,
+            runtime_health.throughput_blocks_per_sec,
         )
         .with_auxiliary_sources(auxiliary_sources);
         self.writer.write(&status)
@@ -821,6 +893,50 @@ mod tests {
         assert_eq!(caught_up.capture_backlog_records, 0);
         assert_eq!(caught_up.oldest_pending_capture_height, None);
         assert_eq!(caught_up.disk_free_basis_points, Some(2_345));
+    }
+
+    #[test]
+    fn windowed_throughput_counts_captured_blocks_and_archived_records() {
+        let health = CaptureRuntimeHealth::new();
+        health.configure_auxiliary_sources(&["node-fills".to_owned()]);
+        health.record_capture(
+            CommittedSourceClass::LocallyVerifiedCommitted,
+            BlockHeight::new(43),
+            2_345,
+        );
+        health.record_auxiliary_durable(
+            "node-fills",
+            "node-file-v1:epoch",
+            "node-file-v1:epoch",
+            47,
+            3,
+            0,
+            false,
+            1_000,
+            None,
+        );
+
+        let pending = health.snapshot();
+        assert_eq!(pending.captured_blocks_in_window, 1);
+        assert_eq!(pending.archived_records_in_window, 3);
+        assert!(pending.throughput_records_per_sec.is_none());
+        assert!(pending.throughput_blocks_per_sec.is_none());
+        assert_eq!(super::per_second_rate(0, 1_000), 0);
+        assert_eq!(super::per_second_rate(5, 1_000), 5);
+        assert_eq!(super::per_second_rate(1, 1), 1_000);
+        assert_eq!(super::per_second_rate(u64::MAX, 1), u32::MAX);
+
+        health.sample_throughput();
+        let sampled = health.snapshot();
+        assert_eq!(sampled.captured_blocks_in_window, 0);
+        assert_eq!(sampled.archived_records_in_window, 0);
+        assert!(sampled.throughput_records_per_sec.is_some());
+        assert!(sampled.throughput_blocks_per_sec.is_some());
+
+        health.sample_throughput();
+        let idle = health.snapshot();
+        assert_eq!(idle.throughput_blocks_per_sec, Some(0));
+        assert_eq!(idle.throughput_records_per_sec, Some(0));
     }
 
     #[test]

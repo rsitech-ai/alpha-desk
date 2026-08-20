@@ -6,7 +6,7 @@ use std::{
 
 use canonical_events::BlockEnvelope;
 use domain_types::{BlockHeight, BlockRange, ChainId, KnownTime, ManifestId, SourceId};
-use hl_protocol::SourceObservation;
+use hl_protocol::{ObservationClass, SourceObservation};
 
 pub const ARCHIVE_MANIFEST_SCHEMA_V1: &str = "hyperliquid-alpha-desk/archive-manifest/v1";
 
@@ -282,6 +282,21 @@ impl RawArchiveWorkloadEnvelope {
             return Err(RawArchiveCapacityRejection::RuntimeLimitExceeded);
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub const fn retention_horizon_seconds(&self) -> u64 {
+        self.retention_horizon_seconds
+    }
+
+    #[must_use]
+    pub const fn maximum_eligible_bytes(&self) -> u64 {
+        self.maximum_eligible_bytes
+    }
+
+    #[must_use]
+    pub const fn maximum_eligible_inodes(&self) -> u64 {
+        self.maximum_eligible_inodes
     }
 
     /// Maintenance must call this before publishing capacity health as green.
@@ -923,10 +938,13 @@ impl TryFrom<RawObservationReceipt> for SequenceBoundRawObservationReceipt {
     type Error = ArchiveError;
 
     fn try_from(receipt: RawObservationReceipt) -> Result<Self, Self::Error> {
-        if receipt.cursor_policy() != CursorPolicy::MonotonicByteOffset {
-            return Err(ArchiveError::InvalidInput(
-                "sequence-bound receipt requires monotonic byte offsets",
-            ));
+        match receipt.cursor_policy() {
+            CursorPolicy::MonotonicByteOffset => {}
+            CursorPolicy::ContiguousNativeOffset => {
+                return Err(ArchiveError::InvalidInput(
+                    "sequence-bound receipt requires monotonic byte offsets",
+                ));
+            }
         }
         let local_sequence_range =
             receipt
@@ -1488,11 +1506,7 @@ impl RawObservationBatch {
         let first = observations
             .first()
             .ok_or(ArchiveError::InvalidInput("raw observation batch is empty"))?;
-        if matches!(
-            first.observation_class(),
-            hl_protocol::ObservationClass::CommittedBlock
-                | hl_protocol::ObservationClass::HistoricalBlock
-        ) {
+        if byte_offset_rejects_block_height_class(first.observation_class()) {
             return Err(ArchiveError::InvalidInput(
                 "byte-offset cursor policy is incompatible with block-height observation class",
             ));
@@ -1603,6 +1617,19 @@ impl RawObservationBatch {
     #[must_use]
     pub const fn spool_segment_blake3(&self) -> [u8; 32] {
         self.spool_segment_blake3
+    }
+}
+
+fn byte_offset_rejects_block_height_class(class: ObservationClass) -> bool {
+    match class {
+        ObservationClass::CommittedBlock | ObservationClass::HistoricalBlock => true,
+        ObservationClass::AuxiliaryOrderStatus
+        | ObservationClass::AuxiliaryBookDiff
+        | ObservationClass::AuxiliaryLedger
+        | ObservationClass::Snapshot
+        | ObservationClass::PublicMarketData
+        | ObservationClass::ProvisionalFeed
+        | ObservationClass::ProvisionalMempool => false,
     }
 }
 
@@ -2083,6 +2110,12 @@ pub enum ArchiveError {
     WriterBusy,
     #[error("canonical archive codec failed: {0}")]
     Codec(String),
+    #[error(transparent)]
+    Capacity(#[from] RawArchiveCapacityRejection),
+    #[error("raw archive receipt index rebuild is required")]
+    ReceiptIndexRebuildRequired,
+    #[error("raw V2 import cannot rotate the journal before CURRENT exists: {0}")]
+    ImportJournalRotationBeforeCurrent(&'static str),
 }
 
 impl ArchiveError {
@@ -2100,6 +2133,11 @@ impl ArchiveError {
             Self::UnsafePath => "archive.unsafe_path",
             Self::WriterBusy => "archive.writer_busy",
             Self::Codec(_) => "archive.codec",
+            Self::Capacity(rejection) => rejection.reason_code(),
+            Self::ReceiptIndexRebuildRequired => "archive.receipt_index_rebuild_required",
+            Self::ImportJournalRotationBeforeCurrent(_) => {
+                "archive.import_journal_rotation_before_current"
+            }
         }
     }
 }

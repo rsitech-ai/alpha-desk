@@ -327,14 +327,14 @@ impl<C: NodeReceiveClock> NodeBlockDirectorySource<C> {
 
     async fn wait_for_progress(&self, context: &SourceRequestContext) -> Result<(), SourceError> {
         context.check()?;
-        let wake = Instant::now()
+        let now = tokio::time::Instant::now();
+        let deadline = context.backpressure_deadline();
+        let wake = now
             .checked_add(self.config.poll_interval)
-            .map_or(context.backpressure_deadline(), |poll| {
-                poll.min(context.backpressure_deadline())
-            });
+            .map_or(deadline, |poll| poll.min(deadline));
         tokio::select! {
             () = context.cancellation().cancelled() => Err(SourceError::Cancelled),
-            () = tokio::time::sleep_until(wake.into()) => context.check(),
+            () = tokio::time::sleep_until(wake) => context.check(),
         }
     }
 
