@@ -139,3 +139,6 @@ dev-reset:
 web-dashboard:
     npm --prefix apps/web-dashboard install
     npm --prefix apps/web-dashboard run dev
+
+hyperliquid-full-coverage-docs:
+    ./tools/ci/check-hyperliquid-full-coverage-docs.sh

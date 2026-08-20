@@ -2094,3 +2094,95 @@ Each capability record must contain:
 - https://docs.allium.so/historical-data/supported-blockchains/hyperliquid/overview
 
 Provider statements are treated as vendor claims until independently qualified.
+
+---
+
+## Appendix D. Requirement IDs
+
+These IDs index requirements already stated above. They do not add product behavior.
+
+Approved base design: `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md`. Frozen V1 review tags: `design-approved-v1.0.0`, `spec-v1.0.0`.
+
+Task mapping, target tests, and acceptance evidence live in `docs/superpowers/plans/2026-08-19-hyperliquid-full-coverage-traceability.md`.
+
+| ID | Spec locus | Requirement |
+| --- | --- | --- |
+| HLCOV-SRC-001 | §1, §6.1, §30.3 | Committed node activity is the venue-wide foundation. Do not poll every wallet. |
+| HLCOV-SRC-002 | §6.1 | An independent committed source confirms continuity and detects local corruption. |
+| HLCOV-SRC-003 | §6.1, §30.4 | Official REST and WebSocket are provisional/reconciliation lanes and never silently override committed state. |
+| HLCOV-SRC-004 | §6.1, §13.3 | Official historical S3 backfill preserves each dataset's documented gaps and timing limits. |
+| HLCOV-SRC-005 | §6.1, §30.5 | Managed providers carry provenance and never silently overwrite canonical truth. Community sources are discovery-only. |
+| HLCOV-SRC-006 | §6.2, §6.3 | Evidence carries `SourceRole`. The five record classes stay distinct. All inputs enter `SourceObservationEnvelope` first. |
+| HLCOV-SRC-007 | §3.1 | In-scope sources are node outputs, `/info`, public WS, historical S3, HyperEVM, read precompiles, optional providers, community discovery, and operator labels/watchlists/rules. |
+| HLCOV-SRC-008 | §10.3 | Store exact REST bytes before parse. Canonical/accounting paths use checked fixed-point, never `f64`. Unknown non-state fields warn. Unknown state-affecting variants quarantine. |
+| HLCOV-SRC-009 | §10.4 | Time-range pagination uses overlap, stable-ID or content-hash dedup, same-millisecond records, truncation/gap recording, and `aggregateByTime` as a distinct observation. |
+| HLCOV-SRC-010 | §12.1, §12.2, §12.3 | Weighted REST token buckets per egress, 70-80% safety envelope, P0-P5 priorities, and activity-based wallet cadence. |
+| HLCOV-SRC-011 | §12.4, §3.2 | Named egress paths with independent budgets. No anonymous proxy rotation. |
+| HLCOV-SRC-012 | §13.1 | Required node datasets include transaction blocks, periodic state, trades, fills, order statuses, raw book diffs, miscellaneous events, and L4 snapshots. |
+| HLCOV-SRC-013 | §13.3 | Historical S3 ingestion is resumable requester-pays with per-object manifests. |
+| HLCOV-SRC-014 | §13.4 | Design for ~100 GB/day node logs. Do not delete raw evidence because a ClickHouse projection exists. |
+| HLCOV-PROTO-001 | §4.1, §30.13 | "All" is coverage-complete only when every enabled manifest capability has owner, fixture, parser or opaque policy, trust class, retention, mapping, health, test, limitation, and probe. |
+| HLCOV-PROTO-002 | §4.2 | Capability status is one of the enumerated states in §4.2. |
+| HLCOV-PROTO-003 | §4.3 | Every API response and dashboard aggregate distinguishes the completeness dimensions in §4.3. |
+| HLCOV-PROTO-004 | §9.1 | Manifest is `config/hyperliquid/capabilities.toml` plus JSON schema and generated coverage matrix. |
+| HLCOV-PROTO-005 | §9.2, App B | Every capability record includes the required fields in §9.2 and Appendix B. |
+| HLCOV-PROTO-006 | §9.3 | `just hyperliquid-coverage-check` is offline and deterministic. Live probes must not be required for code generation. |
+| HLCOV-PROTO-007 | §14.1 | `CanonicalEventEnvelope` stays V1. Target additive `1.1.0`. Append fields/messages only. Never reuse protobuf tags. No V2. |
+| HLCOV-PROTO-008 | §14.2, §14.3, §30.11 | Additive event kinds require committed evidence. Typed reconciled snapshots are separate. Snapshots do not synthesize ledger events by default. |
+| HLCOV-PROTO-009 | §14.4 | Stable identity uses protocol coordinates. Correction records never mutate archived history. |
+| HLCOV-PROTO-010 | §8, §30.2, §28.17 | `hlscreen` is reusable code/fixtures and an optional thin client, not a second production truth system. Differential tests are mandatory once fixtures are in scope. |
+| HLCOV-PROTO-011 | §5, §28.10 | Public domains including vault, staking, builder, referral, aligned quote, borrow/lend, HIP-3, and outcome are represented or explicitly capability-gated. |
+| HLCOV-PROTO-012 | §10.2, §11.1, §11.2, §11.3 | Manifest covers documented `/info` families. WS registry is data-driven. Snapshot vs incremental vs reconnect classes are distinct. Planner enforces official WS limits. |
+| HLCOV-CORE-001 | §7.1, §30.8 | Keep the five deployables. Do not split a deployable per domain until measured need. |
+| HLCOV-CORE-002 | §7.2 | Storage roles stay Parquet/object archive, RocksDB, ClickHouse, PostgreSQL, NATS JetStream. Redis is not required. |
+| HLCOV-CORE-003 | §3.2, §30.6 | NATS JetStream remains the operational bus. No Kafka without measured SLO evidence. |
+| HLCOV-CORE-004 | §2.1, §30.9 | Raw evidence is archived before acknowledgement/publication. Live and replay share parser, mapping, reducer, feature, and signal paths. |
+| HLCOV-CORE-005 | §13.2, §28.9 | L4 reconstruction is deterministic. Derived L2 reconciles against official `l2Book`. |
+| HLCOV-CORE-006 | §16, §18.2 | Missing deterministic reducers and the listed reconstruction invariants. |
+| HLCOV-CORE-007 | §18.1, §18.3 | Reconciliation is an explicit finding. Unknown state-affecting variants fail closed for affected reducers/features. Providers never rewrite committed state alone. |
+| HLCOV-CORE-008 | §19.3 | RocksDB column-family extensions are versioned and covered by replay migration tests. |
+| HLCOV-CORE-009 | §19.1, §19.2 | Raw object layout and Parquet additions in §19. Avoid account-address directory partitioning. |
+| HLCOV-CORE-010 | §19.4 | PostgreSQL control schemas for source catalog, wallet registry, backfill/coverage, ABI/provider registry, and watchlists/alert rules. |
+| HLCOV-CORE-011 | §7, §27.2 | Production `hl-core` runtime. Failure behavior in §27.2, including archive-without-NATS and stale committed features when the node is down. |
+| HLCOV-WALLET-001 | §15.1 | Durable wallet registry and related control tables with the core fields in §15.1. |
+| HLCOV-WALLET-002 | §15.2, §28.5 | Wallets are discovered from committed activity, not only external leaderboards. |
+| HLCOV-WALLET-003 | §15.3 | Tracking tiers are explainable and versioned. |
+| HLCOV-WALLET-004 | §15.4, §28.8 | Backfill is resumable, leased, idempotent, and budget-aware. Historical coverage and truncation are visible per wallet/dataset. |
+| HLCOV-WALLET-005 | §16.1, §16.2, §16.3 | Position episodes, cashflow-aware PnL decomposition, and performance outputs. Do not treat raw account-value change as investment performance. |
+| HLCOV-WALLET-006 | §28.6 | At least 10,000 wallet registry records can be scheduled without exceeding configured source budgets. |
+| HLCOV-WALLET-007 | §28.7 | Current wallet positions, orders, and balances reconcile within approved semantics. |
+| HLCOV-WALLET-008 | §15.1, §19.4 | Operator watchlists and labels are in scope. Extend the existing watchlist schema. Do not duplicate it. |
+| HLCOV-EVM-001 | §17.1 | Local `evm_block_and_receipts` is primary. S3 is fallback/independent. Official JSON-RPC is supplemental. |
+| HLCOV-EVM-002 | §17.2 | HyperEVM protocol modules start in `hl-protocol`. A separate Ethereum crate is justified only after dependency/architecture evidence. |
+| HLCOV-EVM-003 | §17.3 | Indexed facts include blocks, txs, receipts, logs, system transactions, token events, CoreWriter actions, and Core/EVM transfers. |
+| HLCOV-EVM-004 | §17.4 | PostgreSQL ABI/contract registry. Unknown logs remain queryable by topic, address, and raw bytes. |
+| HLCOV-EVM-005 | §17.5, §28.12 | Cross-layer links for Core/EVM transfers and known CoreWriter actions. Read precompiles reconcile. They do not replace L1 replay. |
+| HLCOV-EVM-006 | §30.12, §28.11 | HyperEVM raw blocks/receipts are first-class canonical chain facts, archived and queryable. |
+| HLCOV-ANALYTICS-001 | §19.5, §28.13 | ClickHouse fact projections are rebuildable from immutable archives and are never the only copy. |
+| HLCOV-ANALYTICS-002 | §7, §28.13 | Deterministic archive-to-ClickHouse projectors. |
+| HLCOV-ANALYTICS-003 | §7, §28.14 | Production `hl-analytics` drives existing wallet/entity/market intelligence from production facts. |
+| HLCOV-ANALYTICS-004 | §20.1 | Wallet-intelligence projections listed in §20.1. |
+| HLCOV-ANALYTICS-005 | §20.2, §28.15 | Rankings are cashflow-adjusted, point-in-time safe, entity-aware, and coverage-labelled. Never rank purely by raw PnL. |
+| HLCOV-ANALYTICS-006 | §20.3 | Market aggregates carry explicit coverage fields. Tracked-wallet statistics are not called global unless committed venue-wide reconstruction supports that. |
+| HLCOV-ANALYTICS-007 | §20.4 | Provider labels and leaderboards are temporal observations, separate from reconstructed metrics. |
+| HLCOV-ANALYTICS-008 | §21, §28.16 | Alerts are typed, versioned, deterministic, and point-in-time safe, with the §21.2 lifecycle and evidence bundles. Language models do not decide confirmation. |
+| HLCOV-API-001 | §22.1 | Analytical responses include schema version, as-of, knowledge time, watermark, confirmation, source coverage, data health, and build. |
+| HLCOV-API-002 | §22.2, §22.3, §22.4, §22.5 | Market, wallet, ecosystem, and HyperEVM GET surfaces in §22. |
+| HLCOV-API-003 | §22.6 | Operations/evidence endpoints. Control writes are local Alpha Desk metadata only. |
+| HLCOV-API-004 | §22.7 | Resumable streams carry sequence, watermark, snapshot/resume token, and stale-state markers. |
+| HLCOV-API-005 | §23 | Dashboard workspaces: market, wallet, ecosystem, operations. |
+| HLCOV-API-006 | §28.20 | Dashboard exposes data health, source coverage, and limitations alongside intelligence. |
+| HLCOV-API-007 | §23 | Do not create a second web app. Extend existing `apps/AlphaDesk` / operator dashboard. |
+| HLCOV-API-008 | §3.2 | No GraphQL-first rewrite of the existing OpenAPI service. |
+| HLCOV-OPS-001 | §3.2, §30.14 | Read-only: no `/exchange`, signing, private keys, order placement, copy-trading execution, or vault actions. |
+| HLCOV-OPS-002 | §3.2 | No claim of complete historical coverage when the source is truncated or gapped. |
+| HLCOV-OPS-003 | §3.2, §30.7 | Rust is the production runtime. Python is not the canonical production path. |
+| HLCOV-OPS-004 | §24 | Security, privacy, and legal controls in §24, including egress allowlist, TLS, license field suppression, and label provenance. |
+| HLCOV-OPS-005 | §24, §28.18 | Release artifacts contain no execution/signing code or secrets. |
+| HLCOV-OPS-006 | §25 | Latency, correctness, and capacity SLOs plus the core metrics in §25.4. Initial numbers are measured, not frozen. |
+| HLCOV-OPS-007 | §26 | Protocol, differential, replay, chaos, and research tests, plus the verification commands in §26.6. |
+| HLCOV-OPS-008 | §27.1 | Initial production topology in §27.1. |
+| HLCOV-OPS-009 | §28.19 | Load, soak, chaos, restore, and replay gates pass before calling the expansion complete. |
+| HLCOV-OPS-010 | T01 | Design addendum, renamed spec/plan, traceability, plans index, ROADMAP note, and STATUS snapshot. Docs check is `just hyperliquid-full-coverage-docs`. |
+| HLCOV-OPS-011 | §20.4, T35, T39 | First release profile enables no third-party providers. |
+| HLCOV-OPS-012 | §8, T36 | `hlscreen` Alpha Desk API source mode stays in `rsitech-ai/hlscreen`. Observability may ship without that work. |
