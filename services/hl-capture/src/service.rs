@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use canonical_archive::{ArchiveConfig, LocalParquetArchive};
+use canonical_archive::{ArchiveConfig, LocalParquetArchive, RawV3Archive};
 use domain_types::BlockHeight;
 use storage_ports::{CanonicalArchive, CaptureProgressStore, RawObservationArchive};
 use tokio_postgres::config::{Host, SslMode};
@@ -16,8 +16,9 @@ use crate::progress::ReconnectingPostgresProgressStore;
 use crate::secret::read_protected_secret;
 use crate::source_runtime::{auxiliary_node_task, committed_node_tasks};
 use crate::{
-    AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig,
-    CaptureRuntimeError, OwnedTask, RawSegmentArchive, StatusWriter, synthetic_fixture_block,
+    AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRawObservationArchive,
+    CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError, OwnedTask, RawArchiveFormat,
+    RawSegmentArchive, StatusWriter, synthetic_fixture_block,
 };
 
 const BUILD_ID: &str = concat!("hl-capture/", env!("CARGO_PKG_VERSION"));
@@ -159,13 +160,36 @@ pub async fn connect_capture(
     let archive_config =
         ArchiveConfig::production(BUILD_ID).map_err(|_| RuntimeConnectError::Archive)?;
     let archive = Arc::new(
-        LocalParquetArchive::open(config.runtime().archive_path(), archive_config)
+        LocalParquetArchive::open(config.runtime().archive_path(), archive_config.clone())
             .map_err(|_| RuntimeConnectError::Archive)?,
     );
     let canonical_archive: Arc<dyn CanonicalArchive> = archive.clone();
-    let raw_observation_archive: Arc<dyn RawObservationArchive> = archive;
-    let raw_archive: Arc<dyn RawSegmentArchive> =
-        Arc::new(BlockingRawSegmentArchive::new(raw_observation_archive));
+    let v3_raw = match config.runtime().raw_archive_format() {
+        RawArchiveFormat::V2 => None,
+        RawArchiveFormat::V3 => {
+            let raw_v3 = config
+                .runtime()
+                .raw_v3()
+                .ok_or(RuntimeConnectError::Archive)?;
+            Some(Arc::new(
+                RawV3Archive::open(
+                    config.runtime().archive_path(),
+                    archive_config,
+                    raw_v3
+                        .workload()
+                        .map_err(|_| RuntimeConnectError::Archive)?,
+                    raw_v3.budgets().map_err(|_| RuntimeConnectError::Archive)?,
+                )
+                .map_err(|_| RuntimeConnectError::Archive)?,
+            ))
+        }
+    };
+    let raw_observation_archive: Arc<dyn RawObservationArchive> =
+        Arc::new(CaptureRawObservationArchive::new(archive, v3_raw.clone()));
+    let raw_archive: Arc<dyn RawSegmentArchive> = Arc::new(match v3_raw {
+        Some(v3) => BlockingRawSegmentArchive::with_v3(raw_observation_archive, v3),
+        None => BlockingRawSegmentArchive::new(raw_observation_archive),
+    });
     let failover_store = Arc::new(
         crate::FailoverStore::new(config.runtime().failover_state_path().to_path_buf())
             .map_err(|_| RuntimeConnectError::FailoverState)?,

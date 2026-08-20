@@ -27,7 +27,7 @@ use crate::{
     AppError, BacklogError, BacklogRead, CaptureConfig, CommittedNodePipeline,
     CommittedNodePipelineConfig, DiskReserveError, DiskReserveGuard, DiskSpaceProbe,
     FilesystemDiskSpaceProbe, NodeReplicaCmdsStyle, OwnedTask, PipelineError, PipelineOutcome,
-    RawSegmentArchive, RawSegmentArchiveConfig, RawSegmentArchiveError,
+    RawArchiveFormat, RawSegmentArchive, RawSegmentArchiveConfig, RawSegmentArchiveError,
     RawSegmentArchiveVerification, RawSpoolArchiveEvidence, SourceAdapterConfig, SpoolBacklog,
 };
 
@@ -203,6 +203,7 @@ struct AuxiliaryNodeSourceTaskConfig {
     archive_commit_max_records: usize,
     archive_commit_max_delay: Duration,
     disk_reserve_bytes: u64,
+    raw_archive_format: RawArchiveFormat,
 }
 
 #[derive(Debug)]
@@ -512,6 +513,7 @@ pub(crate) fn auxiliary_node_task(
             archive_commit_max_records,
             archive_commit_max_delay,
             disk_reserve_bytes: config.runtime().disk_reserve_bytes(),
+            raw_archive_format: config.runtime().raw_archive_format(),
         });
     }
     if sources.is_empty() {
@@ -693,6 +695,13 @@ where
                 .raw_manifest_ids()
                 .map_err(SourceRuntimeError::Spool)?,
         );
+        let verification = match recovered
+            .checkpoint_entries()
+            .map_err(SourceRuntimeError::Spool)?
+        {
+            Some(entries) => verification.with_checkpoint_entries(entries),
+            None => verification,
+        };
         raw_archive
             .verify_archived_segment(&verification)
             .await
@@ -763,14 +772,16 @@ where
         let checkpoint_directory = spool_path.clone();
         let checkpoint_segment = segment.clone();
         let checkpoint_archive_identity = archive_identity.clone();
+        let checkpoint_format = config.raw_archive_format;
         let new_checkpoint = tokio::task::spawn_blocking(move || {
-            AuxiliaryArchiveCheckpoint::publish(
+            publish_auxiliary_checkpoint(
                 &checkpoint_directory,
                 &checkpoint_archive_identity,
                 &checkpoint_segment,
-                archive_summary.manifest_ids(),
+                &archive_summary,
                 evidence.last_received_wall_micros,
                 evidence.quarantine_reason,
+                checkpoint_format,
             )
         })
         .await
@@ -1309,14 +1320,16 @@ async fn flush_auxiliary_observations<P: DiskSpaceProbe>(
         let checkpoint_directory = config.spool_path.clone();
         let checkpoint_segment = segment.clone();
         let checkpoint_archive_identity = archive_identity.to_owned();
+        let checkpoint_format = config.raw_archive_format;
         let next_checkpoint = tokio::task::spawn_blocking(move || {
-            AuxiliaryArchiveCheckpoint::publish(
+            publish_auxiliary_checkpoint(
                 &checkpoint_directory,
                 &checkpoint_archive_identity,
                 &checkpoint_segment,
-                archive_summary.manifest_ids(),
+                &archive_summary,
                 evidence.last_received_wall_micros,
                 evidence.quarantine_reason,
+                checkpoint_format,
             )
         })
         .await
@@ -2024,6 +2037,41 @@ async fn archive_closed_segment<P: DiskSpaceProbe>(
         .await
         .map_err(SourceRuntimeError::RawArchive)?;
     Ok(summary)
+}
+
+fn publish_auxiliary_checkpoint(
+    directory: &Path,
+    archive_identity: &str,
+    segment: &CloseReceipt,
+    summary: &crate::RawSegmentArchiveSummary,
+    last_received_wall_micros: i64,
+    quarantine_reason: Option<String>,
+    format: RawArchiveFormat,
+) -> Result<AuxiliaryArchiveCheckpoint, SpoolError> {
+    match format {
+        RawArchiveFormat::V3 => {
+            let entries = summary
+                .checkpoint_entries()
+                .map_err(|_| SpoolError::InvalidManifest)?
+                .ok_or(SpoolError::InvalidManifest)?;
+            AuxiliaryArchiveCheckpoint::publish_v2(
+                directory,
+                archive_identity,
+                segment,
+                entries,
+                last_received_wall_micros,
+                quarantine_reason,
+            )
+        }
+        RawArchiveFormat::V2 => AuxiliaryArchiveCheckpoint::publish(
+            directory,
+            archive_identity,
+            segment,
+            summary.manifest_ids(),
+            last_received_wall_micros,
+            quarantine_reason,
+        ),
+    }
 }
 
 fn anticipated_write_bytes(payload_bytes: usize) -> Result<u64, SourceRuntimeError> {
@@ -3064,6 +3112,7 @@ mod tests {
             archive_commit_max_records: 32,
             archive_commit_max_delay: Duration::from_millis(100),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -3209,6 +3258,7 @@ mod tests {
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let archive = Arc::new(
             LocalParquetArchive::open(
@@ -3335,6 +3385,7 @@ mod tests {
             archive_commit_max_records: 3,
             archive_commit_max_delay: Duration::from_secs(2),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -3500,6 +3551,7 @@ mod tests {
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -3595,6 +3647,7 @@ mod tests {
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -3670,6 +3723,7 @@ mod tests {
             archive_commit_max_records: 128,
             archive_commit_max_delay: Duration::from_millis(60),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -3775,6 +3829,7 @@ mod tests {
             archive_commit_max_records: 32,
             archive_commit_max_delay: Duration::from_millis(100),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
@@ -4049,6 +4104,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 32,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         fs::create_dir_all(&config.archive_path).unwrap();
         let started = Arc::new(Notify::new());
@@ -4223,6 +4279,80 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
     }
 
     #[tokio::test]
+    async fn archive_failure_does_not_acknowledge_the_source_cursor() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("node-fills-ack");
+        let mut fill = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source/node-v1/fill.json"),
+        )
+        .unwrap();
+        if fill.last() != Some(&b'\n') {
+            fill.push(b'\n');
+        }
+        fs::write(&source_path, fill).unwrap();
+        let config = AuxiliaryNodeSourceTaskConfig {
+            chain_id: ChainId::new("mainnet").unwrap(),
+            source_id: SourceId::new("node-fills-ack").unwrap(),
+            source_version: "hyperliquid-node-v1".to_owned(),
+            parser_version: "parser-v1".to_owned(),
+            source_path,
+            stream_name: "node-fills-ack".to_owned(),
+            stream: hl_protocol::node::v1::NodeStreamKind::Fills,
+            poll_interval: Duration::from_millis(5),
+            max_payload_bytes: 1024 * 1024,
+            spool_path: root.path().join("spool/node-fills-ack"),
+            archive_path: root.path().join("archive"),
+            segment_target_bytes: 1024 * 1024,
+            rotation_interval: Duration::from_secs(60),
+            backpressure_timeout: Duration::from_millis(20),
+            archive_commit_max_records: 1,
+            archive_commit_max_delay: Duration::from_millis(20),
+            disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
+        };
+        fs::create_dir_all(&config.archive_path).unwrap();
+        let health = Arc::new(CaptureRuntimeHealth::new());
+        health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);
+        let error = run_auxiliary_node_acquisition_with_probe(
+            config.clone(),
+            Arc::new(FailingRawArchive),
+            Arc::clone(&health),
+            CancellationToken::new(),
+            |_| Ok(TestDiskSpaceProbe),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.reason_code(),
+            "capture_raw_archive.verification_mismatch"
+        );
+        let status = health
+            .auxiliary_source_status(config.source_id.as_str())
+            .unwrap();
+        assert_eq!(status.local_sequence(), None);
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v1.json")
+                .is_file()
+        );
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-v2.json")
+                .is_file()
+        );
+        assert!(
+            !config
+                .spool_path
+                .join("auxiliary-archive-checkpoint-current.json")
+                .is_file()
+        );
+        assert_eq!(inspect_spool(&config.spool_path).unwrap().records(), 1);
+    }
+
+    #[tokio::test]
     async fn raw_archive_failure_produces_zero_acknowledgements() {
         let root = TempDir::new().unwrap();
         let source_path = root.path().join("node-fills-archive-fail");
@@ -4252,6 +4382,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         fs::create_dir_all(&config.archive_path).unwrap();
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -4316,6 +4447,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 128,
             archive_commit_max_delay: Duration::from_millis(150),
             disk_reserve_bytes: 1,
+            raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
         health.configure_auxiliary_sources(&[config.source_id.as_str().to_owned()]);

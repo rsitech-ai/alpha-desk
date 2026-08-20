@@ -62,6 +62,36 @@ pub use import_reclaim::{
 pub use retention::{RawArchiveRetentionReport, RawArchiveRetentionRequest};
 pub use scrub::RawArchiveScrubReport;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawV3SourceInspection {
+    chain_id: ChainId,
+    source_id: SourceId,
+    scrub: RawArchiveScrubReport,
+    statistics: storage_ports::RawArchiveMaintenanceStatistics,
+}
+
+impl RawV3SourceInspection {
+    #[must_use]
+    pub const fn chain_id(&self) -> &ChainId {
+        &self.chain_id
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    #[must_use]
+    pub const fn scrub(&self) -> &RawArchiveScrubReport {
+        &self.scrub
+    }
+
+    #[must_use]
+    pub const fn statistics(&self) -> storage_ports::RawArchiveMaintenanceStatistics {
+        self.statistics
+    }
+}
+
 #[derive(Debug)]
 pub struct RawV3Archive {
     root: PathBuf,
@@ -108,6 +138,19 @@ impl RawV3Archive {
         };
         scrub::verify_all_sources(&archive)?;
         Ok(archive)
+    }
+
+    pub fn inspect_sources(&self) -> Result<Vec<RawV3SourceInspection>, ArchiveError> {
+        let mut inspections = Vec::new();
+        for (chain_id, source_id) in discover_v3_sources(self)? {
+            inspections.push(RawV3SourceInspection {
+                chain_id: chain_id.clone(),
+                source_id: source_id.clone(),
+                scrub: self.scrub(&chain_id, &source_id)?,
+                statistics: self.maintenance_statistics(&chain_id, &source_id)?,
+            });
+        }
+        Ok(inspections)
     }
 
     #[must_use]

@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use canonical_archive::{LocalParquetArchive, RawArchiveCheckpoint, RawV3Archive};
 use domain_types::{ChainId, ManifestId, SourceId};
 use hl_protocol::{ObservationClass, SourceObservation};
 use storage_ports::{
-    ArchiveError, CursorPolicy, LocalRecordSequence, RawObservationArchive, RawObservationBatch,
+    ArchiveError, CursorPolicy, LocalRecordSequence, LocalRecordSequenceRange,
+    RawArchiveCheckpointEntriesV2, RawArchiveCheckpointEntryV2, RawObservationArchive,
+    RawObservationBatch, RawObservationIterator, RawObservationRange,
+    SequencedRawObservationIterator, VerifiedRawManifest,
 };
 
 use crate::spool::{CloseReceipt, SpoolError, SpoolRead, SpoolReader};
@@ -145,6 +149,7 @@ pub struct RawSegmentArchiveVerification {
     source_id: SourceId,
     spool: RawSpoolArchiveEvidence,
     manifest_ids: Vec<ManifestId>,
+    checkpoint_entries: Option<RawArchiveCheckpointEntriesV2>,
 }
 
 impl RawSegmentArchiveVerification {
@@ -160,6 +165,118 @@ impl RawSegmentArchiveVerification {
             source_id,
             spool,
             manifest_ids,
+            checkpoint_entries: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_checkpoint_entries(mut self, entries: RawArchiveCheckpointEntriesV2) -> Self {
+        self.checkpoint_entries = Some(entries);
+        self
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CaptureRawObservationArchive {
+    legacy: Arc<LocalParquetArchive>,
+    v3: Option<Arc<RawV3Archive>>,
+}
+
+impl std::fmt::Debug for CaptureRawObservationArchive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CaptureRawObservationArchive")
+            .field("v3_enabled", &self.v3.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CaptureRawObservationArchive {
+    pub(crate) fn new(legacy: Arc<LocalParquetArchive>, v3: Option<Arc<RawV3Archive>>) -> Self {
+        Self { legacy, v3 }
+    }
+
+    fn byte_offset_archive(&self) -> &dyn RawObservationArchive {
+        self.v3
+            .as_ref()
+            .map_or(self.legacy.as_ref() as &dyn RawObservationArchive, |v3| {
+                v3.as_ref() as &dyn RawObservationArchive
+            })
+    }
+}
+
+impl RawObservationArchive for CaptureRawObservationArchive {
+    fn append_batch(
+        &self,
+        batch: &RawObservationBatch,
+    ) -> Result<storage_ports::RawObservationReceipt, ArchiveError> {
+        match batch.cursor_policy() {
+            CursorPolicy::ContiguousNativeOffset => self.legacy.append_batch(batch),
+            CursorPolicy::MonotonicByteOffset => self.byte_offset_archive().append_batch(batch),
+        }
+    }
+
+    fn read_observations(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        range: RawObservationRange,
+    ) -> Result<RawObservationIterator, ArchiveError> {
+        match self.v3.as_ref() {
+            Some(v3) => match v3.read_observations(chain, source, range.clone()) {
+                Ok(iterator) => Ok(iterator),
+                Err(ArchiveError::RangeUnavailable) => {
+                    self.legacy.read_observations(chain, source, range)
+                }
+                Err(error) => Err(error),
+            },
+            None => self.legacy.read_observations(chain, source, range),
+        }
+    }
+
+    fn read_observations_by_sequence(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        range: LocalRecordSequenceRange,
+    ) -> Result<SequencedRawObservationIterator, ArchiveError> {
+        self.byte_offset_archive()
+            .read_observations_by_sequence(chain, source, range)
+    }
+
+    fn verify_raw_manifest(
+        &self,
+        manifest: &ManifestId,
+    ) -> Result<VerifiedRawManifest, ArchiveError> {
+        match self.v3.as_ref() {
+            Some(v3) => match v3.verify_raw_manifest(manifest) {
+                Ok(verified) => Ok(verified),
+                Err(ArchiveError::ReceiptIndexRebuildRequired) => {
+                    self.legacy.verify_raw_manifest(manifest)
+                }
+                Err(error) => Err(error),
+            },
+            None => self.legacy.verify_raw_manifest(manifest),
+        }
+    }
+
+    fn contains_raw_cursor_epoch(
+        &self,
+        chain: &ChainId,
+        source: &SourceId,
+        cursor_epoch: &str,
+    ) -> Result<bool, ArchiveError> {
+        if self
+            .byte_offset_archive()
+            .contains_raw_cursor_epoch(chain, source, cursor_epoch)?
+        {
+            return Ok(true);
+        }
+        if self.v3.is_some() {
+            self.legacy
+                .contains_raw_cursor_epoch(chain, source, cursor_epoch)
+        } else {
+            Ok(false)
         }
     }
 }
@@ -167,12 +284,14 @@ impl RawSegmentArchiveVerification {
 #[derive(Clone)]
 pub struct BlockingRawSegmentArchive {
     archive: Arc<dyn RawObservationArchive>,
+    v3: Option<Arc<RawV3Archive>>,
 }
 
 impl std::fmt::Debug for BlockingRawSegmentArchive {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("BlockingRawSegmentArchive")
+            .field("v3_checkpoint", &self.v3.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -180,7 +299,23 @@ impl std::fmt::Debug for BlockingRawSegmentArchive {
 impl BlockingRawSegmentArchive {
     #[must_use]
     pub fn new(archive: Arc<dyn RawObservationArchive>) -> Self {
-        Self { archive }
+        Self { archive, v3: None }
+    }
+
+    #[must_use]
+    pub fn with_v3(archive: Arc<dyn RawObservationArchive>, v3: Arc<RawV3Archive>) -> Self {
+        Self {
+            archive,
+            v3: Some(v3),
+        }
+    }
+
+    #[must_use]
+    pub fn from_v3(v3: Arc<RawV3Archive>) -> Self {
+        Self {
+            archive: Arc::clone(&v3) as Arc<dyn RawObservationArchive>,
+            v3: Some(v3),
+        }
     }
 }
 
@@ -193,10 +328,11 @@ impl RawSegmentArchive for BlockingRawSegmentArchive {
         config: RawSegmentArchiveConfig,
     ) -> Result<RawSegmentArchiveSummary, RawSegmentArchiveError> {
         let archive = Arc::clone(&self.archive);
+        let v3 = self.v3.clone();
         let chain_id = chain_id.clone();
         let segment = segment.clone();
         tokio::task::spawn_blocking(move || {
-            archive_segment(archive.as_ref(), chain_id, &segment, config)
+            archive_segment(archive.as_ref(), v3.as_deref(), chain_id, &segment, config)
         })
         .await
         .map_err(|_| RawSegmentArchiveError::BlockingTask)?
@@ -207,9 +343,10 @@ impl RawSegmentArchive for BlockingRawSegmentArchive {
         verification: &RawSegmentArchiveVerification,
     ) -> Result<(), RawSegmentArchiveError> {
         let archive = Arc::clone(&self.archive);
+        let v3 = self.v3.clone();
         let verification = verification.clone();
         tokio::task::spawn_blocking(move || {
-            verify_archived_segment(archive.as_ref(), &verification)
+            verify_archived_segment(archive.as_ref(), v3.as_deref(), &verification)
         })
         .await
         .map_err(|_| RawSegmentArchiveError::BlockingTask)?
@@ -238,19 +375,43 @@ impl RawSegmentArchive for BlockingRawSegmentArchive {
 #[allow(clippy::too_many_arguments)]
 fn verify_archived_segment(
     archive: &dyn RawObservationArchive,
+    v3: Option<&RawV3Archive>,
     verification: &RawSegmentArchiveVerification,
 ) -> Result<(), RawSegmentArchiveError> {
     if verification.manifest_ids.is_empty() {
         return Err(RawSegmentArchiveError::VerificationMismatch);
     }
+    if let Some(entries) = &verification.checkpoint_entries {
+        if entries.entries().len() != verification.manifest_ids.len() {
+            return Err(RawSegmentArchiveError::VerificationMismatch);
+        }
+        for (expected_id, entry) in verification.manifest_ids.iter().zip(entries.entries()) {
+            if entry.manifest_id() != expected_id {
+                return Err(RawSegmentArchiveError::VerificationMismatch);
+            }
+        }
+    }
     let mut previous_last_sequence = None;
     let mut verified_record_count = 0_u64;
     let mut verified_last_cursor = None;
     let mut verified_last_sequence = None;
-    for manifest_id in &verification.manifest_ids {
-        let verified = archive
-            .verify_raw_manifest(manifest_id)
-            .map_err(RawSegmentArchiveError::Archive)?;
+    for (index, manifest_id) in verification.manifest_ids.iter().enumerate() {
+        let verified = match &verification.checkpoint_entries {
+            Some(entries) => archive
+                .verify_raw_manifest_at_sequence(
+                    manifest_id,
+                    entries.entries()[index].local_sequence_range(),
+                )
+                .map_err(RawSegmentArchiveError::Archive)?,
+            None => archive
+                .verify_raw_manifest(manifest_id)
+                .map_err(RawSegmentArchiveError::Archive)?,
+        };
+        if let Some(entries) = &verification.checkpoint_entries
+            && verified.manifest_sha256() != entries.entries()[index].manifest_sha256()
+        {
+            return Err(RawSegmentArchiveError::VerificationMismatch);
+        }
         if verified.object().chain_id() != &verification.chain_id
             || verified.object().source_id() != &verification.source_id
             || verified.spool_manifest_blake3() != verification.spool.manifest_blake3
@@ -303,11 +464,23 @@ fn verify_archived_segment(
     {
         return Err(RawSegmentArchiveError::VerificationMismatch);
     }
+    if let Some(v3) = v3
+        && let Some(entries) = &verification.checkpoint_entries
+    {
+        match v3
+            .load_checkpoint(&verification.chain_id, &verification.source_id)
+            .map_err(RawSegmentArchiveError::Archive)?
+        {
+            Some(RawArchiveCheckpoint::V2(loaded)) if loaded.entries() == entries => {}
+            _ => return Err(RawSegmentArchiveError::VerificationMismatch),
+        }
+    }
     Ok(())
 }
 
 fn archive_segment(
     archive: &dyn RawObservationArchive,
+    v3: Option<&RawV3Archive>,
     chain_id: ChainId,
     segment: &CloseReceipt,
     config: RawSegmentArchiveConfig,
@@ -341,6 +514,7 @@ fn archive_segment(
     let mut observation_count = 0_u64;
     let mut batch_count = 0_u64;
     let mut manifest_ids = Vec::new();
+    let mut checkpoint_entries = Vec::new();
     loop {
         let record = match records
             .next_record()
@@ -372,14 +546,15 @@ fn archive_segment(
                 || batch.len() >= config.max_batch_records()
                 || next_batch_bytes > config.max_batch_bytes());
         if must_flush {
-            manifest_ids.push(archive_batch(
+            let receipt = archive_batch(
                 archive,
                 &chain_id,
                 &source_id,
                 segment,
                 std::mem::take(&mut batch),
                 batch_first_local_sequence,
-            )?);
+            )?;
+            push_archived_batch(&mut manifest_ids, &mut checkpoint_entries, receipt)?;
             batch_count = batch_count
                 .checked_add(1)
                 .ok_or(RawSegmentArchiveError::SizeOverflow)?;
@@ -408,14 +583,15 @@ fn archive_segment(
             .ok_or(RawSegmentArchiveError::SizeOverflow)?;
     }
     if !batch.is_empty() {
-        manifest_ids.push(archive_batch(
+        let receipt = archive_batch(
             archive,
             &chain_id,
             &source_id,
             segment,
             batch,
             batch_first_local_sequence,
-        )?);
+        )?;
+        push_archived_batch(&mut manifest_ids, &mut checkpoint_entries, receipt)?;
         batch_count = batch_count
             .checked_add(1)
             .ok_or(RawSegmentArchiveError::SizeOverflow)?;
@@ -434,11 +610,44 @@ fn archive_segment(
     segment
         .verify_current()
         .map_err(RawSegmentArchiveError::Spool)?;
-    Ok(RawSegmentArchiveSummary {
+    let summary = RawSegmentArchiveSummary {
         observation_count,
         batch_count,
         manifest_ids,
-    })
+        checkpoint_entries,
+    };
+    if let Some(v3) = v3 {
+        switch_v3_checkpoint_current(v3, &chain_id, &source_id, &summary)?;
+    }
+    Ok(summary)
+}
+
+fn switch_v3_checkpoint_current(
+    archive: &RawV3Archive,
+    chain_id: &ChainId,
+    source_id: &SourceId,
+    summary: &RawSegmentArchiveSummary,
+) -> Result<(), RawSegmentArchiveError> {
+    let Some(entries) = summary.checkpoint_entries()? else {
+        return Ok(());
+    };
+    let expected_current = archive
+        .load_checkpoint(chain_id, source_id)
+        .map_err(RawSegmentArchiveError::Archive)?
+        .map(|checkpoint| checkpoint.sha256());
+    let target = archive
+        .publish_checkpoint_v2(chain_id, source_id, entries)
+        .map_err(RawSegmentArchiveError::Archive)?;
+    archive
+        .switch_checkpoint_current(chain_id, source_id, expected_current, target)
+        .map_err(RawSegmentArchiveError::Archive)?;
+    match archive
+        .load_checkpoint(chain_id, source_id)
+        .map_err(RawSegmentArchiveError::Archive)?
+    {
+        Some(RawArchiveCheckpoint::V2(loaded)) if loaded.sha256() == target => Ok(()),
+        _ => Err(RawSegmentArchiveError::VerificationMismatch),
+    }
 }
 
 fn archive_batch(
@@ -448,7 +657,7 @@ fn archive_batch(
     segment: &CloseReceipt,
     observations: Vec<SourceObservation>,
     first_local_sequence: Option<LocalRecordSequence>,
-) -> Result<ManifestId, RawSegmentArchiveError> {
+) -> Result<ArchivedBatchReceipt, RawSegmentArchiveError> {
     let batch = match segment
         .manifest()
         .cursor_policy()
@@ -486,7 +695,35 @@ fn archive_batch(
     {
         return Err(RawSegmentArchiveError::VerificationMismatch);
     }
-    Ok(receipt.manifest_id().clone())
+    Ok(ArchivedBatchReceipt {
+        manifest_id: receipt.manifest_id().clone(),
+        manifest_sha256: verified.manifest_sha256(),
+        local_sequence_range: verified.local_sequence_range(),
+    })
+}
+
+fn push_archived_batch(
+    manifest_ids: &mut Vec<ManifestId>,
+    checkpoint_entries: &mut Vec<RawArchiveCheckpointEntryV2>,
+    receipt: ArchivedBatchReceipt,
+) -> Result<(), RawSegmentArchiveError> {
+    manifest_ids.push(receipt.manifest_id.clone());
+    if let Some(range) = receipt.local_sequence_range {
+        checkpoint_entries.push(RawArchiveCheckpointEntryV2::new(
+            receipt.manifest_id,
+            receipt.manifest_sha256,
+            range,
+        ));
+    } else if !checkpoint_entries.is_empty() {
+        return Err(RawSegmentArchiveError::VerificationMismatch);
+    }
+    Ok(())
+}
+
+struct ArchivedBatchReceipt {
+    manifest_id: ManifestId,
+    manifest_sha256: [u8; 32],
+    local_sequence_range: Option<LocalRecordSequenceRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +731,7 @@ pub struct RawSegmentArchiveSummary {
     observation_count: u64,
     batch_count: u64,
     manifest_ids: Vec<ManifestId>,
+    checkpoint_entries: Vec<RawArchiveCheckpointEntryV2>,
 }
 
 impl RawSegmentArchiveSummary {
@@ -510,6 +748,20 @@ impl RawSegmentArchiveSummary {
     #[must_use]
     pub fn manifest_ids(&self) -> &[ManifestId] {
         &self.manifest_ids
+    }
+
+    pub fn checkpoint_entries(
+        &self,
+    ) -> Result<Option<RawArchiveCheckpointEntriesV2>, RawSegmentArchiveError> {
+        if self.checkpoint_entries.is_empty() {
+            return Ok(None);
+        }
+        if self.checkpoint_entries.len() != self.manifest_ids.len() {
+            return Err(RawSegmentArchiveError::VerificationMismatch);
+        }
+        RawArchiveCheckpointEntriesV2::try_new(self.checkpoint_entries.clone())
+            .map(Some)
+            .map_err(RawSegmentArchiveError::Archive)
     }
 }
 

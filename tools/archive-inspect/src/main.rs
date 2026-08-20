@@ -2,12 +2,14 @@
 
 use std::{ffi::OsString, path::Path, process::ExitCode};
 
-use archive_inspect::{InspectError, count, verify};
+use archive_inspect::{
+    InspectError, V3InspectSummary, count, health_v3, scrub_v3, stats_v3, verify,
+};
 use canonical_archive::{ArchiveConfig, RawV3Archive};
 use domain_types::{ChainId, SourceId};
 use storage_ports::{ArchiveError, RawArchiveCapacityBudgets, RawArchiveWorkloadEnvelope};
 
-const USAGE: &str = "usage: archive-inspect <verify|count> <archive-root>
+const USAGE: &str = "usage: archive-inspect <verify|count|scrub|stats|health> <archive-root>
        archive-inspect <import-plan|import-publish|import-approve> <archive-root> <chain> <source>
        archive-inspect <import-backup|import-reclaim> <archive-root> <chain> <source> <backup-root>";
 
@@ -35,22 +37,42 @@ async fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
                     let summary = verify(root)?;
                     let inspection = summary.inspection();
                     println!(
-                        "PASS chains={} raw_sources={} blocks={} canonical_events={} raw_observations={} objects={}",
+                        "PASS chains={} raw_sources={} blocks={} canonical_events={} raw_observations={} objects={} v3_sources={} v3_logical_rows={} v3_logical_manifests={}",
                         inspection.canonical_chains(),
                         inspection.raw_sources(),
                         inspection.canonical_blocks(),
                         inspection.canonical_events(),
                         inspection.raw_observations(),
-                        inspection.objects().len()
+                        inspection.objects().len(),
+                        summary.v3().map_or(0, |v3| v3.sources().len()),
+                        summary.v3().map_or(0, V3InspectSummary::logical_row_count),
+                        summary
+                            .v3()
+                            .map_or(0, V3InspectSummary::logical_manifest_count),
                     );
                 }
                 Some("count") => {
                     let summary = count(root).await?;
                     println!(
-                        "PASS canonical_events={} canonical_objects={}",
+                        "PASS canonical_events={} canonical_objects={} v3_sources={} v3_logical_rows={} v3_logical_manifests={}",
                         summary.canonical_events(),
-                        summary.canonical_objects()
+                        summary.canonical_objects(),
+                        summary.v3_sources(),
+                        summary.v3_logical_rows(),
+                        summary.v3_logical_manifests()
                     );
+                }
+                Some("scrub") => {
+                    let summary = scrub_v3(root)?;
+                    print_v3_summary("scrub", &summary);
+                }
+                Some("stats") => {
+                    let summary = stats_v3(root)?;
+                    print_v3_summary("stats", &summary);
+                }
+                Some("health") => {
+                    let summary = health_v3(root)?;
+                    print_v3_summary("health", &summary);
                 }
                 _ => return Err(CliError::Usage),
             }
@@ -147,6 +169,18 @@ async fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
         _ => return Err(CliError::Usage),
     }
     Ok(())
+}
+
+fn print_v3_summary(command: &str, summary: &V3InspectSummary) {
+    println!(
+        "PASS command={command} sources={} logical_manifests={} packed_ranges={} logical_rows={}",
+        summary.sources().len(),
+        summary.logical_manifest_count(),
+        summary.sources().iter().fold(0_u64, |total, source| {
+            total.saturating_add(source.scrub().packed_range_count())
+        }),
+        summary.logical_row_count(),
+    );
 }
 
 fn open_v3(root: &Path) -> Result<RawV3Archive, InspectError> {

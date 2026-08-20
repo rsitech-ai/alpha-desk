@@ -32,7 +32,7 @@ pub use raw_v3_store::{
     RawArchiveGcPlan, RawArchiveGcReceipt, RawArchiveRestoreReceipt, RawArchiveRetentionReport,
     RawArchiveRetentionRequest, RawArchiveScrubReport, RawV2ImportApproval, RawV2ImportPlan,
     RawV2ImportReceipt, RawV2ImportReclaimPlan, RawV2ImportReclaimReceipt, RawV2ImportReport,
-    RawV3Archive,
+    RawV3Archive, RawV3SourceInspection,
 };
 use storage_ports::{
     LocalRecordSequenceRange, RawObservationArchive, RawObservationBatch, RawObservationIterator,

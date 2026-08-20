@@ -922,3 +922,74 @@ adapter = {{ kind = "node-line", path = "/var/lib/hyperliquid/hl/data/node_fills
         })
     ));
 }
+
+#[test]
+fn raw_v3_format_requires_explicit_capacity_and_rejects_v2_misconfig() {
+    let missing = replace_once(
+        &valid_config(),
+        "disk_reserve_bytes = 10737418240",
+        "disk_reserve_bytes = 10737418240\nraw_archive_format = \"v3\"",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing)
+            .expect_err("v3 format requires capacity")
+            .reason_code(),
+        "capture_config.missing_raw_v3_capacity"
+    );
+
+    let unexpected = format!(
+        "{}{}",
+        valid_config(),
+        r#"
+
+[runtime.raw_v3]
+maximum_records_per_second = 100
+minimum_group_records = 1
+maximum_group_delay_millis = 1000
+retention_horizon_seconds = 3600
+maximum_encoded_record_bytes = 1024
+maximum_uncompacted_commits = 1000
+maximum_eligible_bytes = 67108864
+maximum_eligible_inodes = 64
+raw_data_budget_bytes = 18446744073709551615
+metadata_budget_bytes = 18446744073709551615
+total_storage_budget_bytes = 18446744073709551615
+inode_budget = 18446744073709551615
+digest_confirmed_purge_workflow_configured = true
+"#
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&unexpected)
+            .expect_err("v2 format cannot carry v3 capacity")
+            .reason_code(),
+        "capture_config.unexpected_raw_v3_capacity"
+    );
+
+    let valid_v3 = replace_once(
+        &valid_config(),
+        "disk_reserve_bytes = 10737418240",
+        "disk_reserve_bytes = 10737418240\nraw_archive_format = \"v3\"",
+    ) + r#"
+
+[runtime.raw_v3]
+maximum_records_per_second = 100
+minimum_group_records = 1
+maximum_group_delay_millis = 1000
+retention_horizon_seconds = 3600
+maximum_encoded_record_bytes = 1024
+maximum_uncompacted_commits = 1000
+maximum_eligible_bytes = 67108864
+maximum_eligible_inodes = 64
+raw_data_budget_bytes = 18446744073709551615
+metadata_budget_bytes = 18446744073709551615
+total_storage_budget_bytes = 18446744073709551615
+inode_budget = 18446744073709551615
+digest_confirmed_purge_workflow_configured = true
+"#;
+    let config = CaptureConfig::from_toml(&valid_v3).expect("v3 format with capacity");
+    assert_eq!(
+        config.runtime().raw_archive_format(),
+        hl_capture::RawArchiveFormat::V3
+    );
+    assert!(config.runtime().raw_v3().is_some());
+}
