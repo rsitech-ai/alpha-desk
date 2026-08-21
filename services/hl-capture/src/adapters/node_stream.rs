@@ -73,6 +73,11 @@ impl NodeFileConfig {
         let stream_name = stream_name.into();
         let source_version = source_version.into();
         let parser_schema_version = parser_schema_version.into();
+        if stream.is_whole_file_snapshot() {
+            return Err(SourceError::Configuration(
+                "snapshot streams are whole files, not ndjson line sources".into(),
+            ));
+        }
         if !path.is_absolute()
             || !valid_identity(&stream_name)
             || !valid_identity(&source_version)

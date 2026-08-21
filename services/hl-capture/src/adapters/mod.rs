@@ -14,7 +14,10 @@ pub mod info_rest;
 pub mod providers;
 pub mod public_ws;
 
-pub use node_files::{NodeBlockDirectoryConfig, NodeBlockDirectorySource};
+pub use node_files::{
+    NodeBlockDirectoryConfig, NodeBlockDirectorySource, NodeSnapshotDirectoryConfig,
+    NodeSnapshotDirectorySource,
+};
 pub use node_stream::{
     NodeFileConfig, NodeLineFileSource, NodeLineTailState, NodeQuarantineRecord, NodeReceiveClock,
     SystemNodeClock,

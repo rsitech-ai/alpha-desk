@@ -59,3 +59,21 @@ sha256 = "3411153f277ec8f54dfe58b1fb6795f549fb6083a58958650a5ad74b18c3626d"
 file = "unknown-variant.json"
 stream = "misc-events"
 sha256 = "bff89f1520e59a0628b262d0f0e3964a75bdbc7415f296a69aa85415cfe04b0b"
+
+[[fixture]]
+file = "actions/noop-block.json"
+stream = "transaction-blocks"
+kind = "transaction-block"
+sha256 = "3c9d61545147c0e2fc15b1693f61658bc304349573d1875ea52bc29378f129be"
+
+[[fixture]]
+file = "snapshots/abci-10000.rmp"
+stream = "abci-state-snapshots"
+kind = "abci-state-snapshot"
+sha256 = "3f93ea7e41f7c0097022c21d5fe11a657b403435300e02fca6db6a6a35fea41f"
+
+[[fixture]]
+file = "snapshots/l4-10000.json"
+stream = "l4-snapshots"
+kind = "l4-snapshot"
+sha256 = "5d24bdb776a2479ae2a353430fb184b592d289aef953142145bd884efe0f4aa3"

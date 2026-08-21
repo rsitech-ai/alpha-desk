@@ -168,7 +168,9 @@ minimums and do not qualify the claim.
 
 ## Recording-file invariants
 
-- At least one committed and one trade file are required.
+- At least one committed and one trade file are required. Optional
+  `abci-snapshot` and `l4-snapshot` files use block-height cursors like
+  committed files.
 - Paths are unique, relative, slash-separated, and may not contain empty,
   current-directory, parent-directory, backslash, absolute, or control
   components.

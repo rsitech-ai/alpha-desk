@@ -17,6 +17,8 @@ pub enum NodeStreamKind {
     RawBookDiffs,
     MiscEvents,
     MarketMetadata,
+    AbciStateSnapshots,
+    L4Snapshots,
 }
 
 impl NodeStreamKind {
@@ -24,10 +26,32 @@ impl NodeStreamKind {
     pub const fn observation_class(self) -> ObservationClass {
         match self {
             Self::TransactionBlocks => ObservationClass::CommittedBlock,
-            Self::Trades | Self::Fills | Self::MiscEvents => ObservationClass::AuxiliaryLedger,
+            Self::Trades | Self::Fills | Self::MiscEvents | Self::AbciStateSnapshots => {
+                ObservationClass::AuxiliaryLedger
+            }
             Self::OrderStatuses => ObservationClass::AuxiliaryOrderStatus,
-            Self::RawBookDiffs => ObservationClass::AuxiliaryBookDiff,
+            Self::RawBookDiffs | Self::L4Snapshots => ObservationClass::AuxiliaryBookDiff,
             Self::MarketMetadata => ObservationClass::Snapshot,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_whole_file_snapshot(self) -> bool {
+        matches!(self, Self::AbciStateSnapshots | Self::L4Snapshots)
+    }
+
+    #[must_use]
+    pub const fn snapshot_file_extension(self) -> Option<&'static str> {
+        match self {
+            Self::AbciStateSnapshots => Some("rmp"),
+            Self::L4Snapshots => Some("json"),
+            Self::TransactionBlocks
+            | Self::Trades
+            | Self::Fills
+            | Self::OrderStatuses
+            | Self::RawBookDiffs
+            | Self::MiscEvents
+            | Self::MarketMetadata => None,
         }
     }
 }
@@ -45,6 +69,8 @@ pub enum NodeRecordKind {
     Transfer,
     MiscEvent,
     MarketMetadata,
+    AbciStateSnapshot,
+    L4Snapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +117,22 @@ impl NodeRecordV1 {
     pub fn into_payload(self) -> Bytes {
         self.payload
     }
+
+    pub(super) fn from_parts(
+        stream: NodeStreamKind,
+        kind: NodeRecordKind,
+        block_number: Option<u64>,
+        payload: Bytes,
+    ) -> Self {
+        let content_hash = blake3::hash(&payload);
+        Self {
+            stream,
+            kind,
+            block_number,
+            payload,
+            content_hash,
+        }
+    }
 }
 
 pub fn parse_node_record(
@@ -101,6 +143,21 @@ pub fn parse_node_record(
         return Err(SourceError::MalformedPayload(
             "node record size is outside the supported range".to_owned(),
         ));
+    }
+    match stream {
+        NodeStreamKind::AbciStateSnapshots => {
+            return crate::node::state_snapshot::parse_abci_state_snapshot(payload);
+        }
+        NodeStreamKind::L4Snapshots => {
+            return crate::node::state_snapshot::parse_l4_snapshot(payload);
+        }
+        NodeStreamKind::TransactionBlocks
+        | NodeStreamKind::Trades
+        | NodeStreamKind::Fills
+        | NodeStreamKind::OrderStatuses
+        | NodeStreamKind::RawBookDiffs
+        | NodeStreamKind::MiscEvents
+        | NodeStreamKind::MarketMetadata => {}
     }
     let root: Value = serde_json::from_slice(&payload)
         .map_err(|_| SourceError::MalformedPayload("node record is not valid JSON".to_owned()))?;
@@ -174,9 +231,11 @@ fn classify_event(
 ) -> Result<NodeRecordKind, SourceError> {
     match stream {
         NodeStreamKind::TransactionBlocks => {
-            require_object(event, "abci_block")?;
-            Ok(NodeRecordKind::TransactionBlock)
+            crate::node::transaction::classify_transaction_block(event)
         }
+        NodeStreamKind::AbciStateSnapshots | NodeStreamKind::L4Snapshots => Err(
+            SourceError::MalformedPayload("snapshot streams are not JSON event batches".to_owned()),
+        ),
         NodeStreamKind::Trades => {
             for field in [
                 "coin",
@@ -238,7 +297,7 @@ fn classify_event(
             validate_book_diff(event.get("raw_book_diff"))?;
             Ok(NodeRecordKind::RawBookDiff)
         }
-        NodeStreamKind::MiscEvents => classify_misc_event(event),
+        NodeStreamKind::MiscEvents => crate::node::misc::classify_misc_event(event),
         NodeStreamKind::MarketMetadata => {
             event
                 .get("universe")
@@ -250,56 +309,6 @@ fn classify_event(
                 })?;
             Ok(NodeRecordKind::MarketMetadata)
         }
-    }
-}
-
-fn classify_misc_event(event: &Map<String, Value>) -> Result<NodeRecordKind, SourceError> {
-    require_string(event, "time")?;
-    require_string(event, "hash")?;
-    let inner = require_singleton_object(event, "inner")?;
-    let (variant, value) = inner
-        .iter()
-        .next()
-        .ok_or_else(|| SourceError::MalformedPayload("misc event is empty".to_owned()))?;
-    match variant.as_str() {
-        "CDeposit" | "Delegation" | "CWithdrawal" | "ValidatorRewards" | "Funding" => {
-            require_value_object(value, "misc event payload")?;
-            Ok(NodeRecordKind::MiscEvent)
-        }
-        "LedgerUpdate" => {
-            let ledger = require_value_object(value, "ledger update payload")?;
-            let delta = require_singleton_object(ledger, "delta")?;
-            let (delta_variant, delta_value) = delta
-                .iter()
-                .next()
-                .ok_or_else(|| SourceError::MalformedPayload("ledger delta is empty".to_owned()))?;
-            require_value_object(delta_value, "ledger delta payload")?;
-            match delta_variant.as_str() {
-                "Liquidation" => Ok(NodeRecordKind::Liquidation),
-                "InternalTransfer"
-                | "AccountClassTransfer"
-                | "SubAccountTransfer"
-                | "SpotTransfer"
-                | "PerpDexClassTransfer" => Ok(NodeRecordKind::Transfer),
-                "Withdraw"
-                | "Deposit"
-                | "VaultCreate"
-                | "VaultDeposit"
-                | "VaultWithdraw"
-                | "VaultDistribution"
-                | "VaultLeaderCommission"
-                | "SpotGenesis"
-                | "RewardsClaim"
-                | "AccountActivationGas"
-                | "DeployGasAuction" => Ok(NodeRecordKind::MiscEvent),
-                _ => Err(SourceError::SchemaDrift(
-                    "unknown node ledger-delta variant".to_owned(),
-                )),
-            }
-        }
-        _ => Err(SourceError::SchemaDrift(
-            "unknown node misc-event variant".to_owned(),
-        )),
     }
 }
 
@@ -328,7 +337,10 @@ fn validate_book_diff(value: Option<&Value>) -> Result<(), SourceError> {
     }
 }
 
-fn require_string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, SourceError> {
+pub(super) fn require_string<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, SourceError> {
     object
         .get(field)
         .and_then(Value::as_str)
@@ -340,7 +352,7 @@ fn require_string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a
         })
 }
 
-fn require_u64(object: &Map<String, Value>, field: &str) -> Result<u64, SourceError> {
+pub(super) fn require_u64(object: &Map<String, Value>, field: &str) -> Result<u64, SourceError> {
     object.get(field).and_then(Value::as_u64).ok_or_else(|| {
         SourceError::MalformedPayload(format!("node record has no unsigned integer field {field}"))
     })
@@ -365,7 +377,7 @@ fn require_optional_string(object: &Map<String, Value>, field: &str) -> Result<(
     }
 }
 
-fn require_object<'a>(
+pub(super) fn require_object<'a>(
     object: &'a Map<String, Value>,
     field: &str,
 ) -> Result<&'a Map<String, Value>, SourceError> {
@@ -374,7 +386,7 @@ fn require_object<'a>(
     })
 }
 
-fn require_singleton_object<'a>(
+pub(super) fn require_singleton_object<'a>(
     object: &'a Map<String, Value>,
     field: &str,
 ) -> Result<&'a Map<String, Value>, SourceError> {
@@ -388,7 +400,7 @@ fn require_singleton_object<'a>(
     }
 }
 
-fn require_value_object<'a>(
+pub(super) fn require_value_object<'a>(
     value: &'a Value,
     context: &str,
 ) -> Result<&'a Map<String, Value>, SourceError> {

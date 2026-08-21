@@ -828,14 +828,19 @@ impl SourceAdapterConfig {
                 stream_name,
                 stream,
                 poll_interval_millis,
-            } => Self::validate_node(
-                path,
-                stream_name,
-                *poll_interval_millis,
-                stream.observation_class(),
-                observation_class,
-                None,
-            ),
+            } => {
+                if stream.is_whole_file_snapshot() {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Self::validate_node(
+                    path,
+                    stream_name,
+                    *poll_interval_millis,
+                    stream.observation_class(),
+                    observation_class,
+                    None,
+                )
+            }
             Self::NodeBlockDirectory {
                 path,
                 stream_name,

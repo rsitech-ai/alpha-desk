@@ -392,11 +392,13 @@ fn non_trade_disposition(
         NodeRecordKind::MarketMetadata => Some(MappingDisposition::EvidenceOnly(
             EvidenceOnlyReason::AuxiliaryMarketMetadata,
         )),
-        NodeRecordKind::Trade | NodeRecordKind::TransactionBlock | NodeRecordKind::MiscEvent => {
-            Some(MappingDisposition::EvidenceOnly(
-                EvidenceOnlyReason::UnsupportedCanonicalSemantics,
-            ))
-        }
+        NodeRecordKind::Trade
+        | NodeRecordKind::TransactionBlock
+        | NodeRecordKind::MiscEvent
+        | NodeRecordKind::AbciStateSnapshot
+        | NodeRecordKind::L4Snapshot => Some(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::UnsupportedCanonicalSemantics,
+        )),
     }
 }
 
