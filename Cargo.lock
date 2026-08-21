@@ -613,6 +613,7 @@ dependencies = [
 name = "canonical-ledger"
 version = "0.1.0"
 dependencies = [
+ "api-contracts",
  "blake3",
  "canonical-events",
  "domain-types",

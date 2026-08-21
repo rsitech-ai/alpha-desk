@@ -7,9 +7,11 @@ use orderbook::{BookHealth, OrderBook, TriggerKind};
 use crate::{
     ApplyContext, BlockDeltaView, CanonicalAccountReducerV1, CanonicalLiquidationReducerV1,
     CanonicalMarketReducerV1, CanonicalOrderReducerV1, CanonicalPositionEpisodeReducerV1,
-    CanonicalPositionReducerV1, CanonicalTradeReducerV1, CanonicalTradeReducerV2,
-    CanonicalTriggerReducerV1, CanonicalTwapReducerV1, EventReducer, OrderCurrentRecordV1,
-    ReducerError, StateImage, StateMutation, StateView, TriggerCurrentRecordV1,
+    CanonicalPositionReducerV1, CanonicalRelationshipReducerV1, CanonicalStakingReducerV1,
+    CanonicalTradeReducerV1, CanonicalTradeReducerV2, CanonicalTriggerReducerV1,
+    CanonicalTwapReducerV1, CanonicalValidatorReducerV1, CanonicalVaultReducerV1, EventReducer,
+    OrderCurrentRecordV1, ReducerError, StateImage, StateMutation, StateView,
+    TriggerCurrentRecordV1,
 };
 
 const UNSUPPORTED_EVENT_REASON: &str = "canonical_state.unsupported_event";
@@ -38,7 +40,7 @@ impl CanonicalStateComponentVersionV1 {
     }
 }
 
-const EXPECTED_COMPONENT_MANIFEST: [CanonicalStateComponentVersionV1; 10] = [
+const EXPECTED_COMPONENT_MANIFEST: [CanonicalStateComponentVersionV1; 14] = [
     CanonicalStateComponentVersionV1::new(
         "market",
         "hyperliquid-alpha-desk-canonical-market@1.0.0",
@@ -73,6 +75,19 @@ const EXPECTED_COMPONENT_MANIFEST: [CanonicalStateComponentVersionV1; 10] = [
         "hyperliquid-alpha-desk-canonical-trigger@1.0.0",
     ),
     CanonicalStateComponentVersionV1::new("twap", "hyperliquid-alpha-desk-canonical-twap@1.0.0"),
+    CanonicalStateComponentVersionV1::new("vault", "hyperliquid-alpha-desk-canonical-vault@1.0.0"),
+    CanonicalStateComponentVersionV1::new(
+        "staking",
+        "hyperliquid-alpha-desk-canonical-staking@1.0.0",
+    ),
+    CanonicalStateComponentVersionV1::new(
+        "validator",
+        "hyperliquid-alpha-desk-canonical-validator@1.0.0",
+    ),
+    CanonicalStateComponentVersionV1::new(
+        "relationships",
+        "hyperliquid-alpha-desk-canonical-relationships@1.0.0",
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -111,6 +126,10 @@ enum Component {
     PositionLiquidation,
     Trigger,
     Twap,
+    Vault,
+    Staking,
+    Validator,
+    Relationships,
 }
 
 const MARKET_OWNER: &[Component] = &[Component::Market];
@@ -127,8 +146,12 @@ const ACCOUNT_OWNER: &[Component] = &[Component::Account];
 const LIQUIDATION_OWNER: &[Component] = &[Component::PositionLiquidation];
 const TRIGGER_OWNER: &[Component] = &[Component::Trigger];
 const TWAP_OWNER: &[Component] = &[Component::Twap];
+const VAULT_AND_RELATION: &[Component] = &[Component::Vault, Component::Relationships];
+const STAKING_OWNER: &[Component] = &[Component::Staking];
+const STAKING_AND_RELATION: &[Component] = &[Component::Staking, Component::Relationships];
+const VALIDATOR_OWNER: &[Component] = &[Component::Validator];
 const NO_OWNERS: &[Component] = &[];
-const ALL_COMPONENTS: &[Component; 10] = &[
+const ALL_COMPONENTS: &[Component; 14] = &[
     Component::Market,
     Component::Order,
     Component::TradeV1,
@@ -139,6 +162,10 @@ const ALL_COMPONENTS: &[Component; 10] = &[
     Component::PositionLiquidation,
     Component::Trigger,
     Component::Twap,
+    Component::Vault,
+    Component::Staking,
+    Component::Validator,
+    Component::Relationships,
 ];
 
 /// The sealed production reducer for canonical account state.
@@ -175,10 +202,14 @@ pub struct CanonicalStateReducerV1 {
     position_liquidation: CanonicalLiquidationReducerV1,
     trigger: CanonicalTriggerReducerV1,
     twap: CanonicalTwapReducerV1,
+    vault: CanonicalVaultReducerV1,
+    staking: CanonicalStakingReducerV1,
+    validator: CanonicalValidatorReducerV1,
+    relationships: CanonicalRelationshipReducerV1,
 }
 
 impl CanonicalStateReducerV1 {
-    pub const VERSION: &'static str = "hyperliquid-alpha-desk-canonical-state@1.1.0";
+    pub const VERSION: &'static str = "hyperliquid-alpha-desk-canonical-state@1.2.0";
 
     pub fn try_new() -> Result<Self, CanonicalStateError> {
         validate_component_manifest(&actual_component_manifest())?;
@@ -193,11 +224,15 @@ impl CanonicalStateReducerV1 {
             position_liquidation: CanonicalLiquidationReducerV1,
             trigger: CanonicalTriggerReducerV1,
             twap: CanonicalTwapReducerV1,
+            vault: CanonicalVaultReducerV1,
+            staking: CanonicalStakingReducerV1,
+            validator: CanonicalValidatorReducerV1,
+            relationships: CanonicalRelationshipReducerV1,
         })
     }
 
     #[must_use]
-    pub const fn component_manifest(&self) -> &'static [CanonicalStateComponentVersionV1; 10] {
+    pub const fn component_manifest(&self) -> &'static [CanonicalStateComponentVersionV1; 14] {
         &EXPECTED_COMPONENT_MANIFEST
     }
 
@@ -261,6 +296,10 @@ impl CanonicalStateReducerV1 {
             Component::PositionLiquidation => self.position_liquidation.supports(event),
             Component::Trigger => self.trigger.supports(event),
             Component::Twap => self.twap.supports(event),
+            Component::Vault => self.vault.supports(event),
+            Component::Staking => self.staking.supports(event),
+            Component::Validator => self.validator.supports(event),
+            Component::Relationships => self.relationships.supports(event),
         }
     }
 
@@ -284,6 +323,10 @@ impl CanonicalStateReducerV1 {
             }
             Component::Trigger => self.trigger.reduce(state, event, context),
             Component::Twap => self.twap.reduce(state, event, context),
+            Component::Vault => self.vault.reduce(state, event, context),
+            Component::Staking => self.staking.reduce(state, event, context),
+            Component::Validator => self.validator.reduce(state, event, context),
+            Component::Relationships => self.relationships.reduce(state, event, context),
         }
     }
 
@@ -306,6 +349,10 @@ impl CanonicalStateReducerV1 {
             }
             Component::Trigger => self.trigger.validate_block(state, context),
             Component::Twap => self.twap.validate_block(state, context),
+            Component::Vault => self.vault.validate_block(state, context),
+            Component::Staking => self.staking.validate_block(state, context),
+            Component::Validator => self.validator.validate_block(state, context),
+            Component::Relationships => self.relationships.validate_block(state, context),
         }
     }
 
@@ -346,6 +393,18 @@ impl CanonicalStateReducerV1 {
                 .trigger
                 .validate_block_delta(final_state, delta, context),
             Component::Twap => self.twap.validate_block_delta(final_state, delta, context),
+            Component::Vault => self.vault.validate_block_delta(final_state, delta, context),
+            Component::Staking => self
+                .staking
+                .validate_block_delta(final_state, delta, context),
+            Component::Validator => {
+                self.validator
+                    .validate_block_delta(final_state, delta, context)
+            }
+            Component::Relationships => {
+                self.relationships
+                    .validate_block_delta(final_state, delta, context)
+            }
         }
     }
 }
@@ -458,7 +517,8 @@ fn owners(event: &CanonicalEventEnvelope) -> &'static [Component] {
         | EventKind::OrderPartiallyFilled
         | EventKind::OrderFilled
         | EventKind::OrderCancelled
-        | EventKind::OrderRejected => ORDER_OWNER,
+        | EventKind::OrderRejected
+        | EventKind::NonUserOrderCancelled => ORDER_OWNER,
         EventKind::TradeMatched => match event.payload() {
             EventPayload::TradeMatched(trade) if trade.participants.is_some() => {
                 ENRICHED_TRADE_OWNERS
@@ -479,7 +539,11 @@ fn owners(event: &CanonicalEventEnvelope) -> &'static [Component] {
         | EventKind::ReferralReward
         | EventKind::AccountModeChanged
         | EventKind::MarginModeChanged
-        | EventKind::LeverageChanged => ACCOUNT_OWNER,
+        | EventKind::LeverageChanged
+        | EventKind::InternalTransfer
+        | EventKind::AccountClassTransfer
+        | EventKind::RewardClaimed
+        | EventKind::SpotGenesisApplied => ACCOUNT_OWNER,
         EventKind::LiquidationStarted
         | EventKind::LiquidationFill
         | EventKind::BackstopLiquidation
@@ -488,25 +552,18 @@ fn owners(event: &CanonicalEventEnvelope) -> &'static [Component] {
         EventKind::TwapStarted | EventKind::TwapSliceFilled | EventKind::TwapCompleted => {
             TWAP_OWNER
         }
-        EventKind::NonUserOrderCancelled
-        | EventKind::InternalTransfer
-        | EventKind::AccountClassTransfer
-        | EventKind::VaultCreated
-        | EventKind::VaultDistribution
-        | EventKind::VaultLeaderCommissionPaid
-        | EventKind::RewardClaimed
-        | EventKind::SpotGenesisApplied
-        | EventKind::StakingDeposit
-        | EventKind::StakingDelegated
-        | EventKind::StakingUndelegated
+        EventKind::VaultCreated | EventKind::VaultDistribution => VAULT_AND_RELATION,
+        EventKind::VaultLeaderCommissionPaid => NO_OWNERS,
+        EventKind::StakingDeposit
         | EventKind::StakingWithdrawalQueued
-        | EventKind::StakingWithdrawalCompleted
-        | EventKind::ValidatorRewardPaid => NO_OWNERS,
+        | EventKind::StakingWithdrawalCompleted => STAKING_OWNER,
+        EventKind::StakingDelegated | EventKind::StakingUndelegated => STAKING_AND_RELATION,
+        EventKind::ValidatorRewardPaid => VALIDATOR_OWNER,
     }
 }
 
 fn validate_component_manifest(
-    actual: &[CanonicalStateComponentVersionV1; 10],
+    actual: &[CanonicalStateComponentVersionV1; 14],
 ) -> Result<(), CanonicalStateError> {
     for (expected, actual) in EXPECTED_COMPONENT_MANIFEST.iter().zip(actual) {
         if expected.name != actual.name || expected.version != actual.version {
@@ -565,7 +622,7 @@ fn fanout_all_components<'a, S, D, C>(
     Ok(())
 }
 
-const fn actual_component_manifest() -> [CanonicalStateComponentVersionV1; 10] {
+const fn actual_component_manifest() -> [CanonicalStateComponentVersionV1; 14] {
     [
         CanonicalStateComponentVersionV1::new("market", CanonicalMarketReducerV1::VERSION),
         CanonicalStateComponentVersionV1::new("order", CanonicalOrderReducerV1::VERSION),
@@ -586,6 +643,13 @@ const fn actual_component_manifest() -> [CanonicalStateComponentVersionV1; 10] {
         ),
         CanonicalStateComponentVersionV1::new("trigger", CanonicalTriggerReducerV1::VERSION),
         CanonicalStateComponentVersionV1::new("twap", CanonicalTwapReducerV1::VERSION),
+        CanonicalStateComponentVersionV1::new("vault", CanonicalVaultReducerV1::VERSION),
+        CanonicalStateComponentVersionV1::new("staking", CanonicalStakingReducerV1::VERSION),
+        CanonicalStateComponentVersionV1::new("validator", CanonicalValidatorReducerV1::VERSION),
+        CanonicalStateComponentVersionV1::new(
+            "relationships",
+            CanonicalRelationshipReducerV1::VERSION,
+        ),
     ]
 }
 
@@ -787,6 +851,10 @@ mod tests {
                 (Component::PositionLiquidation, true, true, true),
                 (Component::Trigger, true, true, true),
                 (Component::Twap, true, true, true),
+                (Component::Vault, true, true, true),
+                (Component::Staking, true, true, true),
+                (Component::Validator, true, true, true),
+                (Component::Relationships, true, true, true),
             ]
         );
     }
@@ -844,7 +912,8 @@ mod tests {
             | EventKind::OrderPartiallyFilled
             | EventKind::OrderFilled
             | EventKind::OrderCancelled
-            | EventKind::OrderRejected => ORDER_OWNER,
+            | EventKind::OrderRejected
+            | EventKind::NonUserOrderCancelled => ORDER_OWNER,
             EventKind::TradeMatched => TRADE_V1_OWNER,
             EventKind::FundingPaid | EventKind::FundingReceived => FUNDING_OWNERS,
             EventKind::DepositCredited
@@ -859,7 +928,11 @@ mod tests {
             | EventKind::ReferralReward
             | EventKind::AccountModeChanged
             | EventKind::MarginModeChanged
-            | EventKind::LeverageChanged => ACCOUNT_OWNER,
+            | EventKind::LeverageChanged
+            | EventKind::InternalTransfer
+            | EventKind::AccountClassTransfer
+            | EventKind::RewardClaimed
+            | EventKind::SpotGenesisApplied => ACCOUNT_OWNER,
             EventKind::LiquidationStarted
             | EventKind::LiquidationFill
             | EventKind::BackstopLiquidation
@@ -868,20 +941,13 @@ mod tests {
             EventKind::TwapStarted | EventKind::TwapSliceFilled | EventKind::TwapCompleted => {
                 TWAP_OWNER
             }
-            EventKind::NonUserOrderCancelled
-            | EventKind::InternalTransfer
-            | EventKind::AccountClassTransfer
-            | EventKind::VaultCreated
-            | EventKind::VaultDistribution
-            | EventKind::VaultLeaderCommissionPaid
-            | EventKind::RewardClaimed
-            | EventKind::SpotGenesisApplied
-            | EventKind::StakingDeposit
-            | EventKind::StakingDelegated
-            | EventKind::StakingUndelegated
+            EventKind::VaultCreated | EventKind::VaultDistribution => VAULT_AND_RELATION,
+            EventKind::VaultLeaderCommissionPaid => NO_OWNERS,
+            EventKind::StakingDeposit
             | EventKind::StakingWithdrawalQueued
-            | EventKind::StakingWithdrawalCompleted
-            | EventKind::ValidatorRewardPaid => NO_OWNERS,
+            | EventKind::StakingWithdrawalCompleted => STAKING_OWNER,
+            EventKind::StakingDelegated | EventKind::StakingUndelegated => STAKING_AND_RELATION,
+            EventKind::ValidatorRewardPaid => VALIDATOR_OWNER,
         }
     }
 

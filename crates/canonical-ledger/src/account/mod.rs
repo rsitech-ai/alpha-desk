@@ -24,12 +24,18 @@ use crate::{
     ApplyContext, AssetContextCurrentRecordV1, EventReducer, MarketCurrentRecordV1,
     MarketMetadataResolutionV1, ReducerError, StateKey, StateMutation, StateView,
     account::codec::require_record_bytes,
+    opaque::{decode_class_transfer, decode_internal, decode_reward, decode_spot_genesis},
 };
+
+pub(crate) use cashflow::{
+    FlowSide, quote_flow_mutation as quote_flow_put,
+    vault_principal_mutation as vault_principal_put,
+};
+pub(crate) use relations::vault_relation_mutation as vault_relation_put;
 
 use self::{
     cashflow::{
-        FlowSide, quantity_flow_mutation, quote_flow_mutation, vault_principal_mutation,
-        vault_share_mutation,
+        quantity_flow_mutation, quote_flow_mutation, vault_principal_mutation, vault_share_mutation,
     },
     codec::{decode_hash, decode_wire, encode_wire, state_key},
     modes::{account_mode_mutation, leverage_mutation, margin_mode_mutation},
@@ -72,6 +78,10 @@ impl EventReducer for CanonicalAccountReducerV1 {
                     | EventKind::AccountModeChanged
                     | EventKind::MarginModeChanged
                     | EventKind::LeverageChanged
+                    | EventKind::InternalTransfer
+                    | EventKind::AccountClassTransfer
+                    | EventKind::RewardClaimed
+                    | EventKind::SpotGenesisApplied
             )
     }
 
@@ -395,6 +405,91 @@ impl EventReducer for CanonicalAccountReducerV1 {
                     height,
                 )?);
             }
+            EventPayload::InternalTransfer(payload) => {
+                let decoded = decode_internal(payload)?;
+                let debit = decoded
+                    .amount
+                    .checked_add(decoded.fee)
+                    .map_err(flow_reducer_error)?;
+                mutations.push(quote_flow_mutation(
+                    state,
+                    decoded.from_account_id,
+                    AccountQuoteFlowScopeV1::DefaultPerpQuote,
+                    debit,
+                    FlowSide::Debit,
+                    event_id,
+                    height,
+                )?);
+                mutations.push(quote_flow_mutation(
+                    state,
+                    decoded.to_account_id,
+                    AccountQuoteFlowScopeV1::DefaultPerpQuote,
+                    decoded.amount,
+                    FlowSide::Credit,
+                    event_id,
+                    height,
+                )?);
+            }
+            EventPayload::AccountClassTransfer(payload) => {
+                let decoded = decode_class_transfer(payload)?;
+                let (debit_scope, credit_scope) = if decoded.to_perp {
+                    (
+                        AccountQuoteFlowScopeV1::SpotClassQuote,
+                        AccountQuoteFlowScopeV1::DefaultPerpQuote,
+                    )
+                } else {
+                    (
+                        AccountQuoteFlowScopeV1::DefaultPerpQuote,
+                        AccountQuoteFlowScopeV1::SpotClassQuote,
+                    )
+                };
+                mutations.push(quote_flow_mutation(
+                    state,
+                    decoded.account_id,
+                    debit_scope,
+                    decoded.amount,
+                    FlowSide::Debit,
+                    event_id,
+                    height,
+                )?);
+                mutations.push(quote_flow_mutation(
+                    state,
+                    decoded.account_id,
+                    credit_scope,
+                    decoded.amount,
+                    FlowSide::Credit,
+                    event_id,
+                    height,
+                )?);
+            }
+            EventPayload::RewardClaimed(payload) => {
+                let decoded = decode_reward(payload)?;
+                mutations.push(quote_flow_mutation(
+                    state,
+                    decoded.account_id,
+                    AccountQuoteFlowScopeV1::RewardClaimedQuote,
+                    decoded.amount,
+                    FlowSide::Credit,
+                    event_id,
+                    height,
+                )?);
+            }
+            EventPayload::SpotGenesisApplied(payload) => {
+                let decoded = decode_spot_genesis(payload)?;
+                if let [account_id] = event.account_addresses() {
+                    mutations.push(quantity_flow_mutation(
+                        state,
+                        *account_id,
+                        AccountQuantityFlowScopeV1::SpotGenesisAsset {
+                            asset_id: decoded.token,
+                        },
+                        decoded.amount,
+                        FlowSide::Credit,
+                        event_id,
+                        height,
+                    )?);
+                }
+            }
             _ => {
                 return Err(reducer_error(
                     "account_state.unsupported_event",
@@ -486,7 +581,13 @@ impl AccountFactRecordV1 {
             | EventPayload::FundingReceived(_)
             | EventPayload::AccountModeChanged(_)
             | EventPayload::MarginModeChanged(_)
-            | EventPayload::LeverageChanged(_) => (None, None),
+            | EventPayload::LeverageChanged(_)
+            | EventPayload::InternalTransfer(_)
+            | EventPayload::AccountClassTransfer(_)
+            | EventPayload::RewardClaimed(_) => (None, None),
+            EventPayload::SpotGenesisApplied(payload) => {
+                (Some(decode_spot_genesis(payload)?.token), None)
+            }
             _ => {
                 return Err(reducer_error(
                     "account_state.unsupported_event",
@@ -659,6 +760,15 @@ const fn valid_fact_shape(
         EventKind::MarginModeChanged | EventKind::LeverageChanged => {
             account_count == 1 && market_count == 1 && !has_asset && !has_vault
         }
+        EventKind::InternalTransfer => {
+            account_count == 2 && market_count == 0 && !has_asset && !has_vault
+        }
+        EventKind::AccountClassTransfer | EventKind::RewardClaimed => {
+            account_count == 1 && market_count == 0 && !has_asset && !has_vault
+        }
+        EventKind::SpotGenesisApplied => {
+            account_count <= 1 && market_count == 0 && has_asset && !has_vault
+        }
         _ => false,
     }
 }
@@ -728,6 +838,25 @@ fn validate_event_identities(event: &CanonicalEventEnvelope) -> Result<(), Reduc
             &[payload.account_id],
             std::slice::from_ref(&payload.market_id),
         ),
+        EventPayload::InternalTransfer(payload) => {
+            let decoded = decode_internal(payload)?;
+            identity_matches(
+                event,
+                &[decoded.from_account_id, decoded.to_account_id],
+                &[],
+            )
+        }
+        EventPayload::AccountClassTransfer(payload) => {
+            let decoded = decode_class_transfer(payload)?;
+            identity_matches(event, &[decoded.account_id], &[])
+        }
+        EventPayload::RewardClaimed(payload) => {
+            let decoded = decode_reward(payload)?;
+            identity_matches(event, &[decoded.account_id], &[])
+        }
+        EventPayload::SpotGenesisApplied(_) => {
+            event.account_addresses().len() <= 1 && event.market_ids().is_empty()
+        }
         _ => false,
     };
     if matches {
@@ -752,6 +881,10 @@ fn validate_prerequisites(
     state: &StateView<'_>,
     event: &CanonicalEventEnvelope,
 ) -> Result<(), ReducerError> {
+    let genesis = match event.payload() {
+        EventPayload::SpotGenesisApplied(payload) => Some(decode_spot_genesis(payload)?),
+        _ => None,
+    };
     let asset_id = match event.payload() {
         EventPayload::DepositCredited(payload) => Some(&payload.asset_id),
         EventPayload::WithdrawalDebited(payload) => Some(&payload.asset_id),
@@ -760,6 +893,7 @@ fn validate_prerequisites(
         EventPayload::FeeCharged(payload) => Some(&payload.asset_id),
         EventPayload::BuilderFeeCharged(payload) => Some(&payload.asset_id),
         EventPayload::ReferralReward(payload) => Some(&payload.asset_id),
+        EventPayload::SpotGenesisApplied(_) => genesis.as_ref().map(|decoded| &decoded.token),
         _ => None,
     };
     if let Some(asset_id) = asset_id {
@@ -939,6 +1073,9 @@ mod tests {
             AccountQuantityFlowScopeV1::VaultShares {
                 vault_id: vault_id.clone(),
             },
+            AccountQuantityFlowScopeV1::SpotGenesisAsset {
+                asset_id: asset_id.clone(),
+            },
         ];
         for scope in quantity_scopes {
             let record = AccountQuantityFlowCurrentRecordV1 {
@@ -963,6 +1100,8 @@ mod tests {
             AccountQuoteFlowScopeV1::VaultPrincipal {
                 vault_id: vault_id.clone(),
             },
+            AccountQuoteFlowScopeV1::SpotClassQuote,
+            AccountQuoteFlowScopeV1::RewardClaimedQuote,
         ];
         for scope in quote_scopes {
             let record = AccountQuoteFlowCurrentRecordV1 {

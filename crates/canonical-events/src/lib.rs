@@ -650,6 +650,13 @@ macro_rules! opaque_payloads {
             pub struct $kind {
                 encoded: Vec<u8>,
             }
+
+            impl $kind {
+                #[must_use]
+                pub fn encoded(&self) -> &[u8] {
+                    &self.encoded
+                }
+            }
         )*
 
         #[derive(Debug, Clone, PartialEq, Eq)]

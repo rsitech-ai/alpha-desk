@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod atomic;
+mod encoding;
 
 use std::{
     fs::{self, File},
@@ -22,6 +23,12 @@ use storage_ports::{
 };
 
 pub use atomic::SyncedWriteBatchStore;
+pub use encoding::{
+    CF_ACCOUNT_STATE, CF_BALANCES, CF_BORROW_LEND, CF_CHECKPOINTS, CF_EVENT_SEEN, CF_EVM_HEADS,
+    CF_L2_BOOK, CF_L4_ORDERS, CF_MARKET_STATE, CF_META, CF_ORDERS, CF_POSITIONS, CF_RECONCILIATION,
+    CF_STAKING, CF_TWAP, CF_VAULTS, COLUMN_FAMILIES, SCHEMA_ID, admit_schema, framed_key,
+    l4_order_key, staking_liquid_key, vault_current_key,
+};
 
 const MANIFEST_FILE: &str = "manifest.json";
 const STATE_FILE: &str = "state.bin";

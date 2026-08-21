@@ -116,6 +116,51 @@ fn second_open_is_locked_and_tampered_state_is_corrupt() {
     assert!(matches!(error, StateStoreError::Corrupt));
 }
 
+#[test]
+fn schema_mismatch_or_missing_schema_requires_rebuild() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
+        .expect("private parent");
+    let root = temporary.path().join("atomic-schema");
+    let store = SyncedWriteBatchStore::open(&root, StateImageLimits::production()).expect("store");
+    let mut first_ledger = ledger(400);
+    let applied = apply(&mut first_ledger, 400, 1);
+    let commit = AtomicStateCommit::try_new(applied.delta(), applied.image()).expect("commit");
+    store.commit(&commit).expect("commit");
+    drop(store);
+
+    let generation = fs::read_dir(&root)
+        .expect("root")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("gen-"))
+        })
+        .expect("generation");
+    let schema = generation.join("SCHEMA");
+    fs::write(&schema, b"wrong-schema").expect("overwrite");
+    fs::set_permissions(&schema, fs::Permissions::from_mode(0o600)).expect("mode");
+
+    let restarted =
+        SyncedWriteBatchStore::open(&root, StateImageLimits::production()).expect("reopen");
+    let error = restarted
+        .load_latest(StateImageLimits::production())
+        .expect_err("schema mismatch");
+    assert!(matches!(error, StateStoreError::RebuildRequired));
+    assert_eq!(error.reason_code(), "state_store.rebuild_required");
+    drop(restarted);
+
+    fs::remove_file(&schema).expect("remove");
+    let restarted =
+        SyncedWriteBatchStore::open(&root, StateImageLimits::production()).expect("reopen");
+    let error = restarted
+        .load_latest(StateImageLimits::production())
+        .expect_err("missing schema");
+    assert!(matches!(error, StateStoreError::RebuildRequired));
+}
+
 struct Applied {
     delta: canonical_ledger::StateDelta,
     image: canonical_ledger::StateImage,

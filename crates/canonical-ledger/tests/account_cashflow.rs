@@ -1,6 +1,12 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+use api_contracts::{
+    WireAccountClassTransfer, WireInternalTransfer, WireRewardClaimed, WireSpotGenesisApplied,
+    encode_account_class_transfer, encode_internal_transfer, encode_reward_claimed,
+    encode_spot_genesis_applied,
+};
+
 use canonical_events::{
     AccountModeChanged, AssetContextUpdated, BlockEnvelope, BuilderFeeCharged,
     CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, DepositCredited, DexCreated,
@@ -127,7 +133,7 @@ impl EventReducer for OversizedKeyReducer {
 }
 
 #[test]
-fn owns_exactly_fifteen_kinds_at_exact_schema() {
+fn owns_exactly_nineteen_kinds_at_exact_schema() {
     let reducer = CanonicalAccountReducerV1;
     for payload in all_owned_payloads() {
         let exact = event_for(100, 0, payload.clone(), "1.0.0");
@@ -1108,9 +1114,9 @@ fn complete_owned_state_restores_byte_exactly_with_frozen_namespace_counts() {
     ledger.apply_block(&block(1_001, events)).unwrap();
     let entries = ledger.state_image().entries();
     let expected = [
-        ("account-fact.v1", 15),
-        ("account-quantity-flow-current.v1", 10),
-        ("account-quote-flow-current.v1", 4),
+        ("account-fact.v1", 19),
+        ("account-quantity-flow-current.v1", 11),
+        ("account-quote-flow-current.v1", 6),
         ("vault-principal-flow-current.v1", 1),
         ("vault-share-flow-current.v1", 1),
         ("account-subaccount-master.v1", 1),
@@ -1208,6 +1214,184 @@ fn immutable_event_fact_collision_is_rejected_at_later_height() {
     assert_eq!(ledger.state_image().canonical_bytes(), before);
 }
 
+#[test]
+fn internal_transfer_debits_amount_plus_fee_once_and_credits_destination_amount() {
+    let mut ledger = seeded_ledger(800);
+    ledger
+        .apply_block(&block(
+            801,
+            vec![raw_event(
+                801,
+                0,
+                EventPayload::decode(
+                    EventKind::InternalTransfer,
+                    &encode_internal_transfer(&WireInternalTransfer {
+                        from_account_id: ACCOUNT_A.to_api_string(),
+                        to_account_id: ACCOUNT_B.to_api_string(),
+                        amount: "1.00".to_owned(),
+                        fee: "0.01".to_owned(),
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+                Vec::new(),
+                vec![ACCOUNT_A, ACCOUNT_B],
+                "1.0.0",
+            )],
+        ))
+        .unwrap();
+    let source = quote_flow(
+        &ledger,
+        ACCOUNT_A,
+        AccountQuoteFlowScopeV1::DefaultPerpQuote,
+    );
+    let destination = quote_flow(
+        &ledger,
+        ACCOUNT_B,
+        AccountQuoteFlowScopeV1::DefaultPerpQuote,
+    );
+    assert_eq!(source.debits(), quote("1.01"));
+    assert_eq!(destination.credits(), quote("1.00"));
+}
+
+#[test]
+fn account_class_transfer_moves_quote_between_spot_and_perp_scopes() {
+    let mut ledger = seeded_ledger(810);
+    ledger
+        .apply_block(&block(811, vec![class_transfer(811, 0, true, "1.00")]))
+        .unwrap();
+    assert_eq!(
+        quote_flow(&ledger, ACCOUNT_A, AccountQuoteFlowScopeV1::SpotClassQuote).debits(),
+        quote("1.00")
+    );
+    assert_eq!(
+        quote_flow(
+            &ledger,
+            ACCOUNT_A,
+            AccountQuoteFlowScopeV1::DefaultPerpQuote
+        )
+        .credits(),
+        quote("1.00")
+    );
+    ledger
+        .apply_block(&block(812, vec![class_transfer(812, 0, false, "0.40")]))
+        .unwrap();
+    assert_eq!(
+        quote_flow(&ledger, ACCOUNT_A, AccountQuoteFlowScopeV1::SpotClassQuote).credits(),
+        quote("0.40")
+    );
+}
+
+#[test]
+fn reward_claimed_credits_dedicated_quote_scope() {
+    let mut ledger = seeded_ledger(820);
+    ledger
+        .apply_block(&block(
+            821,
+            vec![raw_event(
+                821,
+                0,
+                EventPayload::decode(
+                    EventKind::RewardClaimed,
+                    &encode_reward_claimed(&WireRewardClaimed {
+                        account_id: ACCOUNT_A.to_api_string(),
+                        amount: "1.00".to_owned(),
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+                Vec::new(),
+                vec![ACCOUNT_A],
+                "1.0.0",
+            )],
+        ))
+        .unwrap();
+    assert_eq!(
+        quote_flow(
+            &ledger,
+            ACCOUNT_A,
+            AccountQuoteFlowScopeV1::RewardClaimedQuote
+        )
+        .credits(),
+        quote("1.00")
+    );
+}
+
+#[test]
+fn spot_genesis_credits_one_user_and_allows_token_only_zero_user() {
+    let mut ledger = seeded_ledger(830);
+    ledger
+        .apply_block(&block(
+            831,
+            vec![spot_genesis(831, 0, "1.0", vec![ACCOUNT_A])],
+        ))
+        .unwrap();
+    assert_eq!(
+        quantity_flow(
+            &ledger,
+            ACCOUNT_A,
+            AccountQuantityFlowScopeV1::SpotGenesisAsset { asset_id: asset() }
+        )
+        .credits(),
+        quantity("1.0")
+    );
+
+    let mut ledger = seeded_ledger(840);
+    ledger
+        .apply_block(&block(841, vec![spot_genesis(841, 0, "1.0", Vec::new())]))
+        .unwrap();
+    let key = AccountQuantityFlowCurrentRecordV1::state_key(
+        &ACCOUNT_A,
+        &AccountQuantityFlowScopeV1::SpotGenesisAsset { asset_id: asset() },
+    )
+    .unwrap();
+    assert!(!ledger.state_image().entries().contains_key(&key));
+}
+
+fn class_transfer(height: u64, index: u32, to_perp: bool, amount: &str) -> CanonicalEventEnvelope {
+    raw_event(
+        height,
+        index,
+        EventPayload::decode(
+            EventKind::AccountClassTransfer,
+            &encode_account_class_transfer(&WireAccountClassTransfer {
+                account_id: ACCOUNT_A.to_api_string(),
+                amount: amount.to_owned(),
+                to_perp,
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+        Vec::new(),
+        vec![ACCOUNT_A],
+        "1.0.0",
+    )
+}
+
+fn spot_genesis(
+    height: u64,
+    index: u32,
+    amount: &str,
+    accounts: Vec<Address>,
+) -> CanonicalEventEnvelope {
+    raw_event(
+        height,
+        index,
+        EventPayload::decode(
+            EventKind::SpotGenesisApplied,
+            &encode_spot_genesis_applied(&WireSpotGenesisApplied {
+                token: asset().as_str().to_owned(),
+                amount: amount.to_owned(),
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+        Vec::new(),
+        accounts,
+        "1.0.0",
+    )
+}
+
 fn all_owned_payloads() -> Vec<EventPayload> {
     let asset = asset();
     let market = market();
@@ -1283,9 +1467,48 @@ fn all_owned_payloads() -> Vec<EventPayload> {
         EventPayload::ReferralReward(ReferralReward {
             account_id: ACCOUNT_A,
             referrer_account_id: REFERRER,
-            asset_id: asset,
+            asset_id: asset.clone(),
             amount: quantity("1"),
         }),
+        EventPayload::decode(
+            EventKind::InternalTransfer,
+            &encode_internal_transfer(&WireInternalTransfer {
+                from_account_id: ACCOUNT_A.to_api_string(),
+                to_account_id: ACCOUNT_B.to_api_string(),
+                amount: "1".to_owned(),
+                fee: "0".to_owned(),
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+        EventPayload::decode(
+            EventKind::AccountClassTransfer,
+            &encode_account_class_transfer(&WireAccountClassTransfer {
+                account_id: ACCOUNT_A.to_api_string(),
+                amount: "1".to_owned(),
+                to_perp: true,
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+        EventPayload::decode(
+            EventKind::RewardClaimed,
+            &encode_reward_claimed(&WireRewardClaimed {
+                account_id: ACCOUNT_A.to_api_string(),
+                amount: "1".to_owned(),
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+        EventPayload::decode(
+            EventKind::SpotGenesisApplied,
+            &encode_spot_genesis_applied(&WireSpotGenesisApplied {
+                token: asset.as_str().to_owned(),
+                amount: "1".to_owned(),
+            })
+            .unwrap(),
+        )
+        .unwrap(),
         account_mode(
             AccountAbstractionModeV1::Standard,
             AccountAbstractionModeV1::Unified,
@@ -1524,6 +1747,11 @@ fn identities(payload: &EventPayload) -> (Vec<Address>, Vec<MarketId>) {
         EventPayload::LeverageChanged(value) => {
             (vec![value.account_id], vec![value.market_id.clone()])
         }
+        EventPayload::InternalTransfer(_) => (vec![ACCOUNT_A, ACCOUNT_B], Vec::new()),
+        EventPayload::AccountClassTransfer(_) | EventPayload::RewardClaimed(_) => {
+            (vec![ACCOUNT_A], Vec::new())
+        }
+        EventPayload::SpotGenesisApplied(_) => (vec![ACCOUNT_A], Vec::new()),
         EventPayload::AssetContextUpdated(_) => (Vec::new(), Vec::new()),
         _ => unreachable!("test helper supports account and prerequisite payloads only"),
     }

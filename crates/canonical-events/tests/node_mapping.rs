@@ -1195,6 +1195,147 @@ fn batched_account_class_and_vault_create_map() {
 }
 
 #[test]
+fn vault_distribution_reward_claimed_spot_genesis_and_validator_reward_map() {
+    let user = "0x4444444444444444444444444444444444444444";
+    let distribution = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": [user],
+                "delta": { "VaultDistribution": { "vault": "vault-1", "usdc": "1.0" } }
+            }
+        }
+    });
+    let reward = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": [user],
+                "delta": { "RewardsClaim": { "amount": "2.0" } }
+            }
+        }
+    });
+    let genesis = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": [user],
+                "delta": { "SpotGenesis": { "token": "USDC", "amount": "3.0" } }
+            }
+        }
+    });
+    let validator = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "ValidatorRewards": {
+                "validator_to_reward": [["hl-validator-1", "4.0"]]
+            }
+        }
+    });
+
+    let record =
+        parse_node_record(NodeStreamKind::MiscEvents, wrap_event(distribution).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("VaultDistribution must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::VaultDistribution);
+    let dist = api_contracts::decode_vault_distribution(match events[0].payload() {
+        EventPayload::VaultDistribution(payload) => payload.encoded(),
+        other => panic!("expected VaultDistribution, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(dist.vault_id, "vault-1");
+    assert_eq!(dist.amount, "1.0");
+
+    let record = parse_node_record(NodeStreamKind::MiscEvents, wrap_event(reward).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("RewardClaimed must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::RewardClaimed);
+    let claimed = api_contracts::decode_reward_claimed(match events[0].payload() {
+        EventPayload::RewardClaimed(payload) => payload.encoded(),
+        other => panic!("expected RewardClaimed, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(claimed.amount, "2.0");
+    assert_eq!(events[0].account_addresses().len(), 1);
+
+    let record = parse_node_record(NodeStreamKind::MiscEvents, wrap_event(genesis).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("SpotGenesisApplied must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::SpotGenesisApplied);
+    let applied = api_contracts::decode_spot_genesis_applied(match events[0].payload() {
+        EventPayload::SpotGenesisApplied(payload) => payload.encoded(),
+        other => panic!("expected SpotGenesisApplied, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(applied.token, "USDC");
+    assert_eq!(applied.amount, "3.0");
+
+    let record =
+        parse_node_record(NodeStreamKind::MiscEvents, wrap_event(validator).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("ValidatorRewardPaid must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::ValidatorRewardPaid);
+    assert!(events[0].account_addresses().is_empty());
+    let paid = api_contracts::decode_validator_reward_paid(match events[0].payload() {
+        EventPayload::ValidatorRewardPaid(payload) => payload.encoded(),
+        other => panic!("expected ValidatorRewardPaid, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(paid.validator, "hl-validator-1");
+    assert_eq!(paid.amount, "4.0");
+}
+
+#[test]
+fn misc_record_discards_mapped_siblings_when_one_inner_is_undocumented() {
+    let user = "0x4444444444444444444444444444444444444444";
+    let bytes = wrap_events(vec![
+        serde_json::json!({
+            "time": "2026-07-28T12:00:02.000",
+            "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "inner": {
+                "LedgerUpdate": {
+                    "users": [user],
+                    "delta": {
+                        "VaultCreate": { "vault": "vault-1", "usdc": "1.0", "fee": "0.1" }
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "time": "2026-07-28T12:00:02.000",
+            "hash": "0x4444444444444444444444444444444444444444444444444444444444444444",
+            "inner": {
+                "LedgerUpdate": {
+                    "users": [user],
+                    "delta": { "VaultLeaderCommission": { "usdc": "0.1" } }
+                }
+            }
+        }),
+    ]);
+    let record = parse_node_record(NodeStreamKind::MiscEvents, bytes.into()).unwrap();
+    assert_eq!(
+        map_node_v1_record(&record, &catalog(), &context()).unwrap(),
+        MappingDisposition::EvidenceOnly(EvidenceOnlyReason::UnsupportedCanonicalSemantics)
+    );
+}
+
+#[test]
 fn batched_staking_inners_map() {
     let user = "0x4444444444444444444444444444444444444444";
     let cases = [

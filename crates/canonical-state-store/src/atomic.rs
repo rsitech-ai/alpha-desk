@@ -26,13 +26,14 @@ use rustix::fs::{
     renameat_with, unlinkat,
 };
 use storage_ports::{
-    AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateCommitReceipt,
-    StateStoreError,
+    AtomicStateCommit, AtomicStateStore, STATE_STORE_SCHEMA, StateCommitDisposition,
+    StateCommitReceipt, StateStoreError,
 };
 
 const HEAD_FILE: &str = "HEAD";
 const LOCK_FILE: &str = "LOCK";
 const STATE_FILE: &str = "state.bin";
+const SCHEMA_FILE: &str = "SCHEMA";
 const GENERATION_PREFIX: &str = "gen-";
 const MAX_PATH_BYTES: usize = 4_096;
 const STAGING_ATTEMPTS: usize = 16;
@@ -91,6 +92,7 @@ impl SyncedWriteBatchStore {
             return Ok(None);
         };
         let directory = open_generation(&self.root, &generation)?;
+        require_schema(&directory)?;
         let bytes = read_regular(&directory, STATE_FILE, self.state_limits.max_state_bytes())?;
         decode_image(&bytes, self.state_limits).map(Some)
     }
@@ -133,6 +135,7 @@ impl AtomicStateStore for SyncedWriteBatchStore {
         let generation = generation_name(commit.after_state_hash());
         let mut staged = StagedGeneration::create(&self.root)?;
         staged.write_file(STATE_FILE, &bytes)?;
+        staged.write_file(SCHEMA_FILE, STATE_STORE_SCHEMA.as_bytes())?;
         staged.sync()?;
         renameat_with(
             &self.root,
@@ -164,6 +167,7 @@ impl AtomicStateStore for SyncedWriteBatchStore {
             return Ok(None);
         };
         let directory = open_generation(&self.root, &generation)?;
+        require_schema(&directory)?;
         let bytes = read_regular(&directory, STATE_FILE, limits.max_state_bytes())?;
         decode_image(&bytes, limits).map(Some)
     }
@@ -254,6 +258,7 @@ impl Drop for StagedGeneration<'_> {
             return;
         }
         let _ = unlinkat(&self.directory, STATE_FILE, AtFlags::empty());
+        let _ = unlinkat(&self.directory, SCHEMA_FILE, AtFlags::empty());
         let _ = unlinkat(self.root, self.name.as_str(), AtFlags::REMOVEDIR);
     }
 }
@@ -350,6 +355,36 @@ fn read_regular(
         return Err(StateStoreError::Corrupt);
     }
     Ok(bytes)
+}
+
+fn require_schema(directory: &File) -> Result<(), StateStoreError> {
+    match openat(
+        directory,
+        SCHEMA_FILE,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => {
+            let file = File::from(descriptor);
+            let metadata = file
+                .metadata()
+                .map_err(|_| StateStoreError::Io("inspecting atomic schema file"))?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+                return Err(StateStoreError::Corrupt);
+            }
+            let mut bytes = Vec::new();
+            file.take(256)
+                .read_to_end(&mut bytes)
+                .map_err(|_| StateStoreError::Io("reading atomic schema file"))?;
+            if bytes == STATE_STORE_SCHEMA.as_bytes() {
+                Ok(())
+            } else {
+                Err(StateStoreError::RebuildRequired)
+            }
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => Err(StateStoreError::RebuildRequired),
+        Err(_) => Err(StateStoreError::Io("opening atomic schema file")),
+    }
 }
 
 fn read_head(root: &File) -> Result<Option<String>, StateStoreError> {

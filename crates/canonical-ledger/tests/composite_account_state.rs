@@ -35,7 +35,7 @@ fn validated_constructor_exposes_the_exact_ordered_component_manifest() {
 
     assert_eq!(
         reducer.reducer_set_version(),
-        "hyperliquid-alpha-desk-canonical-state@1.1.0"
+        "hyperliquid-alpha-desk-canonical-state@1.2.0"
     );
     assert_eq!(
         reducer
@@ -61,6 +61,16 @@ fn validated_constructor_exposes_the_exact_ordered_component_manifest() {
             ),
             ("trigger", "hyperliquid-alpha-desk-canonical-trigger@1.0.0"),
             ("twap", "hyperliquid-alpha-desk-canonical-twap@1.0.0"),
+            ("vault", "hyperliquid-alpha-desk-canonical-vault@1.0.0"),
+            ("staking", "hyperliquid-alpha-desk-canonical-staking@1.0.0"),
+            (
+                "validator",
+                "hyperliquid-alpha-desk-canonical-validator@1.0.0"
+            ),
+            (
+                "relationships",
+                "hyperliquid-alpha-desk-canonical-relationships@1.0.0"
+            ),
         ]
     );
 }

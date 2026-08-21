@@ -7,7 +7,10 @@ use domain_types::{
 use orderbook::RestingOrder;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{ApplyContext, EventReducer, ReducerError, StateKey, StateMutation, StateView};
+use crate::{
+    ApplyContext, EventReducer, ReducerError, StateKey, StateMutation, StateView,
+    opaque::decode_non_user_cancel,
+};
 
 const FACT_NAMESPACE: &str = "order-fact.v1";
 const CURRENT_NAMESPACE: &str = "order-current.v1";
@@ -103,12 +106,7 @@ fn reduce_order_event(
     state: &StateView<'_>,
     event: &CanonicalEventEnvelope,
 ) -> Result<Vec<StateMutation>, ReducerError> {
-    let order_id = order_id(event.payload()).ok_or_else(|| {
-        reducer_error(
-            "order_state.invalid_event",
-            "order reducer received a non-order payload",
-        )
-    })?;
+    let order_id = order_identity(event.payload())?;
     let [market_id] = event.market_ids() else {
         return Err(reducer_error(
             "order_state.identity_mismatch",
@@ -122,7 +120,7 @@ fn reduce_order_event(
         ));
     };
     let current_key =
-        OrderCurrentRecordV1::state_key(market_id, order_id).map_err(codec_reducer_error)?;
+        OrderCurrentRecordV1::state_key(market_id, &order_id).map_err(codec_reducer_error)?;
     let existing = state
         .get(&current_key)
         .map(|bytes| {
@@ -138,7 +136,7 @@ fn reduce_order_event(
                     "order identity is already present in canonical state",
                 ));
             }
-            if accepted.order_id != *order_id
+            if accepted.order_id != order_id
                 || accepted.market_id != *market_id
                 || accepted.account_id != *account_id
             {
@@ -364,6 +362,22 @@ fn apply_transition(
             }
             current.lifecycle = OrderLifecycleV1::Cancelled;
         }
+        EventPayload::NonUserOrderCancelled(payload) => {
+            let decoded = decode_non_user_cancel(payload)?;
+            if decoded.order_id != current.order_id {
+                return Err(reducer_error(
+                    "order_state.identity_mismatch",
+                    "cancelled order identity must match current state",
+                ));
+            }
+            if decoded.remaining_quantity != current.remaining_quantity {
+                return Err(reducer_error(
+                    "order_state.remaining_mismatch",
+                    "cancellation remainder must match current state",
+                ));
+            }
+            current.lifecycle = OrderLifecycleV1::Cancelled;
+        }
         EventPayload::OrderAccepted(_) | EventPayload::OrderRejected(_) => {
             return Err(reducer_error(
                 "order_state.invalid_event",
@@ -425,6 +439,7 @@ fn validate_payload_semantics(payload: &EventPayload) -> Result<(), ReducerError
             }
             Ok(())
         }
+        EventPayload::NonUserOrderCancelled(value) => decode_non_user_cancel(value).map(|_| ()),
         EventPayload::OrderRejected(value) => {
             if invalid_text(&value.reason_code, 128) || invalid_text(&value.reason, 1_024) {
                 return Err(reducer_error(
@@ -483,9 +498,10 @@ const fn transition_allowed(lifecycle: OrderLifecycleV1, kind: EventKind) -> boo
                 | OrderLifecycleV1::Modified
                 | OrderLifecycleV1::PartiallyFilled
         ),
-        EventKind::OrderPartiallyFilled | EventKind::OrderFilled | EventKind::OrderCancelled => {
-            !lifecycle.is_terminal()
-        }
+        EventKind::OrderPartiallyFilled
+        | EventKind::OrderFilled
+        | EventKind::OrderCancelled
+        | EventKind::NonUserOrderCancelled => !lifecycle.is_terminal(),
         _ => false,
     }
 }
@@ -1255,8 +1271,21 @@ const fn is_order_kind(kind: EventKind) -> bool {
             | EventKind::OrderPartiallyFilled
             | EventKind::OrderFilled
             | EventKind::OrderCancelled
+            | EventKind::NonUserOrderCancelled
             | EventKind::OrderRejected
     )
+}
+
+fn order_identity(payload: &EventPayload) -> Result<OrderId, ReducerError> {
+    match payload {
+        EventPayload::NonUserOrderCancelled(value) => Ok(decode_non_user_cancel(value)?.order_id),
+        other => order_id(other).cloned().ok_or_else(|| {
+            reducer_error(
+                "order_state.invalid_event",
+                "order reducer received a non-order payload",
+            )
+        }),
+    }
 }
 
 fn order_id(payload: &EventPayload) -> Option<&OrderId> {
