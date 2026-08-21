@@ -1,4 +1,6 @@
 //! Official historical S3 adapter. Archive exact object bytes before cursor advance.
+//! S3 `replica_cmds` objects are recovery evidence (`evidence-only` /
+//! `canonical_event`). Committed replica_cmds remain the `node_files` stream.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -370,6 +372,7 @@ struct DatasetProgress {
     cursor: Option<HistoricalBackfillCursor>,
     objects: BTreeMap<String, HistoricalObjectPlan>,
     gaps: BTreeMap<String, HistoricalGapRecord>,
+    manifests: BTreeMap<String, HistoricalObjectManifest>,
 }
 
 #[derive(Debug)]
@@ -513,6 +516,41 @@ impl HistoricalBackfillProgress for HistoricalProgressStore {
             .map(|dataset| dataset.gaps.values().cloned().collect())
             .unwrap_or_default())
     }
+
+    fn record_manifest(
+        &self,
+        manifest: &HistoricalObjectManifest,
+    ) -> Result<ProgressRecordDisposition, ProgressError> {
+        let mut state = self
+            .lock()
+            .map_err(|_| ProgressError::Storage("historical progress lock"))?;
+        let dataset = state.entry(manifest.dataset().to_owned()).or_default();
+        if let Some(existing) = dataset.manifests.get(manifest.key()) {
+            if existing == manifest {
+                return Ok(ProgressRecordDisposition::IdenticalDuplicate);
+            }
+            return Err(ProgressError::ConflictingObject);
+        }
+        dataset
+            .manifests
+            .insert(manifest.key().to_owned(), manifest.clone());
+        self.persist_locked(&state)
+            .map_err(|_| ProgressError::Storage("historical progress persist"))?;
+        Ok(ProgressRecordDisposition::New)
+    }
+
+    fn load_manifests(
+        &self,
+        dataset_id: &str,
+    ) -> Result<Vec<HistoricalObjectManifest>, ProgressError> {
+        let state = self
+            .lock()
+            .map_err(|_| ProgressError::Storage("historical progress lock"))?;
+        Ok(state
+            .get(dataset_id)
+            .map(|dataset| dataset.manifests.values().cloned().collect())
+            .unwrap_or_default())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,6 +566,8 @@ struct CheckpointDataset {
     cursor: Option<CheckpointCursor>,
     objects: Vec<CheckpointObject>,
     gaps: Vec<CheckpointGap>,
+    #[serde(default)]
+    manifests: Vec<CheckpointManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -560,6 +600,26 @@ struct CheckpointGap {
     bucket: String,
     key: String,
     recorded_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointManifest {
+    bucket: String,
+    key: String,
+    etag: Option<String>,
+    content_hash: Option<String>,
+    dataset: String,
+    dataset_version: String,
+    byte_count: u64,
+    first_block: Option<u64>,
+    last_block: Option<u64>,
+    first_event_time_micros: Option<i64>,
+    last_event_time_micros: Option<i64>,
+    parser_build: String,
+    imported_at_micros: i64,
+    gap_status: String,
+    requester_pays_billed_bytes: Option<u64>,
 }
 
 fn encode_checkpoint(
@@ -599,6 +659,36 @@ fn encode_checkpoint(
                         bucket: gap.bucket().to_owned(),
                         key: gap.key().to_owned(),
                         recorded_at: gap.recorded_at().unix_micros(),
+                    })
+                    .collect(),
+                manifests: progress
+                    .manifests
+                    .values()
+                    .map(|manifest| CheckpointManifest {
+                        bucket: manifest.bucket().to_owned(),
+                        key: manifest.key().to_owned(),
+                        etag: manifest.etag().map(ToOwned::to_owned),
+                        content_hash: manifest.content_hash().map(hex::encode),
+                        dataset: manifest.dataset().to_owned(),
+                        dataset_version: manifest.dataset_version().to_owned(),
+                        byte_count: manifest.byte_count(),
+                        first_block: manifest.first_block().map(BlockHeight::get),
+                        last_block: manifest.last_block().map(BlockHeight::get),
+                        first_event_time_micros: manifest
+                            .first_event_time()
+                            .map(KnownTime::unix_micros),
+                        last_event_time_micros: manifest
+                            .last_event_time()
+                            .map(KnownTime::unix_micros),
+                        parser_build: manifest.parser_build().to_owned(),
+                        imported_at_micros: manifest.imported_at().unix_micros(),
+                        gap_status: match manifest.gap_status() {
+                            HistoricalGapStatus::Present => "present".to_owned(),
+                            HistoricalGapStatus::MissingObject => "missing_object".to_owned(),
+                        },
+                        requester_pays_billed_bytes: manifest
+                            .requester_pays_cost()
+                            .map(|cost| cost.billed_bytes()),
                     })
                     .collect(),
             },
@@ -664,6 +754,57 @@ fn decode_checkpoint(bytes: &[u8]) -> Result<BTreeMap<String, DatasetProgress>, 
             )
             .map_err(|_| HistoricalError::Checkpoint)?;
             progress.gaps.insert(gap.key, record);
+        }
+        for stored in dataset.manifests {
+            let content_hash = match stored.content_hash {
+                Some(hex) => {
+                    let mut hash = [0_u8; 32];
+                    hex::decode_to_slice(&hex, &mut hash)
+                        .map_err(|_| HistoricalError::Checkpoint)?;
+                    Some(hash)
+                }
+                None => None,
+            };
+            let gap_status = match stored.gap_status.as_str() {
+                "present" => HistoricalGapStatus::Present,
+                "missing_object" => HistoricalGapStatus::MissingObject,
+                _ => return Err(HistoricalError::Checkpoint),
+            };
+            let requester_pays_cost = stored
+                .requester_pays_billed_bytes
+                .map(RequesterPaysCost::try_new)
+                .transpose()
+                .map_err(|_| HistoricalError::Checkpoint)?;
+            let first_event_time = stored
+                .first_event_time_micros
+                .map(KnownTime::from_unix_micros)
+                .transpose()
+                .map_err(|_| HistoricalError::Checkpoint)?;
+            let last_event_time = stored
+                .last_event_time_micros
+                .map(KnownTime::from_unix_micros)
+                .transpose()
+                .map_err(|_| HistoricalError::Checkpoint)?;
+            let manifest = HistoricalObjectManifest::try_new(
+                stored.bucket,
+                stored.key.clone(),
+                stored.etag,
+                content_hash,
+                stored.dataset,
+                stored.dataset_version,
+                stored.byte_count,
+                stored.first_block.map(BlockHeight::new),
+                stored.last_block.map(BlockHeight::new),
+                first_event_time,
+                last_event_time,
+                stored.parser_build,
+                KnownTime::from_unix_micros(stored.imported_at_micros)
+                    .map_err(|_| HistoricalError::Checkpoint)?,
+                gap_status,
+                requester_pays_cost,
+            )
+            .map_err(|_| HistoricalError::Checkpoint)?;
+            progress.manifests.insert(stored.key, manifest);
         }
         state.insert(dataset_id, progress);
     }
@@ -752,7 +893,9 @@ where
                 ProgressRecordDisposition::New => gaps = gaps.saturating_add(1),
                 ProgressRecordDisposition::IdenticalDuplicate => {}
             }
-            manifests.push(gap_manifest(request, key)?);
+            let manifest = gap_manifest(request, key)?;
+            progress.record_manifest(&manifest).map_err(map_progress)?;
+            manifests.push(manifest);
             cursor_version = cursor_version.saturating_add(1);
             last_key = Some(key.clone());
             persist_cursor(
@@ -799,7 +942,9 @@ where
                 duplicates = duplicates.saturating_add(1);
             }
         }
-        manifests.push(present_manifest(request, key, &object, hash, byte_count)?);
+        let manifest = present_manifest(request, key, &object, hash, byte_count)?;
+        progress.record_manifest(&manifest).map_err(map_progress)?;
+        manifests.push(manifest);
         cursor_version = cursor_version.saturating_add(1);
         last_key = Some(key.clone());
         persist_cursor(
@@ -834,6 +979,9 @@ fn persist_cursor<P: HistoricalBackfillProgress>(
     cursor_version: u64,
     imported_at: KnownTime,
 ) -> Result<(), HistoricalError> {
+    // ponytail: last_key and coverage_* are last-call-only and can move
+    // backwards. They are not a coverage record. Read objects/manifests for
+    // "what we have". Upgrade: monotone coverage index for T23/T25.
     let cursor = HistoricalBackfillCursor::try_new(
         dataset_id,
         last_key,

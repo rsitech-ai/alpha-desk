@@ -488,6 +488,20 @@ fn owners(event: &CanonicalEventEnvelope) -> &'static [Component] {
         EventKind::TwapStarted | EventKind::TwapSliceFilled | EventKind::TwapCompleted => {
             TWAP_OWNER
         }
+        EventKind::NonUserOrderCancelled
+        | EventKind::InternalTransfer
+        | EventKind::AccountClassTransfer
+        | EventKind::VaultCreated
+        | EventKind::VaultDistribution
+        | EventKind::VaultLeaderCommissionPaid
+        | EventKind::RewardClaimed
+        | EventKind::SpotGenesisApplied
+        | EventKind::StakingDeposit
+        | EventKind::StakingDelegated
+        | EventKind::StakingUndelegated
+        | EventKind::StakingWithdrawalQueued
+        | EventKind::StakingWithdrawalCompleted
+        | EventKind::ValidatorRewardPaid => NO_OWNERS,
     }
 }
 
@@ -854,6 +868,20 @@ mod tests {
             EventKind::TwapStarted | EventKind::TwapSliceFilled | EventKind::TwapCompleted => {
                 TWAP_OWNER
             }
+            EventKind::NonUserOrderCancelled
+            | EventKind::InternalTransfer
+            | EventKind::AccountClassTransfer
+            | EventKind::VaultCreated
+            | EventKind::VaultDistribution
+            | EventKind::VaultLeaderCommissionPaid
+            | EventKind::RewardClaimed
+            | EventKind::SpotGenesisApplied
+            | EventKind::StakingDeposit
+            | EventKind::StakingDelegated
+            | EventKind::StakingUndelegated
+            | EventKind::StakingWithdrawalQueued
+            | EventKind::StakingWithdrawalCompleted
+            | EventKind::ValidatorRewardPaid => NO_OWNERS,
         }
     }
 

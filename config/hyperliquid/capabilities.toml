@@ -4,9 +4,11 @@ schema_version = 1
 # REST/WS adapters remain planned. S3 historical import is implemented_unqualified
 # for HyperCore datasets. HyperEVM S3 is T25. Node replica_cmds / NodeLine rows
 # are implemented_unqualified only when hl-protocol parsers and fixtures/source/node-v1 exist.
-# All node_files rows (including market-metadata periodic state, spec §6.1) and
-# s3.replica_cmds are committed. Remaining official S3 archives are historical
+# All node_files rows (including market-metadata periodic state, spec §6.1) are
+# committed. Official S3 archives, including replica_cmds objects, are historical
 # backfill (spec §6.1 priority 4), mapped to evidence-only rather than enrichment.
+# Committed replica_cmds remain the node_files stream. The S3 object archive does
+# not drive the committed block cursor.
 
 [[capability]]
 id = "official.info.all_mids"
@@ -1850,7 +1852,7 @@ freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "canonical_event"
 status = "implemented_unqualified"
-limitations = "Importer archives opaque object bytes. Older fills live under node_fills. Current fills are node_fills_by_block. lz4 inner layout is not decoded. Not live-qualified"
+limitations = "Importer archives opaque object bytes. Older trades live under node_trades. Current trades are not published on S3. lz4 inner layout is not decoded. Not live-qualified"
 
 # Official S3 explorer-blocks archive (§6.1 priority 4), not community explorers
 # (§6.1 priority 6). evidence-only / canonical_event is the honest pair.
@@ -1871,7 +1873,7 @@ freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "canonical_event"
 status = "implemented_unqualified"
-limitations = "Importer archives opaque object bytes. Older fills live under node_fills. Current fills are node_fills_by_block. lz4 inner layout is not decoded. Not live-qualified"
+limitations = "Importer archives opaque explorer-blocks objects. lz4 inner layout is not decoded. Not live-qualified"
 
 [[capability]]
 id = "s3.replica_cmds"
@@ -1880,7 +1882,7 @@ network = ["mainnet", "testnet"]
 transport = "s3"
 identifier = "replica_cmds"
 domain = "node"
-source_role = "committed"
+source_role = "evidence-only"
 request_cost = "requester_pays"
 pagination = "by_object"
 parser = "hl_capture::historical_s3::import_object"
@@ -1888,7 +1890,7 @@ fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
-state_target = "committed_state"
+state_target = "canonical_event"
 status = "implemented_unqualified"
 limitations = "Importer archives opaque replica_cmds objects as recovery evidence. Does not drive the committed block cursor. Not live-qualified"
 

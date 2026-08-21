@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let protos = [
         schemas.join("common/v1/types.proto"),
         schemas.join("canonical/v1/events.proto"),
+        schemas.join("canonical/v1/snapshots.proto"),
         schemas.join("health/v1/health.proto"),
         schemas.join("stream/v1/envelope.proto"),
     ];

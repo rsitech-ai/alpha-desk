@@ -545,3 +545,46 @@ fn node_format_prefixes_import_from_the_emulator() {
         assert_eq!(report.parser_build, PARSER_BUILD, "{key}");
     }
 }
+
+#[test]
+fn object_manifest_survives_progress_store_reopen() {
+    let directory = tempfile::tempdir().expect("dir");
+    let persist = directory.path().join("progress.json");
+    let key = "replica_cmds/20230916/100";
+    {
+        let mut archive = durable_archive(directory.path());
+        let progress = HistoricalProgressStore::open(&persist).expect("progress");
+        let report = import_objects(
+            &fixture_store(),
+            &mut archive,
+            &progress,
+            &NoHistoricalFaults,
+            &BackfillRequest {
+                dataset: DatasetKind::ReplicaCmds,
+                format: DatasetFormat::Current,
+                bucket: NODE_MAINNET_BUCKET.to_owned(),
+                keys: vec![key.to_owned()],
+                request_payer: RequestPayer::Requester,
+                imported_at: now(),
+            },
+        )
+        .expect("import");
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.manifests.len(), 1);
+        assert_eq!(
+            report.manifests[0].gap_status(),
+            HistoricalGapStatus::Present
+        );
+    }
+
+    let progress = HistoricalProgressStore::open(&persist).expect("reopen");
+    let loaded = progress.load_manifests("replica_cmds").expect("manifests");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].key(), key);
+    assert_eq!(loaded[0].gap_status(), HistoricalGapStatus::Present);
+    assert!(loaded[0].first_event_time().is_some());
+    assert!(loaded[0].first_block().is_some());
+    assert!(loaded[0].byte_count() > 0);
+    assert!(loaded[0].requester_pays_cost().is_some());
+    assert!(loaded[0].content_hash().is_some());
+}

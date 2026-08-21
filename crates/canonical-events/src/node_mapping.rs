@@ -1,12 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use api_contracts::is_canonical_trade_client_order_id;
+use api_contracts::{
+    WireAccountClassTransfer, WireInternalTransfer, WireNonUserOrderCancelled, WireRewardClaimed,
+    WireSpotGenesisApplied, WireStakingDelegated, WireStakingDeposit, WireStakingUndelegated,
+    WireStakingWithdrawalCompleted, WireStakingWithdrawalQueued, WireValidatorRewardPaid,
+    WireVaultCreated, WireVaultDistribution, WireVaultLeaderCommissionPaid,
+    encode_account_class_transfer, encode_internal_transfer, encode_non_user_order_cancelled,
+    encode_reward_claimed, encode_spot_genesis_applied, encode_staking_delegated,
+    encode_staking_deposit, encode_staking_undelegated, encode_staking_withdrawal_completed,
+    encode_staking_withdrawal_queued, encode_validator_reward_paid, encode_vault_created,
+    encode_vault_distribution, encode_vault_leader_commission_paid,
+    is_canonical_trade_client_order_id,
+};
 use chrono::{DateTime, NaiveDateTime};
 use domain_types::{
     Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, OrderSide,
     PositionQuantity, Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
 };
+use hl_protocol::node::misc::parse_misc_event;
 use hl_protocol::node::order_status::{
     BookSide, OrderStatusClass, OrderStatusV1, parse_order_status_batch,
 };
@@ -17,9 +29,9 @@ use serde_json::{Map, Value};
 
 use crate::{
     BlockEnvelope, BlockError, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass,
-    ContractError, EventPayload, OrderAccepted, OrderCancelled, OrderFilled, OrderRejected,
-    OrderRested, SourceEvidence, TradeMatched, TradeParticipantRoleV1, TradeParticipantV1,
-    TriggerOrderActivated,
+    ContractError, EventKind, EventPayload, OrderAccepted, OrderCancelled, OrderFilled,
+    OrderRejected, OrderRested, SourceEvidence, TradeMatched, TradeParticipantRoleV1,
+    TradeParticipantV1, TriggerOrderActivated,
 };
 
 const TRADE_ID_CONTEXT: &str = "hyperliquid-alpha-desk/trade-id/node-v1";
@@ -300,18 +312,24 @@ pub fn map_node_v1_record(
         NodeRecordKind::Fill => Ok(MappingDisposition::EvidenceOnly(
             EvidenceOnlyReason::OneSidedFill,
         )),
-        NodeRecordKind::Transfer => Ok(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::IncompleteLedgerTransfer,
-        )),
         NodeRecordKind::Liquidation => Ok(MappingDisposition::EvidenceOnly(
             EvidenceOnlyReason::IncompleteLiquidation,
         )),
         NodeRecordKind::MarketMetadata => Ok(MappingDisposition::EvidenceOnly(
             EvidenceOnlyReason::AuxiliaryMarketMetadata,
         )),
+        NodeRecordKind::Transfer => map_misc_like_record(
+            record,
+            context,
+            EvidenceOnlyReason::IncompleteLedgerTransfer,
+        ),
+        NodeRecordKind::MiscEvent => map_misc_like_record(
+            record,
+            context,
+            EvidenceOnlyReason::UnsupportedCanonicalSemantics,
+        ),
         NodeRecordKind::Trade
         | NodeRecordKind::TransactionBlock
-        | NodeRecordKind::MiscEvent
         | NodeRecordKind::AbciStateSnapshot
         | NodeRecordKind::L4Snapshot => Ok(MappingDisposition::EvidenceOnly(
             EvidenceOnlyReason::UnsupportedCanonicalSemantics,
@@ -775,6 +793,15 @@ fn map_order_status(
             limit_price,
             quantity: original,
         }),
+        OrderStatusClass::Canceled if is_system_cancel(status.status()) => opaque_payload(
+            EventKind::NonUserOrderCancelled,
+            encode_non_user_order_cancelled(&WireNonUserOrderCancelled {
+                order_id: order_id.to_string(),
+                reason: status.status().to_owned(),
+                remaining_quantity: remaining.to_string(),
+            })
+            .map_err(payload_codec_mapping)?,
+        )?,
         OrderStatusClass::Canceled => EventPayload::OrderCancelled(OrderCancelled {
             order_id,
             reason: status.status().to_owned(),
@@ -970,6 +997,480 @@ fn nonnegative_quantity(value: &str) -> Result<Quantity, MappingError> {
         });
     }
     Ok(quantity)
+}
+
+fn map_misc_like_record(
+    record: &NodeRecordV1,
+    context: &NodeV1MappingContext,
+    unmapped: EvidenceOnlyReason,
+) -> Result<MappingDisposition, MappingError> {
+    if record.block_number().is_none() {
+        return Ok(MappingDisposition::EvidenceOnly(unmapped));
+    }
+    let (events, block_time, block_height) = batched_misc_events(record.payload())?;
+    let mut mapped = Vec::new();
+    let mut transaction_index = 0_u32;
+    for (source_index, event) in events.iter().enumerate() {
+        let source_index =
+            u32::try_from(source_index).map_err(|_| MappingError::EventIndexOverflow)?;
+        parse_misc_event(event, Some(block_height.get()), source_index)
+            .map_err(source_to_mapping)?;
+        let Some(pieces) = map_misc_payload(event)? else {
+            return Ok(MappingDisposition::EvidenceOnly(unmapped));
+        };
+        if source_index > 0 {
+            transaction_index = transaction_index
+                .checked_add(1)
+                .ok_or(MappingError::EventIndexOverflow)?;
+        }
+        let mut canonical_event_index = 0_u32;
+        for piece in pieces {
+            mapped.push(envelope_from_misc(
+                piece,
+                source_index,
+                transaction_index,
+                canonical_event_index,
+                block_height,
+                block_time,
+                record,
+                context,
+            )?);
+            canonical_event_index = canonical_event_index
+                .checked_add(1)
+                .ok_or(MappingError::EventIndexOverflow)?;
+        }
+    }
+    Ok(MappingDisposition::Mapped(mapped))
+}
+
+struct MiscPiece {
+    payload: EventPayload,
+    account_ids: Vec<Address>,
+    transaction_id: TransactionId,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn envelope_from_misc(
+    piece: MiscPiece,
+    source_index: u32,
+    transaction_index: u32,
+    canonical_event_index: u32,
+    block_height: BlockHeight,
+    block_time: ProtocolTime,
+    record: &NodeRecordV1,
+    context: &NodeV1MappingContext,
+) -> Result<CanonicalEventEnvelope, MappingError> {
+    CanonicalEventEnvelope::from_input(CanonicalEventInput {
+        schema_version: "1.0.0".to_owned(),
+        chain_id: context.chain_id.clone(),
+        block_height,
+        block_time,
+        transaction_id: piece.transaction_id,
+        transaction_index,
+        canonical_event_index,
+        market_ids: Vec::new(),
+        account_ids: piece.account_ids,
+        source_evidence: vec![indexed_evidence(record, context, source_index)?],
+        confirmation_class: ConfirmationClass::ProvisionalSource,
+        observed_at: context.observed_at,
+        ingested_at: context.ingested_at,
+        canonicalized_at: context.canonicalized_at,
+        parser_version: context.mapper_version.clone(),
+        payload: piece.payload,
+    })
+    .map_err(Into::into)
+}
+
+#[allow(clippy::type_complexity)]
+fn batched_misc_events(
+    payload: &[u8],
+) -> Result<(Vec<Map<String, Value>>, ProtocolTime, BlockHeight), MappingError> {
+    let root: Value =
+        serde_json::from_slice(payload).map_err(|error| MappingError::MalformedRecord {
+            reason: error.to_string(),
+        })?;
+    let object = root
+        .as_object()
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "misc record root must be an object".to_owned(),
+        })?;
+    let events = object
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "batched misc record has no events array".to_owned(),
+        })?;
+    let block_time = parse_block_time(
+        object
+            .get("block_time")
+            .and_then(Value::as_str)
+            .ok_or_else(|| MappingError::MalformedRecord {
+                reason: "batched misc record has no block_time".to_owned(),
+            })?,
+    )?;
+    let block_height = BlockHeight::new(
+        object
+            .get("block_number")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| MappingError::MalformedRecord {
+                reason: "batched misc record has no block_number".to_owned(),
+            })?,
+    );
+    let objects = events
+        .iter()
+        .map(|event| {
+            event
+                .as_object()
+                .cloned()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "misc event must be an object".to_owned(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((objects, block_time, block_height))
+}
+
+fn map_misc_payload(event: &Map<String, Value>) -> Result<Option<Vec<MiscPiece>>, MappingError> {
+    let hash = json_string(event, "hash")?;
+    let transaction_id =
+        TransactionId::new(hash).map_err(|error| MappingError::MalformedRecord {
+            reason: format!("invalid misc transaction identity: {error}"),
+        })?;
+    let inner = event
+        .get("inner")
+        .and_then(Value::as_object)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "misc event has no inner object".to_owned(),
+        })?;
+    let (variant, value) = inner
+        .iter()
+        .next()
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "misc event inner is empty".to_owned(),
+        })?;
+    let body = value
+        .as_object()
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "misc event payload must be an object".to_owned(),
+        })?;
+    match variant.as_str() {
+        "CDeposit" => Ok(Some(vec![staking_piece(
+            EventKind::StakingDeposit,
+            encode_staking_deposit(&WireStakingDeposit {
+                account_id: json_string(body, "user")?,
+                amount: json_string(body, "amount")?,
+            })
+            .map_err(payload_codec_mapping)?,
+            json_string(body, "user")?,
+            transaction_id,
+        )?])),
+        "Delegation" => {
+            let undelegate = json_bool(body, "is_undelegate")?;
+            let (kind, bytes) = if undelegate {
+                (
+                    EventKind::StakingUndelegated,
+                    encode_staking_undelegated(&WireStakingUndelegated {
+                        account_id: json_string(body, "user")?,
+                        validator: json_string(body, "validator")?,
+                        amount: json_string(body, "amount")?,
+                    })
+                    .map_err(payload_codec_mapping)?,
+                )
+            } else {
+                (
+                    EventKind::StakingDelegated,
+                    encode_staking_delegated(&WireStakingDelegated {
+                        account_id: json_string(body, "user")?,
+                        validator: json_string(body, "validator")?,
+                        amount: json_string(body, "amount")?,
+                    })
+                    .map_err(payload_codec_mapping)?,
+                )
+            };
+            Ok(Some(vec![staking_piece(
+                kind,
+                bytes,
+                json_string(body, "user")?,
+                transaction_id,
+            )?]))
+        }
+        "CWithdrawal" => {
+            let finalized = json_bool(body, "is_finalized")?;
+            let (kind, bytes) = if finalized {
+                (
+                    EventKind::StakingWithdrawalCompleted,
+                    encode_staking_withdrawal_completed(&WireStakingWithdrawalCompleted {
+                        account_id: json_string(body, "user")?,
+                        amount: json_string(body, "amount")?,
+                    })
+                    .map_err(payload_codec_mapping)?,
+                )
+            } else {
+                (
+                    EventKind::StakingWithdrawalQueued,
+                    encode_staking_withdrawal_queued(&WireStakingWithdrawalQueued {
+                        account_id: json_string(body, "user")?,
+                        amount: json_string(body, "amount")?,
+                    })
+                    .map_err(payload_codec_mapping)?,
+                )
+            };
+            Ok(Some(vec![staking_piece(
+                kind,
+                bytes,
+                json_string(body, "user")?,
+                transaction_id,
+            )?]))
+        }
+        "ValidatorRewards" => map_validator_rewards(body, transaction_id),
+        "LedgerUpdate" => map_ledger_delta(body, transaction_id),
+        _ => Ok(None),
+    }
+}
+
+fn map_validator_rewards(
+    body: &Map<String, Value>,
+    transaction_id: TransactionId,
+) -> Result<Option<Vec<MiscPiece>>, MappingError> {
+    let pairs = body
+        .get("validator_to_reward")
+        .and_then(Value::as_array)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "validator rewards have no validator_to_reward array".to_owned(),
+        })?;
+    if pairs.is_empty() {
+        return Ok(None);
+    }
+    let mut pieces = Vec::new();
+    for pair in pairs {
+        let pair = pair
+            .as_array()
+            .filter(|value| value.len() == 2)
+            .ok_or_else(|| MappingError::MalformedRecord {
+                reason: "validator_to_reward entries must be pairs".to_owned(),
+            })?;
+        let validator = pair[0]
+            .as_str()
+            .ok_or_else(|| MappingError::MalformedRecord {
+                reason: "validator_to_reward key must be a string".to_owned(),
+            })?
+            .to_owned();
+        let amount = pair[1]
+            .as_str()
+            .ok_or_else(|| MappingError::MalformedRecord {
+                reason: "validator_to_reward amount must be a decimal string".to_owned(),
+            })?
+            .to_owned();
+        pieces.push(MiscPiece {
+            payload: opaque_payload(
+                EventKind::ValidatorRewardPaid,
+                encode_validator_reward_paid(&WireValidatorRewardPaid {
+                    validator: validator.clone(),
+                    amount,
+                })
+                .map_err(payload_codec_mapping)?,
+            )?,
+            account_ids: Vec::new(),
+            transaction_id: transaction_id.clone(),
+        });
+    }
+    Ok(Some(pieces))
+}
+
+fn map_ledger_delta(
+    ledger: &Map<String, Value>,
+    transaction_id: TransactionId,
+) -> Result<Option<Vec<MiscPiece>>, MappingError> {
+    let users = ledger_users(ledger)?;
+    let delta = ledger
+        .get("delta")
+        .and_then(Value::as_object)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "ledger update has no delta object".to_owned(),
+        })?;
+    let (variant, value) = delta
+        .iter()
+        .next()
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "ledger delta is empty".to_owned(),
+        })?;
+    let body = value
+        .as_object()
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "ledger delta payload must be an object".to_owned(),
+        })?;
+    let (kind, bytes, accounts) = match variant.as_str() {
+        "InternalTransfer" => (
+            EventKind::InternalTransfer,
+            encode_internal_transfer(&WireInternalTransfer {
+                from_account_id: json_string(body, "user")?,
+                to_account_id: json_string(body, "destination")?,
+                amount: json_string(body, "usdc")?,
+                fee: json_string(body, "fee")?,
+            })
+            .map_err(payload_codec_mapping)?,
+            vec![
+                parse_account(json_string(body, "user")?)?,
+                parse_account(json_string(body, "destination")?)?,
+            ],
+        ),
+        "AccountClassTransfer" => {
+            let account = users.first().copied().ok_or(MappingError::InvalidAddress)?;
+            (
+                EventKind::AccountClassTransfer,
+                encode_account_class_transfer(&WireAccountClassTransfer {
+                    account_id: account.to_api_string(),
+                    amount: json_string(body, "usdc")?,
+                    to_perp: json_bool(body, "toPerp")?,
+                })
+                .map_err(payload_codec_mapping)?,
+                vec![account],
+            )
+        }
+        "VaultCreate" => (
+            EventKind::VaultCreated,
+            encode_vault_created(&WireVaultCreated {
+                vault_id: json_string(body, "vault")?,
+                amount: json_string(body, "usdc")?,
+                fee: json_string(body, "fee")?,
+            })
+            .map_err(payload_codec_mapping)?,
+            users,
+        ),
+        "VaultDistribution" => (
+            EventKind::VaultDistribution,
+            encode_vault_distribution(&WireVaultDistribution {
+                vault_id: json_string(body, "vault")?,
+                amount: json_string(body, "usdc")?,
+            })
+            .map_err(payload_codec_mapping)?,
+            users,
+        ),
+        "VaultLeaderCommission" => (
+            EventKind::VaultLeaderCommissionPaid,
+            encode_vault_leader_commission_paid(&WireVaultLeaderCommissionPaid {
+                vault_id: body
+                    .get("vault")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                account_id: users
+                    .first()
+                    .map(|account| account.to_api_string())
+                    .unwrap_or_default(),
+                amount: body
+                    .get("usdc")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            })
+            .map_err(payload_codec_mapping)?,
+            users,
+        ),
+        "RewardsClaim" => {
+            let account = users.first().copied().ok_or(MappingError::InvalidAddress)?;
+            (
+                EventKind::RewardClaimed,
+                encode_reward_claimed(&WireRewardClaimed {
+                    account_id: account.to_api_string(),
+                    amount: json_string(body, "amount")?,
+                })
+                .map_err(payload_codec_mapping)?,
+                vec![account],
+            )
+        }
+        "SpotGenesis" => (
+            EventKind::SpotGenesisApplied,
+            encode_spot_genesis_applied(&WireSpotGenesisApplied {
+                token: json_string(body, "token")?,
+                amount: json_string(body, "amount")?,
+            })
+            .map_err(payload_codec_mapping)?,
+            users,
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some(vec![MiscPiece {
+        payload: opaque_payload(kind, bytes)?,
+        account_ids: accounts,
+        transaction_id,
+    }]))
+}
+
+fn staking_piece(
+    kind: EventKind,
+    bytes: Vec<u8>,
+    user: String,
+    transaction_id: TransactionId,
+) -> Result<MiscPiece, MappingError> {
+    Ok(MiscPiece {
+        payload: opaque_payload(kind, bytes)?,
+        account_ids: vec![parse_account(user)?],
+        transaction_id,
+    })
+}
+
+fn ledger_users(ledger: &Map<String, Value>) -> Result<Vec<Address>, MappingError> {
+    let users = ledger
+        .get("users")
+        .and_then(Value::as_array)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: "ledger update has no users array".to_owned(),
+        })?;
+    users
+        .iter()
+        .map(|user| {
+            let text = user.as_str().ok_or(MappingError::InvalidAddress)?;
+            parse_account(text.to_owned())
+        })
+        .collect()
+}
+
+fn parse_account(value: String) -> Result<Address, MappingError> {
+    Address::parse_api(&value).map_err(|_| MappingError::InvalidAddress)
+}
+
+fn json_string(object: &Map<String, Value>, field: &str) -> Result<String, MappingError> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: format!("missing string field {field}"),
+        })
+}
+
+fn json_bool(object: &Map<String, Value>, field: &str) -> Result<bool, MappingError> {
+    object
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| MappingError::MalformedRecord {
+            reason: format!("missing boolean field {field}"),
+        })
+}
+
+fn is_system_cancel(status: &str) -> bool {
+    matches!(
+        status,
+        "marginCanceled"
+            | "vaultWithdrawalCanceled"
+            | "openInterestCapCanceled"
+            | "selfTradeCanceled"
+            | "reduceOnlyCanceled"
+            | "siblingFilledCanceled"
+            | "delistedCanceled"
+            | "liquidatedCanceled"
+    )
+}
+
+fn opaque_payload(kind: EventKind, bytes: Vec<u8>) -> Result<EventPayload, MappingError> {
+    EventPayload::decode(kind, &bytes).map_err(Into::into)
+}
+
+fn payload_codec_mapping(error: api_contracts::PayloadCodecError) -> MappingError {
+    MappingError::MalformedRecord {
+        reason: error.to_string(),
+    }
 }
 
 fn source_to_mapping(error: hl_protocol::SourceError) -> MappingError {

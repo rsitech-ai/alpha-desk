@@ -1,0 +1,18 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "reconciled_snapshots",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "canonical_snapshot_envelope_pb"
+  ],
+  "fields": [
+    {"name": "chain_id", "type": "utf8", "nullable": false},
+    {"name": "snapshot_family", "type": "utf8", "nullable": false},
+    {"name": "snapshot_class", "type": "utf8", "nullable": false},
+    {"name": "as_of_block", "type": "uint64", "nullable": true},
+    {"name": "observed_at_micros", "type": "int64", "nullable": false},
+    {"name": "schema_version", "type": "utf8", "nullable": false},
+    {"name": "payload_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "canonical_snapshot_envelope_pb", "type": "binary", "nullable": false}
+  ]
+}

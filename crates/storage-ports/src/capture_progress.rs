@@ -1,3 +1,4 @@
+use crate::archive::HistoricalObjectManifest;
 use async_trait::async_trait;
 use domain_types::{BlockHeight, ChainId, KnownTime, ManifestId};
 
@@ -707,6 +708,16 @@ pub trait HistoricalBackfillProgress: Send + Sync {
     ) -> Result<Option<HistoricalObjectPlan>, ProgressError>;
 
     fn load_gaps(&self, dataset_id: &str) -> Result<Vec<HistoricalGapRecord>, ProgressError>;
+
+    fn record_manifest(
+        &self,
+        manifest: &HistoricalObjectManifest,
+    ) -> Result<ProgressRecordDisposition, ProgressError>;
+
+    fn load_manifests(
+        &self,
+        dataset_id: &str,
+    ) -> Result<Vec<HistoricalObjectManifest>, ProgressError>;
 }
 
 fn validate_identity(value: &str) -> Result<(), ProgressError> {

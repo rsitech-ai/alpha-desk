@@ -269,7 +269,7 @@ fn rest_info_request_cost_follows_spec_12_1() {
 }
 
 #[test]
-fn node_streams_and_replica_cmds_are_committed() {
+fn node_file_streams_are_committed() {
     let manifest = committed_manifest();
     let node_files: Vec<_> = manifest
         .capability
@@ -285,12 +285,22 @@ fn node_streams_and_replica_cmds_are_committed() {
             capability.id
         );
     }
-    let replica = manifest
+}
+
+#[test]
+fn s3_replica_cmds_is_evidence_only_recovery() {
+    let replica = committed_manifest()
         .capability
-        .iter()
+        .into_iter()
         .find(|row| row.id == "s3.replica_cmds")
         .expect("s3.replica_cmds");
-    assert_eq!(replica.source_role, SourceRole::Committed);
+    assert_eq!(replica.source_role, SourceRole::EvidenceOnly);
+    assert_eq!(replica.state_target, StateTarget::CanonicalEvent);
+    assert!(
+        replica
+            .limitations
+            .contains("Does not drive the committed block cursor")
+    );
 }
 
 #[test]
@@ -380,9 +390,9 @@ fn remaining_s3_archives_are_evidence_only() {
     let archives: Vec<_> = manifest
         .capability
         .iter()
-        .filter(|capability| capability.transport == "s3" && capability.id != "s3.replica_cmds")
+        .filter(|capability| capability.transport == "s3")
         .collect();
-    assert_eq!(archives.len(), 8);
+    assert_eq!(archives.len(), 9);
     for capability in archives {
         assert_eq!(
             capability.source_role,

@@ -32,8 +32,22 @@ mod generated {
 }
 
 mod health;
+mod v1_1;
 
 pub use health::{HealthCodecError, WireHealthAssessment, WireHealthState, WireSourceHealth};
+pub use v1_1::{
+    WireAccountClassTransfer, WireCanonicalSnapshotEnvelope, WireInternalTransfer,
+    WireNonUserOrderCancelled, WireRewardClaimed, WireSpotGenesisApplied, WireStakingDelegated,
+    WireStakingDeposit, WireStakingUndelegated, WireStakingWithdrawalCompleted,
+    WireStakingWithdrawalQueued, WireValidatorRewardPaid, WireVaultCreated, WireVaultDistribution,
+    WireVaultLeaderCommissionPaid, encode_account_class_transfer, encode_canonical_snapshot,
+    encode_internal_transfer, encode_non_user_order_cancelled, encode_reward_claimed,
+    encode_spot_genesis_applied, encode_staking_delegated, encode_staking_deposit,
+    encode_staking_undelegated, encode_staking_withdrawal_completed,
+    encode_staking_withdrawal_queued, encode_v1_1_default_payload, encode_validator_reward_paid,
+    encode_vault_created, encode_vault_distribution, encode_vault_leader_commission_paid,
+    validate_v1_1_event_payload,
+};
 
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/alpha-desk-v1.pb"));
@@ -460,6 +474,7 @@ pub struct WireCanonicalEventEnvelope {
     pub payload_hash: Vec<u8>,
     pub parser_version: String,
     pub payload: Vec<u8>,
+    pub superseded_event_id: Option<String>,
 }
 
 impl WireCanonicalEventEnvelope {
@@ -495,6 +510,7 @@ impl From<&WireCanonicalEventEnvelope> for generated::hl::canonical::v1::Canonic
             payload_hash: value.payload_hash.clone(),
             parser_version: value.parser_version.clone(),
             payload: value.payload.clone(),
+            superseded_event_id: value.superseded_event_id.clone(),
         }
     }
 }
@@ -533,6 +549,7 @@ impl From<generated::hl::canonical::v1::CanonicalEventEnvelope> for WireCanonica
             payload_hash: value.payload_hash,
             parser_version: value.parser_version,
             payload: value.payload,
+            superseded_event_id: value.superseded_event_id,
         }
     }
 }
@@ -2475,7 +2492,10 @@ pub fn encode_default_event_payload(kind: &str) -> Result<Vec<u8>, PayloadCodecE
         "DexCreated" => default_message::<generated::hl::canonical::v1::DexCreated>(),
         "OutcomeCreated" => default_message::<generated::hl::canonical::v1::OutcomeCreated>(),
         "OutcomeResolved" => default_message::<generated::hl::canonical::v1::OutcomeResolved>(),
-        other => return Err(PayloadCodecError::UnknownKind(other.to_owned())),
+        other => match encode_v1_1_default_payload(other) {
+            Some(result) => return result,
+            None => return Err(PayloadCodecError::UnknownKind(other.to_owned())),
+        },
     };
     Ok(wrap_payload(kind, message))
 }
@@ -2502,6 +2522,19 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
             | "LiquidationFill"
             | "BackstopLiquidation"
             | "PositionSettled"
+            | "InternalTransfer"
+            | "AccountClassTransfer"
+            | "VaultCreated"
+            | "VaultDistribution"
+            | "VaultLeaderCommissionPaid"
+            | "RewardClaimed"
+            | "SpotGenesisApplied"
+            | "StakingDeposit"
+            | "StakingDelegated"
+            | "StakingUndelegated"
+            | "StakingWithdrawalQueued"
+            | "StakingWithdrawalCompleted"
+            | "ValidatorRewardPaid"
     ) {
         validate_account_payload_size(kind, bytes)?;
     }
@@ -2549,7 +2582,10 @@ pub fn validate_event_payload(kind: &str, bytes: &[u8]) -> Result<(), PayloadCod
         "DexCreated" => decode_dex_created(bytes).map(|_| ()),
         "OutcomeCreated" => decode_outcome_created(bytes).map(|_| ()),
         "OutcomeResolved" => decode_outcome_resolved(bytes).map(|_| ()),
-        other => Err(PayloadCodecError::UnknownKind(other.to_owned())),
+        other => match validate_v1_1_event_payload(other, bytes) {
+            Some(result) => result,
+            None => Err(PayloadCodecError::UnknownKind(other.to_owned())),
+        },
     }
 }
 
@@ -3733,11 +3769,11 @@ fn decode_optional_identity(
     }
 }
 
-fn default_message<M: Message + Default>() -> Vec<u8> {
+pub(crate) fn default_message<M: Message + Default>() -> Vec<u8> {
     M::default().encode_to_vec()
 }
 
-fn wrap_payload(kind: &str, message: Vec<u8>) -> Vec<u8> {
+pub(crate) fn wrap_payload(kind: &str, message: Vec<u8>) -> Vec<u8> {
     generated::hl::canonical::v1::TypedPayloadEnvelope {
         event_kind: kind.to_owned(),
         message,
@@ -3777,7 +3813,7 @@ fn validate_trade_payload_size(kind: &str, bytes: &[u8]) -> Result<(), PayloadCo
     Ok(())
 }
 
-fn unwrap_payload(kind: &str, bytes: &[u8]) -> Result<Vec<u8>, PayloadCodecError> {
+pub(crate) fn unwrap_payload(kind: &str, bytes: &[u8]) -> Result<Vec<u8>, PayloadCodecError> {
     let envelope =
         generated::hl::canonical::v1::TypedPayloadEnvelope::decode(bytes).map_err(|source| {
             PayloadCodecError::Decode {

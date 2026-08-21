@@ -41,6 +41,7 @@ fn contracts_command_exports_exact_descriptor_and_rust_set_without_overwrite() {
         descriptor_names,
         [
             "canonical/v1/events.proto",
+            "canonical/v1/snapshots.proto",
             "common/v1/types.proto",
             "health/v1/health.proto",
             "stream/v1/envelope.proto",

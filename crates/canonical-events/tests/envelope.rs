@@ -285,13 +285,67 @@ fn event_kind_mapping_is_exhaustive_unique_and_round_trips() {
         EventKind::DexCreated,
         EventKind::OutcomeCreated,
         EventKind::OutcomeResolved,
+        EventKind::NonUserOrderCancelled,
+        EventKind::InternalTransfer,
+        EventKind::AccountClassTransfer,
+        EventKind::VaultCreated,
+        EventKind::VaultDistribution,
+        EventKind::VaultLeaderCommissionPaid,
+        EventKind::RewardClaimed,
+        EventKind::SpotGenesisApplied,
+        EventKind::StakingDeposit,
+        EventKind::StakingDelegated,
+        EventKind::StakingUndelegated,
+        EventKind::StakingWithdrawalQueued,
+        EventKind::StakingWithdrawalCompleted,
+        EventKind::ValidatorRewardPaid,
     ];
     assert_eq!(EventKind::ALL, expected);
-    assert_eq!(EventKind::ALL.len(), 43);
+    assert_eq!(EventKind::ALL.len(), 57);
 
     let mut names = std::collections::BTreeSet::new();
     for kind in EventKind::ALL {
         assert!(names.insert(kind.as_wire_name()));
         assert_eq!(EventKind::try_from(kind.as_wire_name()).unwrap(), kind);
     }
+}
+
+#[test]
+fn corrected_envelope_may_reference_a_distinct_superseded_event_id() {
+    let original = CanonicalEventEnvelope::fixture().unwrap();
+    let original_bytes = original.encode_to_vec().unwrap();
+    let mut wire = WireCanonicalEventEnvelope::decode(&original_bytes).unwrap();
+    wire.confirmation_class = 5;
+    wire.superseded_event_id = Some("evt_other".to_owned());
+    let decoded = CanonicalEventEnvelope::decode(&wire.encode_to_vec()).unwrap();
+    assert_eq!(decoded.confirmation_class(), ConfirmationClass::Corrected);
+    assert_eq!(
+        decoded
+            .superseded_event_id()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("evt_other")
+    );
+    assert_eq!(
+        CanonicalEventEnvelope::decode(&original_bytes)
+            .unwrap()
+            .encode_to_vec()
+            .unwrap(),
+        original_bytes
+    );
+}
+
+#[test]
+fn superseded_event_id_fails_closed_when_class_or_identity_is_wrong() {
+    let original = CanonicalEventEnvelope::fixture().unwrap();
+    let mut same_id =
+        WireCanonicalEventEnvelope::decode(&original.encode_to_vec().unwrap()).unwrap();
+    same_id.confirmation_class = 5;
+    same_id.superseded_event_id = Some(original.event_id().to_string());
+    assert!(CanonicalEventEnvelope::decode(&same_id.encode_to_vec()).is_err());
+
+    let mut committed =
+        WireCanonicalEventEnvelope::decode(&original.encode_to_vec().unwrap()).unwrap();
+    committed.superseded_event_id = Some("evt_other".to_owned());
+    assert!(CanonicalEventEnvelope::decode(&committed.encode_to_vec()).is_err());
 }

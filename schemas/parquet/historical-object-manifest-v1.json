@@ -1,0 +1,26 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "historical_object_manifest",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "content_hash",
+    "key"
+  ],
+  "fields": [
+    {"name": "bucket", "type": "utf8", "nullable": false},
+    {"name": "key", "type": "utf8", "nullable": false},
+    {"name": "etag", "type": "utf8", "nullable": true},
+    {"name": "content_hash", "type": "fixed_size_binary[32]", "nullable": true},
+    {"name": "dataset", "type": "utf8", "nullable": false},
+    {"name": "dataset_version", "type": "utf8", "nullable": false},
+    {"name": "byte_count", "type": "uint64", "nullable": false},
+    {"name": "first_block", "type": "uint64", "nullable": true},
+    {"name": "last_block", "type": "uint64", "nullable": true},
+    {"name": "first_event_time_micros", "type": "int64", "nullable": true},
+    {"name": "last_event_time_micros", "type": "int64", "nullable": true},
+    {"name": "parser_build", "type": "utf8", "nullable": false},
+    {"name": "imported_at_micros", "type": "int64", "nullable": false},
+    {"name": "gap_status", "type": "utf8", "nullable": false},
+    {"name": "requester_pays_billed_bytes", "type": "uint64", "nullable": true}
+  ]
+}

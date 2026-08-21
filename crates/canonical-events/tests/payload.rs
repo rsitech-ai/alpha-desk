@@ -257,9 +257,9 @@ fn trade_decode_rejects_one_or_three_participants() {
 }
 
 #[test]
-fn all_43_typed_payload_variants_encode_decode_and_preserve_kind() {
+fn all_typed_payload_variants_encode_decode_and_preserve_kind() {
     let fixtures = EventPayload::fixtures().unwrap();
-    assert_eq!(fixtures.len(), 43);
+    assert_eq!(fixtures.len(), EventKind::ALL.len());
     let mut kinds = std::collections::BTreeSet::new();
 
     for payload in fixtures {
@@ -270,7 +270,7 @@ fn all_43_typed_payload_variants_encode_decode_and_preserve_kind() {
         assert_eq!(decoded, payload);
         assert_eq!(decoded.kind(), kind);
     }
-    assert_eq!(kinds.len(), 43);
+    assert_eq!(kinds.len(), EventKind::ALL.len());
 }
 
 #[test]

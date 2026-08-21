@@ -119,6 +119,7 @@ pub const fn subject_for_event_kind(kind: EventKind) -> Subject {
         | EventKind::OrderRested
         | EventKind::OrderModified
         | EventKind::OrderCancelled
+        | EventKind::NonUserOrderCancelled
         | EventKind::OrderRejected
         | EventKind::TriggerOrderActivated
         | EventKind::TwapStarted
@@ -153,6 +154,19 @@ pub const fn subject_for_event_kind(kind: EventKind) -> Subject {
         | EventKind::MarginModeChanged
         | EventKind::LeverageChanged
         | EventKind::LiquidationStarted
-        | EventKind::PositionSettled => Subject::EventLedger,
+        | EventKind::PositionSettled
+        | EventKind::InternalTransfer
+        | EventKind::AccountClassTransfer
+        | EventKind::VaultCreated
+        | EventKind::VaultDistribution
+        | EventKind::VaultLeaderCommissionPaid
+        | EventKind::RewardClaimed
+        | EventKind::SpotGenesisApplied
+        | EventKind::StakingDeposit
+        | EventKind::StakingDelegated
+        | EventKind::StakingUndelegated
+        | EventKind::StakingWithdrawalQueued
+        | EventKind::StakingWithdrawalCompleted
+        | EventKind::ValidatorRewardPaid => Subject::EventLedger,
     }
 }

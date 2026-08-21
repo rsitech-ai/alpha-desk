@@ -2025,7 +2025,20 @@ fn payload_size_preflight_covers_every_constructible_event_kind() {
             | EventKind::LiquidationStarted
             | EventKind::LiquidationFill
             | EventKind::BackstopLiquidation
-            | EventKind::PositionSettled => {
+            | EventKind::PositionSettled
+            | EventKind::InternalTransfer
+            | EventKind::AccountClassTransfer
+            | EventKind::VaultCreated
+            | EventKind::VaultDistribution
+            | EventKind::VaultLeaderCommissionPaid
+            | EventKind::RewardClaimed
+            | EventKind::SpotGenesisApplied
+            | EventKind::StakingDeposit
+            | EventKind::StakingDelegated
+            | EventKind::StakingUndelegated
+            | EventKind::StakingWithdrawalQueued
+            | EventKind::StakingWithdrawalCompleted
+            | EventKind::ValidatorRewardPaid => {
                 let error = EventPayload::decode(kind, &oversized_account)
                     .expect_err("oversized account payload must fail closed");
                 assert!(
@@ -2041,6 +2054,7 @@ fn payload_size_preflight_covers_every_constructible_event_kind() {
             | EventKind::OrderPartiallyFilled
             | EventKind::OrderFilled
             | EventKind::OrderCancelled
+            | EventKind::NonUserOrderCancelled
             | EventKind::OrderRejected
             | EventKind::TriggerOrderActivated
             | EventKind::TwapStarted
