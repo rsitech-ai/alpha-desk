@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use domain_types::{BlockHeight, ChainId, SourceId};
 use hl_protocol::{
-    BlockSource, SourceAdmission, SourceCursor, SourceError, SourceRequestContext, SourceTrust,
+    BlockSource, SourceAdmission, SourceCursor, SourceError, SourceObservation,
+    SourceRequestContext, SourceTrust,
 };
 use storage_ports::{CaptureProgressStore, CursorPolicy, ProgressError};
 use tokio::sync::mpsc;
@@ -15,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::{
     NodeBlockDirectoryConfig, NodeBlockDirectorySource, NodeFileConfig, NodeLineFileSource,
+    NodeQuarantineRecord, NodeSnapshotDirectoryConfig, NodeSnapshotDirectorySource,
 };
 use crate::app::CaptureRuntimeHealth;
 use crate::auxiliary_checkpoint::AuxiliaryArchiveCheckpoint;
@@ -203,7 +205,85 @@ struct AuxiliaryNodeSourceTaskConfig {
     archive_commit_max_records: usize,
     archive_commit_max_delay: Duration,
     disk_reserve_bytes: u64,
+    start_height: Option<u64>,
     raw_archive_format: RawArchiveFormat,
+}
+
+#[derive(Debug)]
+enum AuxiliaryLiveSource {
+    Line(NodeLineFileSource),
+    Snapshot(NodeSnapshotDirectorySource),
+}
+
+#[derive(Debug)]
+struct AuxiliaryTailView {
+    active_cursor_epoch: String,
+    durable_cursor: Option<SourceCursor>,
+    unread_bytes: u64,
+    partial_line: bool,
+}
+
+impl AuxiliaryLiveSource {
+    async fn next_observation(
+        &mut self,
+        context: &SourceRequestContext,
+    ) -> Result<SourceObservation, SourceError> {
+        match self {
+            Self::Line(source) => source.next_observation(context).await,
+            Self::Snapshot(source) => source.next_observation(context).await,
+        }
+    }
+
+    fn acknowledge_durable(&mut self, cursor: &SourceCursor) -> Result<(), SourceError> {
+        match self {
+            Self::Line(source) => source.acknowledge_durable(cursor),
+            Self::Snapshot(source) => source.acknowledge_durable(cursor),
+        }
+    }
+
+    fn acknowledge_quarantine_durable(&mut self, cursor: &SourceCursor) -> Result<(), SourceError> {
+        match self {
+            Self::Line(source) => source.acknowledge_quarantine_durable(cursor),
+            Self::Snapshot(_) => Err(SourceError::CursorRegression),
+        }
+    }
+
+    fn pending_quarantine(&self) -> Option<&NodeQuarantineRecord> {
+        match self {
+            Self::Line(source) => source.pending_quarantine(),
+            Self::Snapshot(_) => None,
+        }
+    }
+
+    fn tail_view(&self) -> Result<AuxiliaryTailView, SourceError> {
+        match self {
+            Self::Line(source) => {
+                let state = source.tail_state()?;
+                Ok(AuxiliaryTailView {
+                    active_cursor_epoch: state.active_cursor_epoch().to_owned(),
+                    durable_cursor: state.durable_cursor().cloned(),
+                    unread_bytes: state.unread_bytes(),
+                    partial_line: state.partial_line(),
+                })
+            }
+            Self::Snapshot(source) => Ok(AuxiliaryTailView {
+                active_cursor_epoch: source.directory_epoch().to_owned(),
+                durable_cursor: source.committed_cursor().cloned(),
+                unread_bytes: 0,
+                partial_line: false,
+            }),
+        }
+    }
+}
+
+impl AuxiliaryNodeSourceTaskConfig {
+    fn cursor_policy(&self) -> CursorPolicy {
+        if self.start_height.is_some() {
+            CursorPolicy::ContiguousNativeOffset
+        } else {
+            CursorPolicy::MonotonicByteOffset
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -349,7 +429,12 @@ pub(crate) fn committed_node_tasks(
                 committed_replica_cmds_style(*replica_cmds_style)?;
                 (path, stream_name, start_height, poll_interval_millis)
             }
-            Some(SourceAdapterConfig::NodeLine { .. }) | None => continue,
+            Some(SourceAdapterConfig::NodeLine { .. })
+            | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
+            | Some(SourceAdapterConfig::OfficialInfo { .. })
+            | Some(SourceAdapterConfig::OfficialWs { .. })
+            | Some(SourceAdapterConfig::HistoricalS3 { .. })
+            | None => continue,
         };
         let admission = source
             .admission()
@@ -472,14 +557,32 @@ pub(crate) fn auxiliary_node_task(
 ) -> Result<Option<OwnedTask>, SourceRuntimeError> {
     let mut sources = Vec::new();
     for source in config.sources() {
-        let (path, stream_name, stream, poll_interval_millis) = match source.adapter() {
+        let (path, stream_name, stream, poll_interval_millis, start_height) = match source.adapter()
+        {
             Some(SourceAdapterConfig::NodeLine {
                 path,
                 stream_name,
                 stream,
                 poll_interval_millis,
-            }) => (path, stream_name, stream, poll_interval_millis),
-            Some(SourceAdapterConfig::NodeBlockDirectory { .. }) | None => continue,
+            }) => (path, stream_name, stream, poll_interval_millis, None),
+            Some(SourceAdapterConfig::NodeSnapshotDirectory {
+                path,
+                stream_name,
+                stream,
+                start_height,
+                poll_interval_millis,
+            }) => (
+                path,
+                stream_name,
+                stream,
+                poll_interval_millis,
+                Some(*start_height),
+            ),
+            Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+            | Some(SourceAdapterConfig::OfficialInfo { .. })
+            | Some(SourceAdapterConfig::OfficialWs { .. })
+            | Some(SourceAdapterConfig::HistoricalS3 { .. })
+            | None => continue,
         };
         let admission = source
             .admission()
@@ -513,6 +616,7 @@ pub(crate) fn auxiliary_node_task(
             archive_commit_max_records,
             archive_commit_max_delay,
             disk_reserve_bytes: config.runtime().disk_reserve_bytes(),
+            start_height,
             raw_archive_format: config.runtime().raw_archive_format(),
         });
     }
@@ -722,7 +826,7 @@ where
         DurabilityPolicy::FsyncEveryRecord,
         SpoolRotationPolicy::try_new(config.segment_target_bytes, config.rotation_interval)
             .map_err(SourceRuntimeError::Spool)?,
-        CursorPolicy::MonotonicByteOffset,
+        config.cursor_policy(),
     )
     .map_err(SourceRuntimeError::Spool)?;
     if let Some(recovered) = &checkpoint {
@@ -813,21 +917,10 @@ where
             recovered.quarantine_reason(),
         );
     }
-    let adapter_config = NodeFileConfig::new_bounded(
-        config.source_path.clone(),
-        config.stream_name.clone(),
-        config.stream,
-        config.source_id.clone(),
-        config.source_version.clone(),
-        config.parser_version.clone(),
-        config.max_payload_bytes,
-        config.poll_interval,
-        config.archive_commit_max_records,
-    )
-    .map_err(SourceRuntimeError::Source)?;
+    let open_config = auxiliary_open_config(&config)?;
     let mut retry_backoff = RetryBackoff::new(&config.source_id);
-    let opened_source = open_auxiliary_node_source(
-        &adapter_config,
+    let opened_source = open_auxiliary_live_source(
+        &open_config,
         spool.last_durable_cursor().cloned(),
         &config.source_id,
         &health,
@@ -963,8 +1056,8 @@ where
                 )
                 .await?;
                 group_commit_deadline = None;
-                let Some(reopened) = open_auxiliary_node_source(
-                    &adapter_config,
+                let Some(reopened) = open_auxiliary_live_source(
+                    &open_config,
                     spool.last_durable_cursor().cloned(),
                     &config.source_id,
                     &health,
@@ -1013,7 +1106,7 @@ where
                     return Err(SourceRuntimeError::Source(error));
                 };
                 let parser_disposition = format!("quarantine-v1:{}", quarantine.reason_code());
-                let observation = hl_protocol::SourceObservation::new(
+                let observation = SourceObservation::new(
                     config.source_id.clone(),
                     config.source_version.clone(),
                     quarantine.observation_class(),
@@ -1141,16 +1234,70 @@ where
     }
 }
 
-async fn open_auxiliary_node_source(
-    config: &NodeFileConfig,
+#[derive(Debug, Clone)]
+enum AuxiliaryOpenConfig {
+    Line(NodeFileConfig),
+    Snapshot(NodeSnapshotDirectoryConfig),
+}
+
+fn auxiliary_open_config(
+    config: &AuxiliaryNodeSourceTaskConfig,
+) -> Result<AuxiliaryOpenConfig, SourceRuntimeError> {
+    match config.start_height {
+        None => {
+            if config.stream.is_whole_file_snapshot() {
+                return Err(SourceRuntimeError::InvalidConfig);
+            }
+            NodeFileConfig::new_bounded(
+                config.source_path.clone(),
+                config.stream_name.clone(),
+                config.stream,
+                config.source_id.clone(),
+                config.source_version.clone(),
+                config.parser_version.clone(),
+                config.max_payload_bytes,
+                config.poll_interval,
+                config.archive_commit_max_records,
+            )
+            .map(AuxiliaryOpenConfig::Line)
+            .map_err(SourceRuntimeError::Source)
+        }
+        Some(start_height) => NodeSnapshotDirectoryConfig::new(
+            config.source_path.clone(),
+            config.stream_name.clone(),
+            config.stream,
+            config.source_id.clone(),
+            config.source_version.clone(),
+            config.parser_version.clone(),
+            start_height,
+            config.max_payload_bytes,
+            config.poll_interval,
+        )
+        .map(AuxiliaryOpenConfig::Snapshot)
+        .map_err(SourceRuntimeError::Source),
+    }
+}
+
+async fn open_auxiliary_live_source(
+    config: &AuxiliaryOpenConfig,
     durable_cursor: Option<SourceCursor>,
     source_id: &SourceId,
     health: &CaptureRuntimeHealth,
     cancellation: &CancellationToken,
     retry_backoff: &mut RetryBackoff,
-) -> Result<Option<NodeLineFileSource>, SourceRuntimeError> {
+) -> Result<Option<AuxiliaryLiveSource>, SourceRuntimeError> {
     loop {
-        match NodeLineFileSource::open(config.clone(), durable_cursor.clone()) {
+        let opened = match config {
+            AuxiliaryOpenConfig::Line(config) => {
+                NodeLineFileSource::open(config.clone(), durable_cursor.clone())
+                    .map(AuxiliaryLiveSource::Line)
+            }
+            AuxiliaryOpenConfig::Snapshot(config) => {
+                NodeSnapshotDirectorySource::open(config.clone(), durable_cursor.clone())
+                    .map(AuxiliaryLiveSource::Snapshot)
+            }
+        };
+        match opened {
             Ok(source) => {
                 retry_backoff.reset();
                 health.recover_auxiliary_retry(source_id.as_str());
@@ -1172,14 +1319,14 @@ async fn open_auxiliary_node_source(
 fn record_auxiliary_tail(
     health: &CaptureRuntimeHealth,
     source_id: &SourceId,
-    source: &NodeLineFileSource,
+    source: &AuxiliaryLiveSource,
 ) -> Result<(), SourceRuntimeError> {
-    let state = source.tail_state().map_err(SourceRuntimeError::Source)?;
+    let state = source.tail_view().map_err(SourceRuntimeError::Source)?;
     health.record_auxiliary_tail(
         source_id.as_str(),
-        state.active_cursor_epoch(),
-        state.unread_bytes(),
-        state.partial_line(),
+        &state.active_cursor_epoch,
+        state.unread_bytes,
+        state.partial_line,
     );
     Ok(())
 }
@@ -1187,14 +1334,15 @@ fn record_auxiliary_tail(
 fn record_auxiliary_durable(
     health: &CaptureRuntimeHealth,
     source_id: &SourceId,
-    source: &NodeLineFileSource,
+    source: &AuxiliaryLiveSource,
     spool: &SourceSpool,
     received_wall_micros: i64,
     quarantine_reason: Option<&str>,
 ) -> Result<(), SourceRuntimeError> {
-    let state = source.tail_state().map_err(SourceRuntimeError::Source)?;
+    let state = source.tail_view().map_err(SourceRuntimeError::Source)?;
     let durable_cursor = state
-        .durable_cursor()
+        .durable_cursor
+        .as_ref()
         .ok_or(SourceRuntimeError::MissingDurabilityReceipt)?;
     let local_sequence = spool
         .last_local_sequence()
@@ -1202,11 +1350,11 @@ fn record_auxiliary_durable(
     health.record_auxiliary_durable(
         source_id.as_str(),
         durable_cursor.epoch(),
-        state.active_cursor_epoch(),
+        &state.active_cursor_epoch,
         durable_cursor.offset(),
         local_sequence.get(),
-        state.unread_bytes(),
-        state.partial_line(),
+        state.unread_bytes,
+        state.partial_line,
         received_wall_micros,
         quarantine_reason,
     );
@@ -1216,11 +1364,11 @@ fn record_auxiliary_durable(
 fn record_auxiliary_buffered(
     health: &CaptureRuntimeHealth,
     source_id: &SourceId,
-    source: &NodeLineFileSource,
+    source: &AuxiliaryLiveSource,
     spool: &SourceSpool,
     pending: usize,
 ) -> Result<(), SourceRuntimeError> {
-    let state = source.tail_state().map_err(SourceRuntimeError::Source)?;
+    let state = source.tail_view().map_err(SourceRuntimeError::Source)?;
     let spool_records = spool
         .last_local_sequence()
         .ok_or(SourceRuntimeError::MissingDurabilityReceipt)?;
@@ -1228,11 +1376,11 @@ fn record_auxiliary_buffered(
         u64::try_from(pending).map_err(|_| SourceRuntimeError::MissingDurabilityReceipt)?;
     health.record_auxiliary_buffered(
         source_id.as_str(),
-        state.active_cursor_epoch(),
+        &state.active_cursor_epoch,
         spool_records.get(),
         unarchived_records,
-        state.unread_bytes(),
-        state.partial_line(),
+        state.unread_bytes,
+        state.partial_line,
     );
     Ok(())
 }
@@ -1275,7 +1423,7 @@ async fn append_auxiliary_observation<P: DiskSpaceProbe>(
 #[allow(clippy::too_many_arguments)]
 async fn flush_auxiliary_observations<P: DiskSpaceProbe>(
     mut spool: SourceSpool,
-    source: &mut NodeLineFileSource,
+    source: &mut AuxiliaryLiveSource,
     pending: &mut Vec<PendingAuxiliaryAcknowledgement>,
     raw_archive: &dyn RawSegmentArchive,
     disk_guard: &DiskReserveGuard<P>,
@@ -2237,11 +2385,11 @@ mod tests {
     };
 
     use super::{
-        AuxiliaryNodeSourceTaskConfig, CommittedSourceRole, DrainSessionError,
+        AuxiliaryNodeSourceTaskConfig, AuxiliaryOpenConfig, CommittedSourceRole, DrainSessionError,
         NodeSourceTaskConfig, RetryBackoff, SourceNotification, SourceRuntimeError,
         append_auxiliary_observation, attempt_failover, auxiliary_commit_policy,
         auxiliary_node_task, classify_backlog_error, committed_replica_cmds_style,
-        committed_source_role, group_commit_due, open_auxiliary_node_source,
+        committed_source_role, group_commit_due, open_auxiliary_live_source,
         prepare_source_spool_path, run_auxiliary_node_acquisition_with_probe,
         run_committed_node_acquisition_with_probe, supervise_auxiliary_tasks,
     };
@@ -3193,6 +3341,7 @@ mod tests {
             archive_commit_max_records: 32,
             archive_commit_max_delay: Duration::from_millis(100),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -3357,6 +3506,7 @@ mod tests {
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let archive = Arc::new(
@@ -3484,6 +3634,7 @@ mod tests {
             archive_commit_max_records: 3,
             archive_commit_max_delay: Duration::from_secs(2),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -3650,6 +3801,7 @@ mod tests {
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -3746,6 +3898,7 @@ mod tests {
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -3822,6 +3975,7 @@ mod tests {
             archive_commit_max_records: 128,
             archive_commit_max_delay: Duration::from_millis(60),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -3928,6 +4082,7 @@ mod tests {
             archive_commit_max_records: 32,
             archive_commit_max_delay: Duration::from_millis(100),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -4079,8 +4234,8 @@ mod tests {
         let task_source_id = source_id.clone();
         let task = tokio::spawn(async move {
             let mut retry = RetryBackoff::new(&task_source_id);
-            open_auxiliary_node_source(
-                &adapter,
+            open_auxiliary_live_source(
+                &AuxiliaryOpenConfig::Line(adapter),
                 None,
                 &task_source_id,
                 task_health.as_ref(),
@@ -4173,6 +4328,61 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
         );
     }
 
+    #[test]
+    fn configured_snapshot_directory_creates_an_owned_runtime_task_and_starting_status() {
+        let root = TempDir::new().unwrap();
+        let mut source = include_str!("../../../config/capture.example.toml").to_owned();
+        source.push_str(&format!(
+            r#"
+
+[[sources]]
+id = "node-abci"
+source_version = "hyperliquid-node-v1"
+trust = "locally-verified-committed"
+class = "auxiliary-ledger"
+queue_capacity = 32
+max_payload_bytes = 1048576
+adapter = {{ kind = "node-snapshot-directory", path = "{}", stream_name = "periodic-abci", stream = "abci-state-snapshots", start_height = 10000, poll_interval_millis = 5 }}
+"#,
+            root.path().join("periodic_abci_states").display()
+        ));
+        let config = CaptureConfig::from_toml(&source).unwrap();
+        let archive = Arc::new(
+            LocalParquetArchive::open(
+                root.path().join("archive"),
+                ArchiveConfig::deterministic_fixture(
+                    "auxiliary-snapshot-task-wiring-test",
+                    KnownTime::from_unix_micros(1_000).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let raw_port: Arc<dyn RawObservationArchive> = archive;
+        let raw_archive: Arc<dyn RawSegmentArchive> =
+            Arc::new(BlockingRawSegmentArchive::new(raw_port));
+        let health = Arc::new(CaptureRuntimeHealth::new());
+
+        let task = auxiliary_node_task(
+            &config,
+            raw_archive,
+            Arc::clone(&health),
+            CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert!(
+            task.is_some(),
+            "configured snapshot directory must not be inert"
+        );
+        let source = health.auxiliary_source_status("node-abci").unwrap();
+        assert_eq!(source.health(), AuxiliarySourceHealth::Starting);
+        assert_eq!(
+            source.qualification(),
+            AuxiliaryQualificationState::Unqualified
+        );
+    }
+
     #[tokio::test]
     async fn crash_after_spool_seal_before_archive_recovers_without_loss_or_duplicate() {
         let root = TempDir::new().unwrap();
@@ -4203,6 +4413,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 32,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         fs::create_dir_all(&config.archive_path).unwrap();
@@ -4407,6 +4618,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         fs::create_dir_all(&config.archive_path).unwrap();
@@ -4486,6 +4698,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(50),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V3,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -4596,6 +4809,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(50),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V3,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -4706,6 +4920,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(50),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V3,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());
@@ -4872,6 +5087,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 1,
             archive_commit_max_delay: Duration::from_millis(20),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         fs::create_dir_all(&config.archive_path).unwrap();
@@ -4937,6 +5153,7 @@ adapter = {{ kind = "node-line", path = "{}", stream_name = "node-fills", stream
             archive_commit_max_records: 128,
             archive_commit_max_delay: Duration::from_millis(150),
             disk_reserve_bytes: 1,
+            start_height: None,
             raw_archive_format: crate::RawArchiveFormat::V2,
         };
         let health = Arc::new(CaptureRuntimeHealth::new());

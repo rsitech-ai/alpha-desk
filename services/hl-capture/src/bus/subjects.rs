@@ -16,6 +16,9 @@ pub enum Subject {
     EventLedger,
     EventMarketMeta,
     EventOracle,
+    SnapshotAccount,
+    SnapshotMarket,
+    SnapshotEcosystem,
     StateAccountDelta,
     StateBookDelta,
     FeatureWallet,
@@ -25,11 +28,12 @@ pub enum Subject {
     SignalLive,
     SignalResolved,
     HealthData,
+    HealthSource,
     HealthModel,
 }
 
 impl Subject {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 21] = [
         Self::BlockCommitted,
         Self::BlockProvisional,
         Self::EventFill,
@@ -37,6 +41,9 @@ impl Subject {
         Self::EventLedger,
         Self::EventMarketMeta,
         Self::EventOracle,
+        Self::SnapshotAccount,
+        Self::SnapshotMarket,
+        Self::SnapshotEcosystem,
         Self::StateAccountDelta,
         Self::StateBookDelta,
         Self::FeatureWallet,
@@ -46,6 +53,7 @@ impl Subject {
         Self::SignalLive,
         Self::SignalResolved,
         Self::HealthData,
+        Self::HealthSource,
         Self::HealthModel,
     ];
 
@@ -59,6 +67,9 @@ impl Subject {
             Self::EventLedger => "hl.v1.event.ledger",
             Self::EventMarketMeta => "hl.v1.event.market_meta",
             Self::EventOracle => "hl.v1.event.oracle",
+            Self::SnapshotAccount => "hl.v1.snapshot.account",
+            Self::SnapshotMarket => "hl.v1.snapshot.market",
+            Self::SnapshotEcosystem => "hl.v1.snapshot.ecosystem",
             Self::StateAccountDelta => "hl.v1.state.account_delta",
             Self::StateBookDelta => "hl.v1.state.book_delta",
             Self::FeatureWallet => "hl.v1.feature.wallet",
@@ -68,6 +79,7 @@ impl Subject {
             Self::SignalLive => "hl.v1.signal.live",
             Self::SignalResolved => "hl.v1.signal.resolved",
             Self::HealthData => "hl.v1.health.data",
+            Self::HealthSource => "hl.v1.health.source",
             Self::HealthModel => "hl.v1.health.model",
         }
     }
@@ -81,11 +93,14 @@ impl Subject {
             | Self::EventOrder
             | Self::EventLedger
             | Self::EventMarketMeta
-            | Self::EventOracle => CANONICAL_STREAM,
+            | Self::EventOracle
+            | Self::SnapshotAccount
+            | Self::SnapshotMarket
+            | Self::SnapshotEcosystem => CANONICAL_STREAM,
             Self::StateAccountDelta | Self::StateBookDelta => STATE_STREAM,
             Self::FeatureWallet | Self::FeatureEntity | Self::FeatureMarket => FEATURE_STREAM,
             Self::SignalCandidate | Self::SignalLive | Self::SignalResolved => SIGNAL_STREAM,
-            Self::HealthData | Self::HealthModel => HEALTH_STREAM,
+            Self::HealthData | Self::HealthSource | Self::HealthModel => HEALTH_STREAM,
         }
     }
 }
@@ -104,6 +119,7 @@ pub const fn subject_for_event_kind(kind: EventKind) -> Subject {
         | EventKind::OrderRested
         | EventKind::OrderModified
         | EventKind::OrderCancelled
+        | EventKind::NonUserOrderCancelled
         | EventKind::OrderRejected
         | EventKind::TriggerOrderActivated
         | EventKind::TwapStarted
@@ -138,6 +154,19 @@ pub const fn subject_for_event_kind(kind: EventKind) -> Subject {
         | EventKind::MarginModeChanged
         | EventKind::LeverageChanged
         | EventKind::LiquidationStarted
-        | EventKind::PositionSettled => Subject::EventLedger,
+        | EventKind::PositionSettled
+        | EventKind::InternalTransfer
+        | EventKind::AccountClassTransfer
+        | EventKind::VaultCreated
+        | EventKind::VaultDistribution
+        | EventKind::VaultLeaderCommissionPaid
+        | EventKind::RewardClaimed
+        | EventKind::SpotGenesisApplied
+        | EventKind::StakingDeposit
+        | EventKind::StakingDelegated
+        | EventKind::StakingUndelegated
+        | EventKind::StakingWithdrawalQueued
+        | EventKind::StakingWithdrawalCompleted
+        | EventKind::ValidatorRewardPaid => Subject::EventLedger,
     }
 }

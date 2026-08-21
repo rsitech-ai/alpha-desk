@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use canonical_events::{
-    CommittedNodeV1MappingContext, ConfirmationClass, EventPayload, EvidenceOnlyReason,
-    MappingDisposition, MappingError, MarketCatalogV1, NodeV1MappingContext,
-    TradeParticipantRoleV1, map_committed_node_v1_block, map_node_v1_record,
+    BlockEnvelope, CanonicalEventEnvelope, CommittedNodeV1MappingContext, ConfirmationClass,
+    EventKind, EventPayload, EvidenceOnlyReason, MappingDisposition, MappingError, MarketCatalogV1,
+    NodeV1MappingContext, TradeParticipantRoleV1, map_committed_node_v1_block, map_node_v1_record,
 };
 use domain_types::{BlockHeight, ChainId, KnownTime, MarketId, SourceId};
 use hl_protocol::SourceError;
@@ -202,7 +203,7 @@ fn committed_mapper_accepts_the_current_nested_empty_bundle_shape_only_when_unam
 }
 
 #[test]
-fn complete_block_batched_trade_maps_without_inventing_maker_taker_semantics() {
+fn complete_block_batched_trade_maps_with_explicit_maker_taker() {
     let record =
         parse_node_record(NodeStreamKind::Trades, fixture("trade-batch.json").into()).unwrap();
 
@@ -252,8 +253,18 @@ fn complete_block_batched_trade_maps_without_inventing_maker_taker_semantics() {
         trade.trade_id.as_ref().unwrap().as_str(),
         "trd_9d76b6581c97fe76b0d8e8e1bec50b7fc85ead4f7235abff2a03f9991c0e70ff"
     );
-    assert_eq!(trade.maker_order_id, None);
-    assert_eq!(trade.taker_order_id, None);
+    assert_eq!(
+        trade.maker_order_id.as_ref().unwrap().as_str(),
+        "12212198275"
+    );
+    assert_eq!(
+        trade.taker_order_id.as_ref().unwrap().as_str(),
+        "12212201265"
+    );
+    assert_eq!(
+        canonical_events::node_trade_match_key(trade.trade_id.as_ref().unwrap()),
+        format!("node-trade:{}", trade.trade_id.as_ref().unwrap().as_str())
+    );
     assert_eq!(trade.deterministic_seed, 0);
     let [buyer, seller] = trade
         .participants
@@ -278,7 +289,7 @@ fn complete_block_batched_trade_maps_without_inventing_maker_taker_semantics() {
 }
 
 #[test]
-fn documented_trade_optionals_are_retained_without_inventing_maker_taker() {
+fn documented_trade_optionals_are_retained_with_maker_taker() {
     let mut batch: serde_json::Value =
         serde_json::from_slice(&fixture("trade-batch.json")).expect("batch JSON");
     batch["events"][0]["side_info"][0]["twap_id"] = serde_json::json!(91);
@@ -304,8 +315,14 @@ fn documented_trade_optionals_are_retained_without_inventing_maker_taker() {
         buyer.client_order_id.as_ref().unwrap().as_str(),
         "0x11111111111111111111111111111111"
     );
-    assert_eq!(trade.maker_order_id, None);
-    assert_eq!(trade.taker_order_id, None);
+    assert_eq!(
+        trade.maker_order_id.as_ref().unwrap().as_str(),
+        "12212198275"
+    );
+    assert_eq!(
+        trade.taker_order_id.as_ref().unwrap().as_str(),
+        "12212201265"
+    );
 }
 
 #[test]
@@ -695,4 +712,725 @@ fn trade_transaction_hash_and_positive_fixed_point_values_are_validated() {
         );
         assert_eq!(error.reason_code(), "canonical_mapping.invalid_decimal");
     }
+}
+
+#[test]
+fn ask_side_swaps_maker_and_taker() {
+    let mut batch: serde_json::Value =
+        serde_json::from_slice(&fixture("trade-batch.json")).expect("batch JSON");
+    batch["events"][0]["side"] = serde_json::json!("A");
+    let record = parse_node_record(
+        NodeStreamKind::Trades,
+        serde_json::to_vec(&batch).unwrap().into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("ask-side trade must map");
+    };
+    let EventPayload::TradeMatched(trade) = events[0].payload() else {
+        panic!("trade");
+    };
+    assert_eq!(
+        trade.maker_order_id.as_ref().unwrap().as_str(),
+        "12212201265"
+    );
+    assert_eq!(
+        trade.taker_order_id.as_ref().unwrap().as_str(),
+        "12212198275"
+    );
+}
+
+fn venue_catalog() -> MarketCatalogV1 {
+    MarketCatalogV1::try_new(
+        "normalized-public-docs-v1",
+        [
+            ("COMP", MarketId::new("perp:COMP").unwrap()),
+            ("INJ", MarketId::new("perp:INJ").unwrap()),
+            ("CHILLGUY", MarketId::new("spot:CHILLGUY").unwrap()),
+        ],
+    )
+    .unwrap()
+}
+
+fn wrap_events(events: Vec<serde_json::Value>) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "local_time": "2026-07-28T12:00:00",
+        "block_time": "2024-07-26T08:31:48.717",
+        "block_number": 42,
+        "events": events
+    }))
+    .unwrap()
+}
+
+fn wrap_event(event: serde_json::Value) -> Vec<u8> {
+    wrap_events(vec![event])
+}
+
+fn assemble_mapped_block(
+    events: &[CanonicalEventEnvelope],
+    record: &hl_protocol::node::v1::NodeRecordV1,
+) {
+    let first = events.first().expect("mapped batch is non-empty");
+    BlockEnvelope::try_new(
+        first.chain_id().clone(),
+        first.block_height(),
+        first.block_time(),
+        first.confirmation_class(),
+        events.to_vec(),
+        BTreeMap::from([(
+            context().source_id.clone(),
+            *record.content_hash().as_bytes(),
+        )]),
+    )
+    .expect("mapped events must assemble");
+}
+
+#[test]
+fn batched_canceled_order_maps_the_resting_user() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    let record =
+        parse_node_record(NodeStreamKind::OrderStatuses, wrap_event(event).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("batched order status must map");
+    };
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].account_addresses()[0].to_api_string(),
+        "0xc64cc00b46101bd40aa1c3121195e85c0b0918d8"
+    );
+    let EventPayload::OrderCancelled(cancelled) = events[0].payload() else {
+        panic!("canceled status must map to OrderCancelled");
+    };
+    assert_eq!(cancelled.order_id.as_str(), "12212359592");
+    assert_eq!(cancelled.reason, "canceled");
+}
+
+#[test]
+fn batched_l4_new_maps_the_resting_user() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let record = parse_node_record(NodeStreamKind::RawBookDiffs, wrap_event(event).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("batched l4 diff must map");
+    };
+    assert_eq!(
+        events[0].account_addresses()[0].to_api_string(),
+        "0x768484f7e2ebb675c57838366c02ae99ba2a9b08"
+    );
+    let EventPayload::OrderRested(rested) = events[0].payload() else {
+        panic!("new diff must rest");
+    };
+    assert_eq!(rested.order_id.as_str(), "35061046831");
+    assert_eq!(rested.remaining_quantity.to_string(), "186910.0");
+}
+
+#[test]
+fn every_documented_order_status_maps_when_block_batched() {
+    let base: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    for name in hl_protocol::node::order_status::ORDER_STATUS_NAMES {
+        let mut event = base.clone();
+        event["status"] = serde_json::json!(name);
+        if *name == "triggered" {
+            event["order"]["isTrigger"] = serde_json::json!(true);
+            event["order"]["triggerPx"] = serde_json::json!("24.5");
+        }
+        let record = parse_node_record(NodeStreamKind::OrderStatuses, wrap_event(event).into())
+            .unwrap_or_else(|_| panic!("{name} must parse"));
+        let MappingDisposition::Mapped(events) =
+            map_node_v1_record(&record, &venue_catalog(), &context())
+                .unwrap_or_else(|_| panic!("{name} must map"))
+        else {
+            panic!("{name} must not stay evidence-only when batched");
+        };
+        assert_eq!(events[0].schema_version(), "1.0.0");
+        assert_eq!(
+            events[0].confirmation_class(),
+            ConfirmationClass::ProvisionalSource
+        );
+        match *name {
+            "open" => assert!(matches!(
+                events[0].payload(),
+                EventPayload::OrderAccepted(_)
+            )),
+            "filled" => assert!(matches!(events[0].payload(), EventPayload::OrderFilled(_))),
+            "triggered" => {
+                assert!(matches!(
+                    events[0].payload(),
+                    EventPayload::TriggerOrderActivated(_)
+                ));
+            }
+            "marginCanceled"
+            | "vaultWithdrawalCanceled"
+            | "openInterestCapCanceled"
+            | "selfTradeCanceled"
+            | "reduceOnlyCanceled"
+            | "siblingFilledCanceled"
+            | "delistedCanceled"
+            | "liquidatedCanceled" => {
+                assert!(matches!(
+                    events[0].payload(),
+                    EventPayload::NonUserOrderCancelled(_)
+                ));
+            }
+            _ => assert!(matches!(
+                events[0].payload(),
+                EventPayload::OrderCancelled(_)
+            )),
+        }
+    }
+}
+
+#[test]
+fn rejected_status_with_canonical_cloid_maps_to_order_rejected() {
+    let mut event: serde_json::Value =
+        serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    event["status"] = serde_json::json!("rejected");
+    event["order"]["cloid"] = serde_json::json!("0x11111111111111111111111111111111");
+    let record =
+        parse_node_record(NodeStreamKind::OrderStatuses, wrap_event(event).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("rejected with cloid must map");
+    };
+    let EventPayload::OrderRejected(rejected) = events[0].payload() else {
+        panic!("canonical cloid rejection must keep OrderRejected");
+    };
+    assert_eq!(
+        rejected.client_order_id.as_str(),
+        "0x11111111111111111111111111111111"
+    );
+    assert_eq!(rejected.reason_code, "rejected");
+}
+
+#[test]
+fn batched_l4_update_and_remove_keep_the_resting_user() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let mut update = event.clone();
+    update["raw_book_diff"] = serde_json::json!({ "update": { "sz": "100.0" } });
+    let record =
+        parse_node_record(NodeStreamKind::RawBookDiffs, wrap_event(update).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("update must map");
+    };
+    let EventPayload::OrderRested(rested) = events[0].payload() else {
+        panic!("update rests");
+    };
+    assert_eq!(rested.remaining_quantity.to_string(), "100.0");
+
+    let mut remove = event;
+    remove["raw_book_diff"] = serde_json::json!("remove");
+    let record =
+        parse_node_record(NodeStreamKind::RawBookDiffs, wrap_event(remove).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("remove must map");
+    };
+    let EventPayload::OrderCancelled(cancelled) = events[0].payload() else {
+        panic!("remove cancels");
+    };
+    assert_eq!(cancelled.reason, "raw_book_diff_remove");
+    assert_eq!(cancelled.remaining_quantity.to_string(), "0");
+}
+
+#[test]
+fn batched_l4_new_then_update_same_oid_get_distinct_event_ids() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let mut update = event.clone();
+    update["raw_book_diff"] = serde_json::json!({ "update": { "sz": "100.0" } });
+    let record = parse_node_record(
+        NodeStreamKind::RawBookDiffs,
+        wrap_events(vec![event, update]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("batched l4 new+update must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[1].transaction_index(), 0);
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].canonical_event_index(), 1);
+    assert!(matches!(events[0].payload(), EventPayload::OrderRested(_)));
+    assert!(matches!(events[1].payload(), EventPayload::OrderRested(_)));
+    assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
+}
+
+#[test]
+fn batched_order_status_same_oid_same_kind_get_distinct_event_ids() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    let mut second = event.clone();
+    second["order"]["sz"] = serde_json::json!("100.0");
+    let record = parse_node_record(
+        NodeStreamKind::OrderStatuses,
+        wrap_events(vec![event, second]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("batched order statuses must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[1].transaction_index(), 0);
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].canonical_event_index(), 1);
+    assert!(matches!(
+        events[0].payload(),
+        EventPayload::OrderCancelled(_)
+    ));
+    assert!(matches!(
+        events[1].payload(),
+        EventPayload::OrderCancelled(_)
+    ));
+    assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
+}
+
+#[test]
+fn batched_order_status_distinct_oids_assemble_a_block() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    let mut other = event.clone();
+    other["order"]["oid"] = serde_json::json!(12_212_359_593_u64);
+    let record = parse_node_record(
+        NodeStreamKind::OrderStatuses,
+        wrap_events(vec![event, other]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("distinct-oid order statuses must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_ne!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].transaction_index(), 1);
+    assert_eq!(events[1].canonical_event_index(), 0);
+    assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
+}
+
+#[test]
+fn batched_l4_distinct_oids_assemble_a_block() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let mut other = event.clone();
+    other["oid"] = serde_json::json!(35_061_046_832_u64);
+    let record = parse_node_record(
+        NodeStreamKind::RawBookDiffs,
+        wrap_events(vec![event, other]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("distinct-oid l4 diffs must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_ne!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].transaction_index(), 1);
+    assert_eq!(events[1].canonical_event_index(), 0);
+    assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
+}
+
+#[test]
+fn batched_order_status_interleaved_oids_fail_closed_as_non_contiguous() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    let mut other = event.clone();
+    other["order"]["oid"] = serde_json::json!(12_212_359_593_u64);
+    let record = parse_node_record(
+        NodeStreamKind::OrderStatuses,
+        wrap_events(vec![event.clone(), other, event]).into(),
+    )
+    .unwrap();
+    let error = map_node_v1_record(&record, &venue_catalog(), &context()).unwrap_err();
+    assert!(matches!(error, MappingError::NonContiguousTransaction));
+    assert_eq!(
+        error.reason_code(),
+        "canonical_mapping.non_contiguous_transaction"
+    );
+}
+
+#[test]
+fn batched_l4_interleaved_oids_fail_closed_as_non_contiguous() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let mut other = event.clone();
+    other["oid"] = serde_json::json!(35_061_046_832_u64);
+    let record = parse_node_record(
+        NodeStreamKind::RawBookDiffs,
+        wrap_events(vec![event.clone(), other, event]).into(),
+    )
+    .unwrap();
+    let error = map_node_v1_record(&record, &venue_catalog(), &context()).unwrap_err();
+    assert!(matches!(error, MappingError::NonContiguousTransaction));
+    assert_eq!(
+        error.reason_code(),
+        "canonical_mapping.non_contiguous_transaction"
+    );
+}
+
+#[test]
+fn batched_system_cancel_maps_to_non_user_order_cancelled() {
+    let mut event: serde_json::Value =
+        serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    event["status"] = serde_json::json!("marginCanceled");
+    let record =
+        parse_node_record(NodeStreamKind::OrderStatuses, wrap_event(event).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("system cancel must map");
+    };
+    assert!(matches!(
+        events[0].payload(),
+        EventPayload::NonUserOrderCancelled(_)
+    ));
+    assert_eq!(events[0].event_kind(), EventKind::NonUserOrderCancelled);
+}
+
+#[test]
+fn batched_internal_transfer_maps_when_block_context_exists() {
+    let event = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": [
+                    "0x4444444444444444444444444444444444444444",
+                    "0x5555555555555555555555555555555555555555"
+                ],
+                "delta": {
+                    "InternalTransfer": {
+                        "usdc": "1.0",
+                        "user": "0x4444444444444444444444444444444444444444",
+                        "destination": "0x5555555555555555555555555555555555555555",
+                        "fee": "0.01"
+                    }
+                }
+            }
+        }
+    });
+    let record = parse_node_record(NodeStreamKind::MiscEvents, wrap_event(event).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("internal transfer must map");
+    };
+    assert_eq!(events[0].schema_version(), "1.0.0");
+    assert_eq!(events[0].event_kind(), EventKind::InternalTransfer);
+    assert_eq!(events[0].account_addresses().len(), 2);
+}
+
+#[test]
+fn batched_account_class_and_vault_create_map() {
+    let class_transfer = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": ["0x4444444444444444444444444444444444444444"],
+                "delta": { "AccountClassTransfer": { "usdc": "1.0", "toPerp": true } }
+            }
+        }
+    });
+    let vault = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x4444444444444444444444444444444444444444444444444444444444444444",
+        "inner": {
+            "LedgerUpdate": {
+                "users": ["0x4444444444444444444444444444444444444444"],
+                "delta": {
+                    "VaultCreate": {
+                        "vault": "vault-1",
+                        "usdc": "1.0",
+                        "fee": "0.1"
+                    }
+                }
+            }
+        }
+    });
+    for (event, kind) in [
+        (class_transfer, EventKind::AccountClassTransfer),
+        (vault, EventKind::VaultCreated),
+    ] {
+        let record =
+            parse_node_record(NodeStreamKind::MiscEvents, wrap_event(event).into()).unwrap();
+        let MappingDisposition::Mapped(events) =
+            map_node_v1_record(&record, &catalog(), &context()).unwrap()
+        else {
+            panic!("{kind:?} must map");
+        };
+        assert_eq!(events[0].event_kind(), kind);
+    }
+}
+
+#[test]
+fn vault_distribution_reward_claimed_spot_genesis_and_validator_reward_map() {
+    let user = "0x4444444444444444444444444444444444444444";
+    let distribution = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": [user],
+                "delta": { "VaultDistribution": { "vault": "vault-1", "usdc": "1.0" } }
+            }
+        }
+    });
+    let reward = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": [user],
+                "delta": { "RewardsClaim": { "amount": "2.0" } }
+            }
+        }
+    });
+    let genesis = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "LedgerUpdate": {
+                "users": [user],
+                "delta": { "SpotGenesis": { "token": "USDC", "amount": "3.0" } }
+            }
+        }
+    });
+    let validator = serde_json::json!({
+        "time": "2026-07-28T12:00:02.000",
+        "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "inner": {
+            "ValidatorRewards": {
+                "validator_to_reward": [["hl-validator-1", "4.0"]]
+            }
+        }
+    });
+
+    let record =
+        parse_node_record(NodeStreamKind::MiscEvents, wrap_event(distribution).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("VaultDistribution must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::VaultDistribution);
+    let dist = api_contracts::decode_vault_distribution(match events[0].payload() {
+        EventPayload::VaultDistribution(payload) => payload.encoded(),
+        other => panic!("expected VaultDistribution, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(dist.vault_id, "vault-1");
+    assert_eq!(dist.amount, "1.0");
+
+    let record = parse_node_record(NodeStreamKind::MiscEvents, wrap_event(reward).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("RewardClaimed must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::RewardClaimed);
+    let claimed = api_contracts::decode_reward_claimed(match events[0].payload() {
+        EventPayload::RewardClaimed(payload) => payload.encoded(),
+        other => panic!("expected RewardClaimed, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(claimed.amount, "2.0");
+    assert_eq!(events[0].account_addresses().len(), 1);
+
+    let record = parse_node_record(NodeStreamKind::MiscEvents, wrap_event(genesis).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("SpotGenesisApplied must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::SpotGenesisApplied);
+    let applied = api_contracts::decode_spot_genesis_applied(match events[0].payload() {
+        EventPayload::SpotGenesisApplied(payload) => payload.encoded(),
+        other => panic!("expected SpotGenesisApplied, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(applied.token, "USDC");
+    assert_eq!(applied.amount, "3.0");
+
+    let record =
+        parse_node_record(NodeStreamKind::MiscEvents, wrap_event(validator).into()).unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &catalog(), &context()).unwrap()
+    else {
+        panic!("ValidatorRewardPaid must map");
+    };
+    assert_eq!(events[0].event_kind(), EventKind::ValidatorRewardPaid);
+    assert!(events[0].account_addresses().is_empty());
+    let paid = api_contracts::decode_validator_reward_paid(match events[0].payload() {
+        EventPayload::ValidatorRewardPaid(payload) => payload.encoded(),
+        other => panic!("expected ValidatorRewardPaid, got {other:?}"),
+    })
+    .unwrap();
+    assert_eq!(paid.validator, "hl-validator-1");
+    assert_eq!(paid.amount, "4.0");
+}
+
+#[test]
+fn misc_record_discards_mapped_siblings_when_one_inner_is_undocumented() {
+    let user = "0x4444444444444444444444444444444444444444";
+    let bytes = wrap_events(vec![
+        serde_json::json!({
+            "time": "2026-07-28T12:00:02.000",
+            "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "inner": {
+                "LedgerUpdate": {
+                    "users": [user],
+                    "delta": {
+                        "VaultCreate": { "vault": "vault-1", "usdc": "1.0", "fee": "0.1" }
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "time": "2026-07-28T12:00:02.000",
+            "hash": "0x4444444444444444444444444444444444444444444444444444444444444444",
+            "inner": {
+                "LedgerUpdate": {
+                    "users": [user],
+                    "delta": { "VaultLeaderCommission": { "usdc": "0.1" } }
+                }
+            }
+        }),
+    ]);
+    let record = parse_node_record(NodeStreamKind::MiscEvents, bytes.into()).unwrap();
+    assert_eq!(
+        map_node_v1_record(&record, &catalog(), &context()).unwrap(),
+        MappingDisposition::EvidenceOnly(EvidenceOnlyReason::UnsupportedCanonicalSemantics)
+    );
+}
+
+#[test]
+fn batched_staking_inners_map() {
+    let user = "0x4444444444444444444444444444444444444444";
+    let cases = [
+        (
+            serde_json::json!({"CDeposit": {"user": user, "amount": "1.0"}}),
+            EventKind::StakingDeposit,
+        ),
+        (
+            serde_json::json!({
+                "Delegation": {
+                    "user": user,
+                    "validator": "0x5555555555555555555555555555555555555555",
+                    "amount": "1.0",
+                    "is_undelegate": false
+                }
+            }),
+            EventKind::StakingDelegated,
+        ),
+        (
+            serde_json::json!({
+                "Delegation": {
+                    "user": user,
+                    "validator": "0x5555555555555555555555555555555555555555",
+                    "amount": "1.0",
+                    "is_undelegate": true
+                }
+            }),
+            EventKind::StakingUndelegated,
+        ),
+        (
+            serde_json::json!({"CWithdrawal": {"user": user, "amount": "1.0", "is_finalized": false}}),
+            EventKind::StakingWithdrawalQueued,
+        ),
+        (
+            serde_json::json!({"CWithdrawal": {"user": user, "amount": "1.0", "is_finalized": true}}),
+            EventKind::StakingWithdrawalCompleted,
+        ),
+    ];
+    for (inner, kind) in cases {
+        let event = serde_json::json!({
+            "time": "2026-07-28T12:00:02.000",
+            "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "inner": inner
+        });
+        let record =
+            parse_node_record(NodeStreamKind::MiscEvents, wrap_event(event).into()).unwrap();
+        let MappingDisposition::Mapped(events) =
+            map_node_v1_record(&record, &catalog(), &context()).unwrap()
+        else {
+            panic!("{kind:?} must map");
+        };
+        assert_eq!(events[0].event_kind(), kind);
+    }
+}
+
+#[test]
+fn undocumented_vault_leader_commission_is_evidence_only() {
+    let user = "0x4444444444444444444444444444444444444444";
+    let cases = [
+        serde_json::json!({
+            "users": [],
+            "delta": { "VaultLeaderCommission": { "usdc": "0.1" } }
+        }),
+        serde_json::json!({
+            "users": [user],
+            "delta": {
+                "VaultLeaderCommission": { "vault": "vault-1", "usdc": "0.1" }
+            }
+        }),
+        serde_json::json!({
+            "users": [],
+            "delta": { "VaultDeposit": { "usdc": "1.0" } }
+        }),
+    ];
+    for ledger in cases {
+        let event = serde_json::json!({
+            "time": "2026-07-28T12:00:02.000",
+            "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "inner": { "LedgerUpdate": ledger }
+        });
+        let record =
+            parse_node_record(NodeStreamKind::MiscEvents, wrap_event(event).into()).unwrap();
+        assert_eq!(
+            map_node_v1_record(&record, &catalog(), &context()).unwrap(),
+            MappingDisposition::EvidenceOnly(EvidenceOnlyReason::UnsupportedCanonicalSemantics)
+        );
+    }
+}
+
+#[test]
+fn wrapped_spot_transfer_stays_evidence_only() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("transfer.json")).unwrap();
+    let record = parse_node_record(NodeStreamKind::MiscEvents, wrap_event(event).into()).unwrap();
+    assert_eq!(
+        map_node_v1_record(&record, &catalog(), &context()).unwrap(),
+        MappingDisposition::EvidenceOnly(EvidenceOnlyReason::IncompleteLedgerTransfer)
+    );
 }

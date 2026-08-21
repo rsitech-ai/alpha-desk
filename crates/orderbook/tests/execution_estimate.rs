@@ -17,20 +17,8 @@ fn healthy_two_sided_book_quotes_exact_vwap_spread_and_impact() {
         1,
         BlockHeight::new(20),
         vec![
-            RestingOrder {
-                order_id: OrderId::new("bid-1").unwrap(),
-                side: OrderSide::Buy,
-                price: price("99"),
-                remaining: qty("10"),
-                sequence: 1,
-            },
-            RestingOrder {
-                order_id: OrderId::new("ask-1").unwrap(),
-                side: OrderSide::Sell,
-                price: price("101"),
-                remaining: qty("2"),
-                sequence: 2,
-            },
+            rest("bid-1", OrderSide::Buy, "99", "10", 1),
+            rest("ask-1", OrderSide::Sell, "101", "2", 2),
         ],
     );
     let latency = point_latency();
@@ -62,27 +50,9 @@ fn two_level_visible_vwap_is_exact_when_spread_divides() {
         1,
         BlockHeight::new(20),
         vec![
-            RestingOrder {
-                order_id: OrderId::new("bid-1").unwrap(),
-                side: OrderSide::Buy,
-                price: price("60"),
-                remaining: qty("10"),
-                sequence: 1,
-            },
-            RestingOrder {
-                order_id: OrderId::new("ask-1").unwrap(),
-                side: OrderSide::Sell,
-                price: price("100"),
-                remaining: qty("1"),
-                sequence: 2,
-            },
-            RestingOrder {
-                order_id: OrderId::new("ask-2").unwrap(),
-                side: OrderSide::Sell,
-                price: price("102"),
-                remaining: qty("1"),
-                sequence: 3,
-            },
+            rest("bid-1", OrderSide::Buy, "60", "10", 1),
+            rest("ask-1", OrderSide::Sell, "100", "1", 2),
+            rest("ask-2", OrderSide::Sell, "102", "1", 3),
         ],
     );
     let estimate = quote_execution(&book, &buy_request(&market, "2"), &point_latency()).unwrap();
@@ -103,20 +73,8 @@ fn exact_fee_participation_and_stress_are_applied_without_inventing_vwap_bands()
         1,
         BlockHeight::new(20),
         vec![
-            RestingOrder {
-                order_id: OrderId::new("bid-1").unwrap(),
-                side: OrderSide::Buy,
-                price: price("99"),
-                remaining: qty("10"),
-                sequence: 1,
-            },
-            RestingOrder {
-                order_id: OrderId::new("ask-1").unwrap(),
-                side: OrderSide::Sell,
-                price: price("101"),
-                remaining: qty("2"),
-                sequence: 2,
-            },
+            rest("bid-1", OrderSide::Buy, "99", "10", 1),
+            rest("ask-1", OrderSide::Sell, "101", "2", 2),
         ],
     );
 
@@ -150,13 +108,7 @@ fn unmodeled_assumptions_and_inexact_metrics_are_refused() {
     book.apply_snapshot(
         1,
         BlockHeight::new(20),
-        vec![RestingOrder {
-            order_id: OrderId::new("ask-1").unwrap(),
-            side: OrderSide::Sell,
-            price: price("100"),
-            remaining: qty("1"),
-            sequence: 1,
-        }],
+        vec![rest("ask-1", OrderSide::Sell, "100", "1", 1)],
     );
     let one_sided = quote_execution(&book, &buy_request(&market, "1"), &point_latency());
     assert_eq!(
@@ -170,20 +122,8 @@ fn unmodeled_assumptions_and_inexact_metrics_are_refused() {
         1,
         BlockHeight::new(21),
         vec![
-            RestingOrder {
-                order_id: OrderId::new("bid-1").unwrap(),
-                side: OrderSide::Buy,
-                price: price("99"),
-                remaining: qty("1"),
-                sequence: 1,
-            },
-            RestingOrder {
-                order_id: OrderId::new("ask-1").unwrap(),
-                side: OrderSide::Sell,
-                price: price("100"),
-                remaining: qty("1"),
-                sequence: 2,
-            },
+            rest("bid-1", OrderSide::Buy, "99", "1", 1),
+            rest("ask-1", OrderSide::Sell, "100", "1", 2),
         ],
     );
     let inexact = quote_execution(&book, &buy_request(&market, "1"), &point_latency());
@@ -193,20 +133,8 @@ fn unmodeled_assumptions_and_inexact_metrics_are_refused() {
         1,
         BlockHeight::new(22),
         vec![
-            RestingOrder {
-                order_id: OrderId::new("bid-1").unwrap(),
-                side: OrderSide::Buy,
-                price: price("99"),
-                remaining: qty("1"),
-                sequence: 1,
-            },
-            RestingOrder {
-                order_id: OrderId::new("ask-1").unwrap(),
-                side: OrderSide::Sell,
-                price: price("101"),
-                remaining: qty("1"),
-                sequence: 2,
-            },
+            rest("bid-1", OrderSide::Buy, "99", "1", 1),
+            rest("ask-1", OrderSide::Sell, "101", "1", 2),
         ],
     );
     let mut fee = buy_request(&market, "1");
@@ -237,13 +165,7 @@ fn unmodeled_assumptions_and_inexact_metrics_are_refused() {
         2,
         BlockHeight::new(23),
         orderbook::BookDiff::Add {
-            order: RestingOrder {
-                order_id: OrderId::new("ask-1").unwrap(),
-                side: OrderSide::Sell,
-                price: price("103"),
-                remaining: qty("1"),
-                sequence: 3,
-            },
+            order: rest("ask-1", OrderSide::Sell, "103", "1", 3),
         },
     );
     assert!(matches!(book.health(), BookHealth::Red { .. }));
@@ -251,6 +173,16 @@ fn unmodeled_assumptions_and_inexact_metrics_are_refused() {
         quote_execution(&book, &buy_request(&market, "1"), &point_latency()),
         Err(ExecutionError::BookNotHealthy)
     );
+}
+
+fn rest(id: &str, side: OrderSide, px: &str, remaining: &str, sequence: u64) -> RestingOrder {
+    RestingOrder::new(
+        OrderId::new(id).unwrap(),
+        side,
+        price(px),
+        qty(remaining),
+        sequence,
+    )
 }
 
 fn buy_request(market: &MarketId, quantity: &str) -> ExecutionRequest {

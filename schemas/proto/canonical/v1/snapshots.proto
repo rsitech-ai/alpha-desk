@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package hl.canonical.v1;
+
+// Snapshots are a separate class from CanonicalEventEnvelope. They are never
+// ledger transitions. Reducers must refuse them.
+
+enum SnapshotClass {
+  SNAPSHOT_CLASS_UNSPECIFIED = 0;
+  SNAPSHOT_CLASS_RECONCILED = 1;
+  SNAPSHOT_CLASS_REFERENCE = 2;
+}
+
+enum SnapshotFamily {
+  SNAPSHOT_FAMILY_UNSPECIFIED = 0;
+  SNAPSHOT_FAMILY_MARKET_CONTEXT = 1;
+  SNAPSHOT_FAMILY_ACCOUNT_CLEARINGHOUSE = 2;
+  SNAPSHOT_FAMILY_ACCOUNT_ALL_DEX = 3;
+  SNAPSHOT_FAMILY_SPOT_STATE = 4;
+  SNAPSHOT_FAMILY_OPEN_ORDERS = 5;
+  SNAPSHOT_FAMILY_TWAP_STATE = 6;
+  SNAPSHOT_FAMILY_VAULT_DETAILS = 7;
+  SNAPSHOT_FAMILY_FEE_REFERRAL = 8;
+  SNAPSHOT_FAMILY_STAKING_STATE = 9;
+  SNAPSHOT_FAMILY_BORROW_LEND_STATE = 10;
+  SNAPSHOT_FAMILY_ROLE_ABSTRACTION = 11;
+  SNAPSHOT_FAMILY_QUOTE_ALIGNMENT = 12;
+  SNAPSHOT_FAMILY_PROVIDER_POSITIONS = 13;
+  SNAPSHOT_FAMILY_EVM_PRECOMPILE = 14;
+}
+
+message CanonicalSnapshotEnvelope {
+  string schema_version = 1;
+  SnapshotFamily family = 2;
+  SnapshotClass class = 3;
+  string chain_id = 4;
+  optional uint64 as_of_block = 5;
+  int64 observed_at_micros = 6;
+  bytes payload_hash = 7;
+  string parser_version = 8;
+  bytes payload = 9;
+}

@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use domain_types::SourceId;
+use hl_protocol::node::state_snapshot::PERIODIC_SNAPSHOT_STRIDE;
+use hl_protocol::node::v1::NodeStreamKind;
 use hl_protocol::{
     BlockSource, ParseWarning, SourceCursor, SourceError, SourceObservation, SourceRequestContext,
 };
@@ -600,4 +602,331 @@ fn directory_epoch(stream_name: &str, identity: FileIdentity) -> String {
     hasher.update(&identity.device.to_le_bytes());
     hasher.update(&identity.inode.to_le_bytes());
     format!("node-block-dir-v1:{}", hasher.finalize().to_hex())
+}
+
+// ponytail: gitbook documents ABCI as `{date}/{height}.rmp` every 10,000
+// heights. L4 snapshots are JSON `[[coin, [bids, asks]], ...]` computed from
+// ABCI state; the on-disk directory is not named. This adapter uses the same
+// `{date}/{height}.json` layout until the node repo documents the path.
+#[derive(Debug, Clone)]
+pub struct NodeSnapshotDirectoryConfig {
+    root: PathBuf,
+    stream_name: String,
+    stream: NodeStreamKind,
+    source_id: SourceId,
+    source_version: String,
+    parser_schema_version: String,
+    start_height: u64,
+    max_payload_bytes: usize,
+    poll_interval: Duration,
+}
+
+impl NodeSnapshotDirectoryConfig {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        root: PathBuf,
+        stream_name: impl Into<String>,
+        stream: NodeStreamKind,
+        source_id: SourceId,
+        source_version: impl Into<String>,
+        parser_schema_version: impl Into<String>,
+        start_height: u64,
+        max_payload_bytes: usize,
+        poll_interval: Duration,
+    ) -> Result<Self, SourceError> {
+        let stream_name = stream_name.into();
+        let source_version = source_version.into();
+        let parser_schema_version = parser_schema_version.into();
+        if !root.is_absolute()
+            || !stream.is_whole_file_snapshot()
+            || !start_height.is_multiple_of(PERIODIC_SNAPSHOT_STRIDE)
+            || !valid_identity(&stream_name)
+            || !valid_identity(&source_version)
+            || !valid_identity(&parser_schema_version)
+            || !(1..=MAX_NODE_PAYLOAD_BYTES).contains(&max_payload_bytes)
+            || poll_interval.is_zero()
+            || Instant::now().checked_add(poll_interval).is_none()
+        {
+            return Err(SourceError::Configuration(
+                "invalid node snapshot-directory configuration".into(),
+            ));
+        }
+        Ok(Self {
+            root,
+            stream_name,
+            stream,
+            source_id,
+            source_version,
+            parser_schema_version,
+            start_height,
+            max_payload_bytes,
+            poll_interval,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct NodeSnapshotDirectorySource<C = SystemNodeClock> {
+    config: NodeSnapshotDirectoryConfig,
+    root_identity: FileIdentity,
+    epoch: String,
+    last_read_height: Option<u64>,
+    durable_cursor: Option<SourceCursor>,
+    pending_emitted_cursor: Option<SourceCursor>,
+    clock: C,
+}
+
+impl NodeSnapshotDirectorySource<SystemNodeClock> {
+    pub fn open(
+        config: NodeSnapshotDirectoryConfig,
+        durable_cursor: Option<SourceCursor>,
+    ) -> Result<Self, SourceError> {
+        Self::open_with_clock(config, durable_cursor, SystemNodeClock::default())
+    }
+}
+
+impl<C: NodeReceiveClock> NodeSnapshotDirectorySource<C> {
+    pub fn open_with_clock(
+        config: NodeSnapshotDirectoryConfig,
+        durable_cursor: Option<SourceCursor>,
+        clock: C,
+    ) -> Result<Self, SourceError> {
+        let metadata = safe_directory_metadata(&config.root)?;
+        let root_identity = file_identity(&metadata);
+        let epoch = snapshot_directory_epoch(&config.stream_name, root_identity);
+        if durable_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.epoch() != epoch)
+        {
+            return Err(SourceError::CursorRegression);
+        }
+        let first_needed_height = match &durable_cursor {
+            Some(cursor) => {
+                if !cursor.offset().is_multiple_of(PERIODIC_SNAPSHOT_STRIDE) {
+                    return Err(SourceError::CursorRegression);
+                }
+                cursor
+                    .offset()
+                    .checked_add(PERIODIC_SNAPSHOT_STRIDE)
+                    .ok_or(SourceError::CursorRegression)?
+            }
+            None => config.start_height,
+        };
+        find_snapshot_path(&config, first_needed_height)?;
+        let last_read_height = durable_cursor.as_ref().map(SourceCursor::offset);
+        Ok(Self {
+            config,
+            root_identity,
+            epoch,
+            last_read_height,
+            durable_cursor,
+            pending_emitted_cursor: None,
+            clock,
+        })
+    }
+
+    pub fn acknowledge_durable(&mut self, cursor: &SourceCursor) -> Result<(), SourceError> {
+        if self.pending_emitted_cursor.as_ref() != Some(cursor) {
+            return Err(SourceError::CursorRegression);
+        }
+        self.durable_cursor = Some(cursor.clone());
+        self.pending_emitted_cursor = None;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn directory_epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    async fn wait_for_progress(&self, context: &SourceRequestContext) -> Result<(), SourceError> {
+        context.check()?;
+        let now = tokio::time::Instant::now();
+        let deadline = context.backpressure_deadline();
+        let wake = now
+            .checked_add(self.config.poll_interval)
+            .map_or(deadline, |poll| poll.min(deadline));
+        tokio::select! {
+            () = context.cancellation().cancelled() => Err(SourceError::Cancelled),
+            () = tokio::time::sleep_until(wake) => context.check(),
+        }
+    }
+
+    async fn next_snapshot(&self) -> Result<Option<(u64, PathBuf)>, SourceError> {
+        let config = self.config.clone();
+        let root_identity = self.root_identity;
+        let last_read_height = self.last_read_height;
+        tokio::task::spawn_blocking(move || {
+            find_next_snapshot(&config, root_identity, last_read_height)
+        })
+        .await
+        .map_err(|_| SourceError::Configuration("node snapshot discovery task failed".into()))?
+    }
+
+    async fn read_snapshot(
+        &mut self,
+        height: u64,
+        path: PathBuf,
+        context: &SourceRequestContext,
+    ) -> Result<SourceObservation, SourceError> {
+        let max_payload_bytes = self.config.max_payload_bytes;
+        let payload =
+            tokio::task::spawn_blocking(move || read_stable_block(&path, max_payload_bytes))
+                .await
+                .map_err(|_| {
+                    SourceError::Configuration("node snapshot read task failed".into())
+                })??;
+        context.check()?;
+        let cursor = SourceCursor::new(self.epoch.clone(), height)
+            .map_err(|_| SourceError::MalformedPayload("node snapshot cursor is invalid".into()))?;
+        let observation_class = self.config.stream.observation_class();
+        let observation = SourceObservation::new(
+            self.config.source_id.clone(),
+            self.config.source_version.clone(),
+            observation_class,
+            cursor.clone(),
+            self.clock.now()?,
+            self.config.parser_schema_version.clone(),
+            Bytes::from(payload),
+            Vec::<ParseWarning>::new(),
+            self.config.max_payload_bytes,
+        )
+        .map_err(|_| {
+            SourceError::MalformedPayload("node snapshot observation is invalid".into())
+        })?;
+        self.last_read_height = Some(height);
+        self.pending_emitted_cursor = Some(cursor);
+        Ok(observation)
+    }
+}
+
+#[async_trait]
+impl<C: NodeReceiveClock> BlockSource for NodeSnapshotDirectorySource<C> {
+    async fn next_observation(
+        &mut self,
+        context: &SourceRequestContext,
+    ) -> Result<SourceObservation, SourceError> {
+        loop {
+            context.check()?;
+            if self.pending_emitted_cursor.is_some() {
+                return Err(SourceError::BackpressureTimeout);
+            }
+            if let Some((height, path)) = self.next_snapshot().await? {
+                context.check()?;
+                return self.read_snapshot(height, path, context).await;
+            }
+            self.wait_for_progress(context).await?;
+        }
+    }
+
+    fn source_id(&self) -> &SourceId {
+        &self.config.source_id
+    }
+
+    fn committed_cursor(&self) -> Option<&SourceCursor> {
+        self.durable_cursor.as_ref()
+    }
+}
+
+fn find_next_snapshot(
+    config: &NodeSnapshotDirectoryConfig,
+    root_identity: FileIdentity,
+    last_read_height: Option<u64>,
+) -> Result<Option<(u64, PathBuf)>, SourceError> {
+    let metadata = safe_directory_metadata(&config.root)?;
+    if file_identity(&metadata) != root_identity {
+        return Err(SourceError::CursorRegression);
+    }
+    let expected = match last_read_height {
+        Some(last) => last
+            .checked_add(PERIODIC_SNAPSHOT_STRIDE)
+            .ok_or(SourceError::CursorRegression)?,
+        None => config.start_height,
+    };
+    let dates = discover_snapshot_dates(&config.root)?;
+    if let Some(path) = find_snapshot_path_in_dates(config, &dates, expected)? {
+        return Ok(Some((expected, path)));
+    }
+    for delta in 1..=GAP_PROBE_HEIGHTS {
+        let Some(probe) = expected.checked_add(delta.saturating_mul(PERIODIC_SNAPSHOT_STRIDE))
+        else {
+            break;
+        };
+        if find_snapshot_path_in_dates(config, &dates, probe)?.is_some() {
+            return Err(SourceError::RangeUnavailable);
+        }
+    }
+    Ok(None)
+}
+
+fn find_snapshot_path(
+    config: &NodeSnapshotDirectoryConfig,
+    height: u64,
+) -> Result<Option<PathBuf>, SourceError> {
+    let dates = discover_snapshot_dates(&config.root)?;
+    find_snapshot_path_in_dates(config, &dates, height)
+}
+
+fn find_snapshot_path_in_dates(
+    config: &NodeSnapshotDirectoryConfig,
+    dates: &[PathBuf],
+    height: u64,
+) -> Result<Option<PathBuf>, SourceError> {
+    let Some(extension) = config.stream.snapshot_file_extension() else {
+        return Err(SourceError::Configuration(
+            "snapshot directory stream is not a whole-file snapshot".into(),
+        ));
+    };
+    let file_name = format!("{height}.{extension}");
+    let mut candidates = Vec::new();
+    for date in dates {
+        let candidate = date.join(&file_name);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(SourceError::Configuration(
+                        "node snapshot path is not a regular file".into(),
+                    ));
+                }
+                candidates.push(candidate);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(SourceError::TemporaryDisconnect(
+                    "node snapshot metadata failed".into(),
+                ));
+            }
+        }
+    }
+    candidates.sort();
+    let Some(selected) = candidates.last().cloned() else {
+        return Ok(None);
+    };
+    if candidates.len() > 1 {
+        let expected = read_stable_block(&selected, config.max_payload_bytes)?;
+        let expected_hash = blake3::hash(&expected);
+        for candidate in &candidates[..candidates.len() - 1] {
+            let payload = read_stable_block(candidate, config.max_payload_bytes)?;
+            if blake3::hash(&payload) != expected_hash {
+                return Err(SourceError::SchemaDrift(
+                    "conflicting duplicate node snapshot height".into(),
+                ));
+            }
+        }
+    }
+    Ok(Some(selected))
+}
+
+fn discover_snapshot_dates(root: &Path) -> Result<Vec<PathBuf>, SourceError> {
+    strict_subdirectories(root, is_date_name)
+}
+
+fn snapshot_directory_epoch(stream_name: &str, identity: FileIdentity) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"alpha-desk-node-snapshot-directory-epoch-v1\0");
+    hasher.update(stream_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&identity.device.to_le_bytes());
+    hasher.update(&identity.inode.to_le_bytes());
+    format!("node-snapshot-dir-v1:{}", hasher.finalize().to_hex())
 }

@@ -1,7 +1,11 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, btree_map::Entry};
 
-use domain_types::{BlockHeight, MarketId, OrderId, OrderSide, Price, Quantity};
+use domain_types::{
+    Address, BlockHeight, ClientOrderId, MarketId, OrderId, OrderSide, Price, Quantity,
+};
+
+pub const DEFAULT_MAX_ORDERS: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BookHealth {
@@ -11,18 +15,106 @@ pub enum BookHealth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerKind {
+    None,
+    Untriggered { tpsl: bool, trigger_px: Price },
+    Activated { trigger_px: Price },
+}
+
+impl TriggerKind {
+    #[must_use]
+    pub const fn is_untriggered(&self) -> bool {
+        matches!(self, Self::Untriggered { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestingOrder {
     pub order_id: OrderId,
     pub side: OrderSide,
     pub price: Price,
     pub remaining: Quantity,
+    pub original: Quantity,
     pub sequence: u64,
+    pub account_id: Option<Address>,
+    pub client_order_id: Option<ClientOrderId>,
+    pub time_millis: Option<u64>,
+    pub trigger: TriggerKind,
+}
+
+impl RestingOrder {
+    #[must_use]
+    pub fn new(
+        order_id: OrderId,
+        side: OrderSide,
+        price: Price,
+        remaining: Quantity,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            order_id,
+            side,
+            price,
+            remaining,
+            original: remaining,
+            sequence,
+            account_id: None,
+            client_order_id: None,
+            time_millis: None,
+            trigger: TriggerKind::None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_original(mut self, original: Quantity) -> Self {
+        self.original = original;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_account(mut self, account_id: Address) -> Self {
+        self.account_id = Some(account_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_client_order_id(mut self, client_order_id: ClientOrderId) -> Self {
+        self.client_order_id = Some(client_order_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_time_millis(mut self, time_millis: u64) -> Self {
+        self.time_millis = Some(time_millis);
+        self
+    }
+
+    #[must_use]
+    pub fn with_trigger(mut self, trigger: TriggerKind) -> Self {
+        self.trigger = trigger;
+        self
+    }
+
+    #[must_use]
+    pub fn time_priority(&self) -> u64 {
+        self.time_millis.unwrap_or(self.sequence)
+    }
+
+    #[must_use]
+    pub const fn rests_on_l2(&self) -> bool {
+        !self.trigger.is_untriggered()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BookDiff {
     Add {
         order: RestingOrder,
+    },
+    Update {
+        order_id: OrderId,
+        remaining: Quantity,
+        price: Price,
     },
     Cancel {
         order_id: OrderId,
@@ -50,6 +142,7 @@ pub struct LifecycleEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleKind {
     Added,
+    Updated,
     Filled,
     Cancelled,
 }
@@ -60,6 +153,7 @@ pub struct OrderBook {
     sequence: u64,
     as_of_block: BlockHeight,
     health: BookHealth,
+    max_orders: usize,
     bids: BTreeMap<(Reverse<Price>, u64, OrderId), RestingOrder>,
     asks: BTreeMap<(Price, u64, OrderId), RestingOrder>,
     by_id: BTreeMap<OrderId, OrderIndex>,
@@ -70,11 +164,19 @@ pub struct OrderBook {
 struct OrderIndex {
     side: OrderSide,
     price: Price,
-    sequence: u64,
+    time_priority: u64,
 }
 
 impl OrderBook {
     pub fn awaiting_snapshot(market_id: MarketId, as_of_block: BlockHeight) -> Self {
+        Self::awaiting_snapshot_bounded(market_id, as_of_block, DEFAULT_MAX_ORDERS)
+    }
+
+    pub fn awaiting_snapshot_bounded(
+        market_id: MarketId,
+        as_of_block: BlockHeight,
+        max_orders: usize,
+    ) -> Self {
         Self {
             market_id,
             sequence: 0,
@@ -82,6 +184,7 @@ impl OrderBook {
             health: BookHealth::AwaitingSnapshot {
                 reason: "empty book requires a verified snapshot".to_owned(),
             },
+            max_orders,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             by_id: BTreeMap::new(),
@@ -109,6 +212,16 @@ impl OrderBook {
         &self.health
     }
 
+    #[must_use]
+    pub const fn max_orders(&self) -> usize {
+        self.max_orders
+    }
+
+    #[must_use]
+    pub fn active_order_count(&self) -> usize {
+        self.by_id.len()
+    }
+
     pub fn active_orders(&self) -> impl Iterator<Item = &RestingOrder> {
         self.bids.values().chain(self.asks.values())
     }
@@ -131,6 +244,10 @@ impl OrderBook {
         self.sequence = sequence;
         self.as_of_block = as_of_block;
         self.health = BookHealth::Healthy;
+        if orders.len() > self.max_orders {
+            self.mark_red("order count bound");
+            return;
+        }
         for order in orders {
             if let Err(reason) = self.insert_active(order, true) {
                 self.mark_red(reason);
@@ -174,17 +291,22 @@ impl OrderBook {
 
     #[must_use]
     pub fn best_bid(&self) -> Option<&RestingOrder> {
-        self.bids.values().next()
+        self.bids.values().find(|order| order.rests_on_l2())
     }
 
     #[must_use]
     pub fn best_ask(&self) -> Option<&RestingOrder> {
-        self.asks.values().next()
+        self.asks.values().find(|order| order.rests_on_l2())
     }
 
     fn apply_healthy_diff(&mut self, diff: BookDiff) -> Result<(), String> {
         match diff {
             BookDiff::Add { order } => self.insert_active(order, false),
+            BookDiff::Update {
+                order_id,
+                remaining,
+                price,
+            } => self.update_active(&order_id, remaining, price),
             BookDiff::Cancel { order_id } => {
                 self.remove_active(&order_id, LifecycleKind::Cancelled)
             }
@@ -196,16 +318,19 @@ impl OrderBook {
     }
 
     fn insert_active(&mut self, order: RestingOrder, from_snapshot: bool) -> Result<(), String> {
-        if order.remaining.raw() <= 0 || order.price.raw() <= 0 {
+        if order.remaining.raw() <= 0 || order.price.raw() <= 0 || order.original.raw() <= 0 {
             return Err("negative or non-positive order quantity or price".to_owned());
         }
         if self.by_id.contains_key(&order.order_id) {
             return Err("duplicate order id".to_owned());
         }
+        if self.by_id.len() >= self.max_orders {
+            return Err("order count bound".to_owned());
+        }
         let index = OrderIndex {
             side: order.side,
             price: order.price,
-            sequence: order.sequence,
+            time_priority: order.time_priority(),
         };
         match order.side {
             OrderSide::Buy => {
@@ -226,20 +351,73 @@ impl OrderBook {
         Ok(())
     }
 
-    fn remove_active(&mut self, order_id: &OrderId, kind: LifecycleKind) -> Result<(), String> {
-        let Some(index) = self.by_id.remove(order_id) else {
+    fn update_active(
+        &mut self,
+        order_id: &OrderId,
+        remaining: Quantity,
+        price: Price,
+    ) -> Result<(), String> {
+        if remaining.raw() < 0 || price.raw() <= 0 {
+            return Err("negative or non-positive order quantity or price".to_owned());
+        }
+        let Some(index) = self.by_id.get(order_id).cloned() else {
             return Err("order id is not active".to_owned());
         };
+        let mut order = self
+            .take_active(order_id, &index)
+            .ok_or_else(|| "order index is inconsistent".to_owned())?;
+        order.remaining = remaining;
+        order.price = price;
+        if remaining.raw() == 0 {
+            self.lifecycle.push(LifecycleEvent {
+                order_id: order_id.clone(),
+                kind: LifecycleKind::Filled,
+                sequence: self.sequence,
+            });
+            return Ok(());
+        }
+        let new_index = OrderIndex {
+            side: order.side,
+            price: order.price,
+            time_priority: order.time_priority(),
+        };
+        match order.side {
+            OrderSide::Buy => {
+                self.bids.insert(bid_key(&order), order);
+            }
+            OrderSide::Sell => {
+                self.asks.insert(ask_key(&order), order);
+            }
+        }
+        self.by_id.insert(order_id.clone(), new_index);
+        self.lifecycle.push(LifecycleEvent {
+            order_id: order_id.clone(),
+            kind: LifecycleKind::Updated,
+            sequence: self.sequence,
+        });
+        Ok(())
+    }
+
+    fn take_active(&mut self, order_id: &OrderId, index: &OrderIndex) -> Option<RestingOrder> {
+        self.by_id.remove(order_id)?;
         match index.side {
             OrderSide::Buy => {
                 self.bids
-                    .remove(&(Reverse(index.price), index.sequence, order_id.clone()));
+                    .remove(&(Reverse(index.price), index.time_priority, order_id.clone()))
             }
             OrderSide::Sell => {
                 self.asks
-                    .remove(&(index.price, index.sequence, order_id.clone()));
+                    .remove(&(index.price, index.time_priority, order_id.clone()))
             }
         }
+    }
+
+    fn remove_active(&mut self, order_id: &OrderId, kind: LifecycleKind) -> Result<(), String> {
+        let Some(index) = self.by_id.get(order_id).cloned() else {
+            return Err("order id is not active".to_owned());
+        };
+        self.take_active(order_id, &index)
+            .ok_or_else(|| "order index is inconsistent".to_owned())?;
         self.lifecycle.push(LifecycleEvent {
             order_id: order_id.clone(),
             kind,
@@ -259,14 +437,14 @@ impl OrderBook {
             OrderSide::Buy => {
                 let order = self
                     .bids
-                    .get_mut(&(Reverse(index.price), index.sequence, order_id.clone()))
+                    .get_mut(&(Reverse(index.price), index.time_priority, order_id.clone()))
                     .ok_or_else(|| "bid index is inconsistent".to_owned())?;
                 apply_fill_qty(order, fill_quantity)?
             }
             OrderSide::Sell => {
                 let order = self
                     .asks
-                    .get_mut(&(index.price, index.sequence, order_id.clone()))
+                    .get_mut(&(index.price, index.time_priority, order_id.clone()))
                     .ok_or_else(|| "ask index is inconsistent".to_owned())?;
                 apply_fill_qty(order, fill_quantity)?
             }
@@ -320,11 +498,15 @@ fn apply_fill_qty(order: &mut RestingOrder, fill_quantity: Quantity) -> Result<Q
 }
 
 fn bid_key(order: &RestingOrder) -> (Reverse<Price>, u64, OrderId) {
-    (Reverse(order.price), order.sequence, order.order_id.clone())
+    (
+        Reverse(order.price),
+        order.time_priority(),
+        order.order_id.clone(),
+    )
 }
 
 fn ask_key(order: &RestingOrder) -> (Price, u64, OrderId) {
-    (order.price, order.sequence, order.order_id.clone())
+    (order.price, order.time_priority(), order.order_id.clone())
 }
 
 fn aggregate_l2<'a>(
@@ -333,6 +515,9 @@ fn aggregate_l2<'a>(
 ) -> Result<Vec<L2Level>, String> {
     let mut levels: BTreeMap<Price, (Quantity, u32)> = BTreeMap::new();
     for order in orders {
+        if !order.rests_on_l2() {
+            continue;
+        }
         match levels.entry(order.price) {
             Entry::Vacant(vacant) => {
                 let zero = Quantity::from_raw(0, order.remaining.scale())

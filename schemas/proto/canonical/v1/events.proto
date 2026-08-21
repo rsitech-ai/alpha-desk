@@ -24,6 +24,7 @@ message CanonicalEventEnvelope {
   bytes payload_hash = 17;
   string parser_version = 18;
   bytes payload = 19;
+  optional string superseded_event_id = 20;
 }
 
 message SourceEvidence {
@@ -367,4 +368,83 @@ message OutcomeResolved {
   string outcome_id = 2;
   string settlement_value = 3;
   int64 resolved_at_micros = 4;
+}
+
+// Additive V1.1 payloads. New messages only; tags start at 1 on each type.
+message NonUserOrderCancelled {
+  string order_id = 1;
+  string reason = 2;
+  string remaining_quantity = 3;
+}
+
+message InternalTransfer {
+  string from_account_id = 1;
+  string to_account_id = 2;
+  string amount = 3;
+  string fee = 4;
+}
+
+message AccountClassTransfer {
+  string account_id = 1;
+  string amount = 2;
+  bool to_perp = 3;
+}
+
+message VaultCreated {
+  string vault_id = 1;
+  string amount = 2;
+  string fee = 3;
+}
+
+message VaultDistribution {
+  string vault_id = 1;
+  string amount = 2;
+}
+
+message VaultLeaderCommissionPaid {
+  string vault_id = 1;
+  string account_id = 2;
+  string amount = 3;
+}
+
+message RewardClaimed {
+  string account_id = 1;
+  string amount = 2;
+}
+
+message SpotGenesisApplied {
+  string token = 1;
+  string amount = 2;
+}
+
+message StakingDeposit {
+  string account_id = 1;
+  string amount = 2;
+}
+
+message StakingDelegated {
+  string account_id = 1;
+  string validator = 2;
+  string amount = 3;
+}
+
+message StakingUndelegated {
+  string account_id = 1;
+  string validator = 2;
+  string amount = 3;
+}
+
+message StakingWithdrawalQueued {
+  string account_id = 1;
+  string amount = 2;
+}
+
+message StakingWithdrawalCompleted {
+  string account_id = 1;
+  string amount = 2;
+}
+
+message ValidatorRewardPaid {
+  string validator = 1;
+  string amount = 2;
 }

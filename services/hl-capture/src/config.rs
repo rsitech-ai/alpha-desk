@@ -2,11 +2,19 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
-use domain_types::{BlockHeight, ChainId, SourceId};
+use domain_types::{BlockHeight, ChainId, KnownTime, SourceId};
+use hl_protocol::node::state_snapshot::PERIODIC_SNAPSHOT_STRIDE;
 use hl_protocol::node::v1::NodeStreamKind;
-use hl_protocol::{ObservationClass, SourceAdmission, SourceTrust};
+use hl_protocol::{
+    AgreementStatus, NetworkId, ObservationClass, OperatorKind, ProviderLicense,
+    RedistributionPolicy, RetentionClass, SourceAdmission, SourceCatalogError, SourceCatalogRecord,
+    SourceDescriptor, SourceRole, SourceTrust, inferred_operator_kind,
+    validate_operator_kind_trust, validate_role_trust,
+};
 use serde::{Deserialize, Serialize};
 use storage_ports::{RawArchiveCapacityBudgets, RawArchiveWorkloadEnvelope};
+
+use crate::historical_manifest::{DatasetFormat, DatasetKind};
 
 const MAX_IDENTITY_BYTES: usize = 256;
 const MAX_QUEUE_CAPACITY: usize = 1_000_000;
@@ -31,6 +39,8 @@ pub struct CaptureConfig {
     runtime: RuntimeConfig,
     spool: SpoolConfig,
     sources: Vec<SourceConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    egress: Vec<EgressConfig>,
 }
 
 impl CaptureConfig {
@@ -107,6 +117,49 @@ impl CaptureConfig {
         if independent_committed_sources > 1 {
             return Err(ConfigError::DuplicateIndependentCommittedSource);
         }
+        let mut egress_ids = BTreeSet::new();
+        for egress in &self.egress {
+            egress.validate()?;
+            if !egress_ids.insert(egress.id.as_str()) {
+                return Err(ConfigError::DuplicateEgress);
+            }
+        }
+        for source in &self.sources {
+            match source.adapter.as_ref() {
+                Some(SourceAdapterConfig::OfficialInfo { egress_id, .. }) => {
+                    if source.trust != SourceTrust::ReconciledSnapshot {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                    if !egress_ids.contains(egress_id.as_str()) {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                }
+                Some(SourceAdapterConfig::OfficialWs { egress_id, .. }) => {
+                    if source.trust != SourceTrust::ReconciledSnapshot {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                    let Some(egress) = self
+                        .egress
+                        .iter()
+                        .find(|egress| egress.id.as_str() == egress_id.as_str())
+                    else {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    };
+                    if egress.kind != EgressKind::OfficialWs {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                }
+                Some(SourceAdapterConfig::HistoricalS3 { .. }) => {
+                    if source.trust != SourceTrust::RecoveryOnly {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                }
+                Some(SourceAdapterConfig::NodeLine { .. })
+                | Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+                | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
+                | None => {}
+            }
+        }
         Ok(())
     }
 
@@ -139,14 +192,32 @@ impl CaptureConfig {
     pub fn payload_limit(&self, id: &str) -> Option<usize> {
         self.source(id).map(SourceConfig::max_payload_bytes)
     }
+
+    #[must_use]
+    pub fn scheduled_sources(&self, at: KnownTime) -> Vec<&SourceConfig> {
+        self.sources
+            .iter()
+            .filter(|source| source.allows_scheduled_work(at))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn egress(&self) -> &[EgressConfig] {
+        &self.egress
+    }
 }
 
 fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), ConfigError> {
     match source.adapter.as_ref() {
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => Ok(()),
-        Some(SourceAdapterConfig::NodeLine { .. }) | None => {
-            Err(ConfigError::InvalidCommittedSourceAdapter)
-        }
+        Some(
+            SourceAdapterConfig::NodeLine { .. }
+            | SourceAdapterConfig::NodeSnapshotDirectory { .. }
+            | SourceAdapterConfig::OfficialInfo { .. }
+            | SourceAdapterConfig::OfficialWs { .. }
+            | SourceAdapterConfig::HistoricalS3 { .. },
+        )
+        | None => Err(ConfigError::InvalidCommittedSourceAdapter),
     }
 }
 
@@ -500,6 +571,8 @@ pub struct SourceConfig {
     adapter: Option<SourceAdapterConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credential_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog: Option<SourceCatalogConfig>,
 }
 
 impl SourceConfig {
@@ -523,6 +596,7 @@ impl SourceConfig {
         if let Some(adapter) = &self.adapter {
             adapter.validate(self.observation_class)?;
         }
+        let _ = self.catalog_record()?;
         Ok(())
     }
 
@@ -570,6 +644,166 @@ impl SourceConfig {
     pub fn credential_path(&self) -> Option<&Path> {
         self.credential_path.as_deref()
     }
+
+    #[must_use]
+    pub const fn catalog(&self) -> Option<&SourceCatalogConfig> {
+        self.catalog.as_ref()
+    }
+
+    pub fn catalog_record(&self) -> Result<Option<SourceCatalogRecord>, ConfigError> {
+        let Some(catalog) = &self.catalog else {
+            return Ok(None);
+        };
+        Ok(Some(catalog.record(self)?))
+    }
+
+    #[must_use]
+    pub fn allows_scheduled_work(&self, at: KnownTime) -> bool {
+        match self.catalog_record() {
+            Ok(None) => true,
+            Ok(Some(record)) => record.allows_scheduled_work(at),
+            Err(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCatalogConfig {
+    network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<SourceRole>,
+    operator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_kind: Option<OperatorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dataset_version: Option<String>,
+    retention_class: RetentionClass,
+    redistribution: RedistributionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    license_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agreement_status: Option<AgreementStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agreement_expires_at_micros: Option<i64>,
+}
+
+impl SourceCatalogConfig {
+    fn record(&self, source: &SourceConfig) -> Result<SourceCatalogRecord, ConfigError> {
+        let network = NetworkId::new(self.network.clone()).map_err(catalog_error)?;
+        let role = self
+            .role
+            .unwrap_or_else(|| SourceRole::from_trust(source.trust));
+        validate_role_trust(role, source.trust).map_err(catalog_error)?;
+        let operator_kind = self
+            .operator_kind
+            .unwrap_or_else(|| inferred_operator_kind(source.trust, role));
+        validate_operator_kind_trust(operator_kind, source.trust).map_err(catalog_error)?;
+        let descriptor = SourceDescriptor::new(
+            SourceId::new(source.id.clone()).map_err(|_| ConfigError::InvalidSourceId)?,
+            network,
+            role,
+            self.operator.clone(),
+            self.dataset_version.clone(),
+            self.retention_class,
+            self.redistribution,
+        )
+        .map_err(catalog_error)?;
+        let license = match self.license_name.as_ref() {
+            Some(name) => Some(
+                ProviderLicense::new(
+                    name.clone(),
+                    self.agreement_status.unwrap_or(AgreementStatus::Active),
+                    match self.agreement_expires_at_micros {
+                        Some(micros) => Some(
+                            KnownTime::from_unix_micros(micros)
+                                .map_err(|_| ConfigError::InvalidSourceCatalog)?,
+                        ),
+                        None => None,
+                    },
+                )
+                .map_err(catalog_error)?,
+            ),
+            None => None,
+        };
+        SourceCatalogRecord::new(
+            descriptor,
+            1,
+            operator_kind,
+            source.observation_class,
+            license,
+            KnownTime::from_unix_micros(0).map_err(|_| ConfigError::InvalidSourceCatalog)?,
+            None,
+        )
+        .map_err(catalog_error)
+    }
+
+    #[must_use]
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> Option<SourceRole> {
+        self.role
+    }
+
+    #[must_use]
+    pub fn operator(&self) -> &str {
+        &self.operator
+    }
+
+    #[must_use]
+    pub const fn operator_kind(&self) -> Option<OperatorKind> {
+        self.operator_kind
+    }
+
+    #[must_use]
+    pub fn dataset_version(&self) -> Option<&str> {
+        self.dataset_version.as_deref()
+    }
+
+    #[must_use]
+    pub const fn retention_class(&self) -> RetentionClass {
+        self.retention_class
+    }
+
+    #[must_use]
+    pub const fn redistribution(&self) -> RedistributionPolicy {
+        self.redistribution
+    }
+
+    #[must_use]
+    pub fn license_name(&self) -> Option<&str> {
+        self.license_name.as_deref()
+    }
+
+    #[must_use]
+    pub const fn agreement_status(&self) -> Option<AgreementStatus> {
+        self.agreement_status
+    }
+
+    #[must_use]
+    pub const fn agreement_expires_at_micros(&self) -> Option<i64> {
+        self.agreement_expires_at_micros
+    }
+}
+
+fn catalog_error(error: SourceCatalogError) -> ConfigError {
+    match error {
+        SourceCatalogError::IncompatibleRole => ConfigError::IncompatibleSourceRole,
+        SourceCatalogError::IncompatibleOperatorKind => ConfigError::IncompatibleOperatorKind,
+        SourceCatalogError::MissingProviderLicense => ConfigError::MissingProviderLicense,
+        SourceCatalogError::InvalidNetwork
+        | SourceCatalogError::InvalidSourceId
+        | SourceCatalogError::InvalidOperator
+        | SourceCatalogError::InvalidDatasetVersion
+        | SourceCatalogError::InvalidLicense
+        | SourceCatalogError::MissingCommittedEvidence
+        | SourceCatalogError::InvalidVersion
+        | SourceCatalogError::InvalidValidityWindow
+        | SourceCatalogError::ConflictingIdentity => ConfigError::InvalidSourceCatalog,
+    }
 }
 
 fn is_safe_source_path_component(value: &str) -> bool {
@@ -600,6 +834,44 @@ pub enum SourceAdapterConfig {
         poll_interval_millis: u64,
         replica_cmds_style: NodeReplicaCmdsStyle,
     },
+    NodeSnapshotDirectory {
+        path: PathBuf,
+        stream_name: String,
+        stream: NodeStreamKind,
+        start_height: u64,
+        poll_interval_millis: u64,
+    },
+    OfficialInfo {
+        egress_id: String,
+        capability_id: String,
+        request_timeout_millis: u64,
+    },
+    OfficialWs {
+        egress_id: String,
+        ping_interval_millis: u64,
+        inactivity_timeout_millis: u64,
+        stale_after_millis: u64,
+        reserved_failover_connections: u8,
+        reserved_failover_users: u8,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        families: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        users: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        coins: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dexes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        intervals: Vec<String>,
+    },
+    HistoricalS3 {
+        bucket: String,
+        dataset: String,
+        format: String,
+        request_payer: String,
+        start_key: String,
+        end_key: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -612,34 +884,157 @@ pub enum NodeReplicaCmdsStyle {
 
 impl SourceAdapterConfig {
     fn validate(&self, observation_class: ObservationClass) -> Result<(), ConfigError> {
-        let (path, stream_name, poll_interval_millis, expected_class, replica_cmds_style) =
-            match self {
-                Self::NodeLine {
-                    path,
-                    stream_name,
-                    stream,
-                    poll_interval_millis,
-                } => (
+        match self {
+            Self::OfficialInfo {
+                egress_id,
+                capability_id,
+                request_timeout_millis,
+            } => {
+                validate_identity(egress_id).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(capability_id).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                if !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(request_timeout_millis)
+                    || observation_class != ObservationClass::Snapshot
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Ok(())
+            }
+            Self::OfficialWs {
+                egress_id,
+                ping_interval_millis,
+                inactivity_timeout_millis,
+                stale_after_millis,
+                reserved_failover_connections,
+                reserved_failover_users,
+                families,
+                users,
+                coins,
+                dexes,
+                intervals,
+            } => {
+                validate_identity(egress_id).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                if !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(ping_interval_millis)
+                    || !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(inactivity_timeout_millis)
+                    || !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(stale_after_millis)
+                    || !(1..=10).contains(reserved_failover_connections)
+                    || !(1..=10).contains(reserved_failover_users)
+                    || observation_class != ObservationClass::Snapshot
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                for family in families {
+                    if hl_protocol::ws::family_by_identifier(family).is_none() {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                }
+                for value in users
+                    .iter()
+                    .chain(coins.iter())
+                    .chain(dexes.iter())
+                    .chain(intervals.iter())
+                {
+                    validate_identity(value).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                }
+                Ok(())
+            }
+            Self::HistoricalS3 {
+                bucket,
+                dataset,
+                format,
+                request_payer,
+                start_key,
+                end_key,
+            } => {
+                if request_payer != "requester"
+                    || observation_class != ObservationClass::HistoricalBlock
+                    || start_key > end_key
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                validate_identity(bucket).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(dataset).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(format).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(start_key).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(end_key).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                let kind =
+                    DatasetKind::parse(dataset).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                let parsed_format =
+                    DatasetFormat::parse(format).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                kind.validate_format(parsed_format)
+                    .map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                kind.accept_bucket(bucket)
+                    .map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                if !start_key.starts_with(kind.key_prefix())
+                    || !end_key.starts_with(kind.key_prefix())
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Ok(())
+            }
+            Self::NodeLine {
+                path,
+                stream_name,
+                stream,
+                poll_interval_millis,
+            } => {
+                if stream.is_whole_file_snapshot() {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Self::validate_node(
                     path,
                     stream_name,
                     *poll_interval_millis,
                     stream.observation_class(),
+                    observation_class,
                     None,
-                ),
-                Self::NodeBlockDirectory {
-                    path,
-                    stream_name,
-                    start_height: _,
-                    poll_interval_millis,
-                    replica_cmds_style,
-                } => (
+                )
+            }
+            Self::NodeBlockDirectory {
+                path,
+                stream_name,
+                start_height: _,
+                poll_interval_millis,
+                replica_cmds_style,
+            } => Self::validate_node(
+                path,
+                stream_name,
+                *poll_interval_millis,
+                ObservationClass::CommittedBlock,
+                observation_class,
+                Some(*replica_cmds_style),
+            ),
+            Self::NodeSnapshotDirectory {
+                path,
+                stream_name,
+                stream,
+                start_height,
+                poll_interval_millis,
+            } => {
+                if !stream.is_whole_file_snapshot()
+                    || !start_height.is_multiple_of(PERIODIC_SNAPSHOT_STRIDE)
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Self::validate_node(
                     path,
                     stream_name,
                     *poll_interval_millis,
-                    ObservationClass::CommittedBlock,
-                    Some(*replica_cmds_style),
-                ),
-            };
+                    stream.observation_class(),
+                    observation_class,
+                    None,
+                )
+            }
+        }
+    }
+
+    fn validate_node(
+        path: &Path,
+        stream_name: &str,
+        poll_interval_millis: u64,
+        expected_class: ObservationClass,
+        observation_class: ObservationClass,
+        replica_cmds_style: Option<NodeReplicaCmdsStyle>,
+    ) -> Result<(), ConfigError> {
         validate_node_source_path(path)?;
         validate_identity(stream_name).map_err(|_| ConfigError::InvalidSourceAdapter)?;
         if !(1..=MAX_SOURCE_POLL_INTERVAL_MILLIS).contains(&poll_interval_millis)
@@ -653,6 +1048,136 @@ impl SourceAdapterConfig {
                 Err(ConfigError::InvalidSourceAdapter)
             }
         }
+    }
+}
+
+const OFFICIAL_REST_WEIGHT_PER_MINUTE: u32 = 1_200;
+const OFFICIAL_WS_OUTGOING_PER_MINUTE: u32 = 2_000;
+const MIN_SAFETY_ENVELOPE_PERCENT: u8 = 70;
+const MAX_SAFETY_ENVELOPE_PERCENT: u8 = 80;
+
+fn default_priority_reserve_percent() -> u8 {
+    40
+}
+
+pub const OFFICIAL_INFO_URLS: &[&str] = &[
+    "https://api.hyperliquid.xyz",
+    "https://api.hyperliquid.xyz/info",
+    "https://api.hyperliquid-testnet.xyz",
+    "https://api.hyperliquid-testnet.xyz/info",
+];
+
+pub const OFFICIAL_INFO_REQUEST_URL: &str = "https://api.hyperliquid.xyz/info";
+pub const OFFICIAL_INFO_TESTNET_REQUEST_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
+
+pub const OFFICIAL_WS_URLS: &[&str] = &[
+    "wss://api.hyperliquid.xyz/ws",
+    "wss://api.hyperliquid-testnet.xyz/ws",
+];
+
+pub const OFFICIAL_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
+pub const OFFICIAL_WS_TESTNET_URL: &str = "wss://api.hyperliquid-testnet.xyz/ws";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EgressKind {
+    OfficialInfo,
+    OfficialWs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressProxyConfig {
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    rotate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressConfig {
+    id: String,
+    kind: EgressKind,
+    base_url: String,
+    weight_per_minute: u32,
+    safety_envelope_percent: u8,
+    #[serde(default = "default_priority_reserve_percent")]
+    priority_reserve_percent: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy: Option<EgressProxyConfig>,
+}
+
+impl EgressConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !is_safe_source_path_component(&self.id) {
+            return Err(ConfigError::InvalidEgress);
+        }
+        if self.proxy.is_some() {
+            return Err(ConfigError::AnonymousProxyRejected);
+        }
+        match self.kind {
+            EgressKind::OfficialInfo => {
+                if self.base_url.contains("/exchange") {
+                    return Err(ConfigError::ExchangeEndpointForbidden);
+                }
+                if self.weight_per_minute != OFFICIAL_REST_WEIGHT_PER_MINUTE
+                    || !(MIN_SAFETY_ENVELOPE_PERCENT..=MAX_SAFETY_ENVELOPE_PERCENT)
+                        .contains(&self.safety_envelope_percent)
+                    || !(1..=90).contains(&self.priority_reserve_percent)
+                    || !OFFICIAL_INFO_URLS.contains(&self.base_url.as_str())
+                {
+                    return Err(ConfigError::InvalidEgress);
+                }
+                Ok(())
+            }
+            EgressKind::OfficialWs => {
+                if self.base_url.contains("/exchange") {
+                    return Err(ConfigError::ExchangeEndpointForbidden);
+                }
+                if self.weight_per_minute != OFFICIAL_WS_OUTGOING_PER_MINUTE
+                    || !(MIN_SAFETY_ENVELOPE_PERCENT..=MAX_SAFETY_ENVELOPE_PERCENT)
+                        .contains(&self.safety_envelope_percent)
+                    || !(1..=90).contains(&self.priority_reserve_percent)
+                    || !OFFICIAL_WS_URLS.contains(&self.base_url.as_str())
+                {
+                    return Err(ConfigError::InvalidEgress);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> EgressKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[must_use]
+    pub const fn weight_per_minute(&self) -> u32 {
+        self.weight_per_minute
+    }
+
+    #[must_use]
+    pub const fn safety_envelope_percent(&self) -> u8 {
+        self.safety_envelope_percent
+    }
+
+    #[must_use]
+    pub const fn priority_reserve_percent(&self) -> u8 {
+        self.priority_reserve_percent
     }
 }
 
@@ -684,6 +1209,14 @@ pub enum ConfigError {
     InvalidSourceTrust,
     #[error("capture source adapter is invalid")]
     InvalidSourceAdapter,
+    #[error("capture source catalog is invalid")]
+    InvalidSourceCatalog,
+    #[error("capture source role is incompatible with source trust")]
+    IncompatibleSourceRole,
+    #[error("capture operator kind is incompatible with source trust")]
+    IncompatibleOperatorKind,
+    #[error("provider capture source requires licensing and redistribution policy")]
+    MissingProviderLicense,
     #[error("capture configuration requires exactly one primary committed source")]
     MissingPrimaryCommittedSource,
     #[error("capture configuration contains multiple primary committed sources")]
@@ -718,6 +1251,14 @@ pub enum ConfigError {
     InvalidStatusListen,
     #[error("validated capture configuration could not be serialized")]
     Serialization,
+    #[error("capture egress identifier is duplicated")]
+    DuplicateEgress,
+    #[error("capture egress configuration is invalid")]
+    InvalidEgress,
+    #[error("anonymous proxy rotation is forbidden")]
+    AnonymousProxyRejected,
+    #[error("capture refused an /exchange endpoint")]
+    ExchangeEndpointForbidden,
 }
 
 impl ConfigError {
@@ -737,6 +1278,10 @@ impl ConfigError {
             Self::InvalidPayloadLimit => "capture_config.invalid_payload_limit",
             Self::InvalidSourceTrust => "capture_config.invalid_source_trust",
             Self::InvalidSourceAdapter => "capture_config.invalid_source_adapter",
+            Self::InvalidSourceCatalog => "capture_config.invalid_source_catalog",
+            Self::IncompatibleSourceRole => "capture_config.incompatible_source_role",
+            Self::IncompatibleOperatorKind => "capture_config.incompatible_operator_kind",
+            Self::MissingProviderLicense => "capture_config.missing_provider_license",
             Self::MissingPrimaryCommittedSource => {
                 "capture_config.missing_primary_committed_source"
             }
@@ -762,6 +1307,10 @@ impl ConfigError {
             Self::InvalidRawV3Capacity => "capture_config.invalid_raw_v3_capacity",
             Self::InvalidStatusListen => "capture_config.invalid_status_listen",
             Self::Serialization => "capture_config.serialization",
+            Self::DuplicateEgress => "capture_config.duplicate_egress",
+            Self::InvalidEgress => "capture_config.invalid_egress",
+            Self::AnonymousProxyRejected => "capture_config.anonymous_proxy",
+            Self::ExchangeEndpointForbidden => "capture_config.exchange_forbidden",
         }
     }
 }

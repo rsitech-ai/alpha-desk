@@ -7,9 +7,10 @@ use std::time::Duration;
 use domain_types::SourceId;
 use hl_capture::adapters::{
     NodeBlockDirectoryConfig, NodeBlockDirectorySource, NodeFileConfig, NodeLineFileSource,
-    NodeReceiveClock,
+    NodeReceiveClock, NodeSnapshotDirectoryConfig, NodeSnapshotDirectorySource,
 };
-use hl_protocol::node::v1::NodeStreamKind;
+use hl_protocol::node::state_snapshot::PERIODIC_SNAPSHOT_STRIDE;
+use hl_protocol::node::v1::{NodeRecordKind, NodeStreamKind, parse_node_record};
 use hl_protocol::{
     BlockSource, ObservationClass, ReceiveTimestamps, SourceCursor, SourceError,
     SourceRequestContext,
@@ -607,4 +608,236 @@ fn conflicting_duplicate_block_height_is_schema_drift() {
     )
     .expect_err("conflicting duplicate height");
     assert!(matches!(error, SourceError::SchemaDrift(_)));
+}
+
+fn snapshot_fixture(name: &str) -> Vec<u8> {
+    fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures/source/node-v1/snapshots")
+            .join(name),
+    )
+    .expect("snapshot fixture")
+}
+
+fn snapshot_directory_config(
+    root: PathBuf,
+    stream: NodeStreamKind,
+    stream_name: &str,
+) -> NodeSnapshotDirectoryConfig {
+    NodeSnapshotDirectoryConfig::new(
+        root,
+        stream_name,
+        stream,
+        SourceId::new("primary-node-snapshots").expect("source id"),
+        "hl-node-v1",
+        "node-v1",
+        PERIODIC_SNAPSHOT_STRIDE,
+        1024 * 1024,
+        Duration::from_millis(5),
+    )
+    .expect("snapshot directory config")
+}
+
+fn write_snapshot(root: &Path, date: &str, height: u64, extension: &str, payload: &[u8]) {
+    let directory = root.join(date);
+    fs::create_dir_all(&directory).expect("snapshot date directory");
+    fs::write(directory.join(format!("{height}.{extension}")), payload).expect("snapshot file");
+}
+
+#[test]
+fn line_file_config_rejects_whole_file_snapshot_streams() {
+    let path = PathBuf::from("/tmp/node-abci.ndjson");
+    let error = NodeFileConfig::new(
+        path,
+        "node-abci",
+        NodeStreamKind::AbciStateSnapshots,
+        SourceId::new("primary-node-abci").expect("source id"),
+        "hl-node-v1",
+        "node-v1",
+        1024 * 1024,
+        Duration::from_millis(5),
+    )
+    .expect_err("abci is not ndjson");
+    assert!(matches!(error, SourceError::Configuration(_)));
+}
+
+#[test]
+fn snapshot_directory_rejects_unaligned_start_height() {
+    let directory = TempDir::new().expect("temp directory");
+    let error = NodeSnapshotDirectoryConfig::new(
+        directory.path().to_path_buf(),
+        "periodic-abci",
+        NodeStreamKind::AbciStateSnapshots,
+        SourceId::new("primary-node-snapshots").expect("source id"),
+        "hl-node-v1",
+        "node-v1",
+        100,
+        1024 * 1024,
+        Duration::from_millis(5),
+    )
+    .expect_err("start height must follow the 10_000 stride");
+    assert!(matches!(error, SourceError::Configuration(_)));
+}
+
+#[tokio::test]
+async fn periodic_abci_directory_restarts_from_durable_height() {
+    let directory = TempDir::new().expect("temp directory");
+    let payload = snapshot_fixture("abci-10000.rmp");
+    write_snapshot(directory.path(), "20260728", 10_000, "rmp", &payload);
+    write_snapshot(directory.path(), "20260728", 20_000, "rmp", &payload);
+    let cancellation = CancellationToken::new();
+    let mut first = NodeSnapshotDirectorySource::open_with_clock(
+        snapshot_directory_config(
+            directory.path().to_path_buf(),
+            NodeStreamKind::AbciStateSnapshots,
+            "periodic-abci",
+        ),
+        None,
+        TestClock::new(),
+    )
+    .expect("open abci source");
+    let first_observation = first
+        .next_observation(&context(cancellation.clone(), Duration::from_secs(1)))
+        .await
+        .expect("height 10000");
+    assert_eq!(first_observation.cursor().offset(), 10_000);
+    assert_eq!(first_observation.payload().as_ref(), payload);
+    assert_eq!(
+        first_observation.observation_class(),
+        ObservationClass::AuxiliaryLedger
+    );
+    let parsed = parse_node_record(
+        NodeStreamKind::AbciStateSnapshots,
+        first_observation.payload().clone(),
+    )
+    .expect("abci parse");
+    assert_eq!(parsed.kind(), NodeRecordKind::AbciStateSnapshot);
+    assert_eq!(parsed.content_hash(), blake3::hash(&payload));
+    let durable = first_observation.cursor().clone();
+    first
+        .acknowledge_durable(&durable)
+        .expect("ack height 10000");
+    drop(first);
+
+    let mut restarted = NodeSnapshotDirectorySource::open_with_clock(
+        snapshot_directory_config(
+            directory.path().to_path_buf(),
+            NodeStreamKind::AbciStateSnapshots,
+            "periodic-abci",
+        ),
+        Some(durable),
+        TestClock::new(),
+    )
+    .expect("restart abci source");
+    let next = restarted
+        .next_observation(&context(cancellation, Duration::from_secs(1)))
+        .await
+        .expect("height 20000");
+    assert_eq!(next.cursor().offset(), 20_000);
+}
+
+#[tokio::test]
+async fn periodic_abci_directory_fails_closed_on_a_visible_stride_gap() {
+    let directory = TempDir::new().expect("temp directory");
+    let payload = snapshot_fixture("abci-10000.rmp");
+    write_snapshot(directory.path(), "20260728", 10_000, "rmp", &payload);
+    write_snapshot(directory.path(), "20260728", 30_000, "rmp", &payload);
+    let cancellation = CancellationToken::new();
+    let mut source = NodeSnapshotDirectorySource::open_with_clock(
+        snapshot_directory_config(
+            directory.path().to_path_buf(),
+            NodeStreamKind::AbciStateSnapshots,
+            "periodic-abci",
+        ),
+        None,
+        TestClock::new(),
+    )
+    .expect("open abci source");
+    let first = source
+        .next_observation(&context(cancellation.clone(), Duration::from_secs(1)))
+        .await
+        .expect("height 10000");
+    source
+        .acknowledge_durable(first.cursor())
+        .expect("height 10000 durable");
+
+    assert_eq!(
+        source
+            .next_observation(&context(cancellation, Duration::from_secs(1)))
+            .await
+            .expect_err("height 20000 is missing"),
+        SourceError::RangeUnavailable
+    );
+}
+
+#[test]
+fn identical_duplicate_snapshot_height_is_idempotent() {
+    let directory = TempDir::new().expect("temp directory");
+    let payload = snapshot_fixture("abci-10000.rmp");
+    write_snapshot(directory.path(), "20260728", 10_000, "rmp", &payload);
+    write_snapshot(directory.path(), "20260729", 10_000, "rmp", &payload);
+    NodeSnapshotDirectorySource::open_with_clock(
+        snapshot_directory_config(
+            directory.path().to_path_buf(),
+            NodeStreamKind::AbciStateSnapshots,
+            "periodic-abci",
+        ),
+        None,
+        TestClock::new(),
+    )
+    .expect("identical duplicate height");
+}
+
+#[test]
+fn conflicting_duplicate_snapshot_height_is_schema_drift() {
+    let directory = TempDir::new().expect("temp directory");
+    let payload = snapshot_fixture("abci-10000.rmp");
+    write_snapshot(directory.path(), "20260728", 10_000, "rmp", &payload);
+    let mut conflicting = payload;
+    conflicting.extend_from_slice(&[0xff]);
+    write_snapshot(directory.path(), "20260729", 10_000, "rmp", &conflicting);
+    let error = NodeSnapshotDirectorySource::open_with_clock(
+        snapshot_directory_config(
+            directory.path().to_path_buf(),
+            NodeStreamKind::AbciStateSnapshots,
+            "periodic-abci",
+        ),
+        None,
+        TestClock::new(),
+    )
+    .expect_err("conflicting duplicate height");
+    assert!(matches!(error, SourceError::SchemaDrift(_)));
+}
+
+#[tokio::test]
+async fn periodic_l4_directory_emits_raw_bytes_with_book_observation_class() {
+    let directory = TempDir::new().expect("temp directory");
+    let payload = snapshot_fixture("l4-10000.json");
+    write_snapshot(directory.path(), "20260728", 10_000, "json", &payload);
+    let cancellation = CancellationToken::new();
+    let mut source = NodeSnapshotDirectorySource::open_with_clock(
+        snapshot_directory_config(
+            directory.path().to_path_buf(),
+            NodeStreamKind::L4Snapshots,
+            "periodic-l4",
+        ),
+        None,
+        TestClock::new(),
+    )
+    .expect("open l4 source");
+    let observation = source
+        .next_observation(&context(cancellation, Duration::from_secs(1)))
+        .await
+        .expect("l4 snapshot");
+    assert_eq!(observation.cursor().offset(), 10_000);
+    assert_eq!(observation.payload().as_ref(), payload);
+    assert_eq!(
+        observation.observation_class(),
+        ObservationClass::AuxiliaryBookDiff
+    );
+    let parsed = parse_node_record(NodeStreamKind::L4Snapshots, observation.payload().clone())
+        .expect("l4 parse");
+    assert_eq!(parsed.kind(), NodeRecordKind::L4Snapshot);
+    assert_eq!(parsed.content_hash(), blake3::hash(&payload));
 }

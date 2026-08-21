@@ -3,7 +3,12 @@ use domain_types::{AccountId, MarketId, SourceId};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::{SourceCursor, SourceError, SourceObservation};
+use crate::{ObservationClass, SourceCursor, SourceError, SourceObservation};
+
+#[must_use]
+pub const fn observation_qualifies_committed_source(class: ObservationClass) -> bool {
+    matches!(class, ObservationClass::CommittedBlock)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotTarget {

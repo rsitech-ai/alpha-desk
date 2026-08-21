@@ -1,0 +1,25 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "evm_logs",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "tx_hash",
+    "log_index",
+    "fact_hash"
+  ],
+  "fields": [
+    {"name": "chain_id", "type": "uint64", "nullable": false},
+    {"name": "block_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "block_number", "type": "uint64", "nullable": false},
+    {"name": "tx_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "tx_index", "type": "uint32", "nullable": false},
+    {"name": "log_index", "type": "uint32", "nullable": false},
+    {"name": "address", "type": "fixed_size_binary[20]", "nullable": false},
+    {"name": "topic0", "type": "fixed_size_binary[32]", "nullable": true},
+    {"name": "topic1", "type": "fixed_size_binary[32]", "nullable": true},
+    {"name": "topic2", "type": "fixed_size_binary[32]", "nullable": true},
+    {"name": "topic3", "type": "fixed_size_binary[32]", "nullable": true},
+    {"name": "data", "type": "binary", "nullable": false},
+    {"name": "fact_hash", "type": "fixed_size_binary[32]", "nullable": false}
+  ]
+}

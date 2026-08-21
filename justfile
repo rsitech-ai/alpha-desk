@@ -38,9 +38,9 @@ reproducible:
 reproducible-environment:
     CC=/tmp/ambient-cc-must-not-run CFLAGS=-Dambient_cflags_must_not_apply CARGO_PROFILE_RELEASE_LTO=false RUSTC_WRAPPER=/tmp/ambient-rustc-wrapper-must-not-run ./tools/ci/verify-reproducible-build.sh --check-environment-seal
 
-ci-verify: check-workspace quality ci-test
+ci-verify: check-workspace hyperliquid-full-coverage-docs hyperliquid-coverage-check quality ci-test
 
-verify: check-workspace quality test
+verify: check-workspace hyperliquid-full-coverage-docs hyperliquid-coverage-check quality test
 
 oss-audit:
     cargo +1.97.1 run -p open-source-audit --locked --offline -- check --policy config/open-source-policy.toml --root .
@@ -142,3 +142,31 @@ dev-reset:
 web-dashboard:
     npm --prefix apps/web-dashboard install
     npm --prefix apps/web-dashboard run dev
+
+# Full-coverage spec/plan/traceability gate, including inverse-claim fail-closed.
+hyperliquid-full-coverage-docs:
+    ./tools/ci/check-hyperliquid-full-coverage-docs.sh
+
+hyperliquid-coverage-check:
+    cargo +1.97.1 run -p hyperliquid-capabilities --locked --offline -- validate
+    cargo +1.97.1 run -p hyperliquid-capabilities --locked --offline -- render-docs --check
+
+# Official /info capture adapter. Not part of `just verify`. Live HTTP only when HL_INFO_CAPTURE_E2E=1.
+info-capture-e2e:
+    ./tools/ci/info-capture-e2e.sh
+
+# Official public WS planner/lifecycle replay. Not part of `just verify`. Live WS only when HL_PUBLIC_WS_E2E=1.
+public-ws-replay:
+    ./tools/ci/public-ws-replay.sh
+
+# Provisional vs committed WS lanes. Not part of `just verify`.
+provisional-ws-replay:
+    ./tools/ci/provisional-ws-replay.sh
+
+# Deterministic L4 reconstruction and official L2 reconcile. Not part of `just verify`.
+l4-replay-e2e:
+    ./tools/ci/l4-replay-e2e.sh
+
+# Official historical S3 backfill and object manifests. Not part of `just verify`.
+historical-backfill-e2e:
+    ./tools/ci/historical-backfill-e2e.sh

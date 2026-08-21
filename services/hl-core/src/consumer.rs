@@ -18,7 +18,7 @@ use futures_util::StreamExt as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    DurableApplyError, DurableApplyOutcome, LocalReplayError, LocalReplaySession,
+    DurableApplyError, DurableApplyOutcome, LocalReplayError,
     publication::{
         BLOCK_MARKER_SCHEMA_V1, CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker,
         HEADER_ARCHIVE_MANIFEST_SHA256, HEADER_ARCHIVE_RECEIPT, HEADER_BLOCK_HASH,
@@ -26,6 +26,7 @@ use crate::{
         decode_committed_block_marker, encode_committed_block_marker, encode_event_payload,
         subject_for_event_kind,
     },
+    state_runtime::{ResumeMode, StateRuntime, align_watermarks},
 };
 
 const MAX_TIMEOUT: Duration = Duration::from_secs(60);
@@ -483,7 +484,7 @@ impl JetStreamReplayError {
 }
 
 pub struct JetStreamReplaySession<R, S> {
-    replay: LocalReplaySession<R, S>,
+    runtime: StateRuntime<R, S>,
     assembler: BlockAssembler,
     fetch_batch: usize,
 }
@@ -498,13 +499,15 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
         image_limits: StateImageLimits,
     ) -> Result<Self, JetStreamReplayError> {
         Ok(Self {
-            replay: LocalReplaySession::open(
+            runtime: StateRuntime::open(
                 chain_id,
                 first_height,
                 reducer,
                 limits,
                 store,
                 image_limits,
+                ResumeMode::Durable,
+                None,
             )?,
             assembler: BlockAssembler::new(),
             fetch_batch: 64,
@@ -513,7 +516,16 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
 
     #[must_use]
     pub fn ledger(&self) -> &canonical_ledger::CanonicalLedger<R> {
-        self.replay.ledger()
+        self.runtime.ledger()
+    }
+
+    #[must_use]
+    pub fn runtime(&self) -> &StateRuntime<R, S> {
+        &self.runtime
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut StateRuntime<R, S> {
+        &mut self.runtime
     }
 
     pub async fn consume_available<Src: CanonicalPullSource>(
@@ -521,8 +533,8 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
         source: &mut Src,
     ) -> Result<JetStreamReplayReport, JetStreamReplayError> {
         let mut report = JetStreamReplayReport::empty(
-            self.replay.ledger().state_hash(),
-            self.replay
+            self.runtime.ledger().state_hash(),
+            self.runtime
                 .ledger()
                 .checkpoint()
                 .map(|checkpoint| checkpoint.block_height()),
@@ -537,19 +549,32 @@ impl<R: EventReducer, S: storage_ports::AtomicStateStore> JetStreamReplaySession
             }
             for delivery in batch {
                 if let Some(assembled) = self.assembler.push(delivery)? {
-                    match self.replay.apply_next(&assembled.block)? {
+                    match self.runtime.session_mut().apply_next(&assembled.block)? {
                         DurableApplyOutcome::Applied { .. } => {
                             report.applied = report
                                 .applied
                                 .checked_add(1)
                                 .ok_or(JetStreamReplayError::Overflow)?;
+                            let state_height = self
+                                .runtime
+                                .ledger()
+                                .checkpoint()
+                                .map(|checkpoint| checkpoint.block_height())
+                                .ok_or(JetStreamReplayError::Replay(
+                                    LocalReplayError::WatermarkMisaligned,
+                                ))?;
+                            align_watermarks(
+                                assembled.block.block_height(),
+                                assembled.block.block_height(),
+                                state_height,
+                            )?;
                         }
                         DurableApplyOutcome::AlreadyApplied(_) => {
                             report.already_applied = report.already_applied.saturating_add(1);
                         }
                     }
                     report.last_height = Some(assembled.block.block_height());
-                    report.state_hash = self.replay.ledger().state_hash();
+                    report.state_hash = self.runtime.ledger().state_hash();
                     source.ack(&assembled.message_ids).await?;
                 }
             }

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use domain_types::{BlockHeight, MarketId, OrderId, OrderSide, Price, Quantity};
 use serde::{Deserialize, Serialize};
 
-use crate::book::{BookDiff, BookHealth, L2Level, OrderBook, RestingOrder};
+use crate::book::{BookDiff, BookHealth, L2Level, OrderBook, RestingOrder, TriggerKind};
 
 pub const BOOK_FIXTURE_SCHEMA: &str = "hl.orderbook.fixture.v1";
 pub const SYNTHETIC_UNASSESSED: &str = "synthetic_unassessed";
@@ -57,6 +57,14 @@ pub struct BookFixtureOrder {
     pub price: String,
     pub remaining: String,
     pub sequence: u64,
+    #[serde(default)]
+    pub time_millis: Option<u64>,
+    #[serde(default)]
+    pub untriggered: bool,
+    #[serde(default)]
+    pub tpsl: bool,
+    #[serde(default)]
+    pub trigger_px: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +79,11 @@ pub enum BookFixtureDiff {
     Fill {
         order_id: String,
         fill_quantity: String,
+    },
+    Update {
+        order_id: String,
+        remaining: String,
+        price: String,
     },
 }
 
@@ -173,16 +186,30 @@ fn decode_order(
     price_scale: u8,
     quantity_scale: u8,
 ) -> Result<RestingOrder, BookFixtureError> {
-    Ok(RestingOrder {
-        order_id: OrderId::new(&order.order_id)
+    let mut decoded = RestingOrder::new(
+        OrderId::new(&order.order_id)
             .map_err(|_| BookFixtureError::Decode("invalid order_id".to_owned()))?,
-        side: order.side,
-        price: Price::parse_at_scale(&order.price, price_scale)
+        order.side,
+        Price::parse_at_scale(&order.price, price_scale)
             .map_err(|_| BookFixtureError::Decode("invalid price".to_owned()))?,
-        remaining: Quantity::parse_at_scale(&order.remaining, quantity_scale)
+        Quantity::parse_at_scale(&order.remaining, quantity_scale)
             .map_err(|_| BookFixtureError::Decode("invalid remaining".to_owned()))?,
-        sequence: order.sequence,
-    })
+        order.sequence,
+    );
+    if let Some(time_millis) = order.time_millis {
+        decoded = decoded.with_time_millis(time_millis);
+    }
+    if order.untriggered {
+        let trigger_px = order.trigger_px.as_deref().ok_or_else(|| {
+            BookFixtureError::Decode("untriggered order needs trigger_px".to_owned())
+        })?;
+        decoded = decoded.with_trigger(TriggerKind::Untriggered {
+            tpsl: order.tpsl,
+            trigger_px: Price::parse_at_scale(trigger_px, price_scale)
+                .map_err(|_| BookFixtureError::Decode("invalid trigger_px".to_owned()))?,
+        });
+    }
+    Ok(decoded)
 }
 
 fn decode_diff(
@@ -206,6 +233,18 @@ fn decode_diff(
                 .map_err(|_| BookFixtureError::Decode("invalid fill order_id".to_owned()))?,
             fill_quantity: Quantity::parse_at_scale(fill_quantity, quantity_scale)
                 .map_err(|_| BookFixtureError::Decode("invalid fill_quantity".to_owned()))?,
+        }),
+        BookFixtureDiff::Update {
+            order_id,
+            remaining,
+            price,
+        } => Ok(BookDiff::Update {
+            order_id: OrderId::new(order_id)
+                .map_err(|_| BookFixtureError::Decode("invalid update order_id".to_owned()))?,
+            remaining: Quantity::parse_at_scale(remaining, quantity_scale)
+                .map_err(|_| BookFixtureError::Decode("invalid update remaining".to_owned()))?,
+            price: Price::parse_at_scale(price, price_scale)
+                .map_err(|_| BookFixtureError::Decode("invalid update price".to_owned()))?,
         }),
     }
 }

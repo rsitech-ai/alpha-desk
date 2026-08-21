@@ -2,6 +2,10 @@
 
 Updated: 2026-08-03
 
+## 2026-08-20 snapshot
+
+STATUS is a snapshot. Runtime maturity differs by component. Capture and some Stage 2 replay paths are implemented locally. Wallet, analytics, API, and desk surfaces remain scaffold or planned. The Hyperliquid full-coverage expansion is planned and in progress on this branch. It is not a passed gate. See `docs/superpowers/specs/2026-08-19-hyperliquid-full-coverage-expansion.md` and `docs/superpowers/plans/2026-08-19-hyperliquid-full-coverage-traceability.md`.
+
 This is the evidence ledger for the current working repository. The approved design and stage plans describe the target system; unchecked plan items are not proof that work is absent, and checked items alone would not be proof that a gate passed. A stage is complete only when its required tests, evidence record, approvals, and signed tag verify.
 
 ## Readiness labels

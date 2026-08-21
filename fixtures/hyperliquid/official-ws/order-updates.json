@@ -1,0 +1,1 @@
+{"channel":"orderUpdates","data":[{"order":{"coin":"BTC","side":"B","limitPx":"1","sz":"1","oid":1,"timestamp":1,"origSz":"1"},"status":"open","statusTimestamp":1}]}

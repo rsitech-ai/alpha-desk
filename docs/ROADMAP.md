@@ -1,6 +1,15 @@
 # Roadmap
 
-The canonical roadmap is the approved [program plan](superpowers/plans/2026-07-24-00-hyperliquid-alpha-desk-program-roadmap.md). This page is the contributor-facing sequence, not a replacement for the detailed gate contracts.
+The V1 program plan file `docs/superpowers/plans/2026-07-24-00-hyperliquid-alpha-desk-program-roadmap.md` is absent on this branch. Do not invent it. Frozen V1 tags remain `design-approved-v1.0.0` and `spec-v1.0.0`. The V1 design file `docs/superpowers/specs/2026-07-24-hyperliquid-alpha-desk-design.md` is also absent here. This page is the contributor-facing sequence, not a replacement for those gate contracts.
+
+## Follow-on: Hyperliquid full public-data coverage
+
+Additive to the 2026-07-24 design. It does not replace V1 and may proceed in parallel with remaining V1 work on this mainline tree.
+
+- Spec: [superpowers/specs/2026-08-19-hyperliquid-full-coverage-expansion.md](superpowers/specs/2026-08-19-hyperliquid-full-coverage-expansion.md)
+- Plan: [superpowers/plans/2026-08-19-hyperliquid-full-coverage-plan.md](superpowers/plans/2026-08-19-hyperliquid-full-coverage-plan.md)
+- Traceability: [superpowers/plans/2026-08-19-hyperliquid-full-coverage-traceability.md](superpowers/plans/2026-08-19-hyperliquid-full-coverage-traceability.md)
+- Docs check: `just hyperliquid-full-coverage-docs`
 
 ## Current focus
 

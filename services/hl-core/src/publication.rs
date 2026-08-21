@@ -8,6 +8,10 @@ use storage_ports::ArchiveReceipt;
 pub const CANONICAL_STREAM: &str = "HL_CANONICAL";
 pub const BLOCK_COMMITTED_SUBJECT: &str = "hl.v1.block.committed";
 pub const BLOCK_PROVISIONAL_SUBJECT: &str = "hl.v1.block.provisional";
+pub const SNAPSHOT_ACCOUNT_SUBJECT: &str = "hl.v1.snapshot.account";
+pub const SNAPSHOT_MARKET_SUBJECT: &str = "hl.v1.snapshot.market";
+pub const SNAPSHOT_ECOSYSTEM_SUBJECT: &str = "hl.v1.snapshot.ecosystem";
+pub const HEALTH_SOURCE_SUBJECT: &str = "hl.v1.health.source";
 pub const BLOCK_MARKER_SCHEMA_V1: &str = "hyperliquid-alpha-desk/block-publication/v1";
 pub const HEADER_SCHEMA: &str = "Alpha-Desk-Schema";
 pub const HEADER_CHAIN: &str = "Alpha-Desk-Chain";
@@ -51,7 +55,10 @@ impl CanonicalSubject {
             "hl.v1.event.ledger" => Ok(Self::EventLedger),
             "hl.v1.event.market_meta" => Ok(Self::EventMarketMeta),
             "hl.v1.event.oracle" => Ok(Self::EventOracle),
-            BLOCK_PROVISIONAL_SUBJECT => Err(BlockMarkerError::Provisional),
+            BLOCK_PROVISIONAL_SUBJECT
+            | SNAPSHOT_ACCOUNT_SUBJECT
+            | SNAPSHOT_MARKET_SUBJECT
+            | SNAPSHOT_ECOSYSTEM_SUBJECT => Err(BlockMarkerError::Provisional),
             _ => Err(BlockMarkerError::UnexpectedSubject),
         }
     }
@@ -70,6 +77,7 @@ pub const fn subject_for_event_kind(kind: EventKind) -> CanonicalSubject {
         | EventKind::OrderRested
         | EventKind::OrderModified
         | EventKind::OrderCancelled
+        | EventKind::NonUserOrderCancelled
         | EventKind::OrderRejected
         | EventKind::TriggerOrderActivated
         | EventKind::TwapStarted
@@ -101,7 +109,20 @@ pub const fn subject_for_event_kind(kind: EventKind) -> CanonicalSubject {
         | EventKind::MarginModeChanged
         | EventKind::LeverageChanged
         | EventKind::LiquidationStarted
-        | EventKind::PositionSettled => CanonicalSubject::EventLedger,
+        | EventKind::PositionSettled
+        | EventKind::InternalTransfer
+        | EventKind::AccountClassTransfer
+        | EventKind::VaultCreated
+        | EventKind::VaultDistribution
+        | EventKind::VaultLeaderCommissionPaid
+        | EventKind::RewardClaimed
+        | EventKind::SpotGenesisApplied
+        | EventKind::StakingDeposit
+        | EventKind::StakingDelegated
+        | EventKind::StakingUndelegated
+        | EventKind::StakingWithdrawalQueued
+        | EventKind::StakingWithdrawalCompleted
+        | EventKind::ValidatorRewardPaid => CanonicalSubject::EventLedger,
     }
 }
 

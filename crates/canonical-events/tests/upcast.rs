@@ -13,7 +13,7 @@ fn current_v1_minor_range_is_validated_and_preserved_byte_for_byte() {
     let original = fixture.encode_to_vec().unwrap();
     let upcaster = CanonicalUpcaster::v1();
 
-    for schema_version in ["1.0.0", "1.0.7"] {
+    for schema_version in ["1.0.0", "1.0.7", "1.1.0", "1.1.7"] {
         let input = with_schema_version(&original, schema_version);
         let result = upcaster.upcast(&input).unwrap();
 
@@ -36,7 +36,7 @@ fn historical_and_future_semantic_versions_fail_closed() {
         .unwrap();
     let upcaster = CanonicalUpcaster::v1();
 
-    for schema_version in ["0.9.0", "1.1.0", "2.0.0"] {
+    for schema_version in ["0.9.0", "1.2.0", "2.0.0"] {
         let error = upcaster
             .upcast(&with_schema_version(&original, schema_version))
             .expect_err("unsupported version must fail");

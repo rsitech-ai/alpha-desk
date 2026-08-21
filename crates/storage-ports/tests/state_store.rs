@@ -55,6 +55,27 @@ fn atomic_commit_binds_one_exact_prepared_state_transition() {
 }
 
 #[test]
+fn column_family_schema_is_exact_and_rebuilds_on_drift() {
+    storage_ports::admit_column_family_schema(storage_ports::STATE_STORE_CFS).unwrap();
+    let error = storage_ports::admit_column_family_schema(&["meta"]).unwrap_err();
+    assert_eq!(error.reason_code(), "state_store.rebuild_required");
+}
+
+#[test]
+fn schema_id_names_the_file_atomic_engine_not_rocksdb() {
+    assert_eq!(
+        storage_ports::STATE_STORE_SCHEMA,
+        "hyperliquid-alpha-desk/file-atomic-state-store/v1"
+    );
+    assert_eq!(storage_ports::STATE_STORE_ENGINE, "file-atomic");
+    assert_ne!(
+        storage_ports::STATE_STORE_SCHEMA,
+        storage_ports::LEGACY_ROCKSDB_STATE_STORE_SCHEMA
+    );
+    assert!(!storage_ports::STATE_STORE_SCHEMA.contains("rocksdb"));
+}
+
+#[test]
 fn atomic_commit_rejects_a_delta_and_state_image_from_different_transitions() {
     let ledger = ledger();
     let PrepareOutcome::Ready(first) = ledger.prepare_block(&block(100)).expect("first") else {

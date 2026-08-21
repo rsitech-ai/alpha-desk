@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsitech.ai/schemas/alpha-desk/capability-manifest-v1.json",
+  "$comment": "Structural description of config/hyperliquid/capabilities.toml. Semantic rules live in tools/hyperliquid-capabilities.",
+  "title": "Hyperliquid capability manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "capability"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "capability": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/capability" }
+    }
+  },
+  "$defs": {
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source",
+        "network",
+        "transport",
+        "identifier",
+        "domain",
+        "source_role",
+        "request_cost",
+        "pagination",
+        "parser",
+        "retention",
+        "owner",
+        "state_target",
+        "status"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmpty" },
+        "source": { "type": "string", "enum": ["official", "node", "s3"] },
+        "network": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["mainnet", "testnet"] }
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["rest_info", "websocket", "node_files", "s3"]
+        },
+        "identifier": { "$ref": "#/$defs/nonEmpty" },
+        "domain": { "$ref": "#/$defs/nonEmpty" },
+        "source_role": {
+          "type": "string",
+          "enum": [
+            "committed",
+            "provisional",
+            "reconciliation",
+            "enrichment",
+            "evidence-only"
+          ]
+        },
+        "request_cost": { "$ref": "#/$defs/nonEmpty" },
+        "pagination": { "$ref": "#/$defs/nonEmpty" },
+        "parser": { "$ref": "#/$defs/nonEmpty" },
+        "fixture_set": { "type": "string" },
+        "retention": { "$ref": "#/$defs/nonEmpty" },
+        "freshness_target_ms": { "type": "integer", "minimum": 1 },
+        "owner": { "$ref": "#/$defs/nonEmpty" },
+        "state_target": {
+          "type": "string",
+          "enum": [
+            "committed_state",
+            "reconciled_snapshot",
+            "canonical_state",
+            "l4_book",
+            "position_state",
+            "canonical_event",
+            "reference_snapshot",
+            "evm_fact",
+            "discovery_only"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "implemented",
+            "implemented_unqualified",
+            "qualified_live",
+            "qualified_replay",
+            "degraded",
+            "partial",
+            "planned",
+            "unsupported",
+            "unsupported_by_network",
+            "source_unavailable",
+            "schema_unknown",
+            "disabled_by_policy"
+          ]
+        },
+        "limitations": { "type": "string" },
+        "unsupported_networks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["network", "reason"],
+            "properties": {
+              "network": { "type": "string", "enum": ["mainnet", "testnet"] },
+              "reason": { "$ref": "#/$defs/nonEmpty" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

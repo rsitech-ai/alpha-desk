@@ -38,7 +38,7 @@ fn account_e2e_proves_exact_synthetic_account_flows_relations_modes_and_boundari
     assert_eq!(report["source_qualification"], "synthetic_unassessed");
     assert_eq!(
         report["reducer_version"],
-        "hyperliquid-alpha-desk-canonical-state@1.1.0"
+        "hyperliquid-alpha-desk-canonical-state@1.2.0"
     );
     assert_eq!(report["synthetic_account_flow_contract_proven"], true);
     for field in [

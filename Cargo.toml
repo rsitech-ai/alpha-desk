@@ -35,6 +35,7 @@ members = [
   "tools/book-inspect",
   "tools/build-info",
   "tools/architecture-check",
+  "tools/hyperliquid-capabilities",
   "tools/stage-gate",
   "tools/open-source-audit",
   "tools/state-replay",

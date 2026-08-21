@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use api_contracts::{WireNonUserOrderCancelled, encode_non_user_order_cancelled};
+
 use canonical_events::{
     BlockEnvelope, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass, EventKind,
     EventPayload, OrderAccepted, OrderCancelled, OrderFilled, OrderModified, OrderPartiallyFilled,
@@ -126,6 +128,7 @@ fn full_fill_lifecycle_creates_immutable_facts_current_state_and_hash_linked_tra
     assert_eq!(current.filled_quantity(), quantity("1.25"));
     assert_eq!(current.remaining_quantity(), quantity("0"));
     assert_eq!(current.last_event_id(), events[4].event_id());
+    assert!(current.try_resting().is_none());
 
     let mut previous_result = None;
     for event in &events {
@@ -162,6 +165,49 @@ fn full_fill_lifecycle_creates_immutable_facts_current_state_and_hash_linked_tra
         previous_result = transition.result_state_hash();
         assert!(previous_result.is_some());
     }
+}
+
+#[test]
+fn rested_order_projects_to_l4_resting_state() {
+    let account = Address::from_bytes(ACCOUNT_BYTES);
+    let market = MarketId::new("perp:BTC").unwrap();
+    let order_id = OrderId::new("order-resting").unwrap();
+    let mut ledger = ledger(110);
+    ledger
+        .apply_block(&block(
+            110,
+            vec![
+                accepted_event(110, 0, &order_id, &market, account, quantity("1")),
+                order_event(
+                    110,
+                    1,
+                    EventPayload::OrderRested(OrderRested {
+                        order_id: order_id.clone(),
+                        market_id: market.clone(),
+                        remaining_quantity: quantity("1"),
+                        limit_price: price("65000"),
+                    }),
+                    vec![market.clone()],
+                    vec![account],
+                    "1.0.0",
+                ),
+            ],
+        ))
+        .unwrap();
+    let current_key = OrderCurrentRecordV1::state_key(&market, &order_id).unwrap();
+    let current = OrderCurrentRecordV1::decode_at(
+        &current_key,
+        ledger.state_image().entries().get(&current_key).unwrap(),
+    )
+    .unwrap();
+    let resting = current
+        .try_resting()
+        .expect("rested order sits on the book");
+    assert_eq!(resting.order_id, order_id);
+    assert_eq!(resting.remaining, quantity("1"));
+    assert_eq!(resting.original, quantity("1"));
+    assert_eq!(resting.account_id, Some(account));
+    assert_eq!(current.last_block_height(), BlockHeight::new(110));
 }
 
 #[test]
@@ -242,6 +288,59 @@ fn cancellation_and_rejection_are_terminal_or_fact_only_as_applicable() {
     assert_eq!(transition.prior_state_hash(), None);
     assert_eq!(transition.result_state_hash(), None);
     assert_eq!(namespace_count(&ledger, "order-current.v1"), 1);
+}
+
+#[test]
+fn non_user_order_cancelled_uses_the_same_cancel_transition() {
+    let account = Address::from_bytes(ACCOUNT_BYTES);
+    let market = MarketId::new("perp:ETH").unwrap();
+    let order_id = OrderId::new("order-system-cancel").unwrap();
+    let mut ledger = ledger(210);
+    ledger
+        .apply_block(&block(
+            210,
+            vec![
+                accepted_event(210, 0, &order_id, &market, account, quantity("1")),
+                order_event(
+                    210,
+                    1,
+                    EventPayload::OrderRested(OrderRested {
+                        order_id: order_id.clone(),
+                        market_id: market.clone(),
+                        remaining_quantity: quantity("1"),
+                        limit_price: price("65000"),
+                    }),
+                    vec![market.clone()],
+                    vec![account],
+                    "1.0.0",
+                ),
+                order_event(
+                    210,
+                    2,
+                    EventPayload::decode(
+                        EventKind::NonUserOrderCancelled,
+                        &encode_non_user_order_cancelled(&WireNonUserOrderCancelled {
+                            order_id: order_id.as_str().to_owned(),
+                            reason: "marginCanceled".to_owned(),
+                            remaining_quantity: quantity("1").to_string(),
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                    vec![market.clone()],
+                    vec![account],
+                    "1.0.0",
+                ),
+            ],
+        ))
+        .unwrap();
+    let current_key = OrderCurrentRecordV1::state_key(&market, &order_id).unwrap();
+    let current = OrderCurrentRecordV1::decode_at(
+        &current_key,
+        ledger.state_image().entries().get(&current_key).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(current.lifecycle(), OrderLifecycleV1::Cancelled);
 }
 
 #[test]

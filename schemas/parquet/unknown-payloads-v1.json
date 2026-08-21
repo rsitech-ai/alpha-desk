@@ -1,0 +1,17 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "unknown_payloads",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "payload"
+  ],
+  "fields": [
+    {"name": "chain_id", "type": "utf8", "nullable": false},
+    {"name": "capability_id", "type": "utf8", "nullable": false},
+    {"name": "parser_version", "type": "utf8", "nullable": false},
+    {"name": "observed_at_micros", "type": "int64", "nullable": false},
+    {"name": "content_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "reason_code", "type": "utf8", "nullable": false},
+    {"name": "payload", "type": "binary", "nullable": false}
+  ]
+}

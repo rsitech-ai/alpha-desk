@@ -459,3 +459,10 @@ fn publication_error(_error: PublicationError) -> CoordinatorError {
 fn progress_error(_error: ProgressError) -> CoordinatorError {
     CoordinatorError::Progress
 }
+
+pub use crate::adapters::info_rest::{
+    InfoCaptureCoordinator, InfoCaptureOutcome, InfoFaultPoint, NoInfoFaults,
+};
+pub use crate::adapters::public_ws::{
+    NoWsFaults, WsCaptureCoordinator, WsCaptureError, WsFaultPoint,
+};

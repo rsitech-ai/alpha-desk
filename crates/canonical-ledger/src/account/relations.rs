@@ -296,7 +296,7 @@ pub(super) fn subaccount_relation_mutation(
     ))
 }
 
-pub(super) fn vault_relation_mutation(
+pub(crate) fn vault_relation_mutation(
     state: &StateView<'_>,
     account_id: Address,
     vault_id: &VaultId,

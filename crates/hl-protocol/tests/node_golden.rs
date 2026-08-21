@@ -78,6 +78,14 @@ fn node_v1_maps_each_stream_to_the_required_observation_class() {
             ObservationClass::AuxiliaryLedger,
         ),
         (NodeStreamKind::MarketMetadata, ObservationClass::Snapshot),
+        (
+            NodeStreamKind::AbciStateSnapshots,
+            ObservationClass::AuxiliaryLedger,
+        ),
+        (
+            NodeStreamKind::L4Snapshots,
+            ObservationClass::AuxiliaryBookDiff,
+        ),
     ] {
         assert_eq!(stream.observation_class(), expected);
     }

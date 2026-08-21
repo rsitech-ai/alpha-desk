@@ -302,10 +302,13 @@ fn every_quantity_and_quote_scope_has_an_unambiguous_key_identity() {
         AccountQuantityFlowScopeV1::BuilderFeeAsset {
             asset_id: asset.clone(),
         },
-        AccountQuantityFlowScopeV1::ReferralRewardAsset { asset_id: asset },
+        AccountQuantityFlowScopeV1::ReferralRewardAsset {
+            asset_id: asset.clone(),
+        },
         AccountQuantityFlowScopeV1::VaultShares {
             vault_id: vault.clone(),
         },
+        AccountQuantityFlowScopeV1::SpotGenesisAsset { asset_id: asset },
     ];
     let quantity_keys = quantity_scopes
         .iter()
@@ -324,6 +327,8 @@ fn every_quantity_and_quote_scope_has_an_unambiguous_key_identity() {
             market_id: MarketId::new("perp:BTC").unwrap(),
         },
         AccountQuoteFlowScopeV1::VaultPrincipal { vault_id: vault },
+        AccountQuoteFlowScopeV1::SpotClassQuote,
+        AccountQuoteFlowScopeV1::RewardClaimedQuote,
     ];
     let quote_keys = quote_scopes
         .iter()

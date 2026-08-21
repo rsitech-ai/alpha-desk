@@ -50,6 +50,20 @@ const PAYLOAD_MESSAGES: &[&str] = &[
     "DexCreated",
     "OutcomeCreated",
     "OutcomeResolved",
+    "NonUserOrderCancelled",
+    "InternalTransfer",
+    "AccountClassTransfer",
+    "VaultCreated",
+    "VaultDistribution",
+    "VaultLeaderCommissionPaid",
+    "RewardClaimed",
+    "SpotGenesisApplied",
+    "StakingDeposit",
+    "StakingDelegated",
+    "StakingUndelegated",
+    "StakingWithdrawalQueued",
+    "StakingWithdrawalCompleted",
+    "ValidatorRewardPaid",
 ];
 
 fn descriptor_set() -> FileDescriptorSet {
@@ -112,6 +126,7 @@ fn canonical_envelope_keeps_the_exact_v1_field_numbers() {
             ("payload_hash", 17),
             ("parser_version", 18),
             ("payload", 19),
+            ("superseded_event_id", 20),
         ]
     );
 }
@@ -128,7 +143,7 @@ fn every_v1_event_family_has_a_distinct_payload_message() {
         .collect::<BTreeSet<_>>();
     let expected = PAYLOAD_MESSAGES.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 43);
+    assert_eq!(actual.len(), 57);
     for name in PAYLOAD_MESSAGES {
         assert!(
             !message(canonical, name).field.is_empty(),
@@ -191,6 +206,69 @@ fn health_contract_is_versioned_and_nonempty() {
             .iter()
             .any(|enumeration| !enumeration.value.is_empty()),
         "health/v1/health.proto must define a real health state enum"
+    );
+}
+
+#[test]
+fn snapshot_envelope_keeps_v1_field_numbers_and_is_not_an_event_payload() {
+    let set = descriptor_set();
+    let snapshots = file(&set, "canonical/v1/snapshots.proto");
+    assert_eq!(snapshots.package.as_deref(), Some("hl.canonical.v1"));
+    let envelope = message(snapshots, "CanonicalSnapshotEnvelope");
+    let actual = envelope
+        .field
+        .iter()
+        .map(field_signature)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            ("schema_version", 1),
+            ("family", 2),
+            ("class", 3),
+            ("chain_id", 4),
+            ("as_of_block", 5),
+            ("observed_at_micros", 6),
+            ("payload_hash", 7),
+            ("parser_version", 8),
+            ("payload", 9),
+        ]
+    );
+    assert!(!PAYLOAD_MESSAGES.contains(&"CanonicalSnapshotEnvelope"));
+}
+
+#[test]
+fn health_assessment_keeps_v1_fields_and_source_health_is_additive() {
+    let set = descriptor_set();
+    let health = file(&set, "health/v1/health.proto");
+    let assessment = message(health, "HealthAssessment");
+    let actual = assessment
+        .field
+        .iter()
+        .map(field_signature)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            ("scope", 1),
+            ("state", 2),
+            ("reason_code", 3),
+            ("observed_at_micros", 4),
+            ("suppresses", 5),
+        ]
+    );
+    let source = message(health, "SourceHealth");
+    let source_fields = source.field.iter().map(field_signature).collect::<Vec<_>>();
+    assert_eq!(
+        source_fields,
+        vec![
+            ("source_id", 1),
+            ("state", 2),
+            ("reason_code", 3),
+            ("observed_at_micros", 4),
+            ("suppresses", 5),
+            ("suppress_provisional_features", 6),
+        ]
     );
 }
 

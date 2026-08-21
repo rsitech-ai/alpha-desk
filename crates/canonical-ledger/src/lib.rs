@@ -1,19 +1,26 @@
 #![forbid(unsafe_code)]
 
 mod account;
+mod borrow_lend;
 mod checkpoint;
 mod composite;
 mod correction;
 mod error;
 mod ledger;
 mod market;
+mod opaque;
 mod order;
 mod position;
+mod record_codec;
 mod reducer;
+mod relationships;
+mod staking;
 mod state;
 mod trade;
 mod trigger;
 mod twap;
+mod validator;
+mod vault;
 mod watermark_only;
 
 pub use account::{
@@ -23,9 +30,11 @@ pub use account::{
     LeverageCurrentRecordV1, MarginModeCurrentRecordV1, SubaccountMasterCurrentRecordV1,
     VaultPrincipalFlowCurrentRecordV1, VaultShareFlowCurrentRecordV1,
 };
+pub use borrow_lend::CanonicalBorrowLendReducerV1;
 pub use checkpoint::{CheckpointArtifact, CheckpointCompatibility};
 pub use composite::{
     CanonicalStateComponentVersionV1, CanonicalStateError, CanonicalStateReducerV1,
+    L4ProjectionError,
 };
 pub use correction::{
     ConfirmationAdmission, CorrectionInspectReport, CorrectionRecord, admit_confirmation,
@@ -56,7 +65,13 @@ pub use position::{
     PositionSettlementFactRecordV1, PositionStateError, PositionUnresolvedCauseFactRecordV1,
     PositionUnresolvedCauseV1, derive_position_episode_id,
 };
+pub use record_codec::RecordCodecError;
 pub use reducer::{ApplyContext, BlockDeltaEntry, BlockDeltaView, EventReducer};
+pub use relationships::{CanonicalRelationshipReducerV1, StakingDelegationRelationCurrentRecordV1};
+pub use staking::{
+    CanonicalStakingReducerV1, StakingDelegationCurrentRecordV1, StakingFactRecordV1,
+    StakingLiquidCurrentRecordV1, StakingPendingCurrentRecordV1,
+};
 pub use state::{
     AppliedMutation, StateImage, StateImageLimits, StateKey, StateMutation, StateView,
 };
@@ -73,6 +88,10 @@ pub use twap::{
     CanonicalTwapReducerV1, TwapCurrentRecordV1, TwapFactRecordV1, TwapLifecycleV1, TwapStateError,
     TwapTransitionRecordV1,
 };
+pub use validator::{
+    CanonicalValidatorReducerV1, ValidatorFactRecordV1, ValidatorRewardCurrentRecordV1,
+};
+pub use vault::{CanonicalVaultReducerV1, VaultCurrentRecordV1, VaultFactRecordV1};
 pub use watermark_only::WatermarkOnlyReducerV1;
 
 pub const CRATE_BOOTSTRAPPED: bool = true;

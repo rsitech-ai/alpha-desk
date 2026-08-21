@@ -2220,6 +2220,214 @@ pub trait RawObservationArchive: Send + Sync {
     ) -> Result<bool, ArchiveError>;
 }
 
+pub const HISTORICAL_OBJECT_MANIFEST_SCHEMA_V1: &str =
+    "hyperliquid-alpha-desk/historical-object-manifest/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoricalGapStatus {
+    Present,
+    MissingObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequesterPaysCost {
+    billed_bytes: u64,
+}
+
+impl RequesterPaysCost {
+    pub fn try_new(billed_bytes: u64) -> Result<Self, ArchiveError> {
+        if billed_bytes == 0 {
+            return Err(ArchiveError::InvalidInput(
+                "requester-pays billed bytes must be nonzero",
+            ));
+        }
+        Ok(Self { billed_bytes })
+    }
+
+    #[must_use]
+    pub const fn billed_bytes(self) -> u64 {
+        self.billed_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalObjectManifest {
+    bucket: String,
+    key: String,
+    etag: Option<String>,
+    content_hash: Option<[u8; 32]>,
+    dataset: String,
+    dataset_version: String,
+    byte_count: u64,
+    first_block: Option<BlockHeight>,
+    last_block: Option<BlockHeight>,
+    first_event_time: Option<KnownTime>,
+    last_event_time: Option<KnownTime>,
+    parser_build: String,
+    imported_at: KnownTime,
+    gap_status: HistoricalGapStatus,
+    requester_pays_cost: Option<RequesterPaysCost>,
+}
+
+impl HistoricalObjectManifest {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+        etag: Option<String>,
+        content_hash: Option<[u8; 32]>,
+        dataset: impl Into<String>,
+        dataset_version: impl Into<String>,
+        byte_count: u64,
+        first_block: Option<BlockHeight>,
+        last_block: Option<BlockHeight>,
+        first_event_time: Option<KnownTime>,
+        last_event_time: Option<KnownTime>,
+        parser_build: impl Into<String>,
+        imported_at: KnownTime,
+        gap_status: HistoricalGapStatus,
+        requester_pays_cost: Option<RequesterPaysCost>,
+    ) -> Result<Self, ArchiveError> {
+        let bucket = bucket.into();
+        let key = key.into();
+        let dataset = dataset.into();
+        let dataset_version = dataset_version.into();
+        let parser_build = parser_build.into();
+        validate_identity(&bucket, "historical object bucket")?;
+        validate_identity(&key, "historical object key")?;
+        validate_identity(&dataset, "historical object dataset")?;
+        validate_identity(&dataset_version, "historical object dataset version")?;
+        validate_identity(&parser_build, "historical object parser build")?;
+        if let Some(etag) = &etag {
+            validate_identity(etag, "historical object etag")?;
+        }
+        match gap_status {
+            HistoricalGapStatus::Present => {
+                if byte_count == 0 || etag.is_none() || content_hash.is_none() {
+                    return Err(ArchiveError::InvalidInput(
+                        "present historical object requires bytes, etag, and content hash",
+                    ));
+                }
+            }
+            HistoricalGapStatus::MissingObject => {
+                if byte_count != 0
+                    || etag.is_some()
+                    || content_hash.is_some()
+                    || requester_pays_cost.is_some()
+                {
+                    return Err(ArchiveError::InvalidInput(
+                        "missing historical object cannot carry content or cost",
+                    ));
+                }
+            }
+        }
+        if let (Some(first), Some(last)) = (first_block, last_block)
+            && first.get() > last.get()
+        {
+            return Err(ArchiveError::InvalidInput("historical object block range"));
+        }
+        if let (Some(first), Some(last)) = (first_event_time, last_event_time)
+            && first > last
+        {
+            return Err(ArchiveError::InvalidInput(
+                "historical object event-time range",
+            ));
+        }
+        Ok(Self {
+            bucket,
+            key,
+            etag,
+            content_hash,
+            dataset,
+            dataset_version,
+            byte_count,
+            first_block,
+            last_block,
+            first_event_time,
+            last_event_time,
+            parser_build,
+            imported_at,
+            gap_status,
+            requester_pays_cost,
+        })
+    }
+
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub fn etag(&self) -> Option<&str> {
+        self.etag.as_deref()
+    }
+
+    #[must_use]
+    pub const fn content_hash(&self) -> Option<[u8; 32]> {
+        self.content_hash
+    }
+
+    #[must_use]
+    pub fn dataset(&self) -> &str {
+        &self.dataset
+    }
+
+    #[must_use]
+    pub fn dataset_version(&self) -> &str {
+        &self.dataset_version
+    }
+
+    #[must_use]
+    pub const fn byte_count(&self) -> u64 {
+        self.byte_count
+    }
+
+    #[must_use]
+    pub const fn first_block(&self) -> Option<BlockHeight> {
+        self.first_block
+    }
+
+    #[must_use]
+    pub const fn last_block(&self) -> Option<BlockHeight> {
+        self.last_block
+    }
+
+    #[must_use]
+    pub const fn first_event_time(&self) -> Option<KnownTime> {
+        self.first_event_time
+    }
+
+    #[must_use]
+    pub const fn last_event_time(&self) -> Option<KnownTime> {
+        self.last_event_time
+    }
+
+    #[must_use]
+    pub fn parser_build(&self) -> &str {
+        &self.parser_build
+    }
+
+    #[must_use]
+    pub const fn imported_at(&self) -> KnownTime {
+        self.imported_at
+    }
+
+    #[must_use]
+    pub const fn gap_status(&self) -> HistoricalGapStatus {
+        self.gap_status
+    }
+
+    #[must_use]
+    pub const fn requester_pays_cost(&self) -> Option<RequesterPaysCost> {
+        self.requester_pays_cost
+    }
+}
+
 fn validate_identity(value: &str, label: &'static str) -> Result<(), ArchiveError> {
     if value.is_empty()
         || value.trim() != value
@@ -2250,7 +2458,11 @@ mod tests {
 
     use domain_types::{BlockHeight, BlockRange};
 
-    use super::{ArchiveError, ArchiveObject};
+    use super::{
+        ArchiveError, ArchiveObject, HistoricalGapStatus, HistoricalObjectManifest,
+        RequesterPaysCost,
+    };
+    use domain_types::KnownTime;
 
     #[test]
     fn archive_object_rejects_unsafe_paths_and_empty_files() {
@@ -2262,6 +2474,72 @@ mod tests {
         ));
         assert!(matches!(
             ArchiveObject::try_new(PathBuf::from("safe.parquet"), [1; 32], 0, 1, range),
+            Err(ArchiveError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn historical_object_manifest_fails_closed_on_gap_shape() {
+        let imported = KnownTime::from_unix_micros(1).expect("time");
+        let present = HistoricalObjectManifest::try_new(
+            "hyperliquid-archive",
+            "market_data/20230916/9/l2Book/SOL.lz4",
+            Some("etag-1".to_owned()),
+            Some([7; 32]),
+            "l2-snapshots",
+            "market_data-v1",
+            12,
+            None,
+            None,
+            None,
+            None,
+            "hl-capture-historical-s3-v1",
+            imported,
+            HistoricalGapStatus::Present,
+            Some(RequesterPaysCost::try_new(12).expect("cost")),
+        )
+        .expect("present");
+        assert_eq!(present.gap_status(), HistoricalGapStatus::Present);
+        assert_eq!(present.byte_count(), 12);
+
+        assert!(
+            HistoricalObjectManifest::try_new(
+                "hyperliquid-archive",
+                "market_data/20230916/9/l2Book/BTC.lz4",
+                None,
+                None,
+                "l2-snapshots",
+                "market_data-v1",
+                0,
+                None,
+                None,
+                None,
+                None,
+                "hl-capture-historical-s3-v1",
+                imported,
+                HistoricalGapStatus::MissingObject,
+                None,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            HistoricalObjectManifest::try_new(
+                "hyperliquid-archive",
+                "market_data/20230916/9/l2Book/BTC.lz4",
+                Some("etag-1".to_owned()),
+                None,
+                "l2-snapshots",
+                "market_data-v1",
+                0,
+                None,
+                None,
+                None,
+                None,
+                "hl-capture-historical-s3-v1",
+                imported,
+                HistoricalGapStatus::MissingObject,
+                None,
+            ),
             Err(ArchiveError::InvalidInput(_))
         ));
     }

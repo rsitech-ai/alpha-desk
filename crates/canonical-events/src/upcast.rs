@@ -14,7 +14,7 @@ impl CanonicalUpcaster {
     pub const fn v1() -> Self {
         Self {
             supported_major: 1,
-            supported_minor: 0,
+            supported_minor: 1,
         }
     }
 
@@ -33,7 +33,7 @@ impl CanonicalUpcaster {
                 reason: "pre-release and build metadata are forbidden".to_owned(),
             });
         }
-        if version.major != self.supported_major || version.minor != self.supported_minor {
+        if version.major != self.supported_major || version.minor > self.supported_minor {
             return Err(UpcastError::UnsupportedVersion {
                 version: version.to_string(),
             });

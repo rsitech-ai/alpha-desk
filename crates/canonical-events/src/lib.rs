@@ -4,6 +4,7 @@ mod block;
 mod event_id;
 mod input;
 mod node_mapping;
+mod snapshot;
 mod upcast;
 
 pub use block::{BlockEnvelope, BlockError};
@@ -12,6 +13,11 @@ pub use input::CanonicalEventInput;
 pub use node_mapping::{
     CommittedNodeV1MappingContext, EvidenceOnlyReason, MappingDisposition, MappingError,
     MarketCatalogV1, NodeV1MappingContext, map_committed_node_v1_block, map_node_v1_record,
+    node_trade_match_key,
+};
+pub use snapshot::{
+    CanonicalSnapshotEnvelope, SNAPSHOT_ENVELOPE_SCHEMA, SnapshotClass, SnapshotFamily,
+    admit_snapshot_as_ledger_transition,
 };
 pub use upcast::{CanonicalUpcaster, UpcastError, UpcastedEnvelope};
 
@@ -65,6 +71,7 @@ use semver::Version;
 use std::str::FromStr;
 
 pub const SCHEMA_MAJOR: u64 = 1;
+pub const EVENT_CATALOG_VERSION: &str = "1.1.0";
 const HASH_LENGTH: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +212,20 @@ event_kinds!(
     DexCreated,
     OutcomeCreated,
     OutcomeResolved,
+    NonUserOrderCancelled,
+    InternalTransfer,
+    AccountClassTransfer,
+    VaultCreated,
+    VaultDistribution,
+    VaultLeaderCommissionPaid,
+    RewardClaimed,
+    SpotGenesisApplied,
+    StakingDeposit,
+    StakingDelegated,
+    StakingUndelegated,
+    StakingWithdrawalQueued,
+    StakingWithdrawalCompleted,
+    ValidatorRewardPaid,
 );
 
 /// Fully mapped V1 trade payload used by the deterministic Task 4 fixture boundary.
@@ -628,6 +649,13 @@ macro_rules! opaque_payloads {
             #[derive(Debug, Clone, PartialEq, Eq)]
             pub struct $kind {
                 encoded: Vec<u8>,
+            }
+
+            impl $kind {
+                #[must_use]
+                pub fn encoded(&self) -> &[u8] {
+                    &self.encoded
+                }
             }
         )*
 
@@ -1485,7 +1513,26 @@ macro_rules! opaque_payloads {
     };
 }
 
-opaque_payloads!();
+opaque_payloads!(
+    NonUserOrderCancelled,
+    InternalTransfer,
+    AccountClassTransfer,
+    VaultCreated,
+    VaultDistribution,
+    VaultLeaderCommissionPaid,
+    RewardClaimed,
+    SpotGenesisApplied,
+    StakingDeposit,
+    StakingDelegated,
+    StakingUndelegated,
+    StakingWithdrawalQueued,
+    StakingWithdrawalCompleted,
+    ValidatorRewardPaid,
+);
+
+fn validate_payload(kind: EventKind, bytes: &[u8]) -> Result<(), ContractError> {
+    api_contracts::validate_event_payload(kind.as_wire_name(), bytes).map_err(payload_error)
+}
 
 fn decode_order_accepted_payload(bytes: &[u8]) -> Result<OrderAccepted, ContractError> {
     let value = decode_order_accepted(bytes).map_err(payload_error)?;
@@ -2615,6 +2662,7 @@ pub struct CanonicalEventEnvelope {
     parser_version: String,
     payload: EventPayload,
     encoded_payload: Vec<u8>,
+    superseded_event_id: Option<EventId>,
 }
 
 impl CanonicalEventEnvelope {
@@ -2670,6 +2718,7 @@ impl CanonicalEventEnvelope {
             parser_version,
             payload: input.payload,
             encoded_payload: payload_bytes,
+            superseded_event_id: None,
         })
     }
 
@@ -2748,6 +2797,7 @@ impl CanonicalEventEnvelope {
             parser_version,
             payload,
             encoded_payload: payload_bytes,
+            superseded_event_id: None,
         })
     }
 
@@ -2934,6 +2984,11 @@ impl CanonicalEventEnvelope {
     }
 
     #[must_use]
+    pub fn superseded_event_id(&self) -> Option<&EventId> {
+        self.superseded_event_id.as_ref()
+    }
+
+    #[must_use]
     pub fn ordering_key(&self) -> EventOrderingKey<'_> {
         EventOrderingKey {
             chain_id: self.chain_id.as_str(),
@@ -2985,6 +3040,7 @@ impl CanonicalEventEnvelope {
             payload_hash: payload_hash.to_vec(),
             parser_version: self.parser_version.clone(),
             payload,
+            superseded_event_id: self.superseded_event_id.as_ref().map(ToString::to_string),
         })
     }
 }
@@ -3004,6 +3060,7 @@ impl CanonicalEventEnvelope {
             && self.payload_hash == other.payload_hash
             && self.payload == other.payload
             && self.encoded_payload == other.encoded_payload
+            && self.superseded_event_id == other.superseded_event_id
     }
 }
 
@@ -3042,6 +3099,29 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
                 reason: "does not match the canonical payload bytes".to_owned(),
             });
         }
+        let confirmation_class = ConfirmationClass::try_from(value.confirmation_class)?;
+        let event_id = parse_id(value.event_id, "event_id", EventId::new)?;
+        let superseded_event_id = match value.superseded_event_id.filter(|value| !value.is_empty())
+        {
+            Some(id) => {
+                if confirmation_class != ConfirmationClass::Corrected {
+                    return Err(ContractError::Invalid {
+                        field: "superseded_event_id",
+                        reason: "superseded_event_id is only valid on Corrected envelopes"
+                            .to_owned(),
+                    });
+                }
+                let superseded = parse_id(id, "superseded_event_id", EventId::new)?;
+                if superseded == event_id {
+                    return Err(ContractError::Invalid {
+                        field: "superseded_event_id",
+                        reason: "superseded_event_id must differ from event_id".to_owned(),
+                    });
+                }
+                Some(superseded)
+            }
+            None => None,
+        };
         let account_ids = value
             .account_ids
             .into_iter()
@@ -3062,7 +3142,7 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
             transaction_id: parse_id(value.transaction_id, "transaction_id", TransactionId::new)?,
             transaction_index: value.transaction_index,
             event_index: value.event_index,
-            event_id: parse_id(value.event_id, "event_id", EventId::new)?,
+            event_id,
             market_ids: value
                 .market_ids
                 .into_iter()
@@ -3074,7 +3154,7 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
                 .into_iter()
                 .map(SourceEvidence::try_from)
                 .collect::<Result<_, _>>()?,
-            confirmation_class: value.confirmation_class.try_into()?,
+            confirmation_class,
             observed_at: parse_known_time(value.observed_at_micros, "observed_at_micros")?,
             ingested_at: parse_known_time(value.ingested_at_micros, "ingested_at_micros")?,
             canonicalized_at: parse_known_time(
@@ -3085,6 +3165,7 @@ impl TryFrom<WireCanonicalEventEnvelope> for CanonicalEventEnvelope {
             parser_version: required(value.parser_version, "parser_version")?,
             payload,
             encoded_payload: payload_bytes,
+            superseded_event_id,
         })
     }
 }
@@ -3302,7 +3383,20 @@ fn payload_size_limit(kind: EventKind) -> Option<(&'static str, usize)> {
         | EventKind::LiquidationStarted
         | EventKind::LiquidationFill
         | EventKind::BackstopLiquidation
-        | EventKind::PositionSettled => Some((
+        | EventKind::PositionSettled
+        | EventKind::InternalTransfer
+        | EventKind::AccountClassTransfer
+        | EventKind::VaultCreated
+        | EventKind::VaultDistribution
+        | EventKind::VaultLeaderCommissionPaid
+        | EventKind::RewardClaimed
+        | EventKind::SpotGenesisApplied
+        | EventKind::StakingDeposit
+        | EventKind::StakingDelegated
+        | EventKind::StakingUndelegated
+        | EventKind::StakingWithdrawalQueued
+        | EventKind::StakingWithdrawalCompleted
+        | EventKind::ValidatorRewardPaid => Some((
             "canonical account payload exceeds the 16384-byte limit",
             MAX_CANONICAL_ACCOUNT_PAYLOAD_BYTES,
         )),
@@ -3312,6 +3406,7 @@ fn payload_size_limit(kind: EventKind) -> Option<(&'static str, usize)> {
         | EventKind::OrderPartiallyFilled
         | EventKind::OrderFilled
         | EventKind::OrderCancelled
+        | EventKind::NonUserOrderCancelled
         | EventKind::OrderRejected
         | EventKind::TriggerOrderActivated
         | EventKind::TwapStarted

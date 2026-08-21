@@ -1,9 +1,17 @@
 #![forbid(unsafe_code)]
 
+mod app;
+mod checkpoint;
+mod config;
 mod consumer;
+mod health;
+mod input;
 mod publication;
+mod publisher;
+mod reconciliation;
 mod replay;
 mod source;
+mod state_runtime;
 
 use canonical_events::BlockEnvelope;
 use canonical_ledger::{
@@ -12,17 +20,32 @@ use canonical_ledger::{
 };
 use storage_ports::{AtomicStateCommit, AtomicStateStore, StateCommitDisposition, StateStoreError};
 
+pub use app::CoreApp;
+pub use checkpoint::{load_checkpoint_ledger, publish_checkpoint};
+pub use config::{ConfigError, CoreConfig, NatsConfig};
 pub use consumer::{
     CanonicalDelivery, CanonicalPullSource, InMemoryCanonicalSource, JetStreamPullSource,
     JetStreamReplayAuth, JetStreamReplayConfig, JetStreamReplayConfigError, JetStreamReplayError,
     JetStreamReplayReport, JetStreamReplaySession, committed_block_delivery,
     committed_event_delivery,
 };
+pub use health::{
+    DiskPressureError, DiskReserve, DiskSpaceProbe, FeatureHealth, HealthState, ShutdownFlag,
+};
+pub use input::CoreInputSubject;
 pub use publication::{
     BLOCK_COMMITTED_SUBJECT, BLOCK_MARKER_SCHEMA_V1, BLOCK_PROVISIONAL_SUBJECT, BlockMarkerError,
-    CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker, decode_committed_block_marker,
-    encode_committed_block_marker, encode_event_payload, subject_for_event_kind,
+    CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker, HEALTH_SOURCE_SUBJECT,
+    SNAPSHOT_ACCOUNT_SUBJECT, SNAPSHOT_ECOSYSTEM_SUBJECT, SNAPSHOT_MARKET_SUBJECT,
+    decode_committed_block_marker, encode_committed_block_marker, encode_event_payload,
+    subject_for_event_kind,
 };
+pub use publisher::{
+    InMemoryDeltaSink, PublishDisposition, PublishError, STATE_ACCOUNT_DELTA_SUBJECT,
+    STATE_BOOK_DELTA_SUBJECT, STATE_DELTA_SCHEMA_V1, StateDeltaSink, encode_state_delta,
+    publish_state_delta,
+};
+pub use reconciliation::{InputDisposition, QuarantineRecord, ReconciliationInbox};
 pub use replay::{
     LocalBlockInspectReport, LocalReplayError, LocalReplayReport, LocalReplaySession,
     inspect_local_replay_block, replay_block_durably,
@@ -31,6 +54,7 @@ pub use source::{
     BlockSourceError, CanonicalBlockSource, DirectoryBlockSource, InMemoryBlockSource,
     LOCAL_REPLAY_BLOCK_SCHEMA, confirmation_label, decode_local_replay_block,
 };
+pub use state_runtime::{ResumeMode, StateRuntime, admit_resume_height, align_watermarks};
 
 #[derive(Debug)]
 pub enum DurableApplyOutcome {

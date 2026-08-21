@@ -1,6 +1,36 @@
 use canonical_ledger::{StateDelta, StateImage, StateImageLimits};
 use domain_types::BlockHeight;
 
+pub const STATE_STORE_SCHEMA: &str = "hyperliquid-alpha-desk/file-atomic-state-store/v1";
+pub const STATE_STORE_ENGINE: &str = "file-atomic";
+pub const LEGACY_ROCKSDB_STATE_STORE_SCHEMA: &str = "hyperliquid-alpha-desk/rocksdb-state-store/v1";
+pub const STATE_STORE_CFS: &[&str] = &[
+    "meta",
+    "market_state",
+    "l2_book",
+    "l4_orders",
+    "account_state",
+    "balances",
+    "positions",
+    "orders",
+    "twap",
+    "vaults",
+    "staking",
+    "borrow_lend",
+    "evm_heads",
+    "reconciliation",
+    "event_seen",
+    "checkpoints",
+];
+
+pub fn admit_column_family_schema(observed: &[&str]) -> Result<(), StateStoreError> {
+    if observed == STATE_STORE_CFS {
+        Ok(())
+    } else {
+        Err(StateStoreError::RebuildRequired)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicStateCommit<'a> {
     delta: &'a StateDelta,
@@ -131,6 +161,8 @@ pub enum StateStoreError {
     Conflict,
     #[error("state store exceeds a configured resource bound")]
     ResourceLimit,
+    #[error("state store schema requires a rebuild")]
+    RebuildRequired,
     #[error("state store I/O failed while {0}")]
     Io(&'static str),
 }
@@ -144,6 +176,7 @@ impl StateStoreError {
             Self::Corrupt => "state_store.corrupt",
             Self::Conflict => "state_store.conflict",
             Self::ResourceLimit => "state_store.resource_limit",
+            Self::RebuildRequired => "state_store.rebuild_required",
             Self::Io(_) => "state_store.io",
         }
     }

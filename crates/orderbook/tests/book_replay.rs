@@ -100,13 +100,13 @@ fn gaps_duplicates_negative_fills_and_crossed_books_are_red() {
 }
 
 fn rest(id: &str, side: OrderSide, price: &str, remaining: &str, sequence: u64) -> RestingOrder {
-    RestingOrder {
-        order_id: OrderId::new(id).unwrap(),
+    RestingOrder::new(
+        OrderId::new(id).unwrap(),
         side,
-        price: Price::parse_at_scale(price, 0).unwrap(),
-        remaining: qty(remaining),
+        Price::parse_at_scale(price, 0).unwrap(),
+        qty(remaining),
         sequence,
-    }
+    )
 }
 
 fn qty(value: &str) -> Quantity {

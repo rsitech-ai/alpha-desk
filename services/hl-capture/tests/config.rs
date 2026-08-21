@@ -324,7 +324,12 @@ fn committed_source_adapter_covers_every_constructible_kind() {
         .adapter()
     {
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => {}
-        Some(SourceAdapterConfig::NodeLine { .. }) | None => {
+        Some(SourceAdapterConfig::NodeLine { .. })
+        | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
+        | Some(SourceAdapterConfig::OfficialInfo { .. })
+        | Some(SourceAdapterConfig::OfficialWs { .. })
+        | Some(SourceAdapterConfig::HistoricalS3 { .. })
+        | None => {
             panic!("example committed adapter must remain node-block-directory")
         }
     }
@@ -339,6 +344,18 @@ fn committed_source_adapter_covers_every_constructible_kind() {
             .expect_err("node-line cannot admit a committed source")
             .reason_code(),
         "capture_config.invalid_committed_source_adapter"
+    );
+
+    let snapshot_dir = replace_once(
+        &valid_config(),
+        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25, replica_cmds_style = \"actions-and-responses\" }",
+        "adapter = { kind = \"node-snapshot-directory\", path = \"/var/lib/hyperliquid/hl/data/periodic_abci_states\", stream_name = \"periodic-abci\", stream = \"abci-state-snapshots\", start_height = 10000, poll_interval_millis = 25 }",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&snapshot_dir)
+            .expect_err("snapshot directories cannot satisfy a committed-block source")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
     );
 
     let missing_adapter = replace_once(
@@ -921,6 +938,524 @@ adapter = {{ kind = "node-line", path = "/var/lib/hyperliquid/hl/data/node_fills
             ..
         })
     ));
+}
+
+#[test]
+fn node_snapshot_directory_is_an_auxiliary_source() {
+    let source = format!(
+        r#"{}
+
+[[sources]]
+id = "node-abci"
+source_version = "hyperliquid-node-v1"
+trust = "locally-verified-committed"
+class = "auxiliary-ledger"
+queue_capacity = 4096
+max_payload_bytes = 8388608
+adapter = {{ kind = "node-snapshot-directory", path = "/var/lib/hyperliquid/hl/data/periodic_abci_states", stream_name = "periodic-abci", stream = "abci-state-snapshots", start_height = 10000, poll_interval_millis = 25 }}
+"#,
+        valid_config()
+    );
+    let config = CaptureConfig::from_toml(&source).expect("valid snapshot directory source");
+    assert!(matches!(
+        config
+            .source("node-abci")
+            .expect("snapshot source")
+            .adapter(),
+        Some(SourceAdapterConfig::NodeSnapshotDirectory {
+            stream: hl_protocol::node::v1::NodeStreamKind::AbciStateSnapshots,
+            start_height: 10_000,
+            ..
+        })
+    ));
+
+    let wrong_class = source.replace("auxiliary-ledger", "committed-block");
+    assert_eq!(
+        CaptureConfig::from_toml(&wrong_class)
+            .expect_err("snapshot class must match the stream")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+
+    let unaligned = source.replace("start_height = 10000", "start_height = 100");
+    assert_eq!(
+        CaptureConfig::from_toml(&unaligned)
+            .expect_err("snapshot start height must follow the stride")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+}
+
+#[test]
+fn official_info_adapter_requires_snapshot_trust_and_egress() {
+    let with_egress = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[egress]]
+id = "official-info"
+kind = "official-info"
+base_url = "https://api.hyperliquid.xyz/info"
+weight_per_minute = 1200
+safety_envelope_percent = 75
+
+[[sources]]
+id = "official-rest"
+source_version = "info-v1"
+trust = "reconciled-snapshot"
+class = "snapshot"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "official-info", egress_id = "official-info", capability_id = "official.info.all_mids", request_timeout_millis = 5000 }
+"#
+    );
+    let config = CaptureConfig::from_toml(&with_egress).expect("official info source");
+    assert!(matches!(
+        config
+            .source("official-rest")
+            .expect("official rest")
+            .adapter(),
+        Some(SourceAdapterConfig::OfficialInfo {
+            capability_id,
+            ..
+        }) if capability_id == "official.info.all_mids"
+    ));
+
+    let missing_egress = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[sources]]
+id = "official-rest"
+source_version = "info-v1"
+trust = "reconciled-snapshot"
+class = "snapshot"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "official-info", egress_id = "official-info", capability_id = "official.info.all_mids", request_timeout_millis = 5000 }
+"#
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing_egress)
+            .expect_err("egress must exist")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+}
+
+#[test]
+fn official_ws_adapter_requires_snapshot_trust_and_ws_egress() {
+    let with_egress = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[egress]]
+id = "official-ws"
+kind = "official-ws"
+base_url = "wss://api.hyperliquid.xyz/ws"
+weight_per_minute = 2000
+safety_envelope_percent = 75
+
+[[sources]]
+id = "official-ws"
+source_version = "ws-v1"
+trust = "reconciled-snapshot"
+class = "snapshot"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "official-ws", egress_id = "official-ws", ping_interval_millis = 15000, inactivity_timeout_millis = 50000, stale_after_millis = 60000, reserved_failover_connections = 1, reserved_failover_users = 1, families = ["allMids"] }
+"#
+    );
+    let config = CaptureConfig::from_toml(&with_egress).expect("official ws source");
+    assert!(matches!(
+        config.source("official-ws").expect("official ws").adapter(),
+        Some(SourceAdapterConfig::OfficialWs { .. })
+    ));
+
+    let plaintext = with_egress.replace(
+        "wss://api.hyperliquid.xyz/ws",
+        "ws://api.hyperliquid.xyz/ws",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&plaintext)
+            .expect_err("plaintext ws")
+            .reason_code(),
+        "capture_config.invalid_egress"
+    );
+
+    let third_party = with_egress.replace(
+        "wss://api.hyperliquid.xyz/ws",
+        "wss://stream.example.com/ws",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&third_party)
+            .expect_err("third party")
+            .reason_code(),
+        "capture_config.invalid_egress"
+    );
+
+    let fast = with_egress.replace("families = [\"allMids\"]", "families = [\"fastAssetCtxs\"]");
+    assert_eq!(
+        CaptureConfig::from_toml(&fast)
+            .expect_err("fastAssetCtxs")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+}
+
+#[test]
+fn historical_s3_adapter_requires_requester_pays_and_recovery_trust() {
+    let accepted = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[sources]]
+id = "historical-l2"
+source_version = "s3-v1"
+trust = "recovery-only"
+class = "historical-block"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "historical-s3", bucket = "hyperliquid-archive", dataset = "l2-snapshots", format = "current", request_payer = "requester", start_key = "market_data/20230916/9/l2Book/SOL.lz4", end_key = "market_data/20230916/9/l2Book/SOL.lz4" }
+"#
+    );
+    let config = CaptureConfig::from_toml(&accepted).expect("historical s3 source");
+    assert!(matches!(
+        config
+            .source("historical-l2")
+            .expect("historical l2")
+            .adapter(),
+        Some(SourceAdapterConfig::HistoricalS3 {
+            request_payer,
+            ..
+        }) if request_payer == "requester"
+    ));
+
+    let owner_pays = accepted.replace("request_payer = \"requester\"", "request_payer = \"owner\"");
+    assert_eq!(
+        CaptureConfig::from_toml(&owner_pays)
+            .expect_err("owner pays")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+
+    let hyperevm = accepted.replace(
+        "dataset = \"l2-snapshots\"",
+        "dataset = \"hyperevm-blocks\"",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&hyperevm)
+            .expect_err("hyperevm")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+
+    let snapshot_trust = accepted.replace(
+        "trust = \"recovery-only\"",
+        "trust = \"reconciled-snapshot\"",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&snapshot_trust)
+            .expect_err("snapshot trust")
+            .reason_code(),
+        "capture_config.invalid_source_trust"
+    );
+}
+
+fn catalog_source(id: &str, trust: &str, class: &str, catalog: &str) -> String {
+    format!(
+        r#"
+
+[[sources]]
+id = "{id}"
+source_version = "catalog-v1"
+trust = "{trust}"
+class = "{class}"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+catalog = {catalog}
+"#
+    )
+}
+
+#[test]
+fn catalog_rejects_conflating_committed_primary_with_discovery_only() {
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "discovery-as-primary",
+            "locally-verified-committed",
+            "committed-block",
+            r#"{ network = "mainnet", role = "discovery-only", operator = "hypurrscan", operator_kind = "community", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&source)
+            .expect_err("discovery-only cannot occupy committed trust")
+            .reason_code(),
+        "capture_config.incompatible_source_role"
+    );
+}
+
+#[test]
+fn catalog_requires_provider_license_and_redistribution() {
+    let missing = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "nansen-labels",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", role = "attribution-enrichment", operator = "nansen", operator_kind = "provider", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing)
+            .expect_err("provider without license")
+            .reason_code(),
+        "capture_config.missing_provider_license"
+    );
+
+    let licensed = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "nansen-labels",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", role = "attribution-enrichment", operator = "nansen", operator_kind = "provider", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "nansen-api-tos", agreement_status = "active" }"#,
+        )
+    );
+    let config = CaptureConfig::from_toml(&licensed).expect("licensed provider");
+    let record = config
+        .source("nansen-labels")
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(record.descriptor().stable_id(), "mainnet:nansen-labels");
+    assert_eq!(
+        record.descriptor().redistribution(),
+        hl_protocol::RedistributionPolicy::InternalOnly
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_third_party_requires_provider_license() {
+    let missing = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "third-party-feed",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", operator = "nansen", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing)
+            .expect_err("omitted catalog.role cannot skip the provider license")
+            .reason_code(),
+        "capture_config.missing_provider_license"
+    );
+
+    let licensed = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "third-party-feed",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", operator = "nansen", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "nansen-api-tos", agreement_status = "active" }"#,
+        )
+    );
+    let config =
+        CaptureConfig::from_toml(&licensed).expect("licensed third-party may omit catalog.role");
+    let record = config
+        .source("third-party-feed")
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(
+        record.descriptor().role(),
+        hl_protocol::SourceRole::ProvisionalRealtime
+    );
+    assert_eq!(record.operator_kind(), hl_protocol::OperatorKind::Provider);
+    assert_eq!(
+        record.license().expect("license").license_name(),
+        "nansen-api-tos"
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_committed_source_does_not_require_license() {
+    let source = replace_once(
+        &valid_config(),
+        r#"adapter = { kind = "node-block-directory""#,
+        r#"catalog = { network = "mainnet", operator = "alpha-desk", retention_class = "raw-indefinite", redistribution = "private-operator-evidence" }
+adapter = { kind = "node-block-directory""#,
+    );
+    let config = CaptureConfig::from_toml(&source).expect("committed node may omit catalog.role");
+    let record = config
+        .source("primary-node")
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(
+        record.descriptor().role(),
+        hl_protocol::SourceRole::CommittedPrimary
+    );
+    assert_eq!(record.operator_kind(), hl_protocol::OperatorKind::LocalNode);
+    assert!(record.license().is_none());
+}
+
+fn assert_omitted_role_non_official_requires_license(
+    id: &str,
+    trust: &str,
+    class: &str,
+    expected_role: hl_protocol::SourceRole,
+) {
+    let missing = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            id,
+            trust,
+            class,
+            r#"{ network = "mainnet", operator = "vendor", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing)
+            .expect_err("omitted catalog.role cannot skip the provider license")
+            .reason_code(),
+        "capture_config.missing_provider_license"
+    );
+
+    let licensed = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            id,
+            trust,
+            class,
+            r#"{ network = "mainnet", operator = "vendor", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "vendor-tos", agreement_status = "active" }"#,
+        )
+    );
+    let config = CaptureConfig::from_toml(&licensed)
+        .unwrap_or_else(|error| panic!("licensed {trust} may omit catalog.role: {error}"));
+    let record = config
+        .source(id)
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(record.descriptor().role(), expected_role);
+    assert_ne!(record.operator_kind(), hl_protocol::OperatorKind::Official);
+    assert_eq!(record.operator_kind(), hl_protocol::OperatorKind::Provider);
+    assert_eq!(
+        record.license().expect("license").license_name(),
+        "vendor-tos"
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_mempool_requires_provider_license() {
+    assert_omitted_role_non_official_requires_license(
+        "mempool-relay",
+        "mempool-provisional",
+        "provisional-mempool",
+        hl_protocol::SourceRole::ProvisionalRealtime,
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_reconciled_snapshot_requires_provider_license() {
+    assert_omitted_role_non_official_requires_license(
+        "snapshot-vendor",
+        "reconciled-snapshot",
+        "snapshot",
+        hl_protocol::SourceRole::ReconciliationSnapshot,
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_recovery_requires_provider_license() {
+    assert_omitted_role_non_official_requires_license(
+        "archive-mirror",
+        "recovery-only",
+        "historical-block",
+        hl_protocol::SourceRole::HistoricalBackfill,
+    );
+}
+
+#[test]
+fn catalog_rejects_official_operator_kind_on_mempool_source() {
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "mempool-relay",
+            "mempool-provisional",
+            "provisional-mempool",
+            r#"{ network = "mainnet", operator = "vendor", operator_kind = "official", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&source)
+            .expect_err("official cannot pair with mempool-provisional")
+            .reason_code(),
+        "capture_config.incompatible_operator_kind"
+    );
+}
+
+#[test]
+fn catalog_rejects_committed_role_without_qualifying_evidence() {
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "aux-primary",
+            "locally-verified-committed",
+            "auxiliary-ledger",
+            r#"{ network = "mainnet", role = "committed-primary", operator = "alpha-desk", retention_class = "raw-indefinite", redistribution = "private-operator-evidence" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&source)
+            .expect_err("auxiliary evidence cannot mark committed")
+            .reason_code(),
+        "capture_config.invalid_source_catalog"
+    );
+}
+
+#[test]
+fn catalog_disabled_provider_is_omitted_from_scheduled_sources() {
+    use domain_types::KnownTime;
+
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "nansen-labels",
+            "third-party-provisional",
+            "public-market-data",
+            r#"{ network = "mainnet", role = "attribution-enrichment", operator = "nansen", operator_kind = "provider", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "nansen-api-tos", agreement_status = "disabled" }"#,
+        )
+    );
+    let config = CaptureConfig::from_toml(&source).expect("disabled provider still parses");
+    let at = KnownTime::from_unix_micros(1).expect("time");
+    let scheduled = config
+        .scheduled_sources(at)
+        .into_iter()
+        .map(hl_capture::SourceConfig::id)
+        .collect::<Vec<_>>();
+    assert_eq!(scheduled, vec!["primary-node", "public-market"]);
+    assert!(
+        !config
+            .source("nansen-labels")
+            .expect("source")
+            .allows_scheduled_work(at)
+    );
 }
 
 #[test]

@@ -9,6 +9,7 @@ use hl_protocol::node::v1::{NodeStreamKind, parse_node_record};
 use hl_protocol::{ObservationClass, SourceAdmission, SourceObservation, SourceTrust};
 
 use crate::coordinator::CaptureCoordinator;
+use crate::provisional_pipeline::{CommittedFact, LaneDecision, ProvisionalWsLane};
 use crate::{
     BlockCandidate, CandidateError, CanonicalSequencer, SequencerConfig, SequencerDecision,
     SequencerError,
@@ -107,6 +108,25 @@ impl<'a, C: CanonicalBlockCommitter + ?Sized> CommittedNodePipeline<'a, C> {
             sequencer,
             committer,
         }
+    }
+
+    #[must_use]
+    pub const fn committed_watermark(&self) -> Option<BlockHeight> {
+        self.sequencer.committed_watermark()
+    }
+
+    pub fn reconcile_provisional(
+        &self,
+        lane: &mut ProvisionalWsLane,
+        facts: &[CommittedFact],
+        now_millis: u64,
+    ) -> Vec<LaneDecision> {
+        let mut decisions: Vec<LaneDecision> = facts
+            .iter()
+            .map(|fact| lane.observe_committed(fact, now_millis))
+            .collect();
+        decisions.extend(lane.expire(now_millis));
+        decisions
     }
 
     pub async fn process_spooled(

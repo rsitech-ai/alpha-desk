@@ -1,0 +1,173 @@
+schema_version = 1
+corpus_kind = "synthetic-framework-examples"
+production_recording = false
+info_schema_documentation = "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
+note = "Synthetic framework fixtures for the /info registry. Not operator recordings and not committed venue truth."
+
+[[fixture]]
+file = "request-all-mids.json"
+sha256 = "f1db7c3d914ab4d110d6819663f1212ce0afa5dd8e61e2e5b0db07a5ebc83a84"
+
+[[fixture]]
+file = "response-all-mids.json"
+sha256 = "a74956aa8aaf4c80297dbe962be19a21fc8582ab1ba9c7839ab65c428ceb8242"
+
+[[fixture]]
+file = "response-unknown-field.json"
+sha256 = "4c361fef82dde63207e430cdeec967d9a9e6693b55f7cded7908cfcf0f1205f0"
+
+[[fixture]]
+file = "response-unknown-variant.json"
+sha256 = "8180f3d8ec15aab1a1c8986ed3018c0d2e0d9e7b5b625e4e9196c1191cc4b767"
+
+[[fixture]]
+file = "response-decimal-overflow.json"
+sha256 = "1afc3d2ba703700e223993826f233397b80bc3378c997d48ffd0617aa4cc2f78"
+
+[[fixture]]
+file = "response-decimal-invalid-scale.json"
+sha256 = "140e81e03ecadafb112f37c7babff2862d1693f887f3d6272be471f7a483a8b1"
+
+[[fixture]]
+file = "response-json-float.json"
+sha256 = "d5284933cee814cc9cf4c44462f71617d8a18158ae5acc79ae5ac7a498a2fd09"
+
+[[fixture]]
+file = "response-same-ms-page.json"
+sha256 = "b3fbfceaf0f11c05b1a96620c42442fd3564625b973f061ede84bad72c11c695"
+
+[[fixture]]
+file = "response-all-mids-remap.json"
+sha256 = "eb5cb54776b033cda7693d8617c1133dfea9ffc61473456aaf00bba78fc3f245"
+
+[[fixture]]
+file = "response-open-orders.json"
+sha256 = "93630c7833b0f31082011ba51244c8604b3b888a6afb8e691e30bae34f015fb8"
+
+[[fixture]]
+file = "response-frontend-open-orders.json"
+sha256 = "46f6fb48a7de7de6c1cb75cce54962377e965bd18db85a443b2c379b160f5160"
+
+[[fixture]]
+file = "response-user-fills.json"
+sha256 = "1fe483bd15e7cdff79e98f540682dcb72e0214356d73f1e12000c485bab4ad1a"
+
+[[fixture]]
+file = "response-historical-orders.json"
+sha256 = "7be02dc45dde3fa62c8dfc4dfbcc94360b8ed1959e3c97c022d5509e7310bb8d"
+
+[[fixture]]
+file = "response-order-status.json"
+sha256 = "6d43a741d30c30b230d8a88b99110108c51670a8f0b75ad7a21158b648327237"
+
+[[fixture]]
+file = "response-order-status-unknown.json"
+sha256 = "01030186d5134d7275b8601e681e4b399ca1e1099de2d79e4483775af5f036f8"
+
+[[fixture]]
+file = "response-l2-book.json"
+sha256 = "ca9267cbce3dfcec3fb6b43fa1065ff7038fe72fe92fdabd69abf8c5d8d25e9c"
+
+[[fixture]]
+file = "response-candle-snapshot.json"
+sha256 = "ce1ac828696a43540e3a587a6096984c9dca3de7f3cff8563293c31670554afb"
+
+[[fixture]]
+file = "response-exchange-status.json"
+sha256 = "85bbb52b1497fb2149764c92807aa2a9689cf47dd5860297ec4defc231604d4b"
+
+[[fixture]]
+file = "response-recent-trades.json"
+sha256 = "2c422a2fb5409935cbf565e7188f8942dc2cd1692bd6e2b72700adaf0fb8ebdb"
+
+[[fixture]]
+file = "response-portfolio.json"
+sha256 = "fb5e3fc6e6c30712cc78744378df376d8fc1428b908aff68aeed4a11bda5d592"
+
+[[fixture]]
+file = "response-user-non-funding-ledger.json"
+sha256 = "f2612f94f0b0d5c6f373f7b76d9c52d380d14055d8defbfebe11284e68d9cc90"
+
+[[fixture]]
+file = "response-user-twap-slice-fills.json"
+sha256 = "1704e541243e73f246041593358b7a9c86eb19a1fee326357a51765e94f03194"
+
+[[fixture]]
+file = "response-twap-history.json"
+sha256 = "ca8fc844abaa52fed3c0c198c408ab58bfad03a7c9c8a4da6d59578f3b1177b1"
+
+[[fixture]]
+file = "response-user-role-agent.json"
+sha256 = "71aacf4d29e183655f820275dcdb08ad6f905b1fd764293c705b8519d4d35ecb"
+
+[[fixture]]
+file = "response-user-role-subaccount.json"
+sha256 = "645a3a821f2c3e415612800327efb7c7f5674037f3f346fb2607dc85e59ae137"
+
+[[fixture]]
+file = "response-user-rate-limit.json"
+sha256 = "bc8be284a10b55730b6c15a81bcd6242e1c7f142f2d6115bb2cc824939005eb5"
+
+[[fixture]]
+file = "response-user-fees.json"
+sha256 = "5b307c6115c3ce37746ad82bd81fd060e659dd643cb9f8420499e94b6ab5006c"
+
+[[fixture]]
+file = "response-referral.json"
+sha256 = "ed6bcca490b3c7fd1d8f327c1127174011cf4a1e9b888d7cd8270e7396be1813"
+
+[[fixture]]
+file = "response-sub-accounts.json"
+sha256 = "1c8d2bc8cdc14569fb3c736283e11fd5eb9bd248f671fcd2ae1fb7acf1d08ab2"
+
+[[fixture]]
+file = "response-user-to-multi-sig-signers.json"
+sha256 = "e95a29477cdee4ad759803d641a3cf8af512078607ff3071baf3b377ffcd1088"
+
+[[fixture]]
+file = "response-extra-agents.json"
+sha256 = "ce898bac589288807ee12430e24372ad8c4e1763199d282339934b2afa7d3d73"
+
+[[fixture]]
+file = "response-approved-builders.json"
+sha256 = "56471058007dfc7071141b9825b1f5110ad164cdf58e75e9e689f4fc22430c6d"
+
+[[fixture]]
+file = "response-user-abstraction.json"
+sha256 = "0b77dccc9dd6ace948c88c95e54b62b5967c6a5a2b0a4007fb651b587d8ab177"
+
+[[fixture]]
+file = "response-user-dex-abstraction.json"
+sha256 = "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74"
+
+[[fixture]]
+file = "response-perp-dexs.json"
+sha256 = "f1a763ded8dfd45a1eb6f97185fc6db352f17afc1bf54255be6bbc23b29d47a6"
+
+[[fixture]]
+file = "response-meta.json"
+sha256 = "cda79e747551d871e7baddc7c208b999fa34b54c413bf4234b1ee303da702949"
+
+[[fixture]]
+file = "response-meta-and-asset-ctxs.json"
+sha256 = "4b86c06360e6a23b08f0198aeb8e88a6ee4e988883aee5f7581d1dd0310a32f3"
+
+[[fixture]]
+file = "response-clearinghouse-state.json"
+sha256 = "ace97c0145baeb2b714fbc9e0ba6fdd6c933db57a1e5ef7c06bffdc75830b1e4"
+
+[[fixture]]
+file = "response-spot-meta.json"
+sha256 = "6591a2e7f2bf39831d19c2f4577b873c6235f129c7f5f4c55201bf59260894a8"
+
+[[fixture]]
+file = "response-outcome-meta.json"
+sha256 = "514e0055c6cb0671b40deaf51218e6b239d843ec688822368f952aa25ec5b41d"
+
+[[fixture]]
+file = "response-vault-details.json"
+sha256 = "e73faab0715ca5d75172227a41e7b8ed19683dab236e41a736f30827a72e7bbc"
+
+[[fixture]]
+file = "response-borrow-lend-user.json"
+sha256 = "af6673fcb58f2b69b91fc9262cf8a33b44fcd17b5a1c75ca4a073055e3f6707c"

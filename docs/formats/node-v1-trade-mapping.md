@@ -22,7 +22,9 @@ and public block-wrapper contract. It is hashed in
 - Unknown markets, invalid transaction hashes, invalid addresses, non-positive
   or unrepresentable fixed-point values, invalid block times, and
   non-contiguous repeated transaction hashes fail closed with stable mapping
-  reason codes.
+  reason codes. Order-status and L4 batches apply the same fail-closed rule to
+  synthetic transaction ids: a later reappearance of an earlier oid is
+  `NonContiguousTransaction`.
 
 The `trades` stream remains `AuxiliaryLedger`. Even with block metadata, mapped
 events use `ProvisionalSource`; this auxiliary source cannot advance the
@@ -44,11 +46,44 @@ committed watermark.
 | `px` | checked positive `Price` |
 | `sz` | checked positive `Quantity` |
 
-The public schema says `side_info[0]` is the buyer and `side_info[1]` is the
-seller, but it does not establish which order is maker or taker. Therefore
-`maker_order_id` and `taker_order_id` remain absent. `deterministic_seed` is
-reserved and is zero. No account, order role, balance, or execution semantic is
-invented.
+`side_info[0]` is the buyer and `side_info[1]` is the seller. Maker and taker
+are derived, fail-closed, from the documented aggressor fields:
+
+- `side` `"B"` means the buyer is the taker (aggressor buy). The seller oid is
+  the maker.
+- `side` `"A"` means the seller is the taker. The buyer oid is the maker.
+- `trade_dir_override` must be `"Na"`. Any other override is `SchemaDrift`.
+- Any other `side` is `SchemaDrift`.
+
+`maker_order_id` and `taker_order_id` are those oids. `deterministic_seed` is
+reserved and is zero. Match keys for committed reconciliation are
+`node-trade:{trade_id}`.
+
+Standalone order-status and raw-book-diff records without `block_number` stay
+evidence-only. Block-batched order statuses map to the existing V1 kinds
+(`OrderAccepted`, `OrderCancelled`, `OrderRejected`, `OrderFilled`,
+`TriggerOrderActivated`) with `ProvisionalSource` confirmation. L4 `new` and
+`update` map to `OrderRested`; `remove` maps to `OrderCancelled` with remaining
+quantity zero. Snapshots cannot mint a committed watermark. Schema version on
+envelopes remains `"1.0.0"`.
+
+Order-status and L4 batches use a synthetic transaction id (`node-order:{oid}` /
+`node-l4:{oid}`). Grouping copies the trade path: first appearance of each
+contiguous oid is `transaction_index`, position within that run is
+`canonical_event_index` (reset to zero when the oid changes), and a later
+reappearance of an earlier oid is `NonContiguousTransaction`. Same-oid diffs in
+one run get distinct event ids from the within-group index. Distinct oids get
+distinct transaction identities and restart the event index at zero, which is
+what `BlockEnvelope::try_new` requires.
+
+| Source | Canonical |
+| --- | --- |
+| filled `limitPx` | `OrderFilled.fill_price` (not a print; the trades stream holds the match) |
+| filled `origSz` | `OrderFilled.fill_quantity` (`sz` is remaining) |
+| triggered `triggerPx` | `TriggerOrderActivated.trigger_price` and `oracle_price` |
+| first appearance of each contiguous oid | `transaction_index` |
+| position within one contiguous oid | `canonical_event_index` |
+| event array position | `source_evidence.source_event_index` |
 
 The parser version records both mapper and market-catalog versions:
 

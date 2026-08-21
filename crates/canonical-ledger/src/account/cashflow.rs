@@ -31,6 +31,7 @@ pub enum AccountQuantityFlowScopeV1 {
     BuilderFeeAsset { asset_id: AssetId },
     ReferralRewardAsset { asset_id: AssetId },
     VaultShares { vault_id: VaultId },
+    SpotGenesisAsset { asset_id: AssetId },
 }
 
 impl AccountQuantityFlowScopeV1 {
@@ -43,6 +44,7 @@ impl AccountQuantityFlowScopeV1 {
             Self::BuilderFeeAsset { .. } => "builder_fee_asset",
             Self::ReferralRewardAsset { .. } => "referral_reward_asset",
             Self::VaultShares { .. } => "vault_shares",
+            Self::SpotGenesisAsset { .. } => "spot_genesis_asset",
         }
     }
 
@@ -69,6 +71,7 @@ impl AccountQuantityFlowScopeV1 {
             ("vault_shares", Some(vault_id)) if asset_id.is_none() => Ok(Self::VaultShares {
                 vault_id: VaultId::new(vault_id).map_err(|_| AccountStateError::InvalidRecord)?,
             }),
+            ("spot_genesis_asset", None) => Ok(Self::SpotGenesisAsset { asset_id: asset()? }),
             _ => Err(AccountStateError::InvalidRecord),
         }
     }
@@ -80,7 +83,8 @@ impl AccountQuantityFlowScopeV1 {
             | Self::SubaccountTransferAsset { asset_id }
             | Self::FeeAsset { asset_id }
             | Self::BuilderFeeAsset { asset_id }
-            | Self::ReferralRewardAsset { asset_id } => asset_id.as_str().as_bytes(),
+            | Self::ReferralRewardAsset { asset_id }
+            | Self::SpotGenesisAsset { asset_id } => asset_id.as_str().as_bytes(),
             Self::VaultShares { vault_id } => vault_id.as_str().as_bytes(),
         }
     }
@@ -92,7 +96,8 @@ impl AccountQuantityFlowScopeV1 {
             | Self::SubaccountTransferAsset { asset_id }
             | Self::FeeAsset { asset_id }
             | Self::BuilderFeeAsset { asset_id }
-            | Self::ReferralRewardAsset { asset_id } => Some(asset_id.as_str().to_owned()),
+            | Self::ReferralRewardAsset { asset_id }
+            | Self::SpotGenesisAsset { asset_id } => Some(asset_id.as_str().to_owned()),
             Self::VaultShares { .. } => None,
         }
     }
@@ -105,7 +110,8 @@ impl AccountQuantityFlowScopeV1 {
             | Self::SubaccountTransferAsset { .. }
             | Self::FeeAsset { .. }
             | Self::BuilderFeeAsset { .. }
-            | Self::ReferralRewardAsset { .. } => None,
+            | Self::ReferralRewardAsset { .. }
+            | Self::SpotGenesisAsset { .. } => None,
         }
     }
 }
@@ -225,6 +231,8 @@ pub enum AccountQuoteFlowScopeV1 {
     DefaultPerpQuote,
     MarketFunding { market_id: MarketId },
     VaultPrincipal { vault_id: VaultId },
+    SpotClassQuote,
+    RewardClaimedQuote,
 }
 
 impl AccountQuoteFlowScopeV1 {
@@ -233,6 +241,8 @@ impl AccountQuoteFlowScopeV1 {
             Self::DefaultPerpQuote => "default_perp_quote",
             Self::MarketFunding { .. } => "market_funding",
             Self::VaultPrincipal { .. } => "vault_principal",
+            Self::SpotClassQuote => "spot_class_quote",
+            Self::RewardClaimedQuote => "reward_claimed_quote",
         }
     }
 
@@ -243,6 +253,8 @@ impl AccountQuoteFlowScopeV1 {
     ) -> Result<Self, AccountStateError> {
         match (scope, market_id, vault_id) {
             ("default_perp_quote", None, None) => Ok(Self::DefaultPerpQuote),
+            ("spot_class_quote", None, None) => Ok(Self::SpotClassQuote),
+            ("reward_claimed_quote", None, None) => Ok(Self::RewardClaimedQuote),
             ("market_funding", Some(market_id), None) => Ok(Self::MarketFunding {
                 market_id: MarketId::new(market_id)
                     .map_err(|_| AccountStateError::InvalidRecord)?,
@@ -256,7 +268,7 @@ impl AccountQuoteFlowScopeV1 {
 
     fn identity(&self) -> Option<&[u8]> {
         match self {
-            Self::DefaultPerpQuote => None,
+            Self::DefaultPerpQuote | Self::SpotClassQuote | Self::RewardClaimedQuote => None,
             Self::MarketFunding { market_id } => Some(market_id.as_str().as_bytes()),
             Self::VaultPrincipal { vault_id } => Some(vault_id.as_str().as_bytes()),
         }
@@ -265,14 +277,20 @@ impl AccountQuoteFlowScopeV1 {
     fn market_id(&self) -> Option<String> {
         match self {
             Self::MarketFunding { market_id } => Some(market_id.as_str().to_owned()),
-            Self::DefaultPerpQuote | Self::VaultPrincipal { .. } => None,
+            Self::DefaultPerpQuote
+            | Self::VaultPrincipal { .. }
+            | Self::SpotClassQuote
+            | Self::RewardClaimedQuote => None,
         }
     }
 
     fn vault_id(&self) -> Option<String> {
         match self {
             Self::VaultPrincipal { vault_id } => Some(vault_id.as_str().to_owned()),
-            Self::DefaultPerpQuote | Self::MarketFunding { .. } => None,
+            Self::DefaultPerpQuote
+            | Self::MarketFunding { .. }
+            | Self::SpotClassQuote
+            | Self::RewardClaimedQuote => None,
         }
     }
 }
@@ -631,12 +649,12 @@ const fn valid_quote_totals(left: QuoteAmount, right: QuoteAmount) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FlowSide {
+pub(crate) enum FlowSide {
     Credit,
     Debit,
 }
 
-pub(super) fn quantity_flow_mutation(
+pub(crate) fn quantity_flow_mutation(
     state: &StateView<'_>,
     account_id: Address,
     scope: AccountQuantityFlowScopeV1,
@@ -675,7 +693,7 @@ pub(super) fn quantity_flow_mutation(
     ))
 }
 
-pub(super) fn quote_flow_mutation(
+pub(crate) fn quote_flow_mutation(
     state: &StateView<'_>,
     account_id: Address,
     scope: AccountQuoteFlowScopeV1,
@@ -714,7 +732,7 @@ pub(super) fn quote_flow_mutation(
     ))
 }
 
-pub(super) fn vault_principal_mutation(
+pub(crate) fn vault_principal_mutation(
     state: &StateView<'_>,
     vault_id: &VaultId,
     amount: QuoteAmount,

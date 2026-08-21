@@ -6,6 +6,7 @@ readonly CONTAINER_NAME="alpha-desk-postgres-migration-$$"
 readonly -a MIGRATIONS=(
   'schemas/postgres/0001_capture_incidents.sql'
   'schemas/postgres/0002_capture_progress.sql'
+  'schemas/postgres/0100_source_catalog.sql'
 )
 
 for command_name in docker sleep; do
@@ -281,6 +282,199 @@ if docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
     COMMIT;
   " >/dev/null 2>&1; then
   printf 'postgres-migration-smoke:error incomplete publication plan was accepted\n' >&2
+  exit 1
+fi
+
+actual_source_tables="$(
+  docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+    psql -X --no-psqlrc --tuples-only --no-align \
+    --username alpha --dbname alpha \
+    --command \
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'source_%' ORDER BY table_name;"
+)"
+readonly actual_source_tables
+readonly expected_source_tables=$'source_capability_binding\nsource_endpoint_version\nsource_health_policy\nsource_license_policy\nsource_probe_result\nsource_registry'
+if [[ "$actual_source_tables" != "$expected_source_tables" ]]; then
+  printf 'postgres-migration-smoke:error unexpected source catalog table set\n%s\n' \
+    "$actual_source_tables" >&2
+  exit 1
+fi
+
+secret_columns="$(
+  docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+    psql -X --no-psqlrc --tuples-only --no-align \
+    --username alpha --dbname alpha \
+    --command \
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name LIKE 'source_%' AND (column_name ILIKE '%secret%' OR column_name ILIKE '%password%' OR column_name ILIKE '%api_key%' OR column_name ILIKE '%token%' OR column_name ILIKE '%credential%') ORDER BY column_name;"
+)"
+if [[ -n "$secret_columns" ]]; then
+  printf 'postgres-migration-smoke:error source catalog must not store provider secrets\n%s\n' \
+    "$secret_columns" >&2
+  exit 1
+fi
+
+if docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+  psql -X --no-psqlrc --set ON_ERROR_STOP=1 --username alpha --dbname alpha \
+  --command "
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      dataset_version, retention_class, redistribution, evidence_class,
+      valid_from
+    ) VALUES (
+      'primary-node', 'mainnet', 1, 'committed-primary', 'locally-verified-committed',
+      'alpha-desk', 'local-node', 'hyperliquid-node-v1', 'raw-indefinite',
+      'private-operator-evidence', 'snapshot', now()
+    );
+  " >/dev/null 2>&1; then
+  printf 'postgres-migration-smoke:error committed source without committed-block evidence was accepted\n' >&2
+  exit 1
+fi
+
+if docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+  psql -X --no-psqlrc --set ON_ERROR_STOP=1 --username alpha --dbname alpha \
+  --command "
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      retention_class, redistribution, evidence_class, valid_from
+    ) VALUES (
+      'nansen-labels', 'mainnet', 1, 'attribution-enrichment', 'third-party-provisional',
+      'nansen', 'provider', 'raw-hot-local', 'internal-only', 'public-market-data', now()
+    );
+  " >/dev/null 2>&1; then
+  printf 'postgres-migration-smoke:error provider source without license policy was accepted\n' >&2
+  exit 1
+fi
+
+docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+  psql -X --no-psqlrc --set ON_ERROR_STOP=1 --username alpha --dbname alpha \
+  --command "
+    BEGIN;
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      dataset_version, retention_class, redistribution, evidence_class,
+      valid_from
+    ) VALUES (
+      'primary-node', 'mainnet', 1, 'committed-primary', 'locally-verified-committed',
+      'alpha-desk', 'local-node', 'hyperliquid-node-v1', 'raw-indefinite',
+      'private-operator-evidence', 'committed-block', TIMESTAMPTZ '2026-01-01 00:00:00+00'
+    );
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      dataset_version, retention_class, redistribution, evidence_class,
+      valid_from
+    ) VALUES (
+      'primary-node', 'testnet', 1, 'committed-primary', 'locally-verified-committed',
+      'alpha-desk', 'local-node', 'hyperliquid-node-v1', 'raw-indefinite',
+      'private-operator-evidence', 'committed-block', TIMESTAMPTZ '2026-01-01 00:00:00+00'
+    );
+    UPDATE source_registry
+      SET valid_to = TIMESTAMPTZ '2026-02-01 00:00:00+00'
+      WHERE source_id = 'primary-node' AND network = 'mainnet' AND version = 1;
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      dataset_version, retention_class, redistribution, evidence_class,
+      valid_from
+    ) VALUES (
+      'primary-node', 'mainnet', 2, 'committed-primary', 'locally-verified-committed',
+      'alpha-desk', 'local-node', 'hyperliquid-node-v2', 'raw-indefinite',
+      'private-operator-evidence', 'committed-block', TIMESTAMPTZ '2026-02-01 00:00:00+00'
+    );
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      retention_class, redistribution, evidence_class,
+      license_name, agreement_status, agreement_expires_at, valid_from
+    ) VALUES (
+      'nansen-active', 'mainnet', 1, 'attribution-enrichment', 'third-party-provisional',
+      'nansen', 'provider', 'raw-hot-local', 'internal-only', 'public-market-data',
+      'nansen-api-tos', 'active', TIMESTAMPTZ '2026-12-01 00:00:00+00',
+      TIMESTAMPTZ '2026-01-01 00:00:00+00'
+    );
+    INSERT INTO source_license_policy (
+      source_id, network, source_version, license_name, redistribution
+    ) VALUES (
+      'nansen-active', 'mainnet', 1, 'nansen-api-tos', 'internal-only'
+    );
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      retention_class, redistribution, evidence_class,
+      license_name, agreement_status, valid_from
+    ) VALUES (
+      'nansen-disabled', 'mainnet', 1, 'attribution-enrichment', 'third-party-provisional',
+      'nansen', 'provider', 'raw-hot-local', 'internal-only', 'public-market-data',
+      'nansen-api-tos', 'disabled', TIMESTAMPTZ '2026-01-01 00:00:00+00'
+    );
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      retention_class, redistribution, evidence_class,
+      license_name, agreement_status, agreement_expires_at, valid_from
+    ) VALUES (
+      'nansen-expired', 'mainnet', 1, 'attribution-enrichment', 'third-party-provisional',
+      'nansen', 'provider', 'raw-hot-local', 'internal-only', 'public-market-data',
+      'nansen-api-tos', 'active', TIMESTAMPTZ '2026-01-15 00:00:00+00',
+      TIMESTAMPTZ '2026-01-01 00:00:00+00'
+    );
+    INSERT INTO source_capability_binding (
+      source_id, network, source_version, capability_id
+    ) VALUES (
+      'primary-node', 'mainnet', 2, 'node.replica_cmds'
+    );
+    INSERT INTO source_endpoint_version (
+      source_id, network, source_version, transport, endpoint_version
+    ) VALUES (
+      'primary-node', 'mainnet', 2, 'node', 'hyperliquid-node-v2'
+    );
+    INSERT INTO source_health_policy (
+      source_id, network, source_version, probe_interval_millis, consecutive_failure_threshold
+    ) VALUES (
+      'primary-node', 'mainnet', 2, 5000, 3
+    );
+    INSERT INTO source_probe_result (
+      source_id, network, probed_at, probe_sequence, outcome, reason_code, latency_millis
+    ) VALUES (
+      'primary-node', 'mainnet', TIMESTAMPTZ '2026-02-01 00:00:01+00', 0, 'ok', NULL, 12
+    );
+    COMMIT;
+  " >/dev/null
+
+history_versions="$(
+  docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+    psql -X --no-psqlrc --tuples-only --no-align \
+    --username alpha --dbname alpha \
+    --command \
+    "SELECT version::text FROM source_registry WHERE source_id = 'primary-node' AND network = 'mainnet' ORDER BY version;"
+)"
+if [[ "$history_versions" != $'1\n2' ]]; then
+  printf 'postgres-migration-smoke:error source catalog history was not preserved\n%s\n' \
+    "$history_versions" >&2
+  exit 1
+fi
+
+if docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+  psql -X --no-psqlrc --set ON_ERROR_STOP=1 --username alpha --dbname alpha \
+  --command "
+    INSERT INTO source_registry (
+      source_id, network, version, role, trust, operator, operator_kind,
+      retention_class, redistribution, evidence_class, valid_from
+    ) VALUES (
+      'primary-node', 'mainnet', 3, 'committed-primary', 'locally-verified-committed',
+      'alpha-desk', 'local-node', 'raw-indefinite', 'private-operator-evidence',
+      'committed-block', TIMESTAMPTZ '2026-03-01 00:00:00+00'
+    );
+  " >/dev/null 2>&1; then
+  printf 'postgres-migration-smoke:error a second current source row was accepted\n' >&2
+  exit 1
+fi
+
+scheduled_sources="$(
+  docker exec --env PGPASSWORD=alpha_dev_only "$CONTAINER_NAME" \
+    psql -X --no-psqlrc --tuples-only --no-align \
+    --username alpha --dbname alpha \
+    --command \
+    "SELECT source_id FROM source_registry WHERE valid_to IS NULL AND (license_name IS NULL OR (agreement_status = 'active' AND (agreement_expires_at IS NULL OR agreement_expires_at > TIMESTAMPTZ '2026-02-01 00:00:00+00'))) ORDER BY source_id, network;"
+)"
+if [[ "$scheduled_sources" != $'nansen-active\nprimary-node\nprimary-node' ]]; then
+  printf 'postgres-migration-smoke:error disabled or expired provider agreements were scheduled\n%s\n' \
+    "$scheduled_sources" >&2
   exit 1
 fi
 

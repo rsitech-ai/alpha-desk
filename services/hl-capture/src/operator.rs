@@ -2,15 +2,65 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
+use crate::EgressBudgetSnapshot;
 use crate::status::{CaptureHealth, read_status, read_status_snapshot_bytes};
 
 const MAX_REQUEST_BYTES: usize = 8_192;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_SCHEMA: &str = "hl.capture.health.v1";
+const INFO_BUDGET_SCHEMA: &str = "hl.capture.info-budget.v1";
+
+#[derive(Serialize)]
+struct InfoBudgetStatusDoc<'a> {
+    schema_version: &'static str,
+    egress_id: &'a str,
+    ceiling_weight_per_minute: u32,
+    envelope_weight_per_minute: u32,
+    available_priority: u32,
+    available_general: u32,
+    circuit_open_until_millis: Option<u64>,
+    http_429_count: u64,
+    requests_ok: u64,
+}
+
+pub fn encode_info_budget_status(
+    snapshot: &EgressBudgetSnapshot,
+) -> Result<Vec<u8>, OperatorError> {
+    serde_json::to_vec(&InfoBudgetStatusDoc {
+        schema_version: INFO_BUDGET_SCHEMA,
+        egress_id: snapshot.egress_id(),
+        ceiling_weight_per_minute: snapshot.ceiling_weight_per_minute(),
+        envelope_weight_per_minute: snapshot.envelope_weight_per_minute(),
+        available_priority: snapshot.available_priority(),
+        available_general: snapshot.available_general(),
+        circuit_open_until_millis: snapshot.circuit_open_until_millis(),
+        http_429_count: snapshot.http_429_count(),
+        requests_ok: snapshot.requests_ok(),
+    })
+    .map_err(|_| OperatorError::Serialization)
+}
+
+#[must_use]
+pub fn info_budget_status_path(status_path: &Path) -> PathBuf {
+    status_path.with_file_name("info-budget.json")
+}
+
+pub fn write_info_budget_snapshot(
+    status_path: &Path,
+    snapshot: &EgressBudgetSnapshot,
+) -> Result<(), OperatorError> {
+    let encoded = encode_info_budget_status(snapshot)?;
+    let path = info_budget_status_path(status_path);
+    let parent = path.parent().ok_or(OperatorError::Io)?;
+    let temporary = parent.join("info-budget.json.tmp");
+    std::fs::write(&temporary, &encoded).map_err(|_| OperatorError::Io)?;
+    std::fs::rename(&temporary, &path).map_err(|_| OperatorError::Io)
+}
 
 pub async fn serve_operator_status(
     status_path: PathBuf,
@@ -100,6 +150,8 @@ async fn handle_connection(
         }
         ("GET", "/healthz") => write_health(&mut stream, status_path).await,
         ("GET", "/status") => write_status(&mut stream, status_path).await,
+        ("GET", "/info-budget") => write_info_budget(&mut stream, status_path).await,
+        ("GET", "/ws-plan") => write_ws_plan(&mut stream, status_path).await,
         ("GET", "/events") => write_events(&mut stream, status_path, cancellation).await,
         ("GET", _) => {
             write_response(&mut stream, 404, "text/plain; charset=utf-8", b"not found").await
@@ -153,6 +205,33 @@ async fn write_status(stream: &mut TcpStream, status_path: &Path) -> Result<(), 
                 error.reason_code()
             );
             write_response(stream, 503, "application/json", body.as_bytes()).await
+        }
+    }
+}
+
+async fn write_info_budget(
+    stream: &mut TcpStream,
+    status_path: &Path,
+) -> Result<(), OperatorError> {
+    let path = info_budget_status_path(status_path);
+    match std::fs::read(&path) {
+        Ok(body) if !body.is_empty() => {
+            write_response(stream, 200, "application/json", &body).await
+        }
+        Ok(_) | Err(_) => {
+            write_response(stream, 404, "text/plain; charset=utf-8", b"not found").await
+        }
+    }
+}
+
+async fn write_ws_plan(stream: &mut TcpStream, status_path: &Path) -> Result<(), OperatorError> {
+    let path = crate::ws_plan_status_path(status_path);
+    match std::fs::read(&path) {
+        Ok(body) if !body.is_empty() => {
+            write_response(stream, 200, "application/json", &body).await
+        }
+        Ok(_) | Err(_) => {
+            write_response(stream, 404, "text/plain; charset=utf-8", b"not found").await
         }
     }
 }

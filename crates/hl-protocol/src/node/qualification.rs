@@ -84,6 +84,8 @@ impl BoundedIdentity {
 pub enum NodeRecordingFileRoleV1 {
     Committed,
     Trade,
+    AbciSnapshot,
+    L4Snapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -851,7 +853,9 @@ fn valid_cursor_range(
     size_bytes: u64,
 ) -> bool {
     match role {
-        NodeRecordingFileRoleV1::Committed => match (first.position, last.position) {
+        NodeRecordingFileRoleV1::Committed
+        | NodeRecordingFileRoleV1::AbciSnapshot
+        | NodeRecordingFileRoleV1::L4Snapshot => match (first.position, last.position) {
             (
                 NodeNativePositionV1::BlockHeight { height: first },
                 NodeNativePositionV1::BlockHeight { height: last },
@@ -1055,10 +1059,12 @@ mod tests {
         }
     }
 
-    fn every_recording_file_role() -> [NodeRecordingFileRoleV1; 2] {
+    fn every_recording_file_role() -> [NodeRecordingFileRoleV1; 4] {
         [
             NodeRecordingFileRoleV1::Committed,
             NodeRecordingFileRoleV1::Trade,
+            NodeRecordingFileRoleV1::AbciSnapshot,
+            NodeRecordingFileRoleV1::L4Snapshot,
         ]
     }
 
@@ -1076,7 +1082,9 @@ mod tests {
         size_bytes: u64,
     ) -> bool {
         match role {
-            NodeRecordingFileRoleV1::Committed => match (first, last) {
+            NodeRecordingFileRoleV1::Committed
+            | NodeRecordingFileRoleV1::AbciSnapshot
+            | NodeRecordingFileRoleV1::L4Snapshot => match (first, last) {
                 (
                     NodeNativePositionV1::BlockHeight { height: first },
                     NodeNativePositionV1::BlockHeight { height: last },
@@ -1120,7 +1128,10 @@ mod tests {
         const SIZE_BYTES: u64 = 100;
         for role in every_recording_file_role() {
             match role {
-                NodeRecordingFileRoleV1::Committed | NodeRecordingFileRoleV1::Trade => {}
+                NodeRecordingFileRoleV1::Committed
+                | NodeRecordingFileRoleV1::AbciSnapshot
+                | NodeRecordingFileRoleV1::L4Snapshot => {}
+                NodeRecordingFileRoleV1::Trade => {}
             }
             for first in every_native_position(10) {
                 match first {
@@ -1172,6 +1183,18 @@ mod tests {
         assert!(!trade(1, 101, 100));
     }
 
+    #[test]
+    fn snapshot_file_roles_wire_as_kebab_case() {
+        assert_eq!(
+            serde_json::to_value(NodeRecordingFileRoleV1::AbciSnapshot).expect("json"),
+            serde_json::json!("abci-snapshot")
+        );
+        assert_eq!(
+            serde_json::to_value(NodeRecordingFileRoleV1::L4Snapshot).expect("json"),
+            serde_json::json!("l4-snapshot")
+        );
+    }
+
     fn file_wire(role: NodeRecordingFileRoleV1, path: &str, digest: &str) -> WireRecordingFileV1 {
         WireRecordingFileV1 {
             relative_path: path.to_owned(),
@@ -1182,7 +1205,9 @@ mod tests {
             first_cursor: WireNativeCursorV1 {
                 epoch: format!("{path}-epoch"),
                 position: match role {
-                    NodeRecordingFileRoleV1::Committed => {
+                    NodeRecordingFileRoleV1::Committed
+                    | NodeRecordingFileRoleV1::AbciSnapshot
+                    | NodeRecordingFileRoleV1::L4Snapshot => {
                         NodeNativePositionV1::BlockHeight { height: 0 }
                     }
                     NodeRecordingFileRoleV1::Trade => {
@@ -1194,7 +1219,9 @@ mod tests {
             last_cursor: WireNativeCursorV1 {
                 epoch: format!("{path}-epoch"),
                 position: match role {
-                    NodeRecordingFileRoleV1::Committed => {
+                    NodeRecordingFileRoleV1::Committed
+                    | NodeRecordingFileRoleV1::AbciSnapshot
+                    | NodeRecordingFileRoleV1::L4Snapshot => {
                         NodeNativePositionV1::BlockHeight { height: 0 }
                     }
                     NodeRecordingFileRoleV1::Trade => {

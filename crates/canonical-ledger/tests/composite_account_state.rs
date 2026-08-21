@@ -35,7 +35,7 @@ fn validated_constructor_exposes_the_exact_ordered_component_manifest() {
 
     assert_eq!(
         reducer.reducer_set_version(),
-        "hyperliquid-alpha-desk-canonical-state@1.1.0"
+        "hyperliquid-alpha-desk-canonical-state@1.2.0"
     );
     assert_eq!(
         reducer
@@ -61,6 +61,16 @@ fn validated_constructor_exposes_the_exact_ordered_component_manifest() {
             ),
             ("trigger", "hyperliquid-alpha-desk-canonical-trigger@1.0.0"),
             ("twap", "hyperliquid-alpha-desk-canonical-twap@1.0.0"),
+            ("vault", "hyperliquid-alpha-desk-canonical-vault@1.0.0"),
+            ("staking", "hyperliquid-alpha-desk-canonical-staking@1.0.0"),
+            (
+                "validator",
+                "hyperliquid-alpha-desk-canonical-validator@1.0.0"
+            ),
+            (
+                "relationships",
+                "hyperliquid-alpha-desk-canonical-relationships@1.0.0"
+            ),
         ]
     );
 }
@@ -91,6 +101,43 @@ fn ledger_and_direct_reducer_keep_unsupported_boundaries_separate() {
         .expect_err("non-1.0.0 events are unsupported");
     assert_eq!(error.reason_code(), "ledger.unsupported_event");
     assert_eq!(error.schema_version(), Some("1.1.0"));
+}
+
+#[test]
+fn project_l4_book_aggregates_resting_orders_into_derived_l2() {
+    let mut ledger = composite_ledger(70);
+    ledger
+        .apply_block(&block(70, market_prerequisites(70)))
+        .unwrap();
+    ledger
+        .apply_block(&block(
+            71,
+            vec![
+                order_accepted_event(71, 0, "bid", BUYER, OrderSide::Buy),
+                raw_event(
+                    71,
+                    1,
+                    EventPayload::OrderAccepted(OrderAccepted {
+                        order_id: OrderId::new("ask").unwrap(),
+                        account_id: SELLER,
+                        market_id: market(),
+                        side: OrderSide::Sell,
+                        limit_price: Price::parse_at_scale("65100", 6).unwrap(),
+                        quantity: Quantity::parse_at_scale("1", 8).unwrap(),
+                    }),
+                    vec![market()],
+                    vec![SELLER],
+                    "1.0.0",
+                ),
+            ],
+        ))
+        .unwrap();
+
+    let book = CanonicalStateReducerV1::project_l4_book(&market(), ledger.state_image()).unwrap();
+    assert_eq!(book.active_order_count(), 2);
+    assert_eq!(book.l2_bids().len(), 1);
+    assert_eq!(book.l2_asks().len(), 1);
+    assert_eq!(*book.health(), orderbook::BookHealth::Healthy);
 }
 
 #[test]

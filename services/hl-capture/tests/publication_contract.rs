@@ -114,6 +114,7 @@ fn every_event_kind_routes_to_one_frozen_canonical_subject() {
         EventKind::TriggerOrderActivated,
         EventKind::TwapStarted,
         EventKind::TwapCompleted,
+        EventKind::NonUserOrderCancelled,
     ];
     let oracle = [EventKind::OracleUpdated, EventKind::FundingRateUpdated];
     let market_meta = [
