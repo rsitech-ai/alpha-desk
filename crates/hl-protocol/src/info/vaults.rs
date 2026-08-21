@@ -21,6 +21,13 @@ pub const VAULT_DETAILS_KNOWN_FIELDS: &[&str] = &[
     "/portfolio/vlm",
     "/apr",
     "/followerState",
+    "/followerState/user",
+    "/followerState/vaultEquity",
+    "/followerState/pnl",
+    "/followerState/allTimePnl",
+    "/followerState/daysFollowing",
+    "/followerState/vaultEntryTime",
+    "/followerState/lockupUntil",
     "/leaderFraction",
     "/leaderCommission",
     "/followers",
@@ -228,6 +235,7 @@ pub struct VaultDetails {
     description: String,
     portfolio: Vec<VaultPortfolioWindow>,
     apr: Decimal,
+    follower_state: Option<VaultFollower>,
     leader_fraction: Decimal,
     leader_commission: Decimal,
     followers: Vec<VaultFollower>,
@@ -276,6 +284,11 @@ impl VaultDetails {
     }
 
     #[must_use]
+    pub const fn follower_state(&self) -> Option<&VaultFollower> {
+        self.follower_state.as_ref()
+    }
+
+    #[must_use]
     pub const fn leader_fraction(&self) -> Decimal {
         self.leader_fraction
     }
@@ -319,6 +332,19 @@ impl VaultDetails {
     pub const fn always_close_on_withdraw(&self) -> Option<bool> {
         self.always_close_on_withdraw
     }
+}
+
+fn parse_vault_follower(value: &Value, path: &str) -> Result<VaultFollower, InfoError> {
+    let object = require_object(value, path)?;
+    Ok(VaultFollower {
+        user: require_address(object, path, "user")?,
+        vault_equity: require_decimal(object, path, "vaultEquity")?,
+        pnl: require_decimal(object, path, "pnl")?,
+        all_time_pnl: require_decimal(object, path, "allTimePnl")?,
+        days_following: require_u64(object, path, "daysFollowing")?,
+        vault_entry_time_millis: require_i64(object, path, "vaultEntryTime")?,
+        lockup_until_millis: require_i64(object, path, "lockupUntil")?,
+    })
 }
 
 fn parse_relationship(value: &Value, path: &str) -> Result<Option<VaultRelationship>, InfoError> {
@@ -406,19 +432,13 @@ impl TryFrom<&ParsedInfoResponse<Value>> for VaultDetails {
                 .iter()
                 .enumerate()
                 .map(|(index, follower)| {
-                    let path = format!("/followers/{index}");
-                    let object = require_object(follower, &path)?;
-                    Ok(VaultFollower {
-                        user: require_address(object, &path, "user")?,
-                        vault_equity: require_decimal(object, &path, "vaultEquity")?,
-                        pnl: require_decimal(object, &path, "pnl")?,
-                        all_time_pnl: require_decimal(object, &path, "allTimePnl")?,
-                        days_following: require_u64(object, &path, "daysFollowing")?,
-                        vault_entry_time_millis: require_i64(object, &path, "vaultEntryTime")?,
-                        lockup_until_millis: require_i64(object, &path, "lockupUntil")?,
-                    })
+                    parse_vault_follower(follower, &format!("/followers/{index}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?,
+        };
+        let follower_state = match object.get("followerState") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(parse_vault_follower(value, "/followerState")?),
         };
         let relationship = match object.get("relationship") {
             None | Some(Value::Null) => None,
@@ -431,6 +451,7 @@ impl TryFrom<&ParsedInfoResponse<Value>> for VaultDetails {
             description: require_str(object, "", "description")?.to_owned(),
             portfolio,
             apr: require_decimal(object, "", "apr")?,
+            follower_state,
             leader_fraction: require_decimal(object, "", "leaderFraction")?,
             leader_commission: require_decimal(object, "", "leaderCommission")?,
             followers,

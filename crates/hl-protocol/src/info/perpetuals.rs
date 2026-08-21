@@ -36,7 +36,9 @@ pub const PERP_DEX_KNOWN_FIELDS: &[&str] = &[
     "/oracleUpdater",
     "/feeRecipient",
     "/assetToStreamingOiCap",
+    "/assetToStreamingOiCap/*",
     "/assetToFundingMultiplier",
+    "/assetToFundingMultiplier/*",
 ];
 pub const PERP_META_KNOWN_FIELDS: &[&str] = &[
     "/universe",
@@ -133,6 +135,8 @@ pub struct PerpDex {
     deployer: Address,
     oracle_updater: Option<Address>,
     fee_recipient: Option<Address>,
+    asset_to_streaming_oi_cap: Vec<(MarketId, Decimal)>,
+    asset_to_funding_multiplier: Vec<(MarketId, Decimal)>,
 }
 
 impl PerpDex {
@@ -159,6 +163,16 @@ impl PerpDex {
     #[must_use]
     pub const fn fee_recipient(&self) -> Option<Address> {
         self.fee_recipient
+    }
+
+    #[must_use]
+    pub fn asset_to_streaming_oi_cap(&self) -> &[(MarketId, Decimal)] {
+        &self.asset_to_streaming_oi_cap
+    }
+
+    #[must_use]
+    pub fn asset_to_funding_multiplier(&self) -> &[(MarketId, Decimal)] {
+        &self.asset_to_funding_multiplier
     }
 }
 
@@ -200,6 +214,18 @@ impl TryFrom<&ParsedInfoResponse<Value>> for PerpDexs {
                     deployer: super::decode::require_address(object, &path, "deployer")?,
                     oracle_updater: optional_address(object, &path, "oracleUpdater")?,
                     fee_recipient: optional_address(object, &path, "feeRecipient")?,
+                    asset_to_streaming_oi_cap: match object.get("assetToStreamingOiCap") {
+                        None | Some(Value::Null) => Vec::new(),
+                        Some(value) => {
+                            asset_decimal_map(value, &child(&path, "assetToStreamingOiCap"))?
+                        }
+                    },
+                    asset_to_funding_multiplier: match object.get("assetToFundingMultiplier") {
+                        None | Some(Value::Null) => Vec::new(),
+                        Some(value) => {
+                            asset_decimal_map(value, &child(&path, "assetToFundingMultiplier"))?
+                        }
+                    },
                 }))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1669,6 +1695,23 @@ fn coin_decimal_pairs(value: &Value, path: &str) -> Result<Vec<(MarketId, Decima
             ))
         })
         .collect()
+}
+
+fn asset_decimal_map(value: &Value, path: &str) -> Result<Vec<(MarketId, Decimal)>, InfoError> {
+    match value {
+        Value::Array(_) => coin_decimal_pairs(value, path),
+        Value::Object(map) => map
+            .iter()
+            .map(|(coin, amount)| {
+                let item = child(path, coin);
+                Ok((
+                    market_id_from_coin(coin)?,
+                    decimal_from_value(amount, &item)?,
+                ))
+            })
+            .collect(),
+        _ => Err(malformed(path, "expected object or [key, value] pairs")),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

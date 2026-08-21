@@ -97,3 +97,114 @@ fn info_staking_family_parses() {
     assert!(validators.validators()[0].is_active());
     assert_eq!(validators.validators()[0].stats()[0].period(), "day");
 }
+
+#[test]
+fn info_delegator_history_cdeposit_amount_is_typed_not_unknown() {
+    let payload = json!([{
+        "time": 1735380381353_i64,
+        "hash": "0x55492465cb523f90815a041a226ba90147008d4b221a24ae8dc35a0dbede4ea4",
+        "delta": { "cDeposit": { "amount": "1.0" } }
+    }]);
+    let (parsed, history) =
+        parse_delegator_history(&serde_json::to_vec(&payload).expect("json"), context())
+            .expect("cdeposit");
+    assert_eq!(history.updates()[0].delta_key(), "cDeposit");
+    assert_eq!(history.updates()[0].amount().unwrap().to_string(), "1.0");
+    assert!(history.updates()[0].phase().is_none());
+    assert!(
+        parsed.unknown_fields().is_empty(),
+        "{:?}",
+        parsed
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let mut extra = payload;
+    extra[0]["delta"]["cDeposit"]["U"] = json!("drift");
+    let (drifted, history) =
+        parse_delegator_history(&serde_json::to_vec(&extra).expect("json"), context())
+            .expect("still parses");
+    assert_eq!(history.updates()[0].amount().unwrap().to_string(), "1.0");
+    assert!(
+        !drifted
+            .unknown_fields()
+            .iter()
+            .any(|path| path.as_str() == "/0/delta/cDeposit/amount"),
+        "parsed cDeposit.amount must not be drift: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        drifted
+            .unknown_fields()
+            .iter()
+            .any(|path| path.as_str() == "/0/delta/cDeposit/U"),
+        "extra cDeposit child must surface in unknown_fields: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn info_delegator_history_withdrawal_phase_is_typed_not_unknown() {
+    let payload = json!([{
+        "time": 1735380381353_i64,
+        "hash": "0x55492465cb523f90815a041a226ba90147008d4b221a24ae8dc35a0dbede4ea4",
+        "delta": { "withdrawal": { "amount": "1.0", "phase": "initiated" } }
+    }]);
+    let (parsed, history) =
+        parse_delegator_history(&serde_json::to_vec(&payload).expect("json"), context())
+            .expect("withdrawal");
+    assert_eq!(history.updates()[0].delta_key(), "withdrawal");
+    assert_eq!(history.updates()[0].amount().unwrap().to_string(), "1.0");
+    assert_eq!(history.updates()[0].phase(), Some("initiated"));
+    assert!(
+        parsed.unknown_fields().is_empty(),
+        "{:?}",
+        parsed
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let mut extra = payload;
+    extra[0]["delta"]["withdrawal"]["U"] = json!("drift");
+    let (drifted, history) =
+        parse_delegator_history(&serde_json::to_vec(&extra).expect("json"), context())
+            .expect("still parses");
+    assert_eq!(history.updates()[0].phase(), Some("initiated"));
+    assert!(
+        !drifted
+            .unknown_fields()
+            .iter()
+            .any(|path| path.as_str() == "/0/delta/withdrawal/phase"
+                || path.as_str() == "/0/delta/withdrawal/amount"),
+        "parsed withdrawal children must not be drift: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        drifted
+            .unknown_fields()
+            .iter()
+            .any(|path| path.as_str() == "/0/delta/withdrawal/U"),
+        "extra withdrawal child must surface in unknown_fields: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+}

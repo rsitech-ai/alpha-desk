@@ -300,3 +300,72 @@ fn info_remaining_perp_family_parsers() {
         "meow"
     );
 }
+
+#[test]
+fn info_perp_dexs_asset_maps_are_typed_not_unknown() {
+    let mut pairs =
+        serde_json::from_slice::<serde_json::Value>(&read_fixture("response-perp-dexs.json"))
+            .expect("json");
+    pairs[1]["assetToStreamingOiCap"] = json!([["XYZ100", "100000.0"]]);
+    pairs[1]["assetToFundingMultiplier"] = json!([["XYZ100", "1.0"]]);
+    let (parsed, dexs) =
+        parse_perp_dexs(&serde_json::to_vec(&pairs).expect("json"), context()).expect("pairs");
+    let hip3 = dexs.dexs()[1].as_ref().expect("builder dex");
+    assert_eq!(
+        hip3.asset_to_streaming_oi_cap()[0].0.as_str(),
+        "perp:XYZ100"
+    );
+    assert_eq!(
+        hip3.asset_to_streaming_oi_cap()[0].1.to_string(),
+        "100000.0"
+    );
+    assert_eq!(hip3.asset_to_funding_multiplier()[0].1.to_string(), "1.0");
+    assert!(
+        parsed.unknown_fields().is_empty(),
+        "{:?}",
+        parsed
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let mut objects =
+        serde_json::from_slice::<serde_json::Value>(&read_fixture("response-perp-dexs.json"))
+            .expect("json");
+    objects[1]["assetToStreamingOiCap"] = json!({ "XYZ100": "100000.0" });
+    objects[1]["assetToFundingMultiplier"] = json!({ "XYZ100": "1.0" });
+    objects[1]["U"] = json!("drift");
+    let (drifted, dexs) =
+        parse_perp_dexs(&serde_json::to_vec(&objects).expect("json"), context()).expect("objects");
+    let hip3 = dexs.dexs()[1].as_ref().expect("builder dex");
+    assert_eq!(
+        hip3.asset_to_streaming_oi_cap()[0].0.as_str(),
+        "perp:XYZ100"
+    );
+    assert_eq!(hip3.asset_to_funding_multiplier()[0].1.to_string(), "1.0");
+    assert!(
+        !drifted.unknown_fields().iter().any(|path| {
+            path.as_str() == "/1/assetToStreamingOiCap/XYZ100"
+                || path.as_str() == "/1/assetToFundingMultiplier/XYZ100"
+        }),
+        "parsed object-map children must not be drift: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        drifted
+            .unknown_fields()
+            .iter()
+            .any(|path| path.as_str() == "/1/U"),
+        "extra perpDexs field must surface in unknown_fields: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+}

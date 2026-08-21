@@ -46,10 +46,83 @@ fn info_vault_equities_and_details_parse() {
     .1;
     assert_eq!(details.kind(), InfoObservationKind::DirectLookup);
     assert_eq!(details.portfolio()[0].period(), "day");
+    assert!(details.follower_state().is_none());
     match details.relationship() {
         Some(VaultRelationship::Parent { child_addresses }) => {
             assert_eq!(child_addresses.len(), 1);
         }
         other => panic!("expected parent relationship, got {other:?}"),
     }
+}
+
+#[test]
+fn info_vault_details_follower_state_is_typed_not_unknown() {
+    let mut payload = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture_root().join("response-vault-details.json")).expect("fixture"),
+    )
+    .expect("json");
+    payload["followerState"] = json!({
+        "user": "0x005844b2ffb2e122cf4244be7dbcb4f84924907c",
+        "vaultEquity": "10.0",
+        "pnl": "1.0",
+        "allTimePnl": "2.0",
+        "daysFollowing": 10,
+        "vaultEntryTime": 1700926145201_i64,
+        "lockupUntil": 1734824439201_i64
+    });
+    let (parsed, details) =
+        parse_vault_details(&serde_json::to_vec(&payload).expect("json"), context())
+            .expect("follower");
+    let follower = details.follower_state().expect("non-null followerState");
+    assert_eq!(
+        follower.user().to_api_string(),
+        "0x005844b2ffb2e122cf4244be7dbcb4f84924907c"
+    );
+    assert_eq!(follower.vault_equity().to_string(), "10.0");
+    assert!(
+        parsed.unknown_fields().is_empty(),
+        "{:?}",
+        parsed
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    payload["followerState"]["U"] = json!("drift");
+    let (drifted, details) =
+        parse_vault_details(&serde_json::to_vec(&payload).expect("json"), context())
+            .expect("still parses");
+    assert_eq!(
+        details
+            .follower_state()
+            .expect("still typed")
+            .vault_equity()
+            .to_string(),
+        "10.0"
+    );
+    assert!(
+        !drifted
+            .unknown_fields()
+            .iter()
+            .any(|path| path.as_str() == "/followerState/vaultEquity"),
+        "parsed followerState children must not be drift: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        drifted
+            .unknown_fields()
+            .iter()
+            .any(|path| path.as_str() == "/followerState/U"),
+        "extra followerState field must surface in unknown_fields: {:?}",
+        drifted
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+    );
 }

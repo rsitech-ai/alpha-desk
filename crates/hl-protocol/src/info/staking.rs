@@ -3,8 +3,9 @@ use serde_json::Value;
 
 use super::decode::{
     InfoObservationKind, UserHistoryMeta, child, expect_capability, history_coverage, malformed,
-    optional_bool, optional_i64, parse_family, require_address, require_array, require_bool,
-    require_decimal, require_i64, require_object, require_object_field, require_str, require_u64,
+    optional_bool, optional_i64, optional_str, parse_family, require_address, require_array,
+    require_bool, require_decimal, require_i64, require_object, require_object_field, require_str,
+    require_u64,
 };
 use super::{InfoError, InfoParseContext, ParsedInfoResponse};
 
@@ -14,6 +15,7 @@ pub const DELEGATOR_REWARDS_PAGE_LIMIT: usize = 2000;
 pub const DELEGATOR_DELTA_KEYS: &[&str] = &["delegate", "cDeposit", "withdrawal"];
 pub const DELEGATOR_REWARD_SOURCES: &[&str] = &["delegation", "commission"];
 pub const VALIDATOR_STAT_PERIODS: &[&str] = &["day", "week", "month"];
+pub const WITHDRAWAL_PHASE_NAMES: &[&str] = &["initiated", "finalized"];
 
 pub const DELEGATOR_SUMMARY_KNOWN_FIELDS: &[&str] = &[
     "/delegated",
@@ -31,7 +33,10 @@ pub const DELEGATOR_HISTORY_KNOWN_FIELDS: &[&str] = &[
     "/delta/delegate/amount",
     "/delta/delegate/isUndelegate",
     "/delta/cDeposit",
+    "/delta/cDeposit/amount",
     "/delta/withdrawal",
+    "/delta/withdrawal/amount",
+    "/delta/withdrawal/phase",
 ];
 pub const DELEGATOR_REWARD_KNOWN_FIELDS: &[&str] = &["/time", "/source", "/totalAmount"];
 pub const VALIDATOR_STATS_KNOWN_FIELDS: &[&str] = &[
@@ -198,6 +203,7 @@ pub struct DelegatorHistoryEntry {
     validator: Option<Address>,
     amount: Option<Decimal>,
     is_undelegate: Option<bool>,
+    phase: Option<String>,
 }
 
 impl DelegatorHistoryEntry {
@@ -229,6 +235,11 @@ impl DelegatorHistoryEntry {
     #[must_use]
     pub const fn is_undelegate(&self) -> Option<bool> {
         self.is_undelegate
+    }
+
+    #[must_use]
+    pub fn phase(&self) -> Option<&str> {
+        self.phase.as_deref()
     }
 }
 
@@ -284,6 +295,22 @@ impl TryFrom<&ParsedInfoResponse<Value>> for DelegatorHistory {
                 let delta_key = found.ok_or_else(|| malformed(&delta_path, "empty delta"))?;
                 let body_path = child(&delta_path, &delta_key);
                 let body = require_object_field(delta, &delta_path, &delta_key)?;
+                let phase = if delta_key == "withdrawal" {
+                    match optional_str(body, &body_path, "phase")? {
+                        None => None,
+                        Some(phase) => {
+                            if !WITHDRAWAL_PHASE_NAMES.contains(&phase) {
+                                return Err(InfoError::UnknownStateAffectingVariant {
+                                    path: child(&body_path, "phase"),
+                                    value: phase.to_owned(),
+                                });
+                            }
+                            Some(phase.to_owned())
+                        }
+                    }
+                } else {
+                    None
+                };
                 Ok(DelegatorHistoryEntry {
                     time_millis: require_i64(object, &path, "time")?,
                     hash: require_str(object, &path, "hash")?.to_owned(),
@@ -296,6 +323,7 @@ impl TryFrom<&ParsedInfoResponse<Value>> for DelegatorHistory {
                         Some(_) => Some(require_decimal(body, &body_path, "amount")?),
                     },
                     is_undelegate: optional_bool(body, &body_path, "isUndelegate")?,
+                    phase,
                     delta_key,
                 })
             })
