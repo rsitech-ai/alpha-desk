@@ -122,7 +122,7 @@ CARGO_TARGET_DIR="$TARGET_ARCHIVE" \
   cargo +1.97.1 run -p archive-inspect --frozen --offline -- \
   verify "$GENERATED_ARCHIVE" >"$TEMP_ROOT/archive-verify.txt"
 if ! diff -u - "$TEMP_ROOT/archive-verify.txt" <<'EXPECTED'
-PASS chains=1 raw_sources=1 blocks=3 canonical_events=3 raw_observations=3 objects=2
+PASS chains=1 raw_sources=1 blocks=3 canonical_events=3 raw_observations=3 objects=2 v3_sources=0 v3_logical_rows=0 v3_logical_manifests=0
 EXPECTED
 then
   printf 'generated-check:error archive verification summary changed\n' >&2
@@ -133,7 +133,7 @@ CARGO_TARGET_DIR="$TARGET_ARCHIVE" \
   cargo +1.97.1 run -p archive-inspect --frozen --offline -- \
   count "$GENERATED_ARCHIVE" >"$TEMP_ROOT/archive-count.txt"
 if ! diff -u - "$TEMP_ROOT/archive-count.txt" <<'EXPECTED'
-PASS canonical_events=3 canonical_objects=1
+PASS canonical_events=3 canonical_objects=1 v3_sources=0 v3_logical_rows=0 v3_logical_manifests=0
 EXPECTED
 then
   printf 'generated-check:error archive count summary changed\n' >&2

@@ -12,6 +12,7 @@ use hl_protocol::{
     validate_operator_kind_trust, validate_role_trust,
 };
 use serde::{Deserialize, Serialize};
+use storage_ports::{RawArchiveCapacityBudgets, RawArchiveWorkloadEnvelope};
 
 use crate::historical_manifest::{DatasetFormat, DatasetKind};
 
@@ -242,6 +243,10 @@ pub struct RuntimeConfig {
     backpressure_timeout_millis: u64,
     shutdown_grace_millis: u64,
     disk_reserve_bytes: u64,
+    #[serde(default, skip_serializing_if = "RawArchiveFormat::is_v2")]
+    raw_archive_format: RawArchiveFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raw_v3: Option<RawV3RuntimeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     status_listen: Option<String>,
 }
@@ -275,7 +280,12 @@ impl RuntimeConfig {
         if let Some(listen) = &self.status_listen {
             validate_status_listen(listen)?;
         }
-        Ok(())
+        match (self.raw_archive_format, self.raw_v3.as_ref()) {
+            (RawArchiveFormat::V2, None) => Ok(()),
+            (RawArchiveFormat::V2, Some(_)) => Err(ConfigError::UnexpectedRawV3Capacity),
+            (RawArchiveFormat::V3, None) => Err(ConfigError::MissingRawV3Capacity),
+            (RawArchiveFormat::V3, Some(raw_v3)) => raw_v3.validate(),
+        }
     }
 
     #[must_use]
@@ -381,6 +391,84 @@ impl RuntimeConfig {
                 .parse()
                 .expect("RuntimeConfig is constructed only through validated deserialization")
         })
+    }
+
+    #[must_use]
+    pub const fn raw_archive_format(&self) -> RawArchiveFormat {
+        self.raw_archive_format
+    }
+
+    #[must_use]
+    pub const fn raw_v3(&self) -> Option<&RawV3RuntimeConfig> {
+        self.raw_v3.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RawArchiveFormat {
+    #[default]
+    V2,
+    V3,
+}
+
+impl RawArchiveFormat {
+    fn is_v2(&self) -> bool {
+        matches!(self, Self::V2)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawV3RuntimeConfig {
+    maximum_records_per_second: u64,
+    minimum_group_records: u64,
+    maximum_group_delay_millis: u64,
+    retention_horizon_seconds: u64,
+    maximum_encoded_record_bytes: u64,
+    maximum_uncompacted_commits: u64,
+    maximum_eligible_bytes: u64,
+    maximum_eligible_inodes: u64,
+    raw_data_budget_bytes: u64,
+    metadata_budget_bytes: u64,
+    total_storage_budget_bytes: u64,
+    inode_budget: u64,
+    digest_confirmed_purge_workflow_configured: bool,
+}
+
+impl RawV3RuntimeConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.workload()?;
+        self.budgets()?;
+        if !self.digest_confirmed_purge_workflow_configured {
+            return Err(ConfigError::InvalidRawV3Capacity);
+        }
+        Ok(())
+    }
+
+    pub fn workload(&self) -> Result<RawArchiveWorkloadEnvelope, ConfigError> {
+        RawArchiveWorkloadEnvelope::try_new(
+            self.maximum_records_per_second,
+            self.minimum_group_records,
+            self.maximum_group_delay_millis,
+            self.retention_horizon_seconds,
+            self.maximum_encoded_record_bytes,
+            self.maximum_uncompacted_commits,
+            self.maximum_eligible_bytes,
+            self.maximum_eligible_inodes,
+        )
+        .map_err(|_| ConfigError::InvalidRawV3Capacity)
+    }
+
+    pub fn budgets(&self) -> Result<RawArchiveCapacityBudgets, ConfigError> {
+        RawArchiveCapacityBudgets::try_new(
+            self.raw_data_budget_bytes,
+            self.metadata_budget_bytes,
+            self.total_storage_budget_bytes,
+            self.inode_budget,
+            self.digest_confirmed_purge_workflow_configured,
+        )
+        .map_err(|_| ConfigError::InvalidRawV3Capacity)
     }
 }
 
@@ -1153,6 +1241,12 @@ pub enum ConfigError {
     InvalidNatsStream,
     #[error("capture runtime limit is outside the supported range")]
     InvalidRuntimeLimit,
+    #[error("raw V3 capture requires explicit capacity admission")]
+    MissingRawV3Capacity,
+    #[error("raw V3 capacity is present while V1/V2 raw archive format is selected")]
+    UnexpectedRawV3Capacity,
+    #[error("raw V3 capture capacity admission is invalid")]
+    InvalidRawV3Capacity,
     #[error("capture operator status listen address is invalid")]
     InvalidStatusListen,
     #[error("validated capture configuration could not be serialized")]
@@ -1208,6 +1302,9 @@ impl ConfigError {
             Self::InvalidNatsServer => "capture_config.invalid_nats_server",
             Self::InvalidNatsStream => "capture_config.invalid_nats_stream",
             Self::InvalidRuntimeLimit => "capture_config.invalid_runtime_limit",
+            Self::MissingRawV3Capacity => "capture_config.missing_raw_v3_capacity",
+            Self::UnexpectedRawV3Capacity => "capture_config.unexpected_raw_v3_capacity",
+            Self::InvalidRawV3Capacity => "capture_config.invalid_raw_v3_capacity",
             Self::InvalidStatusListen => "capture_config.invalid_status_listen",
             Self::Serialization => "capture_config.serialization",
             Self::DuplicateEgress => "capture_config.duplicate_egress",
