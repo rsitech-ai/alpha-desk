@@ -25,12 +25,20 @@ mod shutdown;
 mod source_runtime;
 pub mod spool;
 mod status;
+mod subscription_plan;
+mod ws_session;
 
 pub use adapters::info_rest::{
     CaptureClock, FakeCaptureClock, HttpsInfoTransport, InfoArchive, InfoCaptureCoordinator,
     InfoCaptureError, InfoCaptureOutcome, InfoFaultInjector, InfoFaultPoint, InfoJobCheckpoint,
     MemoryInfoArchive, MemoryInfoPublisher, NoInfoFaults, RawPortInfoArchive, SystemCaptureClock,
     capture_time_pages, default_info_request_url,
+};
+pub use adapters::public_ws::{
+    MemoryWsFanout, NoWsFaults, RawPortWsArchive, WsArchive, WsCaptureCoordinator, WsCaptureError,
+    WsFanout, WsFaultInjector, WsFaultPoint, WsPendingItem, WsPublished, WsSessionCheckpoint,
+    encode_ws_plan_status, guard_ws_url, replay_official_ws_fixtures, write_ws_plan_snapshot,
+    ws_plan_status_path, ws_request_hash,
 };
 pub use app::{CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError};
 pub use backlog::*;
@@ -55,4 +63,14 @@ pub use status::{
     AuxiliaryQualificationState, AuxiliarySourceHealth, AuxiliarySourceStatus, CaptureHealth,
     CaptureMaintenanceStatus, CaptureSourceHealth, CaptureStatus, CommittedSourceClass,
     RestartReconstruction, StatusError, StatusWriter, read_status,
+};
+pub use subscription_plan::{
+    OfficialWsLimits, PlannedConnection, PlannedConnectionKind, PlannedSubscription, PlannerConfig,
+    PlannerInput, RejectReason, SourceHealthHint, SubscriptionDemand, SubscriptionPlan,
+    expand_official_demand, official_family_identifiers, plan_subscriptions,
+    reconnect_jitter_millis,
+};
+pub use ws_session::{
+    AppliedInbound, InboundClass, MinuteWindow, SessionState, SubscriptionHealth, WsSession,
+    WsSessionError, classify_inbound,
 };

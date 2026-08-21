@@ -48,6 +48,7 @@ pub(crate) struct RuntimeHealthSnapshot {
     throughput_blocks_per_sec: Option<u32>,
     rate_window_started: Instant,
     info_budget_json: Option<Vec<u8>>,
+    ws_plan_json: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -79,6 +80,7 @@ impl CaptureRuntimeHealth {
             throughput_blocks_per_sec: None,
             rate_window_started: Instant::now(),
             info_budget_json: None,
+            ws_plan_json: None,
         });
         Self { sender }
     }
@@ -387,6 +389,12 @@ impl CaptureRuntimeHealth {
         });
     }
 
+    pub(crate) fn set_ws_plan_json(&self, body: Vec<u8>) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.ws_plan_json = Some(body);
+        });
+    }
+
     pub(crate) fn sample_throughput(&self) {
         self.sender.send_modify(|snapshot| {
             let elapsed_millis = u64::try_from(snapshot.rate_window_started.elapsed().as_millis())
@@ -625,6 +633,10 @@ impl CaptureRuntime {
                         if let Some(body) = snapshot.info_budget_json.clone() {
                             let budget_path = crate::info_budget_status_path(status_context.writer.path());
                             let _ = std::fs::write(budget_path, body);
+                        }
+                        if let Some(body) = snapshot.ws_plan_json.clone() {
+                            let plan_path = crate::ws_plan_status_path(status_context.writer.path());
+                            let _ = std::fs::write(plan_path, body);
                         }
                         status_context
                             .write_current(snapshot)

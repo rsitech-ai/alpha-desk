@@ -121,15 +121,33 @@ impl CaptureConfig {
             }
         }
         for source in &self.sources {
-            if let Some(SourceAdapterConfig::OfficialInfo { egress_id, .. }) =
-                source.adapter.as_ref()
-            {
-                if source.trust != SourceTrust::ReconciledSnapshot {
-                    return Err(ConfigError::InvalidSourceAdapter);
+            match source.adapter.as_ref() {
+                Some(SourceAdapterConfig::OfficialInfo { egress_id, .. }) => {
+                    if source.trust != SourceTrust::ReconciledSnapshot {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                    if !egress_ids.contains(egress_id.as_str()) {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
                 }
-                if !egress_ids.contains(egress_id.as_str()) {
-                    return Err(ConfigError::InvalidSourceAdapter);
+                Some(SourceAdapterConfig::OfficialWs { egress_id, .. }) => {
+                    if source.trust != SourceTrust::ReconciledSnapshot {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                    let Some(egress) = self
+                        .egress
+                        .iter()
+                        .find(|egress| egress.id.as_str() == egress_id.as_str())
+                    else {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    };
+                    if egress.kind != EgressKind::OfficialWs {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
                 }
+                Some(SourceAdapterConfig::NodeLine { .. })
+                | Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+                | None => {}
             }
         }
         Ok(())
@@ -182,7 +200,11 @@ impl CaptureConfig {
 fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), ConfigError> {
     match source.adapter.as_ref() {
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => Ok(()),
-        Some(SourceAdapterConfig::NodeLine { .. } | SourceAdapterConfig::OfficialInfo { .. })
+        Some(
+            SourceAdapterConfig::NodeLine { .. }
+            | SourceAdapterConfig::OfficialInfo { .. }
+            | SourceAdapterConfig::OfficialWs { .. },
+        )
         | None => Err(ConfigError::InvalidCommittedSourceAdapter),
     }
 }
@@ -718,6 +740,24 @@ pub enum SourceAdapterConfig {
         capability_id: String,
         request_timeout_millis: u64,
     },
+    OfficialWs {
+        egress_id: String,
+        ping_interval_millis: u64,
+        inactivity_timeout_millis: u64,
+        stale_after_millis: u64,
+        reserved_failover_connections: u8,
+        reserved_failover_users: u8,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        families: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        users: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        coins: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dexes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        intervals: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -742,6 +782,44 @@ impl SourceAdapterConfig {
                     || observation_class != ObservationClass::Snapshot
                 {
                     return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Ok(())
+            }
+            Self::OfficialWs {
+                egress_id,
+                ping_interval_millis,
+                inactivity_timeout_millis,
+                stale_after_millis,
+                reserved_failover_connections,
+                reserved_failover_users,
+                families,
+                users,
+                coins,
+                dexes,
+                intervals,
+            } => {
+                validate_identity(egress_id).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                if !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(ping_interval_millis)
+                    || !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(inactivity_timeout_millis)
+                    || !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(stale_after_millis)
+                    || !(1..=10).contains(reserved_failover_connections)
+                    || !(1..=10).contains(reserved_failover_users)
+                    || observation_class != ObservationClass::Snapshot
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                for family in families {
+                    if hl_protocol::ws::family_by_identifier(family).is_none() {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                }
+                for value in users
+                    .iter()
+                    .chain(coins.iter())
+                    .chain(dexes.iter())
+                    .chain(intervals.iter())
+                {
+                    validate_identity(value).map_err(|_| ConfigError::InvalidSourceAdapter)?;
                 }
                 Ok(())
             }
@@ -800,6 +878,7 @@ impl SourceAdapterConfig {
 }
 
 const OFFICIAL_REST_WEIGHT_PER_MINUTE: u32 = 1_200;
+const OFFICIAL_WS_OUTGOING_PER_MINUTE: u32 = 2_000;
 const MIN_SAFETY_ENVELOPE_PERCENT: u8 = 70;
 const MAX_SAFETY_ENVELOPE_PERCENT: u8 = 80;
 
@@ -817,10 +896,19 @@ pub const OFFICIAL_INFO_URLS: &[&str] = &[
 pub const OFFICIAL_INFO_REQUEST_URL: &str = "https://api.hyperliquid.xyz/info";
 pub const OFFICIAL_INFO_TESTNET_REQUEST_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
 
+pub const OFFICIAL_WS_URLS: &[&str] = &[
+    "wss://api.hyperliquid.xyz/ws",
+    "wss://api.hyperliquid-testnet.xyz/ws",
+];
+
+pub const OFFICIAL_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
+pub const OFFICIAL_WS_TESTNET_URL: &str = "wss://api.hyperliquid-testnet.xyz/ws";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EgressKind {
     OfficialInfo,
+    OfficialWs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -866,6 +954,20 @@ impl EgressConfig {
                         .contains(&self.safety_envelope_percent)
                     || !(1..=90).contains(&self.priority_reserve_percent)
                     || !OFFICIAL_INFO_URLS.contains(&self.base_url.as_str())
+                {
+                    return Err(ConfigError::InvalidEgress);
+                }
+                Ok(())
+            }
+            EgressKind::OfficialWs => {
+                if self.base_url.contains("/exchange") {
+                    return Err(ConfigError::ExchangeEndpointForbidden);
+                }
+                if self.weight_per_minute != OFFICIAL_WS_OUTGOING_PER_MINUTE
+                    || !(MIN_SAFETY_ENVELOPE_PERCENT..=MAX_SAFETY_ENVELOPE_PERCENT)
+                        .contains(&self.safety_envelope_percent)
+                    || !(1..=90).contains(&self.priority_reserve_percent)
+                    || !OFFICIAL_WS_URLS.contains(&self.base_url.as_str())
                 {
                     return Err(ConfigError::InvalidEgress);
                 }

@@ -326,6 +326,7 @@ fn committed_source_adapter_covers_every_constructible_kind() {
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => {}
         Some(SourceAdapterConfig::NodeLine { .. })
         | Some(SourceAdapterConfig::OfficialInfo { .. })
+        | Some(SourceAdapterConfig::OfficialWs { .. })
         | None => {
             panic!("example committed adapter must remain node-block-directory")
         }
@@ -975,6 +976,65 @@ adapter = { kind = "official-info", egress_id = "official-info", capability_id =
     assert_eq!(
         CaptureConfig::from_toml(&missing_egress)
             .expect_err("egress must exist")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+}
+
+#[test]
+fn official_ws_adapter_requires_snapshot_trust_and_ws_egress() {
+    let with_egress = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[egress]]
+id = "official-ws"
+kind = "official-ws"
+base_url = "wss://api.hyperliquid.xyz/ws"
+weight_per_minute = 2000
+safety_envelope_percent = 75
+
+[[sources]]
+id = "official-ws"
+source_version = "ws-v1"
+trust = "reconciled-snapshot"
+class = "snapshot"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "official-ws", egress_id = "official-ws", ping_interval_millis = 15000, inactivity_timeout_millis = 50000, stale_after_millis = 60000, reserved_failover_connections = 1, reserved_failover_users = 1, families = ["allMids"] }
+"#
+    );
+    let config = CaptureConfig::from_toml(&with_egress).expect("official ws source");
+    assert!(matches!(
+        config.source("official-ws").expect("official ws").adapter(),
+        Some(SourceAdapterConfig::OfficialWs { .. })
+    ));
+
+    let plaintext = with_egress.replace(
+        "wss://api.hyperliquid.xyz/ws",
+        "ws://api.hyperliquid.xyz/ws",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&plaintext)
+            .expect_err("plaintext ws")
+            .reason_code(),
+        "capture_config.invalid_egress"
+    );
+
+    let third_party = with_egress.replace(
+        "wss://api.hyperliquid.xyz/ws",
+        "wss://stream.example.com/ws",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&third_party)
+            .expect_err("third party")
+            .reason_code(),
+        "capture_config.invalid_egress"
+    );
+
+    let fast = with_egress.replace("families = [\"allMids\"]", "families = [\"fastAssetCtxs\"]");
+    assert_eq!(
+        CaptureConfig::from_toml(&fast)
+            .expect_err("fastAssetCtxs")
             .reason_code(),
         "capture_config.invalid_source_adapter"
     );

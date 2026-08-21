@@ -151,6 +151,7 @@ async fn handle_connection(
         ("GET", "/healthz") => write_health(&mut stream, status_path).await,
         ("GET", "/status") => write_status(&mut stream, status_path).await,
         ("GET", "/info-budget") => write_info_budget(&mut stream, status_path).await,
+        ("GET", "/ws-plan") => write_ws_plan(&mut stream, status_path).await,
         ("GET", "/events") => write_events(&mut stream, status_path, cancellation).await,
         ("GET", _) => {
             write_response(&mut stream, 404, "text/plain; charset=utf-8", b"not found").await
@@ -213,6 +214,18 @@ async fn write_info_budget(
     status_path: &Path,
 ) -> Result<(), OperatorError> {
     let path = info_budget_status_path(status_path);
+    match std::fs::read(&path) {
+        Ok(body) if !body.is_empty() => {
+            write_response(stream, 200, "application/json", &body).await
+        }
+        Ok(_) | Err(_) => {
+            write_response(stream, 404, "text/plain; charset=utf-8", b"not found").await
+        }
+    }
+}
+
+async fn write_ws_plan(stream: &mut TcpStream, status_path: &Path) -> Result<(), OperatorError> {
+    let path = crate::ws_plan_status_path(status_path);
     match std::fs::read(&path) {
         Ok(body) if !body.is_empty() => {
             write_response(stream, 200, "application/json", &body).await

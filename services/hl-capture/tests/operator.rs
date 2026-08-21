@@ -563,3 +563,29 @@ async fn info_budget_route_serves_snapshot_file() {
     cancellation.cancel();
     server.await.expect("join").expect("serve stops");
 }
+
+#[tokio::test]
+async fn ws_plan_route_serves_snapshot_file() {
+    let (directory, addr, cancellation, server) = serve_fixture("status-v5.json").await;
+    let (status, _) = http_get(addr, "/ws-plan").await;
+    assert_eq!(status, 404);
+
+    let plan = hl_capture::plan_subscriptions(
+        hl_capture::PlannerConfig::official(),
+        hl_capture::PlannerInput::new(vec![hl_capture::SubscriptionDemand::new("allMids")]),
+    );
+    let body = hl_capture::encode_ws_plan_status(&plan, &[]).expect("encode");
+    hl_capture::write_ws_plan_snapshot(&directory.path().join("capture-status.json"), &body)
+        .expect("write plan");
+    let (status, response) = http_get(addr, "/ws-plan").await;
+    assert_eq!(status, 200);
+    let json = json_from_http(&response);
+    assert_eq!(json["schema_version"], "hl.capture.ws-plan.v1");
+    assert_eq!(json["max_connections"], 10);
+    assert_eq!(json["reserved_connections"], 1);
+    let (status, _) = http_get(addr, "/status").await;
+    assert_eq!(status, 200);
+
+    cancellation.cancel();
+    server.await.expect("join").expect("serve stops");
+}

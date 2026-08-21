@@ -463,3 +463,6 @@ fn progress_error(_error: ProgressError) -> CoordinatorError {
 pub use crate::adapters::info_rest::{
     InfoCaptureCoordinator, InfoCaptureOutcome, InfoFaultPoint, NoInfoFaults,
 };
+pub use crate::adapters::public_ws::{
+    NoWsFaults, WsCaptureCoordinator, WsCaptureError, WsFaultPoint,
+};

@@ -18,8 +18,9 @@ use crate::secret::read_protected_secret;
 use crate::source_runtime::{auxiliary_node_task, committed_node_tasks};
 use crate::{
     AppError, BlockingRawSegmentArchive, CaptureClock, CaptureConfig, CaptureRuntime,
-    CaptureRuntimeConfig, CaptureRuntimeError, OwnedTask, RawSegmentArchive, RequestBudget,
-    StatusWriter, encode_info_budget_status, synthetic_fixture_block,
+    CaptureRuntimeConfig, CaptureRuntimeError, EgressKind, OwnedTask, PlannerConfig, PlannerInput,
+    RawSegmentArchive, RequestBudget, SourceAdapterConfig, StatusWriter, encode_info_budget_status,
+    encode_ws_plan_status, expand_official_demand, plan_subscriptions, synthetic_fixture_block,
 };
 
 const BUILD_ID: &str = concat!("hl-capture/", env!("CARGO_PKG_VERSION"));
@@ -79,6 +80,13 @@ impl ConnectedCapture {
             cancellation.child_token(),
         ) {
             self.infrastructure_tasks.push(budget_task);
+        }
+        if let Some(ws_task) = official_ws_plan_task(
+            &self.config,
+            self.runtime.health(),
+            cancellation.child_token(),
+        ) {
+            self.infrastructure_tasks.push(ws_task);
         }
         self.runtime
             .run(cancellation, self.infrastructure_tasks)
@@ -306,14 +314,15 @@ fn official_info_budget_task(
     health: Arc<crate::app::CaptureRuntimeHealth>,
     cancellation: CancellationToken,
 ) -> Option<OwnedTask> {
-    if config.egress().is_empty() {
-        return None;
-    }
     let specs: Vec<(String, u8)> = config
         .egress()
         .iter()
+        .filter(|egress| egress.kind() == EgressKind::OfficialInfo)
         .map(|egress| (egress.id().to_owned(), egress.safety_envelope_percent()))
         .collect();
+    if specs.is_empty() {
+        return None;
+    }
     Some(OwnedTask::new("info-budget", async move {
         let mut budgets = Vec::new();
         for (id, percent) in specs {
@@ -334,6 +343,51 @@ fn official_info_budget_task(
                         if let Ok(body) = encode_info_budget_status(&snapshot) {
                             health.set_info_budget_json(body);
                         }
+                    }
+                }
+            }
+        }
+    }))
+}
+
+fn official_ws_plan_task(
+    config: &CaptureConfig,
+    health: Arc<crate::app::CaptureRuntimeHealth>,
+    cancellation: CancellationToken,
+) -> Option<OwnedTask> {
+    let mut input = None;
+    let mut planner = PlannerConfig::official();
+    for source in config.sources() {
+        if let Some(SourceAdapterConfig::OfficialWs {
+            families,
+            users,
+            coins,
+            dexes,
+            intervals,
+            reserved_failover_connections,
+            reserved_failover_users,
+            ..
+        }) = source.adapter()
+        {
+            planner = planner.with_reserves(
+                u32::from(*reserved_failover_connections),
+                u32::from(*reserved_failover_users),
+            );
+            input = Some(PlannerInput::new(expand_official_demand(
+                families, users, coins, dexes, intervals,
+            )));
+            break;
+        }
+    }
+    let input = input?;
+    Some(OwnedTask::new("ws-plan", async move {
+        loop {
+            tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                () = tokio::time::sleep(Duration::from_secs(1)) => {
+                    let plan = plan_subscriptions(planner, input.clone());
+                    if let Ok(body) = encode_ws_plan_status(&plan, &[]) {
+                        health.set_ws_plan_json(body);
                     }
                 }
             }

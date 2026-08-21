@@ -151,3 +151,7 @@ hyperliquid-coverage-check:
 # Official /info capture adapter. Not part of `just verify`. Live HTTP only when HL_INFO_CAPTURE_E2E=1.
 info-capture-e2e:
     ./tools/ci/info-capture-e2e.sh
+
+# Official public WS planner/lifecycle replay. Not part of `just verify`. Live WS only when HL_PUBLIC_WS_E2E=1.
+public-ws-replay:
+    ./tools/ci/public-ws-replay.sh

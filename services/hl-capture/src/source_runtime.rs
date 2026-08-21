@@ -350,6 +350,7 @@ pub(crate) fn committed_node_tasks(
             }
             Some(SourceAdapterConfig::NodeLine { .. })
             | Some(SourceAdapterConfig::OfficialInfo { .. })
+            | Some(SourceAdapterConfig::OfficialWs { .. })
             | None => continue,
         };
         let admission = source
@@ -482,6 +483,7 @@ pub(crate) fn auxiliary_node_task(
             }) => (path, stream_name, stream, poll_interval_millis),
             Some(SourceAdapterConfig::NodeBlockDirectory { .. })
             | Some(SourceAdapterConfig::OfficialInfo { .. })
+            | Some(SourceAdapterConfig::OfficialWs { .. })
             | None => continue,
         };
         let admission = source
