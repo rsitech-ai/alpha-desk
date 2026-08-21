@@ -11,6 +11,7 @@
     {"name": "block_hash", "type": "fixed_size_binary[32]", "nullable": false},
     {"name": "block_number", "type": "uint64", "nullable": false},
     {"name": "tx_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "tx_hash_observed", "type": "bool", "nullable": false},
     {"name": "tx_index", "type": "uint32", "nullable": false},
     {"name": "type_name", "type": "utf8", "nullable": false},
     {"name": "from_address", "type": "fixed_size_binary[20]", "nullable": true},

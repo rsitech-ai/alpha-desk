@@ -27,7 +27,7 @@ pub use precompile::{
 };
 pub use receipt::{EvmReceipt, ReceiptStatus};
 pub use system_transaction::{CoreOrigin, SystemTransaction};
-pub use transaction::{EvmTransaction, TxKind};
+pub use transaction::{EvmTransaction, HashProvenance, TxKind};
 
 use crate::{ErrorDisposition, SourceError};
 use domain_types::{Address, Decimal, RoundingMode, ValueError};
@@ -441,6 +441,25 @@ pub(crate) fn optional_wei(value: Option<&wire::WireValue>) -> Result<Option<Wei
     }
 }
 
+pub(crate) fn optional_u64(value: Option<&wire::WireValue>) -> Result<Option<u64>, EvmError> {
+    match value {
+        None | Some(wire::WireValue::Nil) => Ok(None),
+        Some(other) => Ok(Some(u64_from_wire(Some(other))?)),
+    }
+}
+
+pub(crate) fn required_u64(
+    value: Option<&wire::WireValue>,
+    field: &'static str,
+) -> Result<u64, EvmError> {
+    match value {
+        None | Some(wire::WireValue::Nil) => {
+            Err(EvmError::SchemaDrift(format!("header is missing {field}")))
+        }
+        Some(other) => u64_from_wire(Some(other)),
+    }
+}
+
 pub(crate) fn chain_from_tx(
     tx_chain: Option<u64>,
     fallback: EvmChainId,
@@ -460,6 +479,9 @@ pub(crate) fn chain_from_tx(
         }
     }
 }
+
+#[cfg(test)]
+mod decode_edges;
 
 #[cfg(test)]
 mod tests {

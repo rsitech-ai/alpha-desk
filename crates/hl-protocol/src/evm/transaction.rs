@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use super::wire::{self, WireValue};
 use super::{
     EvmChainId, EvmError, Hash32, TX_HASH_CONTEXT, Wei, hash_fact, hash32_from_wire,
-    optional_address, optional_wei, u64_from_wire, wei_from_wire,
+    optional_address, optional_u64, optional_wei, u64_from_wire, wei_from_wire,
 };
 
 const TAKEN_TX_FIELDS: &[&str] = &[
@@ -68,6 +68,19 @@ impl TxKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HashProvenance {
+    Observed,
+    Derived,
+}
+
+impl HashProvenance {
+    #[must_use]
+    pub const fn is_observed(self) -> bool {
+        matches!(self, Self::Observed)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvmTransaction {
     chain_id: EvmChainId,
@@ -75,6 +88,7 @@ pub struct EvmTransaction {
     block_number: u64,
     tx_index: u32,
     hash: Hash32,
+    hash_provenance: HashProvenance,
     type_name: String,
     kind: Option<TxKind>,
     from: Option<Address>,
@@ -112,6 +126,49 @@ impl EvmTransaction {
         signature: Vec<Vec<u8>>,
         extra: BTreeMap<String, JsonValue>,
     ) -> Result<Self, EvmError> {
+        Self::from_parts(
+            chain_id,
+            block_hash,
+            block_number,
+            tx_index,
+            hash,
+            HashProvenance::Observed,
+            type_name,
+            from,
+            to,
+            nonce,
+            gas,
+            gas_price,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            value,
+            input,
+            signature,
+            extra,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        chain_id: EvmChainId,
+        block_hash: Hash32,
+        block_number: u64,
+        tx_index: u32,
+        hash: Hash32,
+        hash_provenance: HashProvenance,
+        type_name: impl Into<String>,
+        from: Option<Address>,
+        to: Option<Address>,
+        nonce: u64,
+        gas: Wei,
+        gas_price: Option<Wei>,
+        max_fee_per_gas: Option<Wei>,
+        max_priority_fee_per_gas: Option<Wei>,
+        value: Wei,
+        input: Vec<u8>,
+        signature: Vec<Vec<u8>>,
+        extra: BTreeMap<String, JsonValue>,
+    ) -> Result<Self, EvmError> {
         let type_name = type_name.into();
         if type_name.is_empty() {
             return Err(EvmError::InvalidIdentity);
@@ -123,6 +180,7 @@ impl EvmTransaction {
             block_number,
             tx_index,
             hash,
+            hash_provenance,
             &type_name,
             &input,
             &extra,
@@ -133,6 +191,7 @@ impl EvmTransaction {
             block_number,
             tx_index,
             hash,
+            hash_provenance,
             type_name,
             kind,
             from,
@@ -173,6 +232,16 @@ impl EvmTransaction {
     #[must_use]
     pub const fn hash(&self) -> Hash32 {
         self.hash
+    }
+
+    #[must_use]
+    pub const fn hash_provenance(&self) -> HashProvenance {
+        self.hash_provenance
+    }
+
+    #[must_use]
+    pub const fn hash_is_observed(&self) -> bool {
+        self.hash_provenance.is_observed()
     }
 
     #[must_use]
@@ -264,12 +333,16 @@ impl EvmTransaction {
             }
         };
         let content_map = content.as_map()?;
-        let chain = u64_from_wire(wire::map_get(content_map, &["chainId", "chain_id"])).ok();
+        let chain = optional_u64(wire::map_get(content_map, &["chainId", "chain_id"]))?;
         let chain_id = super::chain_from_tx(chain, fallback_chain)?;
-        let hash = match wire::map_get(root, &["hash"]).or(wire::map_get(content_map, &["hash"])) {
-            Some(value) => hash32_from_wire(Some(value))?,
-            None => derived_tx_hash(chain_id, block_hash, tx_index, content_map)?,
-        };
+        let (hash, hash_provenance) =
+            match wire::map_get(root, &["hash"]).or(wire::map_get(content_map, &["hash"])) {
+                Some(value) => (hash32_from_wire(Some(value))?, HashProvenance::Observed),
+                None => (
+                    derived_tx_hash(chain_id, block_hash, tx_index, content_map)?,
+                    HashProvenance::Derived,
+                ),
+            };
         let signature = match wire::map_get(root, &["signature"]) {
             Some(WireValue::Array(items)) => items
                 .iter()
@@ -278,13 +351,17 @@ impl EvmTransaction {
             Some(other) => vec![wire::as_bytes(other)?],
             None => Vec::new(),
         };
-        Self::new(
+        Self::from_parts(
             chain_id,
             block_hash,
             block_number,
             tx_index,
             hash,
+            hash_provenance,
             type_name,
+            // ponytail: no sender until T25 decides RPC vs narrow recovery vs
+            // archive-carried signer. Spec §17.3/§17.5 links without sender
+            // are a known ceiling. Do not add keccak/secp256k1 here.
             optional_address(
                 wire::map_get(root, &["from"]).or(wire::map_get(content_map, &["from"])),
             )?,
@@ -372,11 +449,11 @@ impl EvmTransaction {
                 .map(|bytes| wire::bin_bytes(bytes))
                 .collect(),
         );
-        wire::string_map(vec![
-            ("transaction", tagged),
-            ("signature", signature),
-            ("hash", wire::bin_bytes(self.hash.as_bytes())),
-        ])
+        let mut fields = vec![("transaction", tagged), ("signature", signature)];
+        if self.hash_provenance.is_observed() {
+            fields.push(("hash", wire::bin_bytes(self.hash.as_bytes())));
+        }
+        wire::string_map(fields)
     }
 }
 
@@ -406,11 +483,16 @@ fn hash_tx(
     block_number: u64,
     tx_index: u32,
     hash: Hash32,
+    hash_provenance: HashProvenance,
     type_name: &str,
     input: &[u8],
     extra: &BTreeMap<String, JsonValue>,
 ) -> [u8; 32] {
     let extra_bytes = serde_json::to_vec(extra).unwrap_or_else(|_| b"{}".to_vec());
+    let provenance = match hash_provenance {
+        HashProvenance::Observed => [1_u8],
+        HashProvenance::Derived => [0_u8],
+    };
     hash_fact(
         TX_HASH_CONTEXT,
         &[
@@ -419,6 +501,7 @@ fn hash_tx(
             &block_number.to_be_bytes(),
             &tx_index.to_be_bytes(),
             hash.as_bytes(),
+            &provenance,
             type_name.as_bytes(),
             input,
             &extra_bytes,

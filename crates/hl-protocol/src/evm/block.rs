@@ -6,7 +6,7 @@ use super::wire::{self, WireValue};
 use super::{
     BLOCK_HASH_CONTEXT, EvmChainId, EvmError, EvmLog, EvmReceipt, EvmTransaction, Hash32,
     SystemTransaction, Wei, address_from_wire, chain_from_tx, hash_fact, hash32_from_wire,
-    optional_hash32, optional_wei, u64_from_wire, wei_from_wire,
+    optional_hash32, optional_u64, optional_wei, required_u64, wei_from_wire,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -300,7 +300,6 @@ impl EvmBlockAndReceipts {
         &self.system_transactions
     }
 
-    #[must_use]
     pub fn logs(&self) -> impl Iterator<Item = &EvmLog> {
         self.receipts.iter().flat_map(EvmReceipt::logs)
     }
@@ -379,8 +378,8 @@ impl EvmBlockAndReceipts {
                 header_map,
                 &["parentHash", "parent_hash"],
             ))?,
-            number: u64_from_wire(wire::map_get(header_map, &["number"]))?,
-            timestamp: u64_from_wire(wire::map_get(header_map, &["timestamp"]))?,
+            number: required_u64(wire::map_get(header_map, &["number"]), "number")?,
+            timestamp: required_u64(wire::map_get(header_map, &["timestamp"]), "timestamp")?,
             miner: address_from_wire(wire::map_get(header_map, &["miner", "beneficiary"]))?,
             sha3_uncles: hash32_from_wire(wire::map_get(
                 header_map,
@@ -592,28 +591,75 @@ fn parse_receipts(
     block_number: u64,
     transactions: &[EvmTransaction],
 ) -> Result<Vec<EvmReceipt>, EvmError> {
-    let Some(WireValue::Array(items)) = value else {
-        if value.is_none() {
-            return Ok(Vec::new());
+    // ponytail: receipts pair 1:1 with body.transactions by index. A combined
+    // list that also covers systemTransactions fails the length check. Upgrade
+    // when a real archive shows the pairing rule.
+    let items = match value {
+        None | Some(WireValue::Nil) => {
+            if transactions.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Err(EvmError::SchemaDrift(
+                "archive object has transactions but no receipts".to_owned(),
+            ));
         }
-        return Err(EvmError::MalformedPayload(
-            "receipts must be an array".to_owned(),
-        ));
+        Some(WireValue::Array(items)) => items,
+        Some(_) => {
+            return Err(EvmError::MalformedPayload(
+                "receipts must be an array".to_owned(),
+            ));
+        }
     };
+    if items.len() != transactions.len() {
+        return Err(EvmError::SchemaDrift(format!(
+            "receipt count {} does not match transaction count {}",
+            items.len(),
+            transactions.len()
+        )));
+    }
     items
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let tx_index = u32::try_from(index).map_err(|_| EvmError::InvalidIdentity)?;
-            let tx_hash = transactions
-                .get(index)
-                .map(EvmTransaction::hash)
-                .ok_or_else(|| {
-                    EvmError::SchemaDrift("receipt index has no matching transaction".to_owned())
-                })?;
-            EvmReceipt::from_wire(item, chain_id, block_hash, block_number, tx_hash, tx_index)
+            let tx = &transactions[index];
+            confirm_receipt_identity(item, tx)?;
+            EvmReceipt::from_wire(
+                item,
+                chain_id,
+                block_hash,
+                block_number,
+                tx.hash(),
+                tx.tx_index(),
+            )
         })
         .collect()
+}
+
+fn confirm_receipt_identity(value: &WireValue, tx: &EvmTransaction) -> Result<(), EvmError> {
+    let inner = match wire::tagged_enum(value) {
+        Ok((_, nested)) => nested,
+        Err(_) => value,
+    };
+    let map = inner.as_map()?;
+    if let Some(wired_hash) = optional_hash32(wire::map_get(
+        map,
+        &["transactionHash", "transaction_hash", "txHash"],
+    ))? && wired_hash != tx.hash()
+    {
+        return Err(EvmError::SchemaDrift(
+            "receipt transaction hash does not match the paired transaction".to_owned(),
+        ));
+    }
+    if let Some(wired_index) = optional_u64(wire::map_get(
+        map,
+        &["transactionIndex", "transaction_index", "txIndex"],
+    ))? && wired_index != u64::from(tx.tx_index())
+    {
+        return Err(EvmError::SchemaDrift(
+            "receipt transaction index does not match the paired transaction".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_system_txs(

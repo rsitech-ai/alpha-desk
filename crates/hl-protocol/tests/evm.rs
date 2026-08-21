@@ -6,9 +6,9 @@ use domain_types::{Address, Decimal};
 use hl_protocol::evm::{
     BlockPace, CORE_WRITER_ADDRESS, CoreWriterAction, CoreWriterCall, EvmBlock,
     EvmBlockAndReceipts, EvmChainId, EvmError, EvmHeader, EvmLog, EvmReceipt, EvmTransaction,
-    Hash32, NativeHypeTransfer, PrecompileObservation, ReceiptStatus, SystemTransaction,
-    TRANSFER_TOPIC, TxKind, Wei, WellKnownLog, decode_rmp_lz4, encode_rmp_lz4, is_core_writer,
-    is_read_precompile,
+    Hash32, HashProvenance, NativeHypeTransfer, PrecompileObservation, ReceiptStatus,
+    SystemTransaction, TRANSFER_TOPIC, TxKind, Wei, WellKnownLog, decode_rmp_lz4, encode_rmp_lz4,
+    is_core_writer, is_read_precompile,
 };
 use serde_json::json;
 
@@ -193,6 +193,8 @@ mod evm {
         let tx = &record.transactions()[0];
         let log = &record.receipts()[0].logs()[0];
         assert!(tx.tx_id().starts_with("0x"));
+        assert_eq!(tx.hash_provenance(), HashProvenance::Observed);
+        assert!(tx.hash_is_observed());
         assert!(tx.fact_id().starts_with("evx_"));
         assert_eq!(
             log.id().as_wire(),
@@ -335,5 +337,16 @@ mod evm {
             assert_eq!(value["fields"][0]["type"], "uint64");
             assert!(!text.contains("canonical_event"));
         }
+        let tx_schema =
+            fs::read_to_string(parquet_root().join("evm-transactions-v1.json")).unwrap();
+        let tx_value: serde_json::Value = serde_json::from_str(&tx_schema).unwrap();
+        let observed = tx_value["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["name"] == "tx_hash_observed")
+            .expect("tx_hash_observed");
+        assert_eq!(observed["type"], "bool");
+        assert_eq!(observed["nullable"], false);
     }
 }
