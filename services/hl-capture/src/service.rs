@@ -8,6 +8,7 @@ use storage_ports::{CanonicalArchive, CaptureProgressStore, RawObservationArchiv
 use tokio_postgres::config::{Host, SslMode};
 use tokio_util::sync::CancellationToken;
 
+use crate::adapters::info_rest::SystemCaptureClock;
 use crate::bus::{JetStreamAuthentication, JetStreamConfig, ReconnectingJetStreamPublisher};
 use crate::coordinator::{
     BlockingCanonicalArchive, CaptureCoordinator, NoCoordinatorFaults, SystemAcknowledgementClock,
@@ -16,8 +17,9 @@ use crate::progress::ReconnectingPostgresProgressStore;
 use crate::secret::read_protected_secret;
 use crate::source_runtime::{auxiliary_node_task, committed_node_tasks};
 use crate::{
-    AppError, BlockingRawSegmentArchive, CaptureConfig, CaptureRuntime, CaptureRuntimeConfig,
-    CaptureRuntimeError, OwnedTask, RawSegmentArchive, StatusWriter, synthetic_fixture_block,
+    AppError, BlockingRawSegmentArchive, CaptureClock, CaptureConfig, CaptureRuntime,
+    CaptureRuntimeConfig, CaptureRuntimeError, OwnedTask, RawSegmentArchive, RequestBudget,
+    StatusWriter, encode_info_budget_status, synthetic_fixture_block,
 };
 
 const BUILD_ID: &str = concat!("hl-capture/", env!("CARGO_PKG_VERSION"));
@@ -70,6 +72,13 @@ impl ConnectedCapture {
         .map_err(|_| CaptureRuntimeError::InvalidConfig)?
         {
             self.infrastructure_tasks.push(auxiliary_task);
+        }
+        if let Some(budget_task) = official_info_budget_task(
+            &self.config,
+            self.runtime.health(),
+            cancellation.child_token(),
+        ) {
+            self.infrastructure_tasks.push(budget_task);
         }
         self.runtime
             .run(cancellation, self.infrastructure_tasks)
@@ -290,4 +299,44 @@ impl RuntimeConnectError {
             Self::FailoverState => "capture_connect.failover_state",
         }
     }
+}
+
+fn official_info_budget_task(
+    config: &CaptureConfig,
+    health: Arc<crate::app::CaptureRuntimeHealth>,
+    cancellation: CancellationToken,
+) -> Option<OwnedTask> {
+    if config.egress().is_empty() {
+        return None;
+    }
+    let specs: Vec<(String, u8)> = config
+        .egress()
+        .iter()
+        .map(|egress| (egress.id().to_owned(), egress.safety_envelope_percent()))
+        .collect();
+    Some(OwnedTask::new("info-budget", async move {
+        let mut budgets = Vec::new();
+        for (id, percent) in specs {
+            budgets.push(RequestBudget::official(id, percent, 0, 1).map_err(|_| {
+                AppError::TaskFailed {
+                    task: "info-budget",
+                    reason_code: "capture_info.invalid_budget",
+                }
+            })?);
+        }
+        let clock = SystemCaptureClock;
+        loop {
+            tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                () = tokio::time::sleep(Duration::from_secs(1)) => {
+                    if let Some(budget) = budgets.first_mut() {
+                        let snapshot = budget.snapshot(clock.now_millis());
+                        if let Ok(body) = encode_info_budget_status(&snapshot) {
+                            health.set_info_budget_json(body);
+                        }
+                    }
+                }
+            }
+        }
+    }))
 }

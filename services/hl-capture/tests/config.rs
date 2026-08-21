@@ -324,7 +324,9 @@ fn committed_source_adapter_covers_every_constructible_kind() {
         .adapter()
     {
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => {}
-        Some(SourceAdapterConfig::NodeLine { .. }) | None => {
+        Some(SourceAdapterConfig::NodeLine { .. })
+        | Some(SourceAdapterConfig::OfficialInfo { .. })
+        | None => {
             panic!("example committed adapter must remain node-block-directory")
         }
     }
@@ -921,6 +923,61 @@ adapter = {{ kind = "node-line", path = "/var/lib/hyperliquid/hl/data/node_fills
             ..
         })
     ));
+}
+
+#[test]
+fn official_info_adapter_requires_snapshot_trust_and_egress() {
+    let with_egress = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[egress]]
+id = "official-info"
+kind = "official-info"
+base_url = "https://api.hyperliquid.xyz/info"
+weight_per_minute = 1200
+safety_envelope_percent = 75
+
+[[sources]]
+id = "official-rest"
+source_version = "info-v1"
+trust = "reconciled-snapshot"
+class = "snapshot"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "official-info", egress_id = "official-info", capability_id = "official.info.all_mids", request_timeout_millis = 5000 }
+"#
+    );
+    let config = CaptureConfig::from_toml(&with_egress).expect("official info source");
+    assert!(matches!(
+        config
+            .source("official-rest")
+            .expect("official rest")
+            .adapter(),
+        Some(SourceAdapterConfig::OfficialInfo {
+            capability_id,
+            ..
+        }) if capability_id == "official.info.all_mids"
+    ));
+
+    let missing_egress = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[sources]]
+id = "official-rest"
+source_version = "info-v1"
+trust = "reconciled-snapshot"
+class = "snapshot"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "official-info", egress_id = "official-info", capability_id = "official.info.all_mids", request_timeout_millis = 5000 }
+"#
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing_egress)
+            .expect_err("egress must exist")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
 }
 
 fn catalog_source(id: &str, trust: &str, class: &str, catalog: &str) -> String {

@@ -6,6 +6,14 @@
 mod node_files;
 mod node_stream;
 
+pub mod evm_local;
+pub mod evm_rpc;
+pub mod evm_s3;
+pub mod historical_s3;
+pub mod info_rest;
+pub mod providers;
+pub mod public_ws;
+
 pub use node_files::{NodeBlockDirectoryConfig, NodeBlockDirectorySource};
 pub use node_stream::{
     NodeFileConfig, NodeLineFileSource, NodeLineTailState, NodeQuarantineRecord, NodeReceiveClock,

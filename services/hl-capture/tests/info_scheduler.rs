@@ -127,6 +127,27 @@ mod info_scheduler {
         let error = scheduler.dispatch(&mut budget, 0).expect_err("storm");
         assert!(matches!(error, SchedulerError::CircuitOpen));
         assert_eq!(error.reason_code(), "capture_info.circuit_open");
+        assert_eq!(scheduler.len(), 2);
+    }
+
+    #[test]
+    fn rate_limit_requeues_after_backoff_window() {
+        let mut budget =
+            RequestBudget::try_new("official-info", 1_000, 80, 40, 0, 9).expect("budget");
+        let mut scheduler = InfoScheduler::new();
+        scheduler
+            .enqueue(job("one", SchedulePriority::P2, 1, 0, 20))
+            .unwrap();
+        let first = scheduler.dispatch(&mut budget, 0).unwrap().expect("first");
+        let until = scheduler.on_429(&mut budget, first, 0).unwrap();
+        assert_eq!(scheduler.len(), 1);
+        let error = scheduler.dispatch(&mut budget, 0).expect_err("storm");
+        assert!(matches!(error, SchedulerError::CircuitOpen));
+        let again = scheduler
+            .dispatch(&mut budget, until.saturating_add(60_000))
+            .unwrap()
+            .expect("requeued after backoff and refill");
+        assert_eq!(again.job().id(), "one");
     }
 
     #[test]
@@ -140,6 +161,7 @@ mod info_scheduler {
             &BTreeMap::new(),
             now(),
             "test-archive",
+            hl_capture::OFFICIAL_INFO_REQUEST_URL,
         )
         .expect("fetch");
         assert!(!fetched.admission().can_advance_committed_watermark());
@@ -347,6 +369,7 @@ mod info_scheduler {
             &BTreeMap::new(),
             now(),
             "test-archive",
+            hl_capture::OFFICIAL_INFO_REQUEST_URL,
         )
         .expect("exchangeStatus");
         let posted: Value = serde_json::from_slice(&transport.posted()[0]).expect("posted");
@@ -459,7 +482,7 @@ mod info_scheduler {
     }
 
     #[test]
-    fn drained_budget_waits_a_minute_then_crawls() {
+    fn drained_budget_at_pinned_clock_does_not_jump() {
         let mut transport = ScriptedInfoTransport::new([page(&[("a", 100)])]);
         let mut budget = RequestBudget::official("official-info", 75, 0, 1).expect("budget");
         let general = budget.snapshot(0).available_general();
@@ -470,7 +493,7 @@ mod info_scheduler {
         assert_eq!(budget.snapshot(0).available_general(), 0);
         let extra = BTreeMap::new();
         let cost = parse_request_cost("base:20 variable:window").expect("cost");
-        let crawl = crawl_time_pages(
+        let error = crawl_time_pages(
             &mut transport,
             &mut budget,
             InfoRegistry::official(),
@@ -487,8 +510,84 @@ mod info_scheduler {
                 cost,
             ),
         )
-        .expect("after refill");
+        .expect_err("pinned clock must not mint a minute");
+        assert!(matches!(
+            error,
+            SchedulerError::Budget(BudgetError::Insufficient)
+        ));
+        assert!(transport.posted().is_empty());
+    }
+
+    #[test]
+    fn drained_budget_crawls_after_caller_advances_clock() {
+        let mut transport = ScriptedInfoTransport::new([page(&[("a", 100)])]);
+        let mut budget = RequestBudget::official("official-info", 75, 0, 1).expect("budget");
+        let general = budget.snapshot(0).available_general();
+        let drain = budget
+            .reserve(0, "drain", SchedulePriority::P4, general)
+            .expect("drain");
+        budget.commit(0, drain, general).expect("spent");
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let crawl = crawl_time_pages(
+            &mut transport,
+            &mut budget,
+            InfoRegistry::official(),
+            TimePageCrawlRequest::new(
+                "official.info.user_fills_by_time",
+                &extra,
+                TimePageCursor::new(0, 5).expect("cursor"),
+                2,
+                "fills",
+                SchedulePriority::P4,
+                60_000,
+                now(),
+                "test-archive",
+                cost,
+            ),
+        )
+        .expect("after real minute");
         assert_eq!(crawl.records().len(), 1);
         assert_eq!(crawl.stop(), TimePageStopReason::Exhausted);
+    }
+
+    #[test]
+    fn pinned_clock_p4_crawl_cannot_mint_budget_minutes() {
+        let records: Vec<(&str, i64)> = (0..520).map(|i| ("x", 100 + i64::from(i))).collect();
+        let owned: Vec<(String, i64)> = records
+            .iter()
+            .enumerate()
+            .map(|(i, (_, time))| (format!("id-{i}"), *time))
+            .collect();
+        let items: Vec<Value> = owned
+            .iter()
+            .map(|(id, time)| json!({ "id": id, "time": time }))
+            .collect();
+        let full_page = InfoHttpResponse::new(200, serde_json::to_vec(&items).expect("json"));
+        let mut transport = ScriptedInfoTransport::new(std::iter::repeat_n(full_page, 8));
+        let mut budget = RequestBudget::official("official-info", 75, 0, 1).expect("budget");
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let crawl = crawl_time_pages(
+            &mut transport,
+            &mut budget,
+            InfoRegistry::official(),
+            TimePageCrawlRequest::new(
+                "official.info.user_fills_by_time",
+                &extra,
+                TimePageCursor::new(0, 5).expect("cursor"),
+                520,
+                "fills",
+                SchedulePriority::P4,
+                0,
+                now(),
+                "test-archive",
+                cost,
+            ),
+        )
+        .expect("first page");
+        assert_eq!(crawl.stop(), TimePageStopReason::BudgetExhausted);
+        assert_eq!(transport.posted().len(), 1);
+        assert_eq!(budget.snapshot(0).available_general(), 0);
     }
 }

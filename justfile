@@ -147,3 +147,7 @@ hyperliquid-full-coverage-docs:
 hyperliquid-coverage-check:
     cargo +1.97.1 run -p hyperliquid-capabilities --locked --offline -- validate
     cargo +1.97.1 run -p hyperliquid-capabilities --locked --offline -- render-docs --check
+
+# Official /info capture adapter. Not part of `just verify`. Live HTTP only when HL_INFO_CAPTURE_E2E=1.
+info-capture-e2e:
+    ./tools/ci/info-capture-e2e.sh

@@ -45,6 +45,23 @@ pub fn encode_info_budget_status(
     .map_err(|_| OperatorError::Serialization)
 }
 
+#[must_use]
+pub fn info_budget_status_path(status_path: &Path) -> PathBuf {
+    status_path.with_file_name("info-budget.json")
+}
+
+pub fn write_info_budget_snapshot(
+    status_path: &Path,
+    snapshot: &EgressBudgetSnapshot,
+) -> Result<(), OperatorError> {
+    let encoded = encode_info_budget_status(snapshot)?;
+    let path = info_budget_status_path(status_path);
+    let parent = path.parent().ok_or(OperatorError::Io)?;
+    let temporary = parent.join("info-budget.json.tmp");
+    std::fs::write(&temporary, &encoded).map_err(|_| OperatorError::Io)?;
+    std::fs::rename(&temporary, &path).map_err(|_| OperatorError::Io)
+}
+
 pub async fn serve_operator_status(
     status_path: PathBuf,
     listen: SocketAddr,
@@ -133,6 +150,7 @@ async fn handle_connection(
         }
         ("GET", "/healthz") => write_health(&mut stream, status_path).await,
         ("GET", "/status") => write_status(&mut stream, status_path).await,
+        ("GET", "/info-budget") => write_info_budget(&mut stream, status_path).await,
         ("GET", "/events") => write_events(&mut stream, status_path, cancellation).await,
         ("GET", _) => {
             write_response(&mut stream, 404, "text/plain; charset=utf-8", b"not found").await
@@ -186,6 +204,21 @@ async fn write_status(stream: &mut TcpStream, status_path: &Path) -> Result<(), 
                 error.reason_code()
             );
             write_response(stream, 503, "application/json", body.as_bytes()).await
+        }
+    }
+}
+
+async fn write_info_budget(
+    stream: &mut TcpStream,
+    status_path: &Path,
+) -> Result<(), OperatorError> {
+    let path = info_budget_status_path(status_path);
+    match std::fs::read(&path) {
+        Ok(body) if !body.is_empty() => {
+            write_response(stream, 200, "application/json", &body).await
+        }
+        Ok(_) | Err(_) => {
+            write_response(stream, 404, "text/plain; charset=utf-8", b"not found").await
         }
     }
 }

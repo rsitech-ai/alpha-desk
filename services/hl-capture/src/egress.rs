@@ -7,7 +7,7 @@ use hl_protocol::{ObservationClass, SourceAdmission, SourceTrust};
 use serde_json::Value;
 
 use crate::ConfigError;
-use crate::config::{EgressConfig, EgressKind};
+use crate::config::{EgressConfig, EgressKind, OFFICIAL_INFO_URLS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfoHttpResponse {
@@ -36,7 +36,11 @@ impl InfoHttpResponse {
 }
 
 pub trait InfoTransport {
-    fn post_info(&mut self, request: &EncodedInfoRequest) -> Result<InfoHttpResponse, EgressError>;
+    fn post_info(
+        &mut self,
+        url: &str,
+        request: &EncodedInfoRequest,
+    ) -> Result<InfoHttpResponse, EgressError>;
 }
 
 #[derive(Debug, Default)]
@@ -61,7 +65,12 @@ impl ScriptedInfoTransport {
 }
 
 impl InfoTransport for ScriptedInfoTransport {
-    fn post_info(&mut self, request: &EncodedInfoRequest) -> Result<InfoHttpResponse, EgressError> {
+    fn post_info(
+        &mut self,
+        url: &str,
+        request: &EncodedInfoRequest,
+    ) -> Result<InfoHttpResponse, EgressError> {
+        let _ = guard_info_request_url(url)?;
         self.posted.push(request.body().clone());
         self.responses
             .pop_front()
@@ -119,6 +128,42 @@ impl InfoFetch {
     }
 }
 
+pub fn official_info_post_url(base_url: &str) -> Result<String, EgressError> {
+    let url = guard_info_request_url(base_url)?;
+    if url.ends_with("/info") {
+        Ok(url)
+    } else {
+        Ok(format!("{url}/info"))
+    }
+}
+
+pub fn guard_info_request_url(url: &str) -> Result<String, EgressError> {
+    if url.is_empty() {
+        return Err(EgressError::HostNotAllowlisted);
+    }
+    if url.contains('@') {
+        return Err(EgressError::HostNotAllowlisted);
+    }
+    if is_exchange_http_path(url) {
+        return Err(EgressError::ExchangeForbidden);
+    }
+    if url.starts_with("http://") {
+        return Err(EgressError::TlsRequired);
+    }
+    if !url.starts_with("https://") {
+        return Err(EgressError::TlsRequired);
+    }
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let trimmed = without_query
+        .strip_suffix('/')
+        .filter(|stripped| *stripped != "https:/")
+        .unwrap_or(without_query);
+    if !OFFICIAL_INFO_URLS.contains(&trimmed) && !OFFICIAL_INFO_URLS.contains(&without_query) {
+        return Err(EgressError::HostNotAllowlisted);
+    }
+    Ok(trimmed.to_owned())
+}
+
 pub fn fetch_info<T: InfoTransport>(
     transport: &mut T,
     registry: InfoRegistry,
@@ -126,6 +171,7 @@ pub fn fetch_info<T: InfoTransport>(
     params: &BTreeMap<String, Value>,
     received_at: KnownTime,
     archive_ref: &str,
+    request_url: &str,
 ) -> Result<InfoFetch, EgressError> {
     let endpoint = registry.get(capability_id).map_err(EgressError::Info)?;
     let admission = endpoint
@@ -138,10 +184,11 @@ pub fn fetch_info<T: InfoTransport>(
         return Err(EgressError::CommittedLane);
     }
     let encoded = endpoint.encode(params).map_err(EgressError::Info)?;
-    if forbids_exchange_request(encoded.identifier(), encoded.body(), "") {
+    let _ = official_info_post_url(request_url)?;
+    if forbids_exchange_request(encoded.identifier(), encoded.body(), request_url) {
         return Err(EgressError::ExchangeForbidden);
     }
-    let response = transport.post_info(&encoded)?;
+    let response = transport.post_info(request_url, &encoded)?;
     match response.status {
         200 => {
             let context = InfoParseContext::new(
@@ -189,9 +236,19 @@ fn encoded_body_is_exchange(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return false;
     };
-    match value.get("type").and_then(Value::as_str) {
-        Some(kind) => EXCHANGE_ACTIONS.contains(&kind) || is_exchange_http_path(kind),
-        None => false,
+    json_is_exchange_action(value.get("type")) || json_is_exchange_action(value.get("action"))
+}
+
+fn json_is_exchange_action(node: Option<&Value>) -> bool {
+    match node {
+        Some(Value::String(kind)) => {
+            EXCHANGE_ACTIONS.contains(&kind.as_str()) || is_exchange_http_path(kind)
+        }
+        Some(Value::Object(map)) => map
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| EXCHANGE_ACTIONS.contains(&kind) || is_exchange_http_path(kind)),
+        _ => false,
     }
 }
 
@@ -209,6 +266,16 @@ pub enum EgressError {
     RateLimited,
     #[error("scripted info transport has no remaining response")]
     NoScriptedResponse,
+    #[error("info request host is not allowlisted")]
+    HostNotAllowlisted,
+    #[error("info request must use https")]
+    TlsRequired,
+    #[error("info request timed out")]
+    Timeout,
+    #[error("info response exceeded the payload limit")]
+    BodyTooLarge,
+    #[error("info response used HTTP compression")]
+    CompressedBody,
 }
 
 impl EgressError {
@@ -221,6 +288,11 @@ impl EgressError {
             Self::HttpStatus(_) => "capture_info.http_status",
             Self::RateLimited => "capture_info.rate_limited",
             Self::NoScriptedResponse => "capture_info.no_scripted_response",
+            Self::HostNotAllowlisted => "capture_info.host_not_allowlisted",
+            Self::TlsRequired => "capture_info.tls_required",
+            Self::Timeout => "capture_info.timeout",
+            Self::BodyTooLarge => "capture_info.body_too_large",
+            Self::CompressedBody => "capture_info.compressed_body",
         }
     }
 }

@@ -348,7 +348,9 @@ pub(crate) fn committed_node_tasks(
                 committed_replica_cmds_style(*replica_cmds_style)?;
                 (path, stream_name, start_height, poll_interval_millis)
             }
-            Some(SourceAdapterConfig::NodeLine { .. }) | None => continue,
+            Some(SourceAdapterConfig::NodeLine { .. })
+            | Some(SourceAdapterConfig::OfficialInfo { .. })
+            | None => continue,
         };
         let admission = source
             .admission()
@@ -478,7 +480,9 @@ pub(crate) fn auxiliary_node_task(
                 stream,
                 poll_interval_millis,
             }) => (path, stream_name, stream, poll_interval_millis),
-            Some(SourceAdapterConfig::NodeBlockDirectory { .. }) | None => continue,
+            Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+            | Some(SourceAdapterConfig::OfficialInfo { .. })
+            | None => continue,
         };
         let admission = source
             .admission()

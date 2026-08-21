@@ -249,5 +249,10 @@ safety_envelope_percent = 75
             br#"{"type":"exchangeStatus"}"#,
             "https://api.hyperliquid.xyz/info",
         ));
+        assert!(forbids_exchange_request(
+            "allMids",
+            br#"{"action":{"type":"order"},"nonce":1,"signature":{}}"#,
+            "https://api.hyperliquid.xyz/info",
+        ));
     }
 }

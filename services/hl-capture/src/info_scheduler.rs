@@ -12,7 +12,6 @@ use crate::request_budget::{
 };
 
 const MAX_TIME_PAGES: usize = 1_024;
-const REFILL_PERIOD_MILLIS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfoJob {
@@ -214,9 +213,11 @@ impl InfoScheduler {
         inflight: InFlight,
         now_millis: u64,
     ) -> Result<u64, SchedulerError> {
-        budget
+        let until = budget
             .on_429(now_millis, inflight.lease)
-            .map_err(SchedulerError::Budget)
+            .map_err(SchedulerError::Budget)?;
+        self.enqueue(inflight.job)?;
+        Ok(until)
     }
 }
 
@@ -296,6 +297,7 @@ pub struct TimePageCrawlRequest<'a> {
     received_at: KnownTime,
     archive_ref: &'a str,
     cost: RequestCost,
+    request_url: &'a str,
 }
 
 impl<'a> TimePageCrawlRequest<'a> {
@@ -324,7 +326,14 @@ impl<'a> TimePageCrawlRequest<'a> {
             received_at,
             archive_ref,
             cost,
+            request_url: crate::config::OFFICIAL_INFO_REQUEST_URL,
         }
+    }
+
+    #[must_use]
+    pub fn with_request_url(mut self, request_url: &'a str) -> Self {
+        self.request_url = request_url;
+        self
     }
 }
 
@@ -340,7 +349,7 @@ pub fn crawl_time_pages<T: InfoTransport>(
     let mut collected = Vec::new();
     let mut cursor = request.cursor.clone();
     let mut pages = 0_usize;
-    let mut now = request.now_millis;
+    let now = request.now_millis;
     loop {
         if pages >= MAX_TIME_PAGES {
             return finish_crawl(
@@ -360,7 +369,7 @@ pub fn crawl_time_pages<T: InfoTransport>(
         }
         let mut params = request.extra_params.clone();
         params.insert("startTime".to_owned(), Value::from(start));
-        let lease = match reserve_page(budget, &request, &mut now) {
+        let lease = match reserve_page(budget, &request, now) {
             Ok(lease) => lease,
             Err(SchedulerError::CircuitOpen) => {
                 return take_progress(
@@ -386,6 +395,7 @@ pub fn crawl_time_pages<T: InfoTransport>(
             &params,
             request.received_at,
             request.archive_ref,
+            request.request_url,
         ) {
             Ok(fetched) => fetched,
             Err(EgressError::RateLimited) => {
@@ -520,33 +530,27 @@ fn negotiated_row_estimate(cost: RequestCost, page_limit: u32, remaining: u32) -
     }
     // ponytail: extra weight is +1/row. Official candle/history coefficients
     // are not in-tree. Cap the reserved rows so one page cannot exceed the
-    // remaining envelope. Swap the table when T09 snapshots it.
+    // remaining envelope. Swap the table when an official snapshot exists.
     Some(page_limit.min(remaining - cost.base()))
 }
 
 fn reserve_page(
     budget: &mut RequestBudget,
     request: &TimePageCrawlRequest<'_>,
-    now: &mut u64,
+    now: u64,
 ) -> Result<BudgetLease, SchedulerError> {
     let page_limit = u32::try_from(request.page_limit).unwrap_or(u32::MAX);
-    for attempt in 0..2_u8 {
-        if attempt == 1 {
-            *now = now.saturating_add(REFILL_PERIOD_MILLIS);
-        }
-        let remaining = remaining_weight(budget, *now, request.priority);
-        let Some(rows) = negotiated_row_estimate(request.cost, page_limit, remaining) else {
-            continue;
-        };
-        let reserved = request.cost.estimated_weight(rows);
-        match budget.reserve(*now, request.job_id, request.priority, reserved) {
-            Ok(lease) => return Ok(lease),
-            Err(BudgetError::Insufficient) => {}
-            Err(BudgetError::CircuitOpen) => return Err(SchedulerError::CircuitOpen),
-            Err(error) => return Err(SchedulerError::Budget(error)),
-        }
+    let remaining = remaining_weight(budget, now, request.priority);
+    let Some(rows) = negotiated_row_estimate(request.cost, page_limit, remaining) else {
+        return Err(SchedulerError::Budget(BudgetError::Insufficient));
+    };
+    let reserved = request.cost.estimated_weight(rows);
+    match budget.reserve(now, request.job_id, request.priority, reserved) {
+        Ok(lease) => Ok(lease),
+        Err(BudgetError::Insufficient) => Err(SchedulerError::Budget(BudgetError::Insufficient)),
+        Err(BudgetError::CircuitOpen) => Err(SchedulerError::CircuitOpen),
+        Err(error) => Err(SchedulerError::Budget(error)),
     }
-    Err(SchedulerError::Budget(BudgetError::Insufficient))
 }
 
 fn take_progress(

@@ -539,3 +539,27 @@ async fn serve_operator_status_rejects_non_loopback_bind() {
     .await;
     assert_eq!(error, Err(OperatorError::UnsafeBind));
 }
+
+#[tokio::test]
+async fn info_budget_route_serves_snapshot_file() {
+    let (directory, addr, cancellation, server) = serve_fixture("status-v5.json").await;
+    let (status, _) = http_get(addr, "/info-budget").await;
+    assert_eq!(status, 404);
+
+    let mut budget =
+        hl_capture::RequestBudget::official("official-info", 75, 0, 1).expect("budget");
+    hl_capture::write_info_budget_snapshot(
+        &directory.path().join("capture-status.json"),
+        &budget.snapshot(0),
+    )
+    .expect("write budget");
+    let (status, body) = http_get(addr, "/info-budget").await;
+    assert_eq!(status, 200);
+    let json = json_from_http(&body);
+    assert_eq!(json["schema_version"], "hl.capture.info-budget.v1");
+    assert_eq!(json["egress_id"], "official-info");
+    assert_eq!(json["ceiling_weight_per_minute"], 1200);
+
+    cancellation.cancel();
+    server.await.expect("join").expect("serve stops");
+}

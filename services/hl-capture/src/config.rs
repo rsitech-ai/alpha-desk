@@ -120,6 +120,18 @@ impl CaptureConfig {
                 return Err(ConfigError::DuplicateEgress);
             }
         }
+        for source in &self.sources {
+            if let Some(SourceAdapterConfig::OfficialInfo { egress_id, .. }) =
+                source.adapter.as_ref()
+            {
+                if source.trust != SourceTrust::ReconciledSnapshot {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                if !egress_ids.contains(egress_id.as_str()) {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -170,9 +182,8 @@ impl CaptureConfig {
 fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), ConfigError> {
     match source.adapter.as_ref() {
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => Ok(()),
-        Some(SourceAdapterConfig::NodeLine { .. }) | None => {
-            Err(ConfigError::InvalidCommittedSourceAdapter)
-        }
+        Some(SourceAdapterConfig::NodeLine { .. } | SourceAdapterConfig::OfficialInfo { .. })
+        | None => Err(ConfigError::InvalidCommittedSourceAdapter),
     }
 }
 
@@ -702,6 +713,11 @@ pub enum SourceAdapterConfig {
         poll_interval_millis: u64,
         replica_cmds_style: NodeReplicaCmdsStyle,
     },
+    OfficialInfo {
+        egress_id: String,
+        capability_id: String,
+        request_timeout_millis: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -714,34 +730,59 @@ pub enum NodeReplicaCmdsStyle {
 
 impl SourceAdapterConfig {
     fn validate(&self, observation_class: ObservationClass) -> Result<(), ConfigError> {
-        let (path, stream_name, poll_interval_millis, expected_class, replica_cmds_style) =
-            match self {
-                Self::NodeLine {
-                    path,
-                    stream_name,
-                    stream,
-                    poll_interval_millis,
-                } => (
-                    path,
-                    stream_name,
-                    *poll_interval_millis,
-                    stream.observation_class(),
-                    None,
-                ),
-                Self::NodeBlockDirectory {
-                    path,
-                    stream_name,
-                    start_height: _,
-                    poll_interval_millis,
-                    replica_cmds_style,
-                } => (
-                    path,
-                    stream_name,
-                    *poll_interval_millis,
-                    ObservationClass::CommittedBlock,
-                    Some(*replica_cmds_style),
-                ),
-            };
+        match self {
+            Self::OfficialInfo {
+                egress_id,
+                capability_id,
+                request_timeout_millis,
+            } => {
+                validate_identity(egress_id).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(capability_id).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                if !(1..=MAX_RUNTIME_TIMEOUT_MILLIS).contains(request_timeout_millis)
+                    || observation_class != ObservationClass::Snapshot
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Ok(())
+            }
+            Self::NodeLine {
+                path,
+                stream_name,
+                stream,
+                poll_interval_millis,
+            } => Self::validate_node(
+                path,
+                stream_name,
+                *poll_interval_millis,
+                stream.observation_class(),
+                observation_class,
+                None,
+            ),
+            Self::NodeBlockDirectory {
+                path,
+                stream_name,
+                start_height: _,
+                poll_interval_millis,
+                replica_cmds_style,
+            } => Self::validate_node(
+                path,
+                stream_name,
+                *poll_interval_millis,
+                ObservationClass::CommittedBlock,
+                observation_class,
+                Some(*replica_cmds_style),
+            ),
+        }
+    }
+
+    fn validate_node(
+        path: &Path,
+        stream_name: &str,
+        poll_interval_millis: u64,
+        expected_class: ObservationClass,
+        observation_class: ObservationClass,
+        replica_cmds_style: Option<NodeReplicaCmdsStyle>,
+    ) -> Result<(), ConfigError> {
         validate_node_source_path(path)?;
         validate_identity(stream_name).map_err(|_| ConfigError::InvalidSourceAdapter)?;
         if !(1..=MAX_SOURCE_POLL_INTERVAL_MILLIS).contains(&poll_interval_millis)
@@ -766,12 +807,15 @@ fn default_priority_reserve_percent() -> u8 {
     40
 }
 
-const OFFICIAL_INFO_URLS: &[&str] = &[
+pub const OFFICIAL_INFO_URLS: &[&str] = &[
     "https://api.hyperliquid.xyz",
     "https://api.hyperliquid.xyz/info",
     "https://api.hyperliquid-testnet.xyz",
     "https://api.hyperliquid-testnet.xyz/info",
 ];
+
+pub const OFFICIAL_INFO_REQUEST_URL: &str = "https://api.hyperliquid.xyz/info";
+pub const OFFICIAL_INFO_TESTNET_REQUEST_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -47,6 +47,7 @@ pub(crate) struct RuntimeHealthSnapshot {
     throughput_records_per_sec: Option<u32>,
     throughput_blocks_per_sec: Option<u32>,
     rate_window_started: Instant,
+    info_budget_json: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -77,6 +78,7 @@ impl CaptureRuntimeHealth {
             throughput_records_per_sec: None,
             throughput_blocks_per_sec: None,
             rate_window_started: Instant::now(),
+            info_budget_json: None,
         });
         Self { sender }
     }
@@ -379,6 +381,12 @@ impl CaptureRuntimeHealth {
             .cloned()
     }
 
+    pub(crate) fn set_info_budget_json(&self, body: Vec<u8>) {
+        self.sender.send_modify(|snapshot| {
+            snapshot.info_budget_json = Some(body);
+        });
+    }
+
     pub(crate) fn sample_throughput(&self) {
         self.sender.send_modify(|snapshot| {
             let elapsed_millis = u64::try_from(snapshot.rate_window_started.elapsed().as_millis())
@@ -613,8 +621,13 @@ impl CaptureRuntime {
                     () = status_cancellation.cancelled() => return Ok(()),
                     _ = heartbeat.tick() => {
                         status_health.sample_throughput();
+                        let snapshot = status_health.snapshot();
+                        if let Some(body) = snapshot.info_budget_json.clone() {
+                            let budget_path = crate::info_budget_status_path(status_context.writer.path());
+                            let _ = std::fs::write(budget_path, body);
+                        }
                         status_context
-                            .write_current(status_health.snapshot())
+                            .write_current(snapshot)
                             .await
                             .map_err(|_| AppError::TaskFailed {
                                 task: "status-heartbeat",
