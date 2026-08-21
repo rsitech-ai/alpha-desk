@@ -4,19 +4,26 @@ use std::str::FromStr;
 use api_contracts::is_canonical_trade_client_order_id;
 use chrono::{DateTime, NaiveDateTime};
 use domain_types::{
-    Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, PositionQuantity,
-    Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
+    Address, BlockHeight, ChainId, ClientOrderId, KnownTime, MarketId, OrderId, OrderSide,
+    PositionQuantity, Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
 };
+use hl_protocol::node::order_status::{
+    BookSide, OrderStatusClass, OrderStatusV1, parse_order_status_batch,
+};
+use hl_protocol::node::raw_book_diff::{RawBookDiffOp, RawBookDiffV1, parse_raw_book_diff_batch};
+use hl_protocol::node::trade::{TradeV1, parse_trade_batch};
 use hl_protocol::node::v1::{NodeRecordKind, NodeRecordV1, NodeStreamKind};
-use serde::Deserialize;
+use serde_json::{Map, Value};
 
 use crate::{
     BlockEnvelope, BlockError, CanonicalEventEnvelope, CanonicalEventInput, ConfirmationClass,
-    ContractError, EventPayload, SourceEvidence, TradeMatched, TradeParticipantRoleV1,
-    TradeParticipantV1,
+    ContractError, EventPayload, OrderAccepted, OrderCancelled, OrderFilled, OrderRejected,
+    OrderRested, SourceEvidence, TradeMatched, TradeParticipantRoleV1, TradeParticipantV1,
+    TriggerOrderActivated,
 };
 
 const TRADE_ID_CONTEXT: &str = "hyperliquid-alpha-desk/trade-id/node-v1";
+const ORDER_FILL_ID_CONTEXT: &str = "hyperliquid-alpha-desk/trade-id/order-status-fill-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MappingDisposition {
@@ -193,28 +200,9 @@ impl MappingError {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct TradeBatch {
-    block_time: String,
-    events: Vec<NodeTrade>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NodeTrade {
-    coin: String,
-    px: String,
-    sz: String,
-    hash: String,
-    side_info: [TradeSide; 2],
-}
-
-#[derive(Debug, Deserialize)]
-struct TradeSide {
-    user: String,
-    start_pos: String,
-    oid: u64,
-    twap_id: serde_json::Value,
-    cloid: serde_json::Value,
+#[must_use]
+pub fn node_trade_match_key(trade_id: &TradeId) -> String {
+    format!("node-trade:{}", trade_id.as_str())
 }
 
 pub fn map_committed_node_v1_block(
@@ -302,51 +290,91 @@ pub fn map_node_v1_record(
     catalog: &MarketCatalogV1,
     context: &NodeV1MappingContext,
 ) -> Result<MappingDisposition, MappingError> {
-    if let Some(disposition) = non_trade_disposition(record.stream(), record.kind()) {
-        return Ok(disposition);
+    match record.kind() {
+        NodeRecordKind::EmptyBatch => Ok(MappingDisposition::EmptyBlock),
+        NodeRecordKind::Trade if record.stream() == NodeStreamKind::Trades => {
+            map_trade_record(record, catalog, context)
+        }
+        NodeRecordKind::OrderStatus => map_order_status_record(record, catalog, context),
+        NodeRecordKind::RawBookDiff => map_raw_book_diff_record(record, catalog, context),
+        NodeRecordKind::Fill => Ok(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::OneSidedFill,
+        )),
+        NodeRecordKind::Transfer => Ok(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::IncompleteLedgerTransfer,
+        )),
+        NodeRecordKind::Liquidation => Ok(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::IncompleteLiquidation,
+        )),
+        NodeRecordKind::MarketMetadata => Ok(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryMarketMetadata,
+        )),
+        NodeRecordKind::Trade
+        | NodeRecordKind::TransactionBlock
+        | NodeRecordKind::MiscEvent
+        | NodeRecordKind::AbciStateSnapshot
+        | NodeRecordKind::L4Snapshot => Ok(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::UnsupportedCanonicalSemantics,
+        )),
     }
-    let Some(block_number) = record.block_number() else {
+}
+
+fn map_trade_record(
+    record: &NodeRecordV1,
+    catalog: &MarketCatalogV1,
+    context: &NodeV1MappingContext,
+) -> Result<MappingDisposition, MappingError> {
+    if record.block_number().is_none() {
         return Ok(MappingDisposition::EvidenceOnly(
             EvidenceOnlyReason::MissingBlockContext,
         ));
-    };
-
-    let batch: TradeBatch = serde_json::from_slice(record.payload()).map_err(|error| {
-        MappingError::MalformedRecord {
-            reason: error.to_string(),
-        }
-    })?;
-    let block_time = parse_block_time(&batch.block_time)?;
-    let block_height = BlockHeight::new(block_number);
+    }
+    let batch = parse_trade_batch(record.payload().clone()).map_err(source_to_mapping)?;
+    let block_time =
+        parse_block_time(
+            batch
+                .block_time()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "trade batch has no block_time".to_owned(),
+                })?,
+        )?;
+    let block_height =
+        BlockHeight::new(
+            batch
+                .block_number()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "trade batch has no block_number".to_owned(),
+                })?,
+        );
     let parser_version = format!("{}/catalog:{}", context.mapper_version, catalog.version());
     let mut seen_transactions = BTreeSet::new();
     let mut current_transaction: Option<String> = None;
     let mut transaction_index = 0_u32;
     let mut canonical_event_index = 0_u32;
-    let mut events = Vec::with_capacity(batch.events.len());
+    let mut events = Vec::with_capacity(batch.trades().len());
 
-    for (source_index, trade) in batch.events.into_iter().enumerate() {
+    for (source_index, trade) in batch.trades().iter().enumerate() {
         let source_index =
             u32::try_from(source_index).map_err(|_| MappingError::EventIndexOverflow)?;
         match current_transaction.as_deref() {
             None => {
-                seen_transactions.insert(trade.hash.clone());
-                current_transaction = Some(trade.hash.clone());
+                seen_transactions.insert(trade.hash().to_owned());
+                current_transaction = Some(trade.hash().to_owned());
             }
-            Some(current) if current == trade.hash => {
+            Some(current) if current == trade.hash() => {
                 canonical_event_index = canonical_event_index
                     .checked_add(1)
                     .ok_or(MappingError::EventIndexOverflow)?;
             }
             Some(_) => {
-                if !seen_transactions.insert(trade.hash.clone()) {
+                if !seen_transactions.insert(trade.hash().to_owned()) {
                     return Err(MappingError::NonContiguousTransaction);
                 }
                 transaction_index = transaction_index
                     .checked_add(1)
                     .ok_or(MappingError::EventIndexOverflow)?;
                 canonical_event_index = 0;
-                current_transaction = Some(trade.hash.clone());
+                current_transaction = Some(trade.hash().to_owned());
             }
         }
 
@@ -367,39 +395,96 @@ pub fn map_node_v1_record(
     Ok(MappingDisposition::Mapped(events))
 }
 
-fn non_trade_disposition(
-    stream: NodeStreamKind,
-    kind: NodeRecordKind,
-) -> Option<MappingDisposition> {
-    match kind {
-        NodeRecordKind::EmptyBatch => Some(MappingDisposition::EmptyBlock),
-        NodeRecordKind::Trade if stream == NodeStreamKind::Trades => None,
-        NodeRecordKind::Fill => Some(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::OneSidedFill,
-        )),
-        NodeRecordKind::OrderStatus => Some(MappingDisposition::EvidenceOnly(
+fn map_order_status_record(
+    record: &NodeRecordV1,
+    catalog: &MarketCatalogV1,
+    context: &NodeV1MappingContext,
+) -> Result<MappingDisposition, MappingError> {
+    if record.block_number().is_none() {
+        return Ok(MappingDisposition::EvidenceOnly(
             EvidenceOnlyReason::AuxiliaryOrderStatus,
-        )),
-        NodeRecordKind::RawBookDiff => Some(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::AuxiliaryBookDiff,
-        )),
-        NodeRecordKind::Transfer => Some(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::IncompleteLedgerTransfer,
-        )),
-        NodeRecordKind::Liquidation => Some(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::IncompleteLiquidation,
-        )),
-        NodeRecordKind::MarketMetadata => Some(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::AuxiliaryMarketMetadata,
-        )),
-        NodeRecordKind::Trade
-        | NodeRecordKind::TransactionBlock
-        | NodeRecordKind::MiscEvent
-        | NodeRecordKind::AbciStateSnapshot
-        | NodeRecordKind::L4Snapshot => Some(MappingDisposition::EvidenceOnly(
-            EvidenceOnlyReason::UnsupportedCanonicalSemantics,
-        )),
+        ));
     }
+    let batch = parse_order_status_batch(record.payload().clone()).map_err(source_to_mapping)?;
+    let block_time =
+        parse_block_time(
+            batch
+                .block_time()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "order-status batch has no block_time".to_owned(),
+                })?,
+        )?;
+    let block_height =
+        BlockHeight::new(
+            batch
+                .block_number()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "order-status batch has no block_number".to_owned(),
+                })?,
+        );
+    let parser_version = format!("{}/catalog:{}", context.mapper_version, catalog.version());
+    let mut events = Vec::with_capacity(batch.statuses().len());
+    for (source_index, status) in batch.statuses().iter().enumerate() {
+        let source_index =
+            u32::try_from(source_index).map_err(|_| MappingError::EventIndexOverflow)?;
+        events.push(map_order_status(
+            status,
+            source_index,
+            block_height,
+            block_time,
+            &parser_version,
+            record,
+            catalog,
+            context,
+        )?);
+    }
+    Ok(MappingDisposition::Mapped(events))
+}
+
+fn map_raw_book_diff_record(
+    record: &NodeRecordV1,
+    catalog: &MarketCatalogV1,
+    context: &NodeV1MappingContext,
+) -> Result<MappingDisposition, MappingError> {
+    if record.block_number().is_none() {
+        return Ok(MappingDisposition::EvidenceOnly(
+            EvidenceOnlyReason::AuxiliaryBookDiff,
+        ));
+    }
+    let batch = parse_raw_book_diff_batch(record.payload().clone()).map_err(source_to_mapping)?;
+    let block_time =
+        parse_block_time(
+            batch
+                .block_time()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "raw-book-diff batch has no block_time".to_owned(),
+                })?,
+        )?;
+    let block_height =
+        BlockHeight::new(
+            batch
+                .block_number()
+                .ok_or_else(|| MappingError::MalformedRecord {
+                    reason: "raw-book-diff batch has no block_number".to_owned(),
+                })?,
+        );
+    let parser_version = format!("{}/catalog:{}", context.mapper_version, catalog.version());
+    let mut events = Vec::with_capacity(batch.diffs().len());
+    for (source_index, diff) in batch.diffs().iter().enumerate() {
+        let source_index =
+            u32::try_from(source_index).map_err(|_| MappingError::EventIndexOverflow)?;
+        events.push(map_raw_book_diff(
+            diff,
+            source_index,
+            block_height,
+            block_time,
+            &parser_version,
+            record,
+            catalog,
+            context,
+        )?);
+    }
+    Ok(MappingDisposition::Mapped(events))
 }
 
 fn required_u64(
@@ -415,9 +500,12 @@ fn required_u64(
 }
 
 fn select_action_bundles<'a>(
-    root: &'a serde_json::Map<String, serde_json::Value>,
-    abci_block: &'a serde_json::Map<String, serde_json::Value>,
-) -> Result<&'a Vec<serde_json::Value>, MappingError> {
+    root: &'a Map<String, Value>,
+    abci_block: &'a Map<String, Value>,
+) -> Result<&'a Vec<Value>, MappingError> {
+    // Fail-closed owner for ambiguous signed_action_bundles. Parse-layer
+    // `signed_action_bundles` returns empty on the same cases so existing
+    // mapping tests can unwrap parse first.
     let root_bundles = root
         .get("signed_action_bundles")
         .map(|value| {
@@ -452,7 +540,7 @@ fn select_action_bundles<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn map_trade(
-    trade: NodeTrade,
+    trade: &TradeV1,
     source_index: u32,
     transaction_index: u32,
     canonical_event_index: u32,
@@ -463,16 +551,21 @@ fn map_trade(
     catalog: &MarketCatalogV1,
     context: &NodeV1MappingContext,
 ) -> Result<CanonicalEventEnvelope, MappingError> {
-    let market_id = catalog.resolve(&trade.coin)?;
+    let market_id = catalog.resolve(trade.coin())?;
     let buyer =
-        Address::parse_api(&trade.side_info[0].user).map_err(|_| MappingError::InvalidAddress)?;
+        Address::parse_api(trade.buyer().user()).map_err(|_| MappingError::InvalidAddress)?;
     let seller =
-        Address::parse_api(&trade.side_info[1].user).map_err(|_| MappingError::InvalidAddress)?;
+        Address::parse_api(trade.seller().user()).map_err(|_| MappingError::InvalidAddress)?;
+    if buyer == seller {
+        return Err(MappingError::MalformedRecord {
+            reason: "trade participant accounts must differ".to_owned(),
+        });
+    }
     let participants = [
-        map_trade_participant(&trade.side_info[0], TradeParticipantRoleV1::Buyer, buyer)?,
-        map_trade_participant(&trade.side_info[1], TradeParticipantRoleV1::Seller, seller)?,
+        map_trade_participant(trade.buyer(), TradeParticipantRoleV1::Buyer, buyer)?,
+        map_trade_participant(trade.seller(), TradeParticipantRoleV1::Seller, seller)?,
     ];
-    let price = Price::from_str(&trade.px).map_err(|error| MappingError::InvalidDecimal {
+    let price = Price::from_str(trade.px()).map_err(|error| MappingError::InvalidDecimal {
         field: "price",
         reason: error.to_string(),
     })?;
@@ -482,27 +575,30 @@ fn map_trade(
             reason: "trade price must be positive".to_owned(),
         });
     }
-    let quantity = Quantity::from_str(&trade.sz).map_err(|error| MappingError::InvalidDecimal {
-        field: "quantity",
-        reason: error.to_string(),
-    })?;
+    let quantity =
+        Quantity::from_str(trade.sz()).map_err(|error| MappingError::InvalidDecimal {
+            field: "quantity",
+            reason: error.to_string(),
+        })?;
     if quantity.raw() <= 0 {
         return Err(MappingError::InvalidDecimal {
             field: "quantity",
             reason: "trade quantity must be positive".to_owned(),
         });
     }
-    if !is_lowercase_hash(&trade.hash) {
+    if !is_lowercase_hash(trade.hash()) {
         return Err(MappingError::InvalidTransactionHash);
     }
-    let transaction_id =
-        TransactionId::new(trade.hash.clone()).map_err(|_| MappingError::InvalidTransactionHash)?;
+    let transaction_id = TransactionId::new(trade.hash().to_owned())
+        .map_err(|_| MappingError::InvalidTransactionHash)?;
     let trade_id = derive_trade_id(
         &context.chain_id,
         block_height,
         &transaction_id,
         canonical_event_index,
     )?;
+    let maker_order_id = Some(order_id_from_oid(trade.maker_oid())?);
+    let taker_order_id = Some(order_id_from_oid(trade.taker_oid())?);
     let source_evidence = SourceEvidence::try_new_indexed(
         context.source_id.clone(),
         context.source_version.clone(),
@@ -530,8 +626,8 @@ fn map_trade(
         payload: EventPayload::TradeMatched(TradeMatched {
             trade_id: Some(trade_id),
             market_id: Some(market_id),
-            maker_order_id: None,
-            taker_order_id: None,
+            maker_order_id,
+            taker_order_id,
             price,
             quantity,
             deterministic_seed: 0,
@@ -542,65 +638,299 @@ fn map_trade(
 }
 
 fn map_trade_participant(
-    source: &TradeSide,
+    source: &hl_protocol::node::trade::TradeSideV1,
     role: TradeParticipantRoleV1,
     account_id: Address,
 ) -> Result<TradeParticipantV1, MappingError> {
-    let start_position = PositionQuantity::from_str(&source.start_pos).map_err(|error| {
+    let start_position = PositionQuantity::from_str(source.start_pos()).map_err(|error| {
         MappingError::InvalidDecimal {
             field: "start_position",
             reason: error.to_string(),
         }
     })?;
-    if source.oid == 0 {
+    if source.oid() == 0 {
         return Err(MappingError::MalformedRecord {
             reason: "trade participant oid must be positive".to_owned(),
         });
     }
-    let twap_id = match &source.twap_id {
-        serde_json::Value::Null => None,
-        serde_json::Value::Number(value) => Some(TwapId::new(value.as_u64().ok_or_else(|| {
-            MappingError::MalformedRecord {
-                reason: "trade participant twap_id must be an unsigned integer or null".to_owned(),
-            }
-        })?)),
-        _ => {
-            return Err(MappingError::MalformedRecord {
-                reason: "trade participant twap_id must be an unsigned integer or null".to_owned(),
-            });
-        }
-    };
-    let client_order_id = match &source.cloid {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(value) => {
+    let twap_id = source.twap_id().map(TwapId::new);
+    let client_order_id = match source.cloid() {
+        None => None,
+        Some(value) => {
             if !is_canonical_trade_client_order_id(value) {
                 return Err(MappingError::MalformedRecord {
                     reason: "trade participant cloid must be lowercase 0x followed by exactly 32 lowercase hexadecimal digits".to_owned(),
                 });
             }
-            Some(ClientOrderId::new(value.clone()).map_err(|error| {
+            Some(ClientOrderId::new(value.to_owned()).map_err(|error| {
                 MappingError::MalformedRecord {
                     reason: format!("invalid trade participant cloid: {error}"),
                 }
             })?)
-        }
-        _ => {
-            return Err(MappingError::MalformedRecord {
-                reason: "trade participant cloid must be a string or null".to_owned(),
-            });
         }
     };
     Ok(TradeParticipantV1 {
         role,
         account_id,
         start_position,
-        order_id: OrderId::new(source.oid.to_string()).map_err(|error| {
-            MappingError::MalformedRecord {
-                reason: format!("invalid trade participant oid: {error}"),
-            }
-        })?,
+        order_id: order_id_from_oid(source.oid())?,
         twap_id,
         client_order_id,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_order_status(
+    status: &OrderStatusV1,
+    source_index: u32,
+    block_height: BlockHeight,
+    block_time: ProtocolTime,
+    parser_version: &str,
+    record: &NodeRecordV1,
+    catalog: &MarketCatalogV1,
+    context: &NodeV1MappingContext,
+) -> Result<CanonicalEventEnvelope, MappingError> {
+    let order = status.order();
+    let market_id = catalog.resolve(order.coin())?;
+    let account_id = Address::parse_api(status.user()).map_err(|_| MappingError::InvalidAddress)?;
+    let order_id = order_id_from_oid(order.oid())?;
+    let side = match order.side() {
+        BookSide::Bid => OrderSide::Buy,
+        BookSide::Ask => OrderSide::Sell,
+    };
+    let limit_price = positive_price(order.limit_px())?;
+    let remaining = nonnegative_quantity(order.sz())?;
+    let original = positive_quantity(order.orig_sz())?;
+    let transaction_id =
+        TransactionId::new(format!("node-order:{}", order.oid())).map_err(|error| {
+            MappingError::MalformedRecord {
+                reason: format!("invalid order transaction identity: {error}"),
+            }
+        })?;
+    let source_evidence = indexed_evidence(record, context, source_index)?;
+    let payload = match status.class() {
+        OrderStatusClass::Open => EventPayload::OrderAccepted(OrderAccepted {
+            order_id,
+            account_id,
+            market_id: market_id.clone(),
+            side,
+            limit_price,
+            quantity: original,
+        }),
+        OrderStatusClass::Canceled => EventPayload::OrderCancelled(OrderCancelled {
+            order_id,
+            reason: status.status().to_owned(),
+            remaining_quantity: remaining,
+        }),
+        OrderStatusClass::Rejected => match order.cloid() {
+            Some(cloid) if is_canonical_trade_client_order_id(cloid) => {
+                EventPayload::OrderRejected(OrderRejected {
+                    client_order_id: ClientOrderId::new(cloid.to_owned()).map_err(|error| {
+                        MappingError::MalformedRecord {
+                            reason: format!("invalid rejected cloid: {error}"),
+                        }
+                    })?,
+                    account_id,
+                    reason_code: status.status().to_owned(),
+                    reason: status.status().to_owned(),
+                })
+            }
+            _ => EventPayload::OrderCancelled(OrderCancelled {
+                order_id,
+                reason: status.status().to_owned(),
+                remaining_quantity: remaining,
+            }),
+        },
+        OrderStatusClass::Filled => EventPayload::OrderFilled(OrderFilled {
+            order_id,
+            trade_id: derive_status_fill_id(
+                &context.chain_id,
+                block_height,
+                order.oid(),
+                order.timestamp(),
+            )?,
+            fill_price: limit_price,
+            fill_quantity: original,
+        }),
+        OrderStatusClass::Triggered => {
+            let trigger_price = positive_price(order.trigger_px())?;
+            EventPayload::TriggerOrderActivated(TriggerOrderActivated {
+                order_id,
+                trigger_price,
+                // ponytail: node order-status has triggerPx, not an oracle print.
+                // Both fields carry triggerPx until a qualified corpus documents oracle.
+                oracle_price: trigger_price,
+            })
+        }
+    };
+    CanonicalEventEnvelope::from_input(CanonicalEventInput {
+        schema_version: "1.0.0".to_owned(),
+        chain_id: context.chain_id.clone(),
+        block_height,
+        block_time,
+        transaction_id,
+        transaction_index: source_index,
+        canonical_event_index: 0,
+        market_ids: vec![market_id],
+        account_ids: vec![account_id],
+        source_evidence: vec![source_evidence],
+        confirmation_class: ConfirmationClass::ProvisionalSource,
+        observed_at: context.observed_at,
+        ingested_at: context.ingested_at,
+        canonicalized_at: context.canonicalized_at,
+        parser_version: parser_version.to_owned(),
+        payload,
+    })
+    .map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_raw_book_diff(
+    diff: &RawBookDiffV1,
+    source_index: u32,
+    block_height: BlockHeight,
+    block_time: ProtocolTime,
+    parser_version: &str,
+    record: &NodeRecordV1,
+    catalog: &MarketCatalogV1,
+    context: &NodeV1MappingContext,
+) -> Result<CanonicalEventEnvelope, MappingError> {
+    let market_id = catalog.resolve(diff.coin())?;
+    let account_id = Address::parse_api(diff.user()).map_err(|_| MappingError::InvalidAddress)?;
+    let order_id = order_id_from_oid(diff.oid())?;
+    let limit_price = positive_price(diff.px())?;
+    let transaction_id =
+        TransactionId::new(format!("node-l4:{}", diff.oid())).map_err(|error| {
+            MappingError::MalformedRecord {
+                reason: format!("invalid l4 transaction identity: {error}"),
+            }
+        })?;
+    let source_evidence = indexed_evidence(record, context, source_index)?;
+    let payload = match diff.op() {
+        RawBookDiffOp::New { sz } | RawBookDiffOp::Update { sz } => {
+            EventPayload::OrderRested(OrderRested {
+                order_id,
+                market_id: market_id.clone(),
+                remaining_quantity: positive_quantity(sz)?,
+                limit_price,
+            })
+        }
+        RawBookDiffOp::Remove => EventPayload::OrderCancelled(OrderCancelled {
+            order_id,
+            reason: "raw_book_diff_remove".to_owned(),
+            remaining_quantity: Quantity::from_str("0").map_err(|error| {
+                MappingError::InvalidDecimal {
+                    field: "quantity",
+                    reason: error.to_string(),
+                }
+            })?,
+        }),
+    };
+    CanonicalEventEnvelope::from_input(CanonicalEventInput {
+        schema_version: "1.0.0".to_owned(),
+        chain_id: context.chain_id.clone(),
+        block_height,
+        block_time,
+        transaction_id,
+        transaction_index: source_index,
+        canonical_event_index: 0,
+        market_ids: vec![market_id],
+        account_ids: vec![account_id],
+        source_evidence: vec![source_evidence],
+        confirmation_class: ConfirmationClass::ProvisionalSource,
+        observed_at: context.observed_at,
+        ingested_at: context.ingested_at,
+        canonicalized_at: context.canonicalized_at,
+        parser_version: parser_version.to_owned(),
+        payload,
+    })
+    .map_err(Into::into)
+}
+
+fn indexed_evidence(
+    record: &NodeRecordV1,
+    context: &NodeV1MappingContext,
+    source_index: u32,
+) -> Result<SourceEvidence, MappingError> {
+    SourceEvidence::try_new_indexed(
+        context.source_id.clone(),
+        context.source_version.clone(),
+        context.source_offset.clone(),
+        *record.content_hash().as_bytes(),
+        source_index,
+    )
+    .map_err(Into::into)
+}
+
+fn order_id_from_oid(oid: u64) -> Result<OrderId, MappingError> {
+    OrderId::new(oid.to_string()).map_err(|error| MappingError::MalformedRecord {
+        reason: format!("invalid order id: {error}"),
+    })
+}
+
+fn positive_price(value: &str) -> Result<Price, MappingError> {
+    let price = Price::from_str(value).map_err(|error| MappingError::InvalidDecimal {
+        field: "price",
+        reason: error.to_string(),
+    })?;
+    if price.raw() <= 0 {
+        return Err(MappingError::InvalidDecimal {
+            field: "price",
+            reason: "price must be positive".to_owned(),
+        });
+    }
+    Ok(price)
+}
+
+fn positive_quantity(value: &str) -> Result<Quantity, MappingError> {
+    let quantity = Quantity::from_str(value).map_err(|error| MappingError::InvalidDecimal {
+        field: "quantity",
+        reason: error.to_string(),
+    })?;
+    if quantity.raw() <= 0 {
+        return Err(MappingError::InvalidDecimal {
+            field: "quantity",
+            reason: "quantity must be positive".to_owned(),
+        });
+    }
+    Ok(quantity)
+}
+
+fn nonnegative_quantity(value: &str) -> Result<Quantity, MappingError> {
+    let quantity = Quantity::from_str(value).map_err(|error| MappingError::InvalidDecimal {
+        field: "quantity",
+        reason: error.to_string(),
+    })?;
+    if quantity.raw() < 0 {
+        return Err(MappingError::InvalidDecimal {
+            field: "quantity",
+            reason: "quantity must be non-negative".to_owned(),
+        });
+    }
+    Ok(quantity)
+}
+
+fn source_to_mapping(error: hl_protocol::SourceError) -> MappingError {
+    MappingError::MalformedRecord {
+        reason: error.to_string(),
+    }
+}
+
+fn derive_status_fill_id(
+    chain_id: &ChainId,
+    block_height: BlockHeight,
+    oid: u64,
+    timestamp: u64,
+) -> Result<TradeId, MappingError> {
+    let mut hasher = blake3::Hasher::new_derive_key(ORDER_FILL_ID_CONTEXT);
+    hash_bytes(&mut hasher, chain_id.as_str().as_bytes());
+    hasher.update(&block_height.get().to_be_bytes());
+    hasher.update(&oid.to_be_bytes());
+    hasher.update(&timestamp.to_be_bytes());
+    TradeId::new(format!("trd_{}", hasher.finalize().to_hex())).map_err(|error| {
+        MappingError::MalformedRecord {
+            reason: format!("derived fill identity is invalid: {error}"),
+        }
     })
 }
 

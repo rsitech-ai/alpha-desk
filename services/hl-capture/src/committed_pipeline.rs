@@ -121,10 +121,12 @@ impl<'a, C: CanonicalBlockCommitter + ?Sized> CommittedNodePipeline<'a, C> {
         facts: &[CommittedFact],
         now_millis: u64,
     ) -> Vec<LaneDecision> {
-        facts
+        let mut decisions: Vec<LaneDecision> = facts
             .iter()
             .map(|fact| lane.observe_committed(fact, now_millis))
-            .collect()
+            .collect();
+        decisions.extend(lane.expire(now_millis));
+        decisions
     }
 
     pub async fn process_spooled(

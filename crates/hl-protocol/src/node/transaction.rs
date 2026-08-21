@@ -189,6 +189,12 @@ fn signed_action_bundles<'a>(
     root: &'a Map<String, Value>,
     abci_block: &'a Map<String, Value>,
 ) -> Result<&'a [Value], SourceError> {
+    // ponytail: both-present and both-absent parse as zero actions so
+    // `parse_transaction_block().actions()` stays load-bearing-empty. Fail-closed
+    // ambiguity lives in `canonical_events::node_mapping::select_action_bundles`.
+    // Promoting this to SchemaDrift without updating
+    // `committed_mapper_accepts_the_current_nested_empty_bundle_shape_only_when_unambiguous`
+    // panics that test's parse unwrap. Do not consume `.actions()` as the mapping path.
     let root_bundles = optional_array(root, "signed_action_bundles")?;
     let nested_bundles = optional_array(abci_block, "signed_action_bundles")?;
     match (root_bundles, nested_bundles) {

@@ -359,3 +359,144 @@ fn one_process_budget_is_handed_to_every_spawned_session() {
     let sessions = open_plan_sessions(&plan, shared, 0).expect("official cap");
     assert!(sessions.len() > 1);
 }
+
+#[test]
+fn two_hashes_on_one_key_confirm_the_matching_row() {
+    let mut lane = ProvisionalWsLane::official();
+    assert!(matches!(
+        lane.observe_ws(&ws_obs(
+            "fill:0xaa:1",
+            "userFills",
+            1,
+            InboundClass::IncrementalEvent,
+            0,
+        )),
+        LaneDecision::ProvisionalOpen { .. }
+    ));
+    assert!(matches!(
+        lane.observe_ws(&ws_obs(
+            "fill:0xaa:1",
+            "userFills",
+            2,
+            InboundClass::IncrementalEvent,
+            1,
+        )),
+        LaneDecision::ProvisionalOpen { .. }
+    ));
+    assert_eq!(lane.unmatched_count(), 2);
+
+    let first = CommittedFact::try_new("fill:0xaa:1", [1; 32]).unwrap();
+    assert_eq!(
+        lane.observe_committed(&first, 10),
+        LaneDecision::Confirmed {
+            key: "fill:0xaa:1".to_owned()
+        }
+    );
+    assert_eq!(lane.unmatched_count(), 1);
+
+    let second = CommittedFact::try_new("fill:0xaa:1", [2; 32]).unwrap();
+    assert_eq!(
+        lane.observe_committed(&second, 11),
+        LaneDecision::Confirmed {
+            key: "fill:0xaa:1".to_owned()
+        }
+    );
+    assert_eq!(lane.unmatched_count(), 0);
+}
+
+#[test]
+fn unmatched_is_bounded_and_refuses_overflow() {
+    let mut lane = ProvisionalWsLane::with_limits(60_000, 1, 8);
+    assert!(matches!(
+        lane.observe_ws(&ws_obs(
+            "fill:0xaa:1",
+            "userFills",
+            1,
+            InboundClass::IncrementalEvent,
+            0,
+        )),
+        LaneDecision::ProvisionalOpen { .. }
+    ));
+    assert_eq!(
+        lane.observe_ws(&ws_obs(
+            "fill:0xaa:2",
+            "userFills",
+            2,
+            InboundClass::IncrementalEvent,
+            1,
+        )),
+        LaneDecision::UnmatchedRefused {
+            key: "fill:0xaa:2".to_owned()
+        }
+    );
+    assert_eq!(lane.unmatched_count(), 1);
+    assert_eq!(
+        lane.observe_ws(&ws_obs(
+            "fill:0xaa:1",
+            "userFills",
+            1,
+            InboundClass::IncrementalEvent,
+            2,
+        )),
+        LaneDecision::ProvisionalOpen {
+            key: "fill:0xaa:1".to_owned(),
+            subject: Subject::SnapshotAccount,
+        }
+    );
+}
+
+#[test]
+fn reconcile_provisional_expires_unmatched_on_the_clock() {
+    let mut lane = ProvisionalWsLane::new(10);
+    lane.observe_ws(&ws_obs(
+        "fill:0xaa:1",
+        "userFills",
+        7,
+        InboundClass::IncrementalEvent,
+        0,
+    ));
+    let committer = RecordingCommitter::default();
+    let pipeline = CommittedNodePipeline::new(pipeline_config(), &committer);
+    let decisions = pipeline.reconcile_provisional(&mut lane, &[], 10);
+    assert_eq!(
+        decisions,
+        [LaneDecision::Expired {
+            key: "fill:0xaa:1".to_owned()
+        }]
+    );
+    assert_eq!(lane.unmatched_count(), 0);
+}
+
+#[test]
+fn snapshot_hash_store_restores_duplicate_classification() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut lane = ProvisionalWsLane::official();
+    assert!(matches!(
+        lane.observe_ws(&ws_obs(
+            "acct:0xaa",
+            "clearinghouseState",
+            3,
+            InboundClass::SnapshotReplace,
+            0,
+        )),
+        LaneDecision::SnapshotReplace { .. }
+    ));
+    let mut store =
+        hl_capture::SnapshotHashStore::open(dir.path().join("snapshot-hashes")).unwrap();
+    lane.persist_into(&mut store).unwrap();
+
+    let mut restarted = ProvisionalWsLane::official();
+    restarted.restore_from(&store);
+    assert_eq!(
+        restarted.observe_ws(&ws_obs(
+            "acct:0xaa",
+            "clearinghouseState",
+            3,
+            InboundClass::SnapshotReplace,
+            20,
+        )),
+        LaneDecision::DuplicateSnapshot {
+            key: "acct:0xaa".to_owned()
+        }
+    );
+}

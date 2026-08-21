@@ -734,6 +734,11 @@ impl<C: NodeReceiveClock> NodeSnapshotDirectorySource<C> {
         Ok(())
     }
 
+    #[must_use]
+    pub fn directory_epoch(&self) -> &str {
+        &self.epoch
+    }
+
     async fn wait_for_progress(&self, context: &SourceRequestContext) -> Result<(), SourceError> {
         context.check()?;
         let now = tokio::time::Instant::now();

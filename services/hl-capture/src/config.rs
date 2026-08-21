@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use domain_types::{BlockHeight, ChainId, KnownTime, SourceId};
+use hl_protocol::node::state_snapshot::PERIODIC_SNAPSHOT_STRIDE;
 use hl_protocol::node::v1::NodeStreamKind;
 use hl_protocol::{
     AgreementStatus, NetworkId, ObservationClass, OperatorKind, ProviderLicense,
@@ -147,6 +148,7 @@ impl CaptureConfig {
                 }
                 Some(SourceAdapterConfig::NodeLine { .. })
                 | Some(SourceAdapterConfig::NodeBlockDirectory { .. })
+                | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
                 | None => {}
             }
         }
@@ -202,6 +204,7 @@ fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), Config
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => Ok(()),
         Some(
             SourceAdapterConfig::NodeLine { .. }
+            | SourceAdapterConfig::NodeSnapshotDirectory { .. }
             | SourceAdapterConfig::OfficialInfo { .. }
             | SourceAdapterConfig::OfficialWs { .. },
         )
@@ -735,6 +738,13 @@ pub enum SourceAdapterConfig {
         poll_interval_millis: u64,
         replica_cmds_style: NodeReplicaCmdsStyle,
     },
+    NodeSnapshotDirectory {
+        path: PathBuf,
+        stream_name: String,
+        stream: NodeStreamKind,
+        start_height: u64,
+        poll_interval_millis: u64,
+    },
     OfficialInfo {
         egress_id: String,
         capability_id: String,
@@ -855,6 +865,27 @@ impl SourceAdapterConfig {
                 observation_class,
                 Some(*replica_cmds_style),
             ),
+            Self::NodeSnapshotDirectory {
+                path,
+                stream_name,
+                stream,
+                start_height,
+                poll_interval_millis,
+            } => {
+                if !stream.is_whole_file_snapshot()
+                    || !start_height.is_multiple_of(PERIODIC_SNAPSHOT_STRIDE)
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                Self::validate_node(
+                    path,
+                    stream_name,
+                    *poll_interval_millis,
+                    stream.observation_class(),
+                    observation_class,
+                    None,
+                )
+            }
         }
     }
 

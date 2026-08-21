@@ -405,6 +405,25 @@ impl WsSession {
         }
     }
 
+    pub fn restore_snapshot_hashes(&mut self, hashes: &BTreeMap<String, [u8; 32]>) {
+        for (key, row) in &mut self.subscriptions {
+            if let Some(hash) = hashes.get(key) {
+                row.snapshot_hash = Some(blake3::Hash::from_bytes(*hash));
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot_hashes(&self) -> BTreeMap<String, [u8; 32]> {
+        self.subscriptions
+            .iter()
+            .filter_map(|(key, row)| {
+                row.snapshot_hash
+                    .map(|hash| (key.clone(), *hash.as_bytes()))
+            })
+            .collect()
+    }
+
     pub fn reconnect_delay_millis(&self) -> u64 {
         reconnect_jitter_millis(
             self.connection.slot(),
@@ -845,6 +864,27 @@ mod tests {
         );
         assert_eq!(
             session.ingest(eth, 31).class(),
+            InboundClass::DuplicateSnapshot
+        );
+    }
+
+    #[test]
+    fn restored_snapshot_hashes_survive_a_new_session() {
+        let connection =
+            active_connection(vec![SubscriptionDemand::new("l2Book").with_coin("BTC")]);
+        let mut session = open_session(connection.clone(), ProcessIpBudget::official(), 0);
+        let btc = Bytes::from_static(
+            br#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[{"px":"1","sz":"1","n":1}],[{"px":"2","sz":"1","n":1}]]}}"#,
+        );
+        assert_eq!(
+            session.ingest(btc.clone(), 10).class(),
+            InboundClass::SnapshotReplace
+        );
+        let hashes = session.snapshot_hashes();
+        let mut restarted = open_session(connection, ProcessIpBudget::official(), 0);
+        restarted.restore_snapshot_hashes(&hashes);
+        assert_eq!(
+            restarted.ingest(btc, 20).class(),
             InboundClass::DuplicateSnapshot
         );
     }

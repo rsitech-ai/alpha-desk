@@ -236,41 +236,7 @@ fn classify_event(
         NodeStreamKind::AbciStateSnapshots | NodeStreamKind::L4Snapshots => Err(
             SourceError::MalformedPayload("snapshot streams are not JSON event batches".to_owned()),
         ),
-        NodeStreamKind::Trades => {
-            for field in [
-                "coin",
-                "side",
-                "time",
-                "px",
-                "sz",
-                "hash",
-                "trade_dir_override",
-            ] {
-                require_string(event, field)?;
-            }
-            let side_info = event
-                .get("side_info")
-                .and_then(Value::as_array)
-                .filter(|value| value.len() == 2)
-                .ok_or_else(|| {
-                    SourceError::MalformedPayload(
-                        "node trade side_info must contain buyer and seller".to_owned(),
-                    )
-                })?;
-            for side in side_info {
-                let side = side.as_object().ok_or_else(|| {
-                    SourceError::MalformedPayload(
-                        "node trade side_info entry must be an object".to_owned(),
-                    )
-                })?;
-                require_string(side, "user")?;
-                require_string(side, "start_pos")?;
-                require_u64(side, "oid")?;
-                require_optional_u64(side, "twap_id")?;
-                require_optional_string(side, "cloid")?;
-            }
-            Ok(NodeRecordKind::Trade)
-        }
+        NodeStreamKind::Trades => crate::node::trade::classify_trade(event),
         NodeStreamKind::Fills => {
             for field in ["coin", "px", "sz", "hash"] {
                 require_string(event, field)?;
@@ -279,24 +245,8 @@ fn classify_event(
             require_u64(event, "tid")?;
             Ok(NodeRecordKind::Fill)
         }
-        NodeStreamKind::OrderStatuses => {
-            require_string(event, "time")?;
-            require_string(event, "user")?;
-            let status = require_string(event, "status")?;
-            if !is_known_order_status(status) {
-                return Err(SourceError::SchemaDrift(
-                    "unknown node order-status variant".to_owned(),
-                ));
-            }
-            require_object(event, "order")?;
-            Ok(NodeRecordKind::OrderStatus)
-        }
-        NodeStreamKind::RawBookDiffs => {
-            require_u64(event, "oid")?;
-            require_string(event, "coin")?;
-            validate_book_diff(event.get("raw_book_diff"))?;
-            Ok(NodeRecordKind::RawBookDiff)
-        }
+        NodeStreamKind::OrderStatuses => crate::node::order_status::classify_order_status(event),
+        NodeStreamKind::RawBookDiffs => crate::node::raw_book_diff::classify_raw_book_diff(event),
         NodeStreamKind::MiscEvents => crate::node::misc::classify_misc_event(event),
         NodeStreamKind::MarketMetadata => {
             event
@@ -309,31 +259,6 @@ fn classify_event(
                 })?;
             Ok(NodeRecordKind::MarketMetadata)
         }
-    }
-}
-
-fn validate_book_diff(value: Option<&Value>) -> Result<(), SourceError> {
-    match value {
-        Some(Value::String(operation)) if operation == "remove" => Ok(()),
-        Some(Value::Object(operation)) if operation.len() == 1 => {
-            let Some((variant, payload)) = operation.iter().next() else {
-                return Err(SourceError::MalformedPayload(
-                    "raw book diff is empty".to_owned(),
-                ));
-            };
-            if !matches!(variant.as_str(), "new" | "update") {
-                return Err(SourceError::SchemaDrift(
-                    "unknown raw-book-diff variant".to_owned(),
-                ));
-            }
-            require_value_object(payload, "raw book diff payload").map(|_| ())
-        }
-        Some(_) => Err(SourceError::MalformedPayload(
-            "raw book diff has an invalid shape".to_owned(),
-        )),
-        None => Err(SourceError::MalformedPayload(
-            "raw book diff is missing".to_owned(),
-        )),
     }
 }
 
@@ -358,7 +283,10 @@ pub(super) fn require_u64(object: &Map<String, Value>, field: &str) -> Result<u6
     })
 }
 
-fn require_optional_u64(object: &Map<String, Value>, field: &str) -> Result<(), SourceError> {
+pub(super) fn require_optional_u64(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<(), SourceError> {
     match object.get(field) {
         Some(Value::Null) => Ok(()),
         Some(Value::Number(value)) if value.as_u64().is_some() => Ok(()),
@@ -368,7 +296,10 @@ fn require_optional_u64(object: &Map<String, Value>, field: &str) -> Result<(), 
     }
 }
 
-fn require_optional_string(object: &Map<String, Value>, field: &str) -> Result<(), SourceError> {
+pub(super) fn require_optional_string(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<(), SourceError> {
     match object.get(field) {
         Some(Value::Null | Value::String(_)) => Ok(()),
         _ => Err(SourceError::MalformedPayload(format!(
@@ -407,39 +338,4 @@ pub(super) fn require_value_object<'a>(
     value
         .as_object()
         .ok_or_else(|| SourceError::MalformedPayload(format!("{context} must be an object")))
-}
-
-fn is_known_order_status(status: &str) -> bool {
-    matches!(
-        status,
-        "open"
-            | "filled"
-            | "canceled"
-            | "triggered"
-            | "rejected"
-            | "marginCanceled"
-            | "vaultWithdrawalCanceled"
-            | "openInterestCapCanceled"
-            | "selfTradeCanceled"
-            | "reduceOnlyCanceled"
-            | "siblingFilledCanceled"
-            | "delistedCanceled"
-            | "liquidatedCanceled"
-            | "scheduledCancel"
-            | "tickRejected"
-            | "minTradeNtlRejected"
-            | "perpMarginRejected"
-            | "reduceOnlyRejected"
-            | "badAloPxRejected"
-            | "iocCancelRejected"
-            | "badTriggerPxRejected"
-            | "marketOrderNoLiquidityRejected"
-            | "positionIncreaseAtOpenInterestCapRejected"
-            | "positionFlipAtOpenInterestCapRejected"
-            | "tooAggressiveAtOpenInterestCapRejected"
-            | "openInterestIncreaseRejected"
-            | "insufficientSpotBalanceRejected"
-            | "oracleRejected"
-            | "perpMaxPositionRejected"
-    )
 }

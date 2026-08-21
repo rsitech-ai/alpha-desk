@@ -325,6 +325,7 @@ fn committed_source_adapter_covers_every_constructible_kind() {
     {
         Some(SourceAdapterConfig::NodeBlockDirectory { .. }) => {}
         Some(SourceAdapterConfig::NodeLine { .. })
+        | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
         | Some(SourceAdapterConfig::OfficialInfo { .. })
         | Some(SourceAdapterConfig::OfficialWs { .. })
         | None => {
@@ -342,6 +343,18 @@ fn committed_source_adapter_covers_every_constructible_kind() {
             .expect_err("node-line cannot admit a committed source")
             .reason_code(),
         "capture_config.invalid_committed_source_adapter"
+    );
+
+    let snapshot_dir = replace_once(
+        &valid_config(),
+        "adapter = { kind = \"node-block-directory\", path = \"/var/lib/hyperliquid/hl/data/replica_cmds\", stream_name = \"replica-cmds\", start_height = 1, poll_interval_millis = 25, replica_cmds_style = \"actions-and-responses\" }",
+        "adapter = { kind = \"node-snapshot-directory\", path = \"/var/lib/hyperliquid/hl/data/periodic_abci_states\", stream_name = \"periodic-abci\", stream = \"abci-state-snapshots\", start_height = 10000, poll_interval_millis = 25 }",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&snapshot_dir)
+            .expect_err("snapshot directories cannot satisfy a committed-block source")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
     );
 
     let missing_adapter = replace_once(
@@ -924,6 +937,52 @@ adapter = {{ kind = "node-line", path = "/var/lib/hyperliquid/hl/data/node_fills
             ..
         })
     ));
+}
+
+#[test]
+fn node_snapshot_directory_is_an_auxiliary_source() {
+    let source = format!(
+        r#"{}
+
+[[sources]]
+id = "node-abci"
+source_version = "hyperliquid-node-v1"
+trust = "locally-verified-committed"
+class = "auxiliary-ledger"
+queue_capacity = 4096
+max_payload_bytes = 8388608
+adapter = {{ kind = "node-snapshot-directory", path = "/var/lib/hyperliquid/hl/data/periodic_abci_states", stream_name = "periodic-abci", stream = "abci-state-snapshots", start_height = 10000, poll_interval_millis = 25 }}
+"#,
+        valid_config()
+    );
+    let config = CaptureConfig::from_toml(&source).expect("valid snapshot directory source");
+    assert!(matches!(
+        config
+            .source("node-abci")
+            .expect("snapshot source")
+            .adapter(),
+        Some(SourceAdapterConfig::NodeSnapshotDirectory {
+            stream: hl_protocol::node::v1::NodeStreamKind::AbciStateSnapshots,
+            start_height: 10_000,
+            ..
+        })
+    ));
+
+    let wrong_class = source.replace("auxiliary-ledger", "committed-block");
+    assert_eq!(
+        CaptureConfig::from_toml(&wrong_class)
+            .expect_err("snapshot class must match the stream")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+
+    let unaligned = source.replace("start_height = 10000", "start_height = 100");
+    assert_eq!(
+        CaptureConfig::from_toml(&unaligned)
+            .expect_err("snapshot start height must follow the stride")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
 }
 
 #[test]

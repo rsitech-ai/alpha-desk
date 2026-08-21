@@ -44,11 +44,26 @@ committed watermark.
 | `px` | checked positive `Price` |
 | `sz` | checked positive `Quantity` |
 
-The public schema says `side_info[0]` is the buyer and `side_info[1]` is the
-seller, but it does not establish which order is maker or taker. Therefore
-`maker_order_id` and `taker_order_id` remain absent. `deterministic_seed` is
-reserved and is zero. No account, order role, balance, or execution semantic is
-invented.
+`side_info[0]` is the buyer and `side_info[1]` is the seller. Maker and taker
+are derived, fail-closed, from the documented aggressor fields:
+
+- `side` `"B"` means the buyer is the taker (aggressor buy). The seller oid is
+  the maker.
+- `side` `"A"` means the seller is the taker. The buyer oid is the maker.
+- `trade_dir_override` must be `"Na"`. Any other override is `SchemaDrift`.
+- Any other `side` is `SchemaDrift`.
+
+`maker_order_id` and `taker_order_id` are those oids. `deterministic_seed` is
+reserved and is zero. Match keys for committed reconciliation are
+`node-trade:{trade_id}`.
+
+Standalone order-status and raw-book-diff records without `block_number` stay
+evidence-only. Block-batched order statuses map to the existing V1 kinds
+(`OrderAccepted`, `OrderCancelled`, `OrderRejected`, `OrderFilled`,
+`TriggerOrderActivated`) with `ProvisionalSource` confirmation. L4 `new` and
+`update` map to `OrderRested`; `remove` maps to `OrderCancelled` with remaining
+quantity zero. Snapshots cannot mint a committed watermark. Schema version on
+envelopes remains `"1.0.0"`.
 
 The parser version records both mapper and market-catalog versions:
 

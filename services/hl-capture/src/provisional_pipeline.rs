@@ -1,12 +1,14 @@
 //! Official WS observations stay provisional. Committed node facts win.
 //!
-//! ponytail: this lane is not a canonical reducer. Snapshot slots are
-//! replace-state in process memory. T11 session hashes are also process-local,
-//! so a restart re-classifies the same bytes as `SnapshotReplace`; this lane
-//! still replaces the slot instead of appending events. Persist hashes in T13/T14
-//! if a committed reducer needs them across process death.
+//! Snapshot slots are replace-state. Session and lane hashes persist through
+//! `SnapshotHashStore` so a process restart can classify DuplicateSnapshot
+//! instead of replaying replace-state. WS still cannot advance a committed
+//! watermark.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, Write};
+use std::path::PathBuf;
 
 use hl_protocol::ws::{WsFamily, family_by_identifier};
 
@@ -15,6 +17,8 @@ use crate::ws_session::InboundClass;
 
 pub const PROVISIONAL_FEATURE_SCOPE: &str = "provisional";
 pub const DEFAULT_UNMATCHED_TTL_MILLIS: u64 = 60_000;
+pub const DEFAULT_UNMATCHED_LIMIT: usize = 4_096;
+pub const DEFAULT_UNMATCHED_PER_KEY: usize = 8;
 
 const FINDING_CONTEXT: &[u8] = b"hl.finding.v1\0";
 
@@ -159,6 +163,7 @@ pub enum LaneDecision {
     Expired { key: String },
     Conflict { finding: ReconciliationFinding },
     Suppressed { key: String },
+    UnmatchedRefused { key: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -174,6 +179,95 @@ impl LaneError {
             Self::InvalidIdentity => "capture_ws.lane_identity",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotHashStore {
+    path: PathBuf,
+    hashes: BTreeMap<String, [u8; 32]>,
+}
+
+impl SnapshotHashStore {
+    pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        let hashes = match fs::read_to_string(&path) {
+            Ok(body) => parse_snapshot_hash_file(&body)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(error),
+        };
+        Ok(Self { path, hashes })
+    }
+
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<[u8; 32]> {
+        self.hashes.get(key).copied()
+    }
+
+    #[must_use]
+    pub fn hashes(&self) -> &BTreeMap<String, [u8; 32]> {
+        &self.hashes
+    }
+
+    pub fn upsert(&mut self, key: impl Into<String>, hash: [u8; 32]) -> io::Result<()> {
+        self.extend([(key.into(), hash)])
+    }
+
+    pub fn extend(
+        &mut self,
+        hashes: impl IntoIterator<Item = (String, [u8; 32])>,
+    ) -> io::Result<()> {
+        for (key, hash) in hashes {
+            if key.is_empty() || key.contains([' ', '\n', '\t']) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "snapshot hash key is empty or contains whitespace",
+                ));
+            }
+            self.hashes.insert(key, hash);
+        }
+        self.flush()
+    }
+
+    pub fn flush(&self) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut body = String::new();
+        for (key, hash) in &self.hashes {
+            body.push_str(key);
+            body.push(' ');
+            body.push_str(&hex::encode(hash));
+            body.push('\n');
+        }
+        let tmp = self.path.with_extension("tmp");
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(tmp, &self.path)?;
+        Ok(())
+    }
+}
+
+fn parse_snapshot_hash_file(body: &str) -> io::Result<BTreeMap<String, [u8; 32]>> {
+    let mut hashes = BTreeMap::new();
+    for line in body.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, hex_hash)) = line.split_once(' ') else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "snapshot hash line is missing a key/hash split",
+            ));
+        };
+        let decoded = hex::decode(hex_hash)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let hash: [u8; 32] = decoded.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "snapshot hash must be 32 bytes")
+        })?;
+        hashes.insert(key.to_owned(), hash);
+    }
+    Ok(hashes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,7 +312,9 @@ impl SourceLaneHealth {
 #[derive(Debug, Clone)]
 pub struct ProvisionalWsLane {
     ttl_millis: u64,
-    unmatched: BTreeMap<String, UnmatchedProvisional>,
+    unmatched_limit: usize,
+    per_key_limit: usize,
+    unmatched: BTreeMap<String, Vec<UnmatchedProvisional>>,
     snapshots: BTreeMap<String, [u8; 32]>,
     findings: Vec<ReconciliationFinding>,
     source_red: bool,
@@ -227,8 +323,19 @@ pub struct ProvisionalWsLane {
 impl ProvisionalWsLane {
     #[must_use]
     pub fn new(ttl_millis: u64) -> Self {
+        Self::with_limits(
+            ttl_millis,
+            DEFAULT_UNMATCHED_LIMIT,
+            DEFAULT_UNMATCHED_PER_KEY,
+        )
+    }
+
+    #[must_use]
+    pub fn with_limits(ttl_millis: u64, unmatched_limit: usize, per_key_limit: usize) -> Self {
         Self {
             ttl_millis,
+            unmatched_limit,
+            per_key_limit,
             unmatched: BTreeMap::new(),
             snapshots: BTreeMap::new(),
             findings: Vec::new(),
@@ -248,7 +355,7 @@ impl ProvisionalWsLane {
 
     #[must_use]
     pub fn unmatched_count(&self) -> usize {
-        self.unmatched.len()
+        self.unmatched.values().map(Vec::len).sum()
     }
 
     #[must_use]
@@ -296,18 +403,30 @@ impl ProvisionalWsLane {
     }
 
     pub fn observe_committed(&mut self, fact: &CommittedFact, _now_millis: u64) -> LaneDecision {
-        let Some(pending) = self.unmatched.remove(fact.match_key()) else {
+        let Some(pending) = self.unmatched.get_mut(fact.match_key()) else {
             return LaneDecision::Ignored;
         };
-        if pending.content_hash == fact.content_hash() {
+        if let Some(index) = pending
+            .iter()
+            .position(|row| row.content_hash == fact.content_hash())
+        {
+            pending.remove(index);
+            if pending.is_empty() {
+                self.unmatched.remove(fact.match_key());
+            }
             return LaneDecision::Confirmed {
                 key: fact.match_key().to_owned(),
             };
         }
+        let oldest = pending
+            .first()
+            .expect("unmatched key has at least one row")
+            .clone();
+        self.unmatched.remove(fact.match_key());
         let finding = conflict_finding(
             fact.match_key(),
-            &pending.family,
-            pending.content_hash,
+            &oldest.family,
+            oldest.content_hash,
             fact.content_hash(),
         );
         self.findings.push(finding.clone());
@@ -316,18 +435,33 @@ impl ProvisionalWsLane {
 
     pub fn expire(&mut self, now_millis: u64) -> Vec<LaneDecision> {
         let ttl = self.ttl_millis;
-        let expired_keys: Vec<String> = self
-            .unmatched
-            .iter()
-            .filter(|(_, pending)| now_millis.saturating_sub(pending.received_at_millis) >= ttl)
-            .map(|(key, _)| key.clone())
-            .collect();
-        let mut decisions = Vec::with_capacity(expired_keys.len());
-        for key in expired_keys {
-            self.unmatched.remove(&key);
-            decisions.push(LaneDecision::Expired { key });
-        }
+        let mut decisions = Vec::new();
+        self.unmatched.retain(|key, rows| {
+            let before = rows.len();
+            rows.retain(|pending| now_millis.saturating_sub(pending.received_at_millis) < ttl);
+            if rows.len() != before {
+                decisions.push(LaneDecision::Expired { key: key.clone() });
+            }
+            !rows.is_empty()
+        });
         decisions
+    }
+
+    pub fn restore_from(&mut self, store: &SnapshotHashStore) {
+        self.snapshots.extend(
+            store
+                .hashes()
+                .iter()
+                .map(|(key, hash)| (key.clone(), *hash)),
+        );
+    }
+
+    pub fn persist_into(&self, store: &mut SnapshotHashStore) -> io::Result<()> {
+        store.extend(
+            self.snapshots
+                .iter()
+                .map(|(key, hash)| (key.clone(), *hash)),
+        )
     }
 
     fn observe_snapshot(&mut self, observation: &WsLaneObservation) -> LaneDecision {
@@ -357,14 +491,37 @@ impl ProvisionalWsLane {
                 key: observation.match_key.clone(),
             };
         }
-        self.unmatched.insert(
-            observation.match_key.clone(),
-            UnmatchedProvisional {
+        if self
+            .unmatched
+            .get(&observation.match_key)
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.content_hash == observation.content_hash)
+            })
+        {
+            return LaneDecision::ProvisionalOpen {
+                key: observation.match_key.clone(),
+                subject: snapshot_subject_for_family(&observation.family),
+            };
+        }
+        if self
+            .unmatched
+            .get(&observation.match_key)
+            .is_some_and(|rows| rows.len() >= self.per_key_limit)
+            || self.unmatched_count() >= self.unmatched_limit
+        {
+            return LaneDecision::UnmatchedRefused {
+                key: observation.match_key.clone(),
+            };
+        }
+        self.unmatched
+            .entry(observation.match_key.clone())
+            .or_default()
+            .push(UnmatchedProvisional {
                 content_hash: observation.content_hash,
                 family: observation.family.clone(),
                 received_at_millis: observation.received_at_millis,
-            },
-        );
+            });
         LaneDecision::ProvisionalOpen {
             key: observation.match_key.clone(),
             subject: snapshot_subject_for_family(&observation.family),
