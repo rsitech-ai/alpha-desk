@@ -1251,6 +1251,40 @@ fn batched_staking_inners_map() {
 }
 
 #[test]
+fn undocumented_vault_leader_commission_is_evidence_only() {
+    let user = "0x4444444444444444444444444444444444444444";
+    let cases = [
+        serde_json::json!({
+            "users": [],
+            "delta": { "VaultLeaderCommission": { "usdc": "0.1" } }
+        }),
+        serde_json::json!({
+            "users": [user],
+            "delta": {
+                "VaultLeaderCommission": { "vault": "vault-1", "usdc": "0.1" }
+            }
+        }),
+        serde_json::json!({
+            "users": [],
+            "delta": { "VaultDeposit": { "usdc": "1.0" } }
+        }),
+    ];
+    for ledger in cases {
+        let event = serde_json::json!({
+            "time": "2026-07-28T12:00:02.000",
+            "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "inner": { "LedgerUpdate": ledger }
+        });
+        let record =
+            parse_node_record(NodeStreamKind::MiscEvents, wrap_event(event).into()).unwrap();
+        assert_eq!(
+            map_node_v1_record(&record, &catalog(), &context()).unwrap(),
+            MappingDisposition::EvidenceOnly(EvidenceOnlyReason::UnsupportedCanonicalSemantics)
+        );
+    }
+}
+
+#[test]
 fn wrapped_spot_transfer_stays_evidence_only() {
     let event: serde_json::Value = serde_json::from_slice(&fixture("transfer.json")).unwrap();
     let record = parse_node_record(NodeStreamKind::MiscEvents, wrap_event(event).into()).unwrap();

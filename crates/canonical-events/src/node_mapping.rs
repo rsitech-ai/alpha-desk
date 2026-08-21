@@ -5,13 +5,12 @@ use api_contracts::{
     WireAccountClassTransfer, WireInternalTransfer, WireNonUserOrderCancelled, WireRewardClaimed,
     WireSpotGenesisApplied, WireStakingDelegated, WireStakingDeposit, WireStakingUndelegated,
     WireStakingWithdrawalCompleted, WireStakingWithdrawalQueued, WireValidatorRewardPaid,
-    WireVaultCreated, WireVaultDistribution, WireVaultLeaderCommissionPaid,
-    encode_account_class_transfer, encode_internal_transfer, encode_non_user_order_cancelled,
-    encode_reward_claimed, encode_spot_genesis_applied, encode_staking_delegated,
-    encode_staking_deposit, encode_staking_undelegated, encode_staking_withdrawal_completed,
+    WireVaultCreated, WireVaultDistribution, encode_account_class_transfer,
+    encode_internal_transfer, encode_non_user_order_cancelled, encode_reward_claimed,
+    encode_spot_genesis_applied, encode_staking_delegated, encode_staking_deposit,
+    encode_staking_undelegated, encode_staking_withdrawal_completed,
     encode_staking_withdrawal_queued, encode_validator_reward_paid, encode_vault_created,
-    encode_vault_distribution, encode_vault_leader_commission_paid,
-    is_canonical_trade_client_order_id,
+    encode_vault_distribution, is_canonical_trade_client_order_id,
 };
 use chrono::{DateTime, NaiveDateTime};
 use domain_types::{
@@ -1342,27 +1341,6 @@ fn map_ledger_delta(
             encode_vault_distribution(&WireVaultDistribution {
                 vault_id: json_string(body, "vault")?,
                 amount: json_string(body, "usdc")?,
-            })
-            .map_err(payload_codec_mapping)?,
-            users,
-        ),
-        "VaultLeaderCommission" => (
-            EventKind::VaultLeaderCommissionPaid,
-            encode_vault_leader_commission_paid(&WireVaultLeaderCommissionPaid {
-                vault_id: body
-                    .get("vault")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-                account_id: users
-                    .first()
-                    .map(|account| account.to_api_string())
-                    .unwrap_or_default(),
-                amount: body
-                    .get("usdc")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
             })
             .map_err(payload_codec_mapping)?,
             users,
