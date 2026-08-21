@@ -181,7 +181,7 @@ pub fn parse_info_response(
             let known: BTreeSet<&str> = known.iter().copied().collect();
             paths
                 .iter()
-                .filter(|path| !known.contains(path.as_str()))
+                .filter(|path| !path_is_known(path, &known))
                 .map(|path| JsonPath::new(path.clone()))
                 .collect::<Result<Vec<_>, _>>()?
         }
@@ -196,7 +196,13 @@ pub fn parse_info_response(
         }
     }
 
-    let fingerprint_input = paths.into_iter().collect::<Vec<_>>().join("\n");
+    let fingerprint_input = paths
+        .iter()
+        .map(|path| shape_path(path))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(ParsedInfoResponse {
         capability_id: CapabilityId::new(capability_id)?,
         request_hash: context.request_hash,
@@ -271,7 +277,11 @@ fn walk_value(
             if is_decimal_string(text) {
                 parse_info_decimal(path, text)?;
             }
-            if let Some(field) = context.enum_fields.iter().find(|field| field.path == path) {
+            if let Some(field) = context
+                .enum_fields
+                .iter()
+                .find(|field| path_matches_declared(path, field.path))
+            {
                 require_known_variant(path, text, field.allowed, state_affecting)?;
                 if !state_affecting && !field.allowed.contains(&text.as_str()) {
                     warnings.push(
@@ -325,4 +335,71 @@ fn is_decimal_string(text: &str) -> bool {
         Some(frac) if !frac.is_empty() && frac.bytes().all(|byte| byte.is_ascii_digit()) => true,
         Some(_) => false,
     }
+}
+
+fn is_array_index(segment: &str) -> bool {
+    !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_schema_field(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some('a'..='z') = chars.next() else {
+        return false;
+    };
+    segment
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn shape_path(path: &str) -> String {
+    let mut out = String::new();
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        out.push('/');
+        if is_array_index(segment) {
+            out.push_str("[]");
+        } else if is_schema_field(segment) {
+            out.push_str(segment);
+        } else {
+            // ponytail: keys that are not camelCase fields (BTC, @1) collapse to *
+            // so listing a market does not fork the fingerprint. A map whose keys
+            // look like schema fields still forks per key; T06 can mark those maps.
+            out.push('*');
+        }
+    }
+    out
+}
+
+fn known_field_key(shape: &str) -> String {
+    let mut out = String::new();
+    for segment in shape.split('/').filter(|segment| !segment.is_empty()) {
+        if segment == "[]" {
+            continue;
+        }
+        out.push('/');
+        out.push_str(segment);
+    }
+    out
+}
+
+fn path_is_known(path: &str, known: &BTreeSet<&str>) -> bool {
+    if known.contains(path) {
+        return true;
+    }
+    let shape = shape_path(path);
+    if known.contains(shape.as_str()) {
+        return true;
+    }
+    let key = known_field_key(&shape);
+    key.is_empty() || known.contains(key.as_str())
+}
+
+fn path_matches_declared(concrete: &str, declared: &str) -> bool {
+    if concrete == declared {
+        return true;
+    }
+    let shape = shape_path(concrete);
+    if shape == declared {
+        return true;
+    }
+    known_field_key(&shape) == declared
 }

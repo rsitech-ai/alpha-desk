@@ -312,6 +312,86 @@ fn info_unknown_fields_preserve_raw_evidence_and_change_schema_fingerprint() {
 }
 
 #[test]
+fn info_schema_fingerprint_ignores_array_cardinality_and_dynamic_map_keys() {
+    let fills = InfoRegistry::official()
+        .encode("official.info.user_fills_by_time", &BTreeMap::new())
+        .expect("encode fills");
+    let two = InfoRegistry::official()
+        .parse(
+            "official.info.user_fills_by_time",
+            br#"[{"px":"1.0"},{"px":"2.0"}]"#,
+            &opaque_context(fills.content_hash()),
+        )
+        .expect("two rows");
+    let three = InfoRegistry::official()
+        .parse(
+            "official.info.user_fills_by_time",
+            br#"[{"px":"1.0"},{"px":"2.0"},{"px":"3.0"}]"#,
+            &opaque_context(fills.content_hash()),
+        )
+        .expect("three rows");
+    assert_eq!(two.schema_fingerprint(), three.schema_fingerprint());
+
+    let mids = InfoRegistry::official()
+        .encode("official.info.all_mids", &BTreeMap::new())
+        .expect("encode mids");
+    let listed = InfoRegistry::official()
+        .parse(
+            "official.info.all_mids",
+            br#"{"BTC":"1.0","ETH":"2.0"}"#,
+            &opaque_context(mids.content_hash()),
+        )
+        .expect("two markets");
+    let new_market = InfoRegistry::official()
+        .parse(
+            "official.info.all_mids",
+            br#"{"BTC":"1.0","ETH":"2.0","SOL":"3.0"}"#,
+            &opaque_context(mids.content_hash()),
+        )
+        .expect("three markets");
+    assert_eq!(listed.schema_fingerprint(), new_market.schema_fingerprint());
+    assert_ne!(
+        two.schema_fingerprint(),
+        listed.schema_fingerprint(),
+        "array-of-fields and mid-price map must not collapse to the same shape"
+    );
+}
+
+#[test]
+fn info_known_fields_match_array_shaped_payloads() {
+    const KNOWN: &[&str] = &["/px"];
+    let encoded = InfoRegistry::official()
+        .encode("official.info.user_fills_by_time", &BTreeMap::new())
+        .expect("encode");
+    let known_only = InfoRegistry::official()
+        .get("official.info.user_fills_by_time")
+        .expect("endpoint")
+        .parse(
+            br#"[{"px":"1.0"},{"px":"2.0"}]"#,
+            &opaque_context(encoded.content_hash()).with_known_fields(KNOWN),
+        )
+        .expect("array of known fields");
+    assert_eq!(known_only.unknown_fields(), &[]);
+
+    let with_extra = InfoRegistry::official()
+        .get("official.info.user_fills_by_time")
+        .expect("endpoint")
+        .parse(
+            br#"[{"px":"1.0"},{"px":"2.0","note":"x"}]"#,
+            &opaque_context(encoded.content_hash()).with_known_fields(KNOWN),
+        )
+        .expect("array with extra");
+    assert_eq!(
+        with_extra
+            .unknown_fields()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>(),
+        ["/1/note"]
+    );
+}
+
+#[test]
 fn info_unknown_state_affecting_enum_variants_quarantine() {
     const STATUS: &[InfoEnumField] = &[InfoEnumField::new("/status", &["open", "filled"])];
     let raw = read_fixture("response-unknown-variant.json");

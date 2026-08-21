@@ -1,10 +1,19 @@
+use std::collections::BTreeSet;
+
 use super::InfoError;
 
+/// Overlap cursor for `/info` `by_time` pages.
+///
+/// Spec §10.4 sketches `last_stable_id` as a scalar. Same-millisecond
+/// records are deduped against `identities_at_last_time` instead. A
+/// lexicographic high-water mark drops unseen ids that sort below it
+/// (`"100" < "99"`). The set is bounded by how many records share one
+/// millisecond.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimePageCursor {
     start_time_millis: i64,
     last_time_millis: Option<i64>,
-    last_stable_id: Option<String>,
+    identities_at_last_time: BTreeSet<String>,
     overlap_millis: i64,
 }
 
@@ -16,7 +25,7 @@ impl TimePageCursor {
         Ok(Self {
             start_time_millis,
             last_time_millis: None,
-            last_stable_id: None,
+            identities_at_last_time: BTreeSet::new(),
             overlap_millis,
         })
     }
@@ -33,7 +42,10 @@ impl TimePageCursor {
 
     #[must_use]
     pub fn last_stable_id(&self) -> Option<&str> {
-        self.last_stable_id.as_deref()
+        self.identities_at_last_time
+            .iter()
+            .next_back()
+            .map(String::as_str)
     }
 
     #[must_use]
@@ -77,14 +89,23 @@ impl TimePageCursor {
             .into_iter()
             .filter(|record| self.is_after_cursor(record))
             .collect();
-        if kept.is_empty() && records.len() >= page_limit {
+        if kept.is_empty() && !records.is_empty() {
             return Ok(TimePageOutcome::NoProgress);
         }
 
         let mut next = self.clone();
         if let Some(last) = kept.last() {
+            let at_last: BTreeSet<String> = kept
+                .iter()
+                .filter(|record| record.time_millis == last.time_millis)
+                .map(|record| record.identity.clone())
+                .collect();
+            if self.last_time_millis == Some(last.time_millis) {
+                next.identities_at_last_time.extend(at_last);
+            } else {
+                next.identities_at_last_time = at_last;
+            }
             next.last_time_millis = Some(last.time_millis);
-            next.last_stable_id = Some(last.identity.clone());
         }
         let indices = kept.iter().map(|record| record.index).collect();
         if records.len() < page_limit {
@@ -107,10 +128,9 @@ impl TimePageCursor {
         match record.time_millis.cmp(&last_time) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => match &self.last_stable_id {
-                None => true,
-                Some(last_id) => record.identity.as_str() > last_id.as_str(),
-            },
+            std::cmp::Ordering::Equal => !self
+                .identities_at_last_time
+                .contains(record.identity.as_str()),
         }
     }
 }

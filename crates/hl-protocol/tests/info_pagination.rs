@@ -124,6 +124,88 @@ fn info_content_identity_dedupes_when_stable_id_is_absent() {
 }
 
 #[test]
+fn info_same_ms_numeric_ids_are_not_dropped_across_page_boundary() {
+    let id99: &[u8] = br#"{"tid":"99"}"#;
+    let id100: &[u8] = br#"{"tid":"100"}"#;
+    let id101: &[u8] = br#"{"tid":"101"}"#;
+    let records = [
+        TimePageRecord::new(100, Some("99"), id99).expect("99"),
+        TimePageRecord::new(100, Some("100"), id100).expect("100"),
+        TimePageRecord::new(100, Some("101"), id101).expect("101"),
+    ];
+    let cursor = TimePageCursor::new(0, 5).expect("cursor");
+    let TimePageOutcome::Next {
+        cursor: first,
+        records: kept,
+    } = cursor.apply_page(&records[..1], 1).expect("first page")
+    else {
+        panic!("expected next after a full first page");
+    };
+    assert_eq!(kept, vec![0]);
+    assert_eq!(first.last_time_millis(), Some(100));
+    assert_eq!(first.last_stable_id(), Some("99"));
+    assert!(first.next_query_start_millis() <= 100);
+    assert_ne!(first.next_query_start_millis(), 101);
+
+    let rest = match first.apply_page(&records, 10).expect("overlap refetch") {
+        TimePageOutcome::Next { records, .. } | TimePageOutcome::Exhausted { records, .. } => {
+            records
+        }
+        TimePageOutcome::NoProgress => panic!("unseen same-ms ids 100 and 101 must surface"),
+    };
+    assert_eq!(rest, vec![1, 2]);
+
+    let cursor_after = match first.apply_page(&records, 10).expect("second") {
+        TimePageOutcome::Next { cursor, .. } | TimePageOutcome::Exhausted { cursor, .. } => cursor,
+        TimePageOutcome::NoProgress => panic!("second page"),
+    };
+    assert!(matches!(
+        cursor_after
+            .apply_page(&records, 10)
+            .expect("already-seen refetch"),
+        TimePageOutcome::NoProgress
+    ));
+}
+
+#[test]
+fn info_same_ms_content_identity_keeps_unseen_hash_below_watermark() {
+    let first_payload: &[u8] = br#"{"px":"1.0","note":"a"}"#;
+    let second_payload: &[u8] = br#"{"px":"1.0","note":"b"}"#;
+    assert_ne!(first_payload, second_payload);
+    let records = [
+        TimePageRecord::new(100, None, first_payload).expect("a"),
+        TimePageRecord::new(100, None, second_payload).expect("b"),
+    ];
+    let id = |payload: &[u8]| format!("blake3:{}", hex::encode(blake3::hash(payload).as_bytes()));
+    let larger = if id(first_payload) > id(second_payload) {
+        0
+    } else {
+        1
+    };
+    let smaller = 1 - larger;
+    let page_one = [records[larger]];
+    let cursor = TimePageCursor::new(0, 1).expect("cursor");
+    let TimePageOutcome::Next {
+        cursor: first,
+        records: kept,
+    } = cursor.apply_page(&page_one, 1).expect("first page")
+    else {
+        panic!("expected next");
+    };
+    assert_eq!(kept, vec![0]);
+
+    let rest = match first.apply_page(&records, 10).expect("overlap refetch") {
+        TimePageOutcome::Next { records, .. } | TimePageOutcome::Exhausted { records, .. } => {
+            records
+        }
+        TimePageOutcome::NoProgress => {
+            panic!("unseen content identity that sorts below the seen hash must surface")
+        }
+    };
+    assert_eq!(rest, vec![smaller]);
+}
+
+#[test]
 fn info_coverage_records_truncation_earliest_time_and_gaps() {
     let gap = TimeRangeGap::new(10, 20).expect("gap");
     let coverage = TimePageCoverage::new(true, Some(20), vec![gap]).expect("coverage");
