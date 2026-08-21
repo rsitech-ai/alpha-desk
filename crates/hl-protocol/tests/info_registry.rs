@@ -516,6 +516,10 @@ fn info_error_variants_have_reason_codes() {
         InfoError::TypeFieldConflict,
         InfoError::EmptyPayload,
         InfoError::MalformedJson,
+        InfoError::MalformedPayload {
+            path: "/status".to_owned(),
+            reason: "missing field",
+        },
         InfoError::DecimalOverflow {
             path: "/px".to_owned(),
         },

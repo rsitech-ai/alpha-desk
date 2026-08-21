@@ -390,7 +390,25 @@ fn path_is_known(path: &str, known: &BTreeSet<&str>) -> bool {
         return true;
     }
     let key = known_field_key(&shape);
-    key.is_empty() || known.contains(key.as_str())
+    if key.is_empty() || known.contains(key.as_str()) {
+        return true;
+    }
+    // shape_path buckets non-camelCase keys to `*`. Declared `/T` must still
+    // match `/0/T` so candleSnapshot can opt in without declaring `/*`.
+    let original = original_field_key(path);
+    !original.is_empty() && known.contains(original.as_str())
+}
+
+fn original_field_key(path: &str) -> String {
+    let mut out = String::new();
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        if is_array_index(segment) {
+            continue;
+        }
+        out.push('/');
+        out.push_str(segment);
+    }
+    out
 }
 
 fn path_matches_declared(concrete: &str, declared: &str) -> bool {

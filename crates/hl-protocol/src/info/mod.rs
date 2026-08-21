@@ -1,16 +1,33 @@
+pub mod accounts;
+pub mod builders_agents;
+pub mod fees_referrals;
+pub mod general;
+pub mod orders;
 pub mod pagination;
 pub mod registry;
 pub mod request;
 pub mod response;
+pub mod twap;
+
+mod decode;
 
 use crate::ErrorDisposition;
 
 const MAX_IDENTITY_BYTES: usize = 256;
 
+pub use accounts::*;
+pub use builders_agents::*;
+pub use decode::{
+    BookSide, InfoObservationKind, UserHistoryMeta, history_coverage, market_id_from_coin,
+};
+pub use fees_referrals::*;
+pub use general::*;
+pub use orders::*;
 pub use pagination::*;
 pub use registry::*;
 pub use request::*;
 pub use response::*;
+pub use twap::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapabilityId(String);
@@ -104,6 +121,8 @@ pub enum InfoError {
     EmptyPayload,
     #[error("info payload is not valid json")]
     MalformedJson,
+    #[error("info payload is malformed at {path}: {reason}")]
+    MalformedPayload { path: String, reason: &'static str },
     #[error("info decimal overflow at {path}")]
     DecimalOverflow { path: String },
     #[error("info decimal scale is invalid at {path}")]
@@ -134,6 +153,7 @@ impl InfoError {
             Self::TypeFieldConflict => "info.type_field_conflict",
             Self::EmptyPayload => "info.empty_payload",
             Self::MalformedJson => "info.malformed_json",
+            Self::MalformedPayload { .. } => "info.malformed_payload",
             Self::DecimalOverflow { .. } => "info.decimal_overflow",
             Self::DecimalInvalidScale { .. } => "info.decimal_invalid_scale",
             Self::DecimalInvalid { .. } => "info.decimal_invalid",
@@ -153,6 +173,7 @@ impl InfoError {
             | Self::DecimalInvalid { .. }
             | Self::ForbiddenJsonNumber { .. }
             | Self::MalformedJson
+            | Self::MalformedPayload { .. }
             | Self::EmptyPayload => ErrorDisposition::Quarantine,
             Self::UnknownCapability
             | Self::UnknownIdentifier
