@@ -1,0 +1,37 @@
+schema_version = 1
+corpus_kind = "synthetic-framework-examples"
+production_recording = false
+info_schema_documentation = "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
+note = "Synthetic framework fixtures for the /info registry. Not operator recordings and not committed venue truth."
+
+[[fixture]]
+file = "request-all-mids.json"
+sha256 = "f1db7c3d914ab4d110d6819663f1212ce0afa5dd8e61e2e5b0db07a5ebc83a84"
+
+[[fixture]]
+file = "response-all-mids.json"
+sha256 = "a74956aa8aaf4c80297dbe962be19a21fc8582ab1ba9c7839ab65c428ceb8242"
+
+[[fixture]]
+file = "response-unknown-field.json"
+sha256 = "4c361fef82dde63207e430cdeec967d9a9e6693b55f7cded7908cfcf0f1205f0"
+
+[[fixture]]
+file = "response-unknown-variant.json"
+sha256 = "8180f3d8ec15aab1a1c8986ed3018c0d2e0d9e7b5b625e4e9196c1191cc4b767"
+
+[[fixture]]
+file = "response-decimal-overflow.json"
+sha256 = "1afc3d2ba703700e223993826f233397b80bc3378c997d48ffd0617aa4cc2f78"
+
+[[fixture]]
+file = "response-decimal-invalid-scale.json"
+sha256 = "140e81e03ecadafb112f37c7babff2862d1693f887f3d6272be471f7a483a8b1"
+
+[[fixture]]
+file = "response-json-float.json"
+sha256 = "d5284933cee814cc9cf4c44462f71617d8a18158ae5acc79ae5ac7a498a2fd09"
+
+[[fixture]]
+file = "response-same-ms-page.json"
+sha256 = "b3fbfceaf0f11c05b1a96620c42442fd3564625b973f061ede84bad72c11c695"
