@@ -264,6 +264,37 @@ fn red_provisional_source_suppresses_provisional_only_features() {
 }
 
 #[test]
+fn red_source_snapshot_does_not_write_hash() {
+    let mut lane = ProvisionalWsLane::official();
+    lane.set_source_red(true);
+    let snapshot = ws_obs(
+        "acct:0xbb",
+        "clearinghouseState",
+        3,
+        InboundClass::SnapshotReplace,
+        0,
+    );
+    assert_eq!(
+        lane.observe_ws(&snapshot),
+        LaneDecision::Suppressed {
+            key: "acct:0xbb".to_owned()
+        }
+    );
+    assert_eq!(lane.snapshot_count(), 0);
+
+    lane.set_source_red(false);
+    let recovered = lane.observe_ws(&snapshot);
+    assert!(matches!(
+        recovered,
+        LaneDecision::SnapshotReplace {
+            subject: Subject::SnapshotAccount,
+            ..
+        }
+    ));
+    assert_eq!(lane.snapshot_count(), 1);
+}
+
+#[test]
 fn existing_subject_strings_remain_stable() {
     let frozen = [
         (Subject::BlockCommitted, "hl.v1.block.committed"),

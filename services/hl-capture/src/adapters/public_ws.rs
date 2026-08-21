@@ -541,10 +541,11 @@ where
             }
             let body = match self.archive.get(&item.archive_ref) {
                 Ok(Some(body)) => body,
-                Ok(None) | Err(WsCaptureError::MissingArchive) | Err(WsCaptureError::Archive) => {
+                Ok(None) | Err(WsCaptureError::MissingArchive) => {
                     self.drop_pending(&item.request_hash)?;
                     continue;
                 }
+                Err(WsCaptureError::Archive) => continue,
                 Err(error) => return Err(error),
             };
             let now_millis = u64::try_from(received_at.unix_micros() / 1_000).unwrap_or(0);
@@ -572,9 +573,7 @@ where
                     self.faults.check(WsFaultPoint::AfterFanout)?;
                 }
                 Err(WsCaptureError::BacklogFull) => return Err(WsCaptureError::BacklogFull),
-                Err(_) => {
-                    self.drop_pending(&item.request_hash)?;
-                }
+                Err(_) => continue,
             }
         }
         Ok(last)

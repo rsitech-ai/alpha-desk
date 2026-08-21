@@ -21,6 +21,7 @@ fn now() -> KnownTime {
 struct MemoryWsStore {
     bodies: BTreeMap<String, Bytes>,
     holes: BTreeSet<String>,
+    read_errors: BTreeSet<String>,
 }
 
 impl MemoryWsStore {
@@ -28,11 +29,20 @@ impl MemoryWsStore {
         Self {
             bodies: BTreeMap::new(),
             holes: BTreeSet::new(),
+            read_errors: BTreeSet::new(),
         }
     }
 
     fn hide(&mut self, archive_ref: &str) {
         self.holes.insert(archive_ref.to_owned());
+    }
+
+    fn fail_reads(&mut self, archive_ref: &str) {
+        self.read_errors.insert(archive_ref.to_owned());
+    }
+
+    fn recover_reads(&mut self, archive_ref: &str) {
+        self.read_errors.remove(archive_ref);
     }
 }
 
@@ -63,6 +73,9 @@ impl WsArchive for MemoryWsStore {
     fn get(&self, archive_ref: &str) -> Result<Option<Bytes>, WsCaptureError> {
         if self.holes.contains(archive_ref) {
             return Ok(None);
+        }
+        if self.read_errors.contains(archive_ref) {
+            return Err(WsCaptureError::Archive);
         }
         Ok(self.bodies.get(archive_ref).cloned())
     }
@@ -435,6 +448,73 @@ fn missing_archive_does_not_strand_later_pending() {
     .expect("drain");
     assert_eq!(class, InboundClass::IncrementalEvent);
     assert_eq!(fanout.items().len(), 1);
+    assert!(checkpoint.pending().is_empty());
+}
+
+#[test]
+fn transient_archive_error_keeps_pending_ref() {
+    let mut archive = MemoryWsStore::new();
+    let mut fanout = MemoryWsFanout::new(8);
+    let mut session = notification_session();
+    let mut checkpoint = WsSessionCheckpoint::new(session.slot());
+    let faults = AlwaysWsFault {
+        point: WsFaultPoint::AfterArchive,
+    };
+    let planned = session_subscription(&session);
+    let first =
+        Bytes::from_static(br#"{"channel":"notification","data":{"notification":"first"}}"#);
+    let second =
+        Bytes::from_static(br#"{"channel":"notification","data":{"notification":"second"}}"#);
+    WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &faults,
+        None,
+    )
+    .ingest(first, Some(&planned), now())
+    .expect_err("fault first");
+    WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &faults,
+        None,
+    )
+    .ingest(second, Some(&planned), now())
+    .expect_err("fault second");
+    assert_eq!(checkpoint.pending().len(), 2);
+    let failing = checkpoint.pending()[0].archive_ref().to_owned();
+    archive.fail_reads(&failing);
+    let class = WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &NoWsFaults,
+        None,
+    )
+    .replay_pending(now())
+    .expect("drain");
+    assert_eq!(class, InboundClass::IncrementalEvent);
+    assert_eq!(fanout.items().len(), 1);
+    assert_eq!(checkpoint.pending().len(), 1);
+    assert_eq!(checkpoint.pending()[0].archive_ref(), failing);
+    archive.recover_reads(&failing);
+    let class = WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &NoWsFaults,
+        None,
+    )
+    .replay_pending(now())
+    .expect("retry");
+    assert_eq!(class, InboundClass::IncrementalEvent);
+    assert_eq!(fanout.items().len(), 2);
     assert!(checkpoint.pending().is_empty());
 }
 

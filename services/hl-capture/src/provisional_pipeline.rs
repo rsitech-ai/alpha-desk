@@ -288,8 +288,9 @@ impl ProvisionalWsLane {
                 LaneDecision::Ignored
             }
             InboundClass::Quarantine => LaneDecision::Ignored,
-            InboundClass::DuplicateSnapshot => self.observe_snapshot(observation, true),
-            InboundClass::SnapshotReplace => self.observe_snapshot(observation, false),
+            InboundClass::DuplicateSnapshot | InboundClass::SnapshotReplace => {
+                self.observe_snapshot(observation)
+            }
             InboundClass::IncrementalEvent => self.observe_incremental(observation),
         }
     }
@@ -329,29 +330,18 @@ impl ProvisionalWsLane {
         decisions
     }
 
-    fn observe_snapshot(
-        &mut self,
-        observation: &WsLaneObservation,
-        classified_duplicate: bool,
-    ) -> LaneDecision {
-        let subject = snapshot_subject_for_family(&observation.family);
-        if classified_duplicate
-            && self.snapshots.get(&observation.match_key) == Some(&observation.content_hash)
-        {
-            return LaneDecision::DuplicateSnapshot {
+    fn observe_snapshot(&mut self, observation: &WsLaneObservation) -> LaneDecision {
+        if self.source_red {
+            return LaneDecision::Suppressed {
                 key: observation.match_key.clone(),
             };
         }
+        let subject = snapshot_subject_for_family(&observation.family);
         let previous = self
             .snapshots
             .insert(observation.match_key.clone(), observation.content_hash);
         if previous == Some(observation.content_hash) {
             return LaneDecision::DuplicateSnapshot {
-                key: observation.match_key.clone(),
-            };
-        }
-        if self.source_red {
-            return LaneDecision::Suppressed {
                 key: observation.match_key.clone(),
             };
         }
