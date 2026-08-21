@@ -1,13 +1,15 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use canonical_events::{CanonicalEventEnvelope, EventKind, EventPayload};
+use domain_types::MarketId;
+use orderbook::{BookHealth, OrderBook, TriggerKind};
 
 use crate::{
     ApplyContext, BlockDeltaView, CanonicalAccountReducerV1, CanonicalLiquidationReducerV1,
     CanonicalMarketReducerV1, CanonicalOrderReducerV1, CanonicalPositionEpisodeReducerV1,
     CanonicalPositionReducerV1, CanonicalTradeReducerV1, CanonicalTradeReducerV2,
-    CanonicalTriggerReducerV1, CanonicalTwapReducerV1, EventReducer, ReducerError, StateMutation,
-    StateView,
+    CanonicalTriggerReducerV1, CanonicalTwapReducerV1, EventReducer, OrderCurrentRecordV1,
+    ReducerError, StateImage, StateMutation, StateView, TriggerCurrentRecordV1,
 };
 
 const UNSUPPORTED_EVENT_REASON: &str = "canonical_state.unsupported_event";
@@ -83,6 +85,18 @@ pub enum CanonicalStateError {
         expected: &'static str,
         actual: &'static str,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum L4ProjectionError {
+    #[error("l4 projection requires a committed watermark")]
+    MissingWatermark,
+    #[error("l4 projection order record is invalid")]
+    InvalidOrder,
+    #[error("l4 projection trigger record is invalid")]
+    InvalidTrigger,
+    #[error("l4 book is not healthy: {0}")]
+    Unhealthy(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +199,54 @@ impl CanonicalStateReducerV1 {
     #[must_use]
     pub const fn component_manifest(&self) -> &'static [CanonicalStateComponentVersionV1; 10] {
         &EXPECTED_COMPONENT_MANIFEST
+    }
+
+    pub fn project_l4_book(
+        market_id: &MarketId,
+        image: &StateImage,
+    ) -> Result<OrderBook, L4ProjectionError> {
+        let as_of = image
+            .block_height()
+            .ok_or(L4ProjectionError::MissingWatermark)?;
+        let mut triggers = BTreeMap::new();
+        let mut orders = Vec::new();
+        for (key, bytes) in image.entries() {
+            match key.namespace() {
+                "trigger-current.v1" => {
+                    let record = TriggerCurrentRecordV1::decode(bytes)
+                        .map_err(|_| L4ProjectionError::InvalidTrigger)?;
+                    if record.market_id() == market_id {
+                        triggers.insert(record.order_id().clone(), record.trigger_price());
+                    }
+                }
+                "order-current.v1" => {
+                    let record = OrderCurrentRecordV1::decode(bytes)
+                        .map_err(|_| L4ProjectionError::InvalidOrder)?;
+                    if record.market_id() == market_id
+                        && let Some(resting) = record.try_resting()
+                    {
+                        orders.push(resting);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for order in &mut orders {
+            if let Some(trigger_px) = triggers.get(&order.order_id) {
+                *order = order.clone().with_trigger(TriggerKind::Activated {
+                    trigger_px: *trigger_px,
+                });
+            }
+        }
+        orders.sort_by(|left, right| left.order_id.as_str().cmp(right.order_id.as_str()));
+        let mut book = OrderBook::awaiting_snapshot(market_id.clone(), as_of);
+        book.apply_snapshot(as_of.get(), as_of, orders);
+        match book.health() {
+            BookHealth::Healthy => Ok(book),
+            BookHealth::AwaitingSnapshot { reason } | BookHealth::Red { reason } => {
+                Err(L4ProjectionError::Unhealthy(reason.clone()))
+            }
+        }
     }
 
     fn child_supports(&self, component: Component, event: &CanonicalEventEnvelope) -> bool {

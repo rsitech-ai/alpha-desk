@@ -1,0 +1,18 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "l4_checkpoints",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "state_hash",
+    "checkpoint_bytes"
+  ],
+  "fields": [
+    {"name": "market_id", "type": "utf8", "nullable": false},
+    {"name": "as_of_block", "type": "uint64", "nullable": false},
+    {"name": "sequence", "type": "uint64", "nullable": false},
+    {"name": "max_orders", "type": "uint64", "nullable": false},
+    {"name": "order_count", "type": "uint32", "nullable": false},
+    {"name": "state_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "checkpoint_bytes", "type": "binary", "nullable": false}
+  ]
+}

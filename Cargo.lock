@@ -617,6 +617,7 @@ dependencies = [
  "canonical-events",
  "domain-types",
  "hex",
+ "orderbook",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2946,7 +2947,9 @@ dependencies = [
 name = "orderbook"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "domain-types",
+ "hex",
  "num-bigint",
  "serde",
  "serde_json",

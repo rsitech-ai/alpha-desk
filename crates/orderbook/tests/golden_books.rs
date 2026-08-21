@@ -4,11 +4,13 @@ const SNAPSHOT_DIFFS: &str = include_str!("../../../fixtures/golden/books/snapsh
 const GAP: &str = include_str!("../../../fixtures/golden/books/gap.json");
 const DUPLICATE: &str = include_str!("../../../fixtures/golden/books/duplicate-order.json");
 const CROSSED: &str = include_str!("../../../fixtures/golden/books/crossed-book.json");
+const FIFO_TRIGGER: &str = include_str!("../../../fixtures/golden/books/fifo-trigger.json");
 
 #[test]
 fn golden_book_fixtures_replay_to_expected_l4_and_l2() {
     for (json, id, healthy) in [
         (SNAPSHOT_DIFFS, "snapshot-diffs", true),
+        (FIFO_TRIGGER, "fifo-trigger", true),
         (GAP, "gap", false),
         (DUPLICATE, "duplicate-order", false),
         (CROSSED, "crossed-book", false),

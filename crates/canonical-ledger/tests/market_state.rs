@@ -119,6 +119,10 @@ fn exact_market_creation_requires_dex_and_assets_and_is_key_bound() {
     );
     assert_eq!(current.price_scale(), Some(6));
     assert_eq!(current.quantity_scale(), Some(8));
+    let policy = current.l2_reconcile_policy_v1().unwrap();
+    assert_eq!(policy.version(), orderbook::L2_RECONCILE_POLICY_V1);
+    assert_eq!(policy.tick_size(), current.tick_size());
+    assert_eq!(policy.lot_size(), current.lot_size());
 
     let version_key =
         MarketMetadataVersionRecordV1::state_key(&market, current.metadata_version()).unwrap();

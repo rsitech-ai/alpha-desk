@@ -4,6 +4,7 @@ use canonical_events::{CanonicalEventEnvelope, EventKind, EventPayload};
 use domain_types::{
     Address, BlockHeight, ClientOrderId, EventId, MarketId, OrderId, OrderSide, Price, Quantity,
 };
+use orderbook::RestingOrder;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{ApplyContext, EventReducer, ReducerError, StateKey, StateMutation, StateView};
@@ -540,6 +541,11 @@ impl OrderLifecycleV1 {
     const fn is_terminal(self) -> bool {
         matches!(self, Self::Filled | Self::Cancelled)
     }
+
+    #[must_use]
+    pub const fn rests_on_book(self) -> bool {
+        !self.is_terminal()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -892,6 +898,30 @@ impl OrderCurrentRecordV1 {
     #[must_use]
     pub const fn last_event_id(&self) -> &EventId {
         &self.last_event_id
+    }
+
+    #[must_use]
+    pub const fn last_block_height(&self) -> BlockHeight {
+        self.last_block_height
+    }
+
+    #[must_use]
+    pub fn try_resting(&self) -> Option<RestingOrder> {
+        if !self.lifecycle.rests_on_book() || self.remaining_quantity.raw() <= 0 {
+            return None;
+        }
+        Some(
+            RestingOrder::new(
+                self.order_id.clone(),
+                self.side,
+                self.limit_price,
+                self.remaining_quantity,
+                self.last_block_height.get(),
+            )
+            .with_original(self.accepted_quantity)
+            .with_account(self.account_id)
+            .with_time_millis(self.last_block_height.get()),
+        )
     }
 }
 

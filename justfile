@@ -159,3 +159,7 @@ public-ws-replay:
 # Provisional vs committed WS lanes. Not part of `just verify`.
 provisional-ws-replay:
     ./tools/ci/provisional-ws-replay.sh
+
+# Deterministic L4 reconstruction and official L2 reconcile. Not part of `just verify`.
+l4-replay-e2e:
+    ./tools/ci/l4-replay-e2e.sh

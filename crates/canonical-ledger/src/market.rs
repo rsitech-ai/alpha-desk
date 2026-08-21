@@ -5,6 +5,7 @@ use domain_types::{
     Address, AssetId, BlockHeight, DexId, EventId, FundingRate, MarketId, OutcomeId, Price,
     ProtocolTime, Quantity, QuoteAmount,
 };
+use orderbook::L2ReconcilePolicyV1;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{ApplyContext, EventReducer, ReducerError, StateKey, StateMutation, StateView};
@@ -1145,6 +1146,15 @@ impl MarketCurrentRecordV1 {
     #[must_use]
     pub const fn lot_size(&self) -> Option<Quantity> {
         self.lot_size
+    }
+
+    pub fn l2_reconcile_policy_v1(&self) -> Result<L2ReconcilePolicyV1, MarketStateError> {
+        match (self.tick_size, self.lot_size) {
+            (Some(tick), Some(lot)) if tick.raw() > 0 && lot.raw() > 0 => {
+                Ok(L2ReconcilePolicyV1::for_market(tick, lot))
+            }
+            _ => Err(MarketStateError::InvalidRecord),
+        }
     }
 
     #[must_use]

@@ -26,6 +26,7 @@ pub use account::{
 pub use checkpoint::{CheckpointArtifact, CheckpointCompatibility};
 pub use composite::{
     CanonicalStateComponentVersionV1, CanonicalStateError, CanonicalStateReducerV1,
+    L4ProjectionError,
 };
 pub use correction::{
     ConfirmationAdmission, CorrectionInspectReport, CorrectionRecord, admit_confirmation,
