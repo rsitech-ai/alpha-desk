@@ -1,14 +1,15 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use canonical_events::{
-    map_committed_node_v1_block, map_node_v1_record, CommittedNodeV1MappingContext,
-    ConfirmationClass, EventPayload, EvidenceOnlyReason, MappingDisposition, MappingError,
-    MarketCatalogV1, NodeV1MappingContext, TradeParticipantRoleV1,
+    BlockEnvelope, CanonicalEventEnvelope, CommittedNodeV1MappingContext, ConfirmationClass,
+    EventPayload, EvidenceOnlyReason, MappingDisposition, MappingError, MarketCatalogV1,
+    NodeV1MappingContext, TradeParticipantRoleV1, map_committed_node_v1_block, map_node_v1_record,
 };
 use domain_types::{BlockHeight, ChainId, KnownTime, MarketId, SourceId};
-use hl_protocol::node::v1::{parse_node_record, NodeRecordKind, NodeStreamKind};
 use hl_protocol::SourceError;
+use hl_protocol::node::v1::{NodeRecordKind, NodeStreamKind, parse_node_record};
 
 fn fixture(name: &str) -> Vec<u8> {
     fs::read(
@@ -648,9 +649,11 @@ fn independent_empty_committed_block_is_not_reconciled_truth() {
         ConfirmationClass::ReconciledSnapshot
     );
     assert_eq!(mapped.source_block_hashes().len(), 1);
-    assert!(mapped
-        .source_block_hashes()
-        .contains_key(&independent.source_id));
+    assert!(
+        mapped
+            .source_block_hashes()
+            .contains_key(&independent.source_id)
+    );
 }
 
 #[test]
@@ -763,6 +766,25 @@ fn wrap_events(events: Vec<serde_json::Value>) -> Vec<u8> {
 
 fn wrap_event(event: serde_json::Value) -> Vec<u8> {
     wrap_events(vec![event])
+}
+
+fn assemble_mapped_block(
+    events: &[CanonicalEventEnvelope],
+    record: &hl_protocol::node::v1::NodeRecordV1,
+) {
+    let first = events.first().expect("mapped batch is non-empty");
+    BlockEnvelope::try_new(
+        first.chain_id().clone(),
+        first.block_height(),
+        first.block_time(),
+        first.confirmation_class(),
+        events.to_vec(),
+        BTreeMap::from([(
+            context().source_id.clone(),
+            *record.content_hash().as_bytes(),
+        )]),
+    )
+    .expect("mapped events must assemble");
 }
 
 #[test]
@@ -926,11 +948,14 @@ fn batched_l4_new_then_update_same_oid_get_distinct_event_ids() {
         events[0].transaction_id().as_str(),
         events[1].transaction_id().as_str()
     );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[1].transaction_index(), 0);
     assert_eq!(events[0].canonical_event_index(), 0);
     assert_eq!(events[1].canonical_event_index(), 1);
     assert!(matches!(events[0].payload(), EventPayload::OrderRested(_)));
     assert!(matches!(events[1].payload(), EventPayload::OrderRested(_)));
     assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
 }
 
 #[test]
@@ -953,6 +978,8 @@ fn batched_order_status_same_oid_same_kind_get_distinct_event_ids() {
         events[0].transaction_id().as_str(),
         events[1].transaction_id().as_str()
     );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[1].transaction_index(), 0);
     assert_eq!(events[0].canonical_event_index(), 0);
     assert_eq!(events[1].canonical_event_index(), 1);
     assert!(matches!(
@@ -964,4 +991,97 @@ fn batched_order_status_same_oid_same_kind_get_distinct_event_ids() {
         EventPayload::OrderCancelled(_)
     ));
     assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
+}
+
+#[test]
+fn batched_order_status_distinct_oids_assemble_a_block() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    let mut other = event.clone();
+    other["order"]["oid"] = serde_json::json!(12_212_359_593_u64);
+    let record = parse_node_record(
+        NodeStreamKind::OrderStatuses,
+        wrap_events(vec![event, other]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("distinct-oid order statuses must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_ne!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].transaction_index(), 1);
+    assert_eq!(events[1].canonical_event_index(), 0);
+    assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
+}
+
+#[test]
+fn batched_l4_distinct_oids_assemble_a_block() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let mut other = event.clone();
+    other["oid"] = serde_json::json!(35_061_046_832_u64);
+    let record = parse_node_record(
+        NodeStreamKind::RawBookDiffs,
+        wrap_events(vec![event, other]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("distinct-oid l4 diffs must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_ne!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].transaction_index(), 0);
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].transaction_index(), 1);
+    assert_eq!(events[1].canonical_event_index(), 0);
+    assert_ne!(events[0].event_id(), events[1].event_id());
+    assemble_mapped_block(&events, &record);
+}
+
+#[test]
+fn batched_order_status_interleaved_oids_fail_closed_as_non_contiguous() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    let mut other = event.clone();
+    other["order"]["oid"] = serde_json::json!(12_212_359_593_u64);
+    let record = parse_node_record(
+        NodeStreamKind::OrderStatuses,
+        wrap_events(vec![event.clone(), other, event]).into(),
+    )
+    .unwrap();
+    let error = map_node_v1_record(&record, &venue_catalog(), &context()).unwrap_err();
+    assert!(matches!(error, MappingError::NonContiguousTransaction));
+    assert_eq!(
+        error.reason_code(),
+        "canonical_mapping.non_contiguous_transaction"
+    );
+}
+
+#[test]
+fn batched_l4_interleaved_oids_fail_closed_as_non_contiguous() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let mut other = event.clone();
+    other["oid"] = serde_json::json!(35_061_046_832_u64);
+    let record = parse_node_record(
+        NodeStreamKind::RawBookDiffs,
+        wrap_events(vec![event.clone(), other, event]).into(),
+    )
+    .unwrap();
+    let error = map_node_v1_record(&record, &venue_catalog(), &context()).unwrap_err();
+    assert!(matches!(error, MappingError::NonContiguousTransaction));
+    assert_eq!(
+        error.reason_code(),
+        "canonical_mapping.non_contiguous_transaction"
+    );
 }

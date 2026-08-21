@@ -8,10 +8,10 @@ use domain_types::{
     PositionQuantity, Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
 };
 use hl_protocol::node::order_status::{
-    parse_order_status_batch, BookSide, OrderStatusClass, OrderStatusV1,
+    BookSide, OrderStatusClass, OrderStatusV1, parse_order_status_batch,
 };
-use hl_protocol::node::raw_book_diff::{parse_raw_book_diff_batch, RawBookDiffOp, RawBookDiffV1};
-use hl_protocol::node::trade::{parse_trade_batch, TradeV1};
+use hl_protocol::node::raw_book_diff::{RawBookDiffOp, RawBookDiffV1, parse_raw_book_diff_batch};
+use hl_protocol::node::trade::{TradeV1, parse_trade_batch};
 use hl_protocol::node::v1::{NodeRecordKind, NodeRecordV1, NodeStreamKind};
 use serde_json::{Map, Value};
 
@@ -423,13 +423,41 @@ fn map_order_status_record(
                 })?,
         );
     let parser_version = format!("{}/catalog:{}", context.mapper_version, catalog.version());
+    let mut seen_transactions = BTreeSet::new();
+    let mut current_transaction: Option<String> = None;
+    let mut transaction_index = 0_u32;
+    let mut canonical_event_index = 0_u32;
     let mut events = Vec::with_capacity(batch.statuses().len());
     for (source_index, status) in batch.statuses().iter().enumerate() {
         let source_index =
             u32::try_from(source_index).map_err(|_| MappingError::EventIndexOverflow)?;
+        let identity = format!("node-order:{}", status.order().oid());
+        match current_transaction.as_deref() {
+            None => {
+                seen_transactions.insert(identity.clone());
+                current_transaction = Some(identity);
+            }
+            Some(current) if current == identity => {
+                canonical_event_index = canonical_event_index
+                    .checked_add(1)
+                    .ok_or(MappingError::EventIndexOverflow)?;
+            }
+            Some(_) => {
+                if !seen_transactions.insert(identity.clone()) {
+                    return Err(MappingError::NonContiguousTransaction);
+                }
+                transaction_index = transaction_index
+                    .checked_add(1)
+                    .ok_or(MappingError::EventIndexOverflow)?;
+                canonical_event_index = 0;
+                current_transaction = Some(identity);
+            }
+        }
         events.push(map_order_status(
             status,
             source_index,
+            transaction_index,
+            canonical_event_index,
             block_height,
             block_time,
             &parser_version,
@@ -469,13 +497,41 @@ fn map_raw_book_diff_record(
                 })?,
         );
     let parser_version = format!("{}/catalog:{}", context.mapper_version, catalog.version());
+    let mut seen_transactions = BTreeSet::new();
+    let mut current_transaction: Option<String> = None;
+    let mut transaction_index = 0_u32;
+    let mut canonical_event_index = 0_u32;
     let mut events = Vec::with_capacity(batch.diffs().len());
     for (source_index, diff) in batch.diffs().iter().enumerate() {
         let source_index =
             u32::try_from(source_index).map_err(|_| MappingError::EventIndexOverflow)?;
+        let identity = format!("node-l4:{}", diff.oid());
+        match current_transaction.as_deref() {
+            None => {
+                seen_transactions.insert(identity.clone());
+                current_transaction = Some(identity);
+            }
+            Some(current) if current == identity => {
+                canonical_event_index = canonical_event_index
+                    .checked_add(1)
+                    .ok_or(MappingError::EventIndexOverflow)?;
+            }
+            Some(_) => {
+                if !seen_transactions.insert(identity.clone()) {
+                    return Err(MappingError::NonContiguousTransaction);
+                }
+                transaction_index = transaction_index
+                    .checked_add(1)
+                    .ok_or(MappingError::EventIndexOverflow)?;
+                canonical_event_index = 0;
+                current_transaction = Some(identity);
+            }
+        }
         events.push(map_raw_book_diff(
             diff,
             source_index,
+            transaction_index,
+            canonical_event_index,
             block_height,
             block_time,
             &parser_version,
@@ -683,6 +739,8 @@ fn map_trade_participant(
 fn map_order_status(
     status: &OrderStatusV1,
     source_index: u32,
+    transaction_index: u32,
+    canonical_event_index: u32,
     block_height: BlockHeight,
     block_time: ProtocolTime,
     parser_version: &str,
@@ -771,8 +829,8 @@ fn map_order_status(
         block_height,
         block_time,
         transaction_id,
-        transaction_index: source_index,
-        canonical_event_index: source_index,
+        transaction_index,
+        canonical_event_index,
         market_ids: vec![market_id],
         account_ids: vec![account_id],
         source_evidence: vec![source_evidence],
@@ -790,6 +848,8 @@ fn map_order_status(
 fn map_raw_book_diff(
     diff: &RawBookDiffV1,
     source_index: u32,
+    transaction_index: u32,
+    canonical_event_index: u32,
     block_height: BlockHeight,
     block_time: ProtocolTime,
     parser_version: &str,
@@ -834,8 +894,8 @@ fn map_raw_book_diff(
         block_height,
         block_time,
         transaction_id,
-        transaction_index: source_index,
-        canonical_event_index: source_index,
+        transaction_index,
+        canonical_event_index,
         market_ids: vec![market_id],
         account_ids: vec![account_id],
         source_evidence: vec![source_evidence],
