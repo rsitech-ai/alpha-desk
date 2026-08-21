@@ -7,7 +7,8 @@ use hl_protocol::node::v1::NodeStreamKind;
 use hl_protocol::{
     AgreementStatus, NetworkId, ObservationClass, OperatorKind, ProviderLicense,
     RedistributionPolicy, RetentionClass, SourceAdmission, SourceCatalogError, SourceCatalogRecord,
-    SourceDescriptor, SourceRole, SourceTrust, inferred_operator_kind, validate_role_trust,
+    SourceDescriptor, SourceRole, SourceTrust, inferred_operator_kind,
+    validate_operator_kind_trust, validate_role_trust,
 };
 use serde::{Deserialize, Serialize};
 
@@ -551,6 +552,7 @@ impl SourceCatalogConfig {
         let operator_kind = self
             .operator_kind
             .unwrap_or_else(|| inferred_operator_kind(source.trust, role));
+        validate_operator_kind_trust(operator_kind, source.trust).map_err(catalog_error)?;
         let descriptor = SourceDescriptor::new(
             SourceId::new(source.id.clone()).map_err(|_| ConfigError::InvalidSourceId)?,
             network,
@@ -644,6 +646,7 @@ impl SourceCatalogConfig {
 fn catalog_error(error: SourceCatalogError) -> ConfigError {
     match error {
         SourceCatalogError::IncompatibleRole => ConfigError::IncompatibleSourceRole,
+        SourceCatalogError::IncompatibleOperatorKind => ConfigError::IncompatibleOperatorKind,
         SourceCatalogError::MissingProviderLicense => ConfigError::MissingProviderLicense,
         SourceCatalogError::InvalidNetwork
         | SourceCatalogError::InvalidSourceId
@@ -773,6 +776,8 @@ pub enum ConfigError {
     InvalidSourceCatalog,
     #[error("capture source role is incompatible with source trust")]
     IncompatibleSourceRole,
+    #[error("capture operator kind is incompatible with source trust")]
+    IncompatibleOperatorKind,
     #[error("provider capture source requires licensing and redistribution policy")]
     MissingProviderLicense,
     #[error("capture configuration requires exactly one primary committed source")]
@@ -824,6 +829,7 @@ impl ConfigError {
             Self::InvalidSourceAdapter => "capture_config.invalid_source_adapter",
             Self::InvalidSourceCatalog => "capture_config.invalid_source_catalog",
             Self::IncompatibleSourceRole => "capture_config.incompatible_source_role",
+            Self::IncompatibleOperatorKind => "capture_config.incompatible_operator_kind",
             Self::MissingProviderLicense => "capture_config.missing_provider_license",
             Self::MissingPrimaryCommittedSource => {
                 "capture_config.missing_primary_committed_source"

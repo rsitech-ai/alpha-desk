@@ -4,7 +4,7 @@ use hl_protocol::{
     RedistributionPolicy, RetentionClass, SourceCatalogError, SourceCatalogRecord,
     SourceDescriptor, SourceRole, SourceTrust, inferred_operator_kind,
     network_scoped_source_identity, observation_qualifies_committed_source,
-    role_requires_provider_license,
+    role_requires_provider_license, validate_operator_kind_trust,
 };
 
 fn network(name: &str) -> NetworkId {
@@ -238,12 +238,141 @@ fn omitted_role_third_party_defaults_to_provider_and_requires_license() {
     )
     .expect("committed node may omit a redundant role without a license");
 
-    assert_eq!(
-        inferred_operator_kind(
-            SourceTrust::MempoolProvisional,
-            SourceRole::from_trust(SourceTrust::MempoolProvisional),
+    let independent_role = SourceRole::from_trust(SourceTrust::IndependentCommitted);
+    let independent_kind =
+        inferred_operator_kind(SourceTrust::IndependentCommitted, independent_role);
+    assert_eq!(independent_role, SourceRole::CommittedIndependent);
+    assert_eq!(independent_kind, OperatorKind::IndependentNode);
+    assert!(!role_requires_provider_license(
+        independent_role,
+        independent_kind
+    ));
+    record(
+        "independent-node",
+        "mainnet",
+        independent_role,
+        independent_kind,
+        ObservationClass::CommittedBlock,
+        None,
+    )
+    .expect("independent committed node may omit a redundant role without a license");
+}
+
+#[test]
+fn omitted_role_non_official_trust_infers_provider_and_requires_license() {
+    for (trust, evidence) in [
+        (
+            SourceTrust::ThirdPartyProvisional,
+            ObservationClass::PublicMarketData,
         ),
-        OperatorKind::Official
+        (
+            SourceTrust::MempoolProvisional,
+            ObservationClass::ProvisionalMempool,
+        ),
+        (SourceTrust::ReconciledSnapshot, ObservationClass::Snapshot),
+        (SourceTrust::RecoveryOnly, ObservationClass::HistoricalBlock),
+    ] {
+        let role = SourceRole::from_trust(trust);
+        let kind = inferred_operator_kind(trust, role);
+        assert_ne!(kind, OperatorKind::Official, "{trust:?}");
+        assert_eq!(kind, OperatorKind::Provider, "{trust:?}");
+        assert!(role_requires_provider_license(role, kind), "{trust:?}");
+        assert_eq!(
+            record("vendor-feed", "mainnet", role, kind, evidence, None),
+            Err(SourceCatalogError::MissingProviderLicense),
+            "{trust:?}"
+        );
+        let licensed = record(
+            "vendor-feed",
+            "mainnet",
+            role,
+            kind,
+            evidence,
+            Some(license("vendor-tos", AgreementStatus::Active, None)),
+        )
+        .unwrap_or_else(|error| {
+            panic!("{trust:?} inferred Provider must accept a license: {error}")
+        });
+        assert_eq!(licensed.operator_kind(), OperatorKind::Provider);
+        assert_eq!(
+            licensed.license().expect("license").license_name(),
+            "vendor-tos"
+        );
+    }
+}
+
+#[test]
+fn operator_kind_cannot_pair_official_with_non_committed_trust() {
+    for trust in [
+        SourceTrust::ThirdPartyProvisional,
+        SourceTrust::MempoolProvisional,
+        SourceTrust::ReconciledSnapshot,
+        SourceTrust::RecoveryOnly,
+    ] {
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::Official, trust),
+            Err(SourceCatalogError::IncompatibleOperatorKind),
+            "{trust:?}"
+        );
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::LocalNode, trust),
+            Err(SourceCatalogError::IncompatibleOperatorKind),
+            "{trust:?}"
+        );
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::IndependentNode, trust),
+            Err(SourceCatalogError::IncompatibleOperatorKind),
+            "{trust:?}"
+        );
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::Provider, trust),
+            Ok(()),
+            "{trust:?}"
+        );
+    }
+
+    for trust in [
+        SourceTrust::LocallyVerifiedCommitted,
+        SourceTrust::IndependentCommitted,
+    ] {
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::Official, trust),
+            Ok(())
+        );
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::LocalNode, trust),
+            Ok(())
+        );
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::IndependentNode, trust),
+            Ok(())
+        );
+        assert_eq!(
+            validate_operator_kind_trust(OperatorKind::Provider, trust),
+            Err(SourceCatalogError::IncompatibleOperatorKind),
+            "{trust:?}"
+        );
+    }
+
+    assert_eq!(
+        validate_operator_kind_trust(OperatorKind::Community, SourceTrust::ThirdPartyProvisional),
+        Ok(())
+    );
+    assert_eq!(
+        validate_operator_kind_trust(OperatorKind::Community, SourceTrust::MempoolProvisional),
+        Err(SourceCatalogError::IncompatibleOperatorKind)
+    );
+
+    assert_eq!(
+        record(
+            "vendor-feed",
+            "mainnet",
+            SourceRole::ProvisionalRealtime,
+            OperatorKind::Official,
+            ObservationClass::PublicMarketData,
+            Some(license("vendor-tos", AgreementStatus::Active, None)),
+        ),
+        Err(SourceCatalogError::IncompatibleOperatorKind)
     );
 }
 

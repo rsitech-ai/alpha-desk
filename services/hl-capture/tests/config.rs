@@ -1073,6 +1073,106 @@ adapter = { kind = "node-block-directory""#,
     assert!(record.license().is_none());
 }
 
+fn assert_omitted_role_non_official_requires_license(
+    id: &str,
+    trust: &str,
+    class: &str,
+    expected_role: hl_protocol::SourceRole,
+) {
+    let missing = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            id,
+            trust,
+            class,
+            r#"{ network = "mainnet", operator = "vendor", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&missing)
+            .expect_err("omitted catalog.role cannot skip the provider license")
+            .reason_code(),
+        "capture_config.missing_provider_license"
+    );
+
+    let licensed = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            id,
+            trust,
+            class,
+            r#"{ network = "mainnet", operator = "vendor", retention_class = "raw-hot-local", redistribution = "internal-only", license_name = "vendor-tos", agreement_status = "active" }"#,
+        )
+    );
+    let config = CaptureConfig::from_toml(&licensed)
+        .unwrap_or_else(|error| panic!("licensed {trust} may omit catalog.role: {error}"));
+    let record = config
+        .source(id)
+        .expect("source")
+        .catalog_record()
+        .expect("catalog")
+        .expect("record");
+    assert_eq!(record.descriptor().role(), expected_role);
+    assert_ne!(record.operator_kind(), hl_protocol::OperatorKind::Official);
+    assert_eq!(record.operator_kind(), hl_protocol::OperatorKind::Provider);
+    assert_eq!(
+        record.license().expect("license").license_name(),
+        "vendor-tos"
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_mempool_requires_provider_license() {
+    assert_omitted_role_non_official_requires_license(
+        "mempool-relay",
+        "mempool-provisional",
+        "provisional-mempool",
+        hl_protocol::SourceRole::ProvisionalRealtime,
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_reconciled_snapshot_requires_provider_license() {
+    assert_omitted_role_non_official_requires_license(
+        "snapshot-vendor",
+        "reconciled-snapshot",
+        "snapshot",
+        hl_protocol::SourceRole::ReconciliationSnapshot,
+    );
+}
+
+#[test]
+fn catalog_omitted_role_on_recovery_requires_provider_license() {
+    assert_omitted_role_non_official_requires_license(
+        "archive-mirror",
+        "recovery-only",
+        "historical-block",
+        hl_protocol::SourceRole::HistoricalBackfill,
+    );
+}
+
+#[test]
+fn catalog_rejects_official_operator_kind_on_mempool_source() {
+    let source = format!(
+        "{}{}",
+        valid_config(),
+        catalog_source(
+            "mempool-relay",
+            "mempool-provisional",
+            "provisional-mempool",
+            r#"{ network = "mainnet", operator = "vendor", operator_kind = "official", retention_class = "raw-hot-local", redistribution = "internal-only" }"#,
+        )
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&source)
+            .expect_err("official cannot pair with mempool-provisional")
+            .reason_code(),
+        "capture_config.incompatible_operator_kind"
+    );
+}
+
 #[test]
 fn catalog_rejects_committed_role_without_qualifying_evidence() {
     let source = format!(

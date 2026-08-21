@@ -135,6 +135,24 @@ impl OperatorKind {
             Self::Community => "community",
         }
     }
+
+    #[must_use]
+    pub const fn compatible_with(self, trust: SourceTrust) -> bool {
+        match self {
+            Self::LocalNode | Self::IndependentNode | Self::Official => matches!(
+                trust,
+                SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted
+            ),
+            Self::Provider => matches!(
+                trust,
+                SourceTrust::ThirdPartyProvisional
+                    | SourceTrust::MempoolProvisional
+                    | SourceTrust::ReconciledSnapshot
+                    | SourceTrust::RecoveryOnly
+            ),
+            Self::Community => matches!(trust, SourceTrust::ThirdPartyProvisional),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -390,6 +408,17 @@ pub fn validate_role_trust(role: SourceRole, trust: SourceTrust) -> Result<(), S
     }
 }
 
+pub fn validate_operator_kind_trust(
+    operator_kind: OperatorKind,
+    trust: SourceTrust,
+) -> Result<(), SourceCatalogError> {
+    if operator_kind.compatible_with(trust) {
+        Ok(())
+    } else {
+        Err(SourceCatalogError::IncompatibleOperatorKind)
+    }
+}
+
 #[must_use]
 pub const fn role_requires_provider_license(role: SourceRole, operator_kind: OperatorKind) -> bool {
     matches!(role, SourceRole::AttributionEnrichment)
@@ -398,14 +427,20 @@ pub const fn role_requires_provider_license(role: SourceRole, operator_kind: Ope
 
 /// Operator kind used when capture TOML omits `operator_kind`.
 ///
-/// `SourceTrust::ThirdPartyProvisional` infers [`OperatorKind::Provider`] so an omitted
+/// Every non-committed trust infers [`OperatorKind::Provider`] so an omitted
 /// `catalog.role` cannot become Official and skip the provider license.
-/// [`SourceRole::DiscoveryOnly`] stays Community. Other trusts keep
+/// [`SourceRole::DiscoveryOnly`] stays Community. Committed trusts keep
 /// [`SourceRole::default_operator_kind`].
 #[must_use]
 pub const fn inferred_operator_kind(trust: SourceTrust, role: SourceRole) -> OperatorKind {
     match trust {
-        SourceTrust::ThirdPartyProvisional => match role {
+        SourceTrust::LocallyVerifiedCommitted | SourceTrust::IndependentCommitted => {
+            role.default_operator_kind()
+        }
+        SourceTrust::ThirdPartyProvisional
+        | SourceTrust::MempoolProvisional
+        | SourceTrust::ReconciledSnapshot
+        | SourceTrust::RecoveryOnly => match role {
             SourceRole::DiscoveryOnly => OperatorKind::Community,
             SourceRole::CommittedPrimary
             | SourceRole::CommittedIndependent
@@ -414,11 +449,6 @@ pub const fn inferred_operator_kind(trust: SourceTrust, role: SourceRole) -> Ope
             | SourceRole::HistoricalBackfill
             | SourceRole::AttributionEnrichment => OperatorKind::Provider,
         },
-        SourceTrust::LocallyVerifiedCommitted
-        | SourceTrust::IndependentCommitted
-        | SourceTrust::ReconciledSnapshot
-        | SourceTrust::RecoveryOnly
-        | SourceTrust::MempoolProvisional => role.default_operator_kind(),
     }
 }
 
@@ -457,6 +487,7 @@ impl SourceCatalogRecord {
         {
             return Err(SourceCatalogError::MissingCommittedEvidence);
         }
+        validate_operator_kind_trust(operator_kind, descriptor.role().trust())?;
         let requires_license = role_requires_provider_license(descriptor.role(), operator_kind);
         if requires_license {
             if license.is_none() {
@@ -585,6 +616,8 @@ pub enum SourceCatalogError {
     InvalidLicense,
     #[error("source role is incompatible with source trust")]
     IncompatibleRole,
+    #[error("operator kind is incompatible with source trust")]
+    IncompatibleOperatorKind,
     #[error("committed source requires a qualifying evidence class")]
     MissingCommittedEvidence,
     #[error("provider source requires licensing and redistribution policy")]
@@ -607,6 +640,7 @@ impl SourceCatalogError {
             Self::InvalidDatasetVersion => "source_catalog.invalid_dataset_version",
             Self::InvalidLicense => "source_catalog.invalid_license",
             Self::IncompatibleRole => "source_catalog.incompatible_role",
+            Self::IncompatibleOperatorKind => "source_catalog.incompatible_operator_kind",
             Self::MissingCommittedEvidence => "source_catalog.missing_committed_evidence",
             Self::MissingProviderLicense => "source_catalog.missing_provider_license",
             Self::InvalidVersion => "source_catalog.invalid_version",
