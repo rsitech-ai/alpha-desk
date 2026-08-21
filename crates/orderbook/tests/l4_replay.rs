@@ -1,4 +1,4 @@
-use domain_types::{BlockHeight, MarketId, OrderId, OrderSide, Price, Quantity};
+use domain_types::{Address, BlockHeight, MarketId, OrderId, OrderSide, Price, Quantity};
 use orderbook::{
     BookDiff, BookHealth, CF_CHECKPOINTS, CF_L2_BOOK, CF_L4_ORDERS, L2Level, L2ReconcileDecision,
     L2ReconcilePolicyV1, L4CheckpointV1, L4Error, L4Reconstruction, OrderBook, RestingOrder,
@@ -254,6 +254,74 @@ fn memory_stays_bounded_under_synthetic_high_order_count() {
         Err(L4Error::ProvisionalRefused(_))
     ));
     assert_eq!(*lane.book().health(), BookHealth::Healthy);
+}
+
+#[test]
+fn same_id_payload_with_different_side_or_account_conflicts() {
+    let account_a = Address::parse_api("0x00000000000000000000000000000000000000aa").unwrap();
+    let account_b = Address::parse_api("0x00000000000000000000000000000000000000bb").unwrap();
+
+    let mut snapshot_side = L4Reconstruction::awaiting_snapshot(market(), BlockHeight::new(1));
+    snapshot_side
+        .apply_committed_snapshot(
+            "snap",
+            5,
+            BlockHeight::new(5),
+            vec![rest("oid", OrderSide::Buy, "100", "1", 1).with_account(account_a)],
+        )
+        .unwrap();
+    assert!(matches!(
+        snapshot_side.apply_committed_snapshot(
+            "snap",
+            5,
+            BlockHeight::new(5),
+            vec![rest("oid", OrderSide::Sell, "100", "1", 1).with_account(account_a)],
+        ),
+        Err(L4Error::Conflict { .. })
+    ));
+
+    let mut snapshot_account = L4Reconstruction::awaiting_snapshot(market(), BlockHeight::new(1));
+    snapshot_account
+        .apply_committed_snapshot(
+            "snap",
+            5,
+            BlockHeight::new(5),
+            vec![rest("oid", OrderSide::Buy, "100", "1", 1).with_account(account_a)],
+        )
+        .unwrap();
+    assert!(matches!(
+        snapshot_account.apply_committed_snapshot(
+            "snap",
+            5,
+            BlockHeight::new(5),
+            vec![rest("oid", OrderSide::Buy, "100", "1", 1).with_account(account_b)],
+        ),
+        Err(L4Error::Conflict { .. })
+    ));
+
+    let mut add = L4Reconstruction::awaiting_snapshot(market(), BlockHeight::new(1));
+    add.apply_committed_snapshot("boot", 1, BlockHeight::new(1), Vec::new())
+        .unwrap();
+    add.apply_committed_diff(
+        "add",
+        2,
+        BlockHeight::new(2),
+        BookDiff::Add {
+            order: rest("oid", OrderSide::Buy, "100", "1", 2).with_account(account_a),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        add.apply_committed_diff(
+            "add",
+            2,
+            BlockHeight::new(2),
+            BookDiff::Add {
+                order: rest("oid", OrderSide::Sell, "100", "1", 2).with_account(account_a),
+            },
+        ),
+        Err(L4Error::Conflict { .. })
+    ));
 }
 
 fn market() -> MarketId {

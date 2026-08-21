@@ -9,6 +9,7 @@ mod state_store;
 pub use archive::{
     ARCHIVE_MANIFEST_SCHEMA_V1, ArchiveError, ArchiveObject, ArchiveReceipt, BlockIterator,
     CanonicalArchive, CanonicalArchiveMaintenance, CompactionReceipt, CursorPolicy,
+    HISTORICAL_OBJECT_MANIFEST_SCHEMA_V1, HistoricalGapStatus, HistoricalObjectManifest,
     LocalRecordSequence, LocalRecordSequenceRange, OwnedSequencedSourceObservation,
     RAW_ARCHIVE_MAXIMUM_DATA_PACK_BYTES, RAW_ARCHIVE_MAXIMUM_EMBEDDED_PACK_MANIFEST_BYTES,
     RAW_ARCHIVE_MAXIMUM_INDEX_PACK_BYTES, RAW_ARCHIVE_MAXIMUM_LOGICAL_MANIFEST_BYTES,
@@ -19,13 +20,14 @@ pub use archive::{
     RawArchiveMaintenanceStatistics, RawArchiveObject, RawArchivePackingPolicy,
     RawArchiveProductionCapacityAdmission, RawArchiveRootLeaseIdentity, RawArchiveWorkloadEnvelope,
     RawObservationArchive, RawObservationBatch, RawObservationIterator, RawObservationRange,
-    RawObservationReceipt, RawPackedRangeReceipt, SequenceBoundRawObservationReceipt,
-    SequencedRawObservationIterator, SequencedSourceObservation, SourceWatermark, VerifiedManifest,
-    VerifiedRawManifest,
+    RawObservationReceipt, RawPackedRangeReceipt, RequesterPaysCost,
+    SequenceBoundRawObservationReceipt, SequencedRawObservationIterator,
+    SequencedSourceObservation, SourceWatermark, VerifiedManifest, VerifiedRawManifest,
 };
 pub use capture_progress::{
-    ArchivedBlockPlan, CaptureCursor, CaptureProgressStore, PlannedPublication, ProgressError,
-    ProgressRecordDisposition, PublicationAcknowledgement,
+    ArchivedBlockPlan, CaptureCursor, CaptureProgressStore, HistoricalBackfillCursor,
+    HistoricalBackfillProgress, HistoricalGapRecord, HistoricalObjectPlan, PlannedPublication,
+    ProgressError, ProgressRecordDisposition, PublicationAcknowledgement,
 };
 pub use checkpoint::{
     CheckpointPublishDisposition, CheckpointReceipt, CheckpointStoreError, StateCheckpointStore,

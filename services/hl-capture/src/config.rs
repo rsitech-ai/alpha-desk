@@ -13,6 +13,8 @@ use hl_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::historical_manifest::{DatasetFormat, DatasetKind};
+
 const MAX_IDENTITY_BYTES: usize = 256;
 const MAX_QUEUE_CAPACITY: usize = 1_000_000;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
@@ -146,6 +148,11 @@ impl CaptureConfig {
                         return Err(ConfigError::InvalidSourceAdapter);
                     }
                 }
+                Some(SourceAdapterConfig::HistoricalS3 { .. }) => {
+                    if source.trust != SourceTrust::RecoveryOnly {
+                        return Err(ConfigError::InvalidSourceAdapter);
+                    }
+                }
                 Some(SourceAdapterConfig::NodeLine { .. })
                 | Some(SourceAdapterConfig::NodeBlockDirectory { .. })
                 | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
@@ -206,7 +213,8 @@ fn validate_committed_source_adapter(source: &SourceConfig) -> Result<(), Config
             SourceAdapterConfig::NodeLine { .. }
             | SourceAdapterConfig::NodeSnapshotDirectory { .. }
             | SourceAdapterConfig::OfficialInfo { .. }
-            | SourceAdapterConfig::OfficialWs { .. },
+            | SourceAdapterConfig::OfficialWs { .. }
+            | SourceAdapterConfig::HistoricalS3 { .. },
         )
         | None => Err(ConfigError::InvalidCommittedSourceAdapter),
     }
@@ -768,6 +776,14 @@ pub enum SourceAdapterConfig {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         intervals: Vec<String>,
     },
+    HistoricalS3 {
+        bucket: String,
+        dataset: String,
+        format: String,
+        request_payer: String,
+        start_key: String,
+        end_key: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -830,6 +846,40 @@ impl SourceAdapterConfig {
                     .chain(intervals.iter())
                 {
                     validate_identity(value).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                }
+                Ok(())
+            }
+            Self::HistoricalS3 {
+                bucket,
+                dataset,
+                format,
+                request_payer,
+                start_key,
+                end_key,
+            } => {
+                if request_payer != "requester"
+                    || observation_class != ObservationClass::HistoricalBlock
+                    || start_key > end_key
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
+                }
+                validate_identity(bucket).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(dataset).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(format).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(start_key).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                validate_identity(end_key).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                let kind =
+                    DatasetKind::parse(dataset).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                let parsed_format =
+                    DatasetFormat::parse(format).map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                kind.validate_format(parsed_format)
+                    .map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                kind.accept_bucket(bucket)
+                    .map_err(|_| ConfigError::InvalidSourceAdapter)?;
+                if !start_key.starts_with(kind.key_prefix())
+                    || !end_key.starts_with(kind.key_prefix())
+                {
+                    return Err(ConfigError::InvalidSourceAdapter);
                 }
                 Ok(())
             }

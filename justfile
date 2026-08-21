@@ -163,3 +163,7 @@ provisional-ws-replay:
 # Deterministic L4 reconstruction and official L2 reconcile. Not part of `just verify`.
 l4-replay-e2e:
     ./tools/ci/l4-replay-e2e.sh
+
+# Official historical S3 backfill and object manifests. Not part of `just verify`.
+historical-backfill-e2e:
+    ./tools/ci/historical-backfill-e2e.sh

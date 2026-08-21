@@ -432,6 +432,7 @@ pub(crate) fn committed_node_tasks(
             | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
             | Some(SourceAdapterConfig::OfficialInfo { .. })
             | Some(SourceAdapterConfig::OfficialWs { .. })
+            | Some(SourceAdapterConfig::HistoricalS3 { .. })
             | None => continue,
         };
         let admission = source
@@ -579,6 +580,7 @@ pub(crate) fn auxiliary_node_task(
             Some(SourceAdapterConfig::NodeBlockDirectory { .. })
             | Some(SourceAdapterConfig::OfficialInfo { .. })
             | Some(SourceAdapterConfig::OfficialWs { .. })
+            | Some(SourceAdapterConfig::HistoricalS3 { .. })
             | None => continue,
         };
         let admission = source

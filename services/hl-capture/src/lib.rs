@@ -12,6 +12,7 @@ mod disk;
 mod egress;
 mod failover;
 mod fixture;
+mod historical_manifest;
 mod info_scheduler;
 mod operator;
 pub mod progress;
@@ -29,6 +30,12 @@ mod status;
 mod subscription_plan;
 mod ws_session;
 
+pub use adapters::historical_s3::{
+    BackfillReport, BackfillRequest, FsObjectStore, HistoricalArchive, HistoricalError,
+    HistoricalFaultInjector, HistoricalFaultPoint, HistoricalProgressStore, ListedObject,
+    NoHistoricalFaults, ObjectBody, ObjectStore, RawPortHistoricalArchive, RequestPayer,
+    import_objects,
+};
 pub use adapters::info_rest::{
     CaptureClock, FakeCaptureClock, HttpsInfoTransport, InfoArchive, InfoCaptureCoordinator,
     InfoCaptureError, InfoCaptureOutcome, InfoFaultInjector, InfoFaultPoint, InfoJobCheckpoint,
@@ -49,6 +56,12 @@ pub use disk::*;
 pub use egress::*;
 pub use failover::*;
 pub use fixture::{FixtureError, synthetic_fixture_block, synthetic_independent_fixture_block};
+pub use historical_manifest::{
+    DATASET_VERSION, DatasetFormat, DatasetKind, EnumerationSpec, MARKET_BUCKET,
+    NODE_MAINNET_BUCKET, NODE_TESTNET_BUCKET, PARSER_BUILD, asset_ctx_key, enumerate_keys,
+    hyperevm_limitations, keys_in_range, l2_object_key, node_object_key, select_fills_dataset,
+    select_trades_dataset,
+};
 pub use info_scheduler::*;
 pub use operator::{
     OperatorError, accept_operator_status, encode_info_budget_status, info_budget_status_path,

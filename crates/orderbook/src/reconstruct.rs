@@ -4,7 +4,7 @@ use blake3::Hasher;
 use domain_types::{BlockHeight, MarketId};
 
 use crate::book::{BookDiff, BookHealth, DEFAULT_MAX_ORDERS, OrderBook, RestingOrder};
-use crate::store::{L4_INPUT_HASH_CONTEXT, content_hash};
+use crate::store::{L4_INPUT_HASH_CONTEXT, content_hash, encode_resting_order};
 
 const DEFAULT_MAX_PROVISIONAL: usize = 4_096;
 
@@ -68,7 +68,7 @@ impl L4Reconstruction {
         orders: Vec<RestingOrder>,
     ) -> Result<(), L4Error> {
         let id = id.into();
-        let hash = snapshot_hash(sequence, as_of_block, &orders);
+        let hash = snapshot_hash(sequence, as_of_block, &orders)?;
         if self.already_committed(&id, hash)? {
             return self.require_healthy();
         }
@@ -86,7 +86,7 @@ impl L4Reconstruction {
         diff: BookDiff,
     ) -> Result<(), L4Error> {
         let id = id.into();
-        let hash = diff_hash(sequence, as_of_block, &diff);
+        let hash = diff_hash(sequence, as_of_block, &diff)?;
         if self.already_committed(&id, hash)? {
             return self.require_healthy();
         }
@@ -135,7 +135,11 @@ impl L4Reconstruction {
     }
 }
 
-fn snapshot_hash(sequence: u64, as_of_block: BlockHeight, orders: &[RestingOrder]) -> [u8; 32] {
+fn snapshot_hash(
+    sequence: u64,
+    as_of_block: BlockHeight,
+    orders: &[RestingOrder],
+) -> Result<[u8; 32], L4Error> {
     let mut hasher = Hasher::new_derive_key(L4_INPUT_HASH_CONTEXT);
     hasher.update(&sequence.to_be_bytes());
     hasher.update(&as_of_block.get().to_be_bytes());
@@ -145,23 +149,22 @@ fn snapshot_hash(sequence: u64, as_of_block: BlockHeight, orders: &[RestingOrder
             .to_be_bytes(),
     );
     for order in orders {
-        hasher.update(order.order_id.as_str().as_bytes());
-        hasher.update(&order.remaining.to_string().into_bytes());
-        hasher.update(&order.price.to_string().into_bytes());
-        hasher.update(&order.time_priority().to_be_bytes());
+        hasher.update(&canonical_order_bytes(order)?);
     }
-    *hasher.finalize().as_bytes()
+    Ok(*hasher.finalize().as_bytes())
 }
 
-fn diff_hash(sequence: u64, as_of_block: BlockHeight, diff: &BookDiff) -> [u8; 32] {
+fn diff_hash(
+    sequence: u64,
+    as_of_block: BlockHeight,
+    diff: &BookDiff,
+) -> Result<[u8; 32], L4Error> {
     let mut material = sequence.to_be_bytes().to_vec();
     material.extend_from_slice(&as_of_block.get().to_be_bytes());
     match diff {
         BookDiff::Add { order } => {
             material.extend_from_slice(b"add");
-            material.extend_from_slice(order.order_id.as_str().as_bytes());
-            material.extend_from_slice(order.remaining.to_string().as_bytes());
-            material.extend_from_slice(order.price.to_string().as_bytes());
+            material.extend_from_slice(&canonical_order_bytes(order)?);
         }
         BookDiff::Update {
             order_id,
@@ -186,5 +189,10 @@ fn diff_hash(sequence: u64, as_of_block: BlockHeight, diff: &BookDiff) -> [u8; 3
             material.extend_from_slice(fill_quantity.to_string().as_bytes());
         }
     }
-    content_hash(&material)
+    Ok(content_hash(&material))
+}
+
+fn canonical_order_bytes(order: &RestingOrder) -> Result<Vec<u8>, L4Error> {
+    encode_resting_order(order)
+        .map_err(|_| L4Error::Unhealthy("committed input is not canonical".to_owned()))
 }

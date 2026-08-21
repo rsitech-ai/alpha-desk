@@ -365,6 +365,8 @@ pub enum ProgressError {
     CapacityExceeded { limit: usize },
     #[error("capture progress storage failed: {0}")]
     Storage(&'static str),
+    #[error("capture progress object conflicts with the durable binding")]
+    ConflictingObject,
 }
 
 impl ProgressError {
@@ -385,6 +387,7 @@ impl ProgressError {
             Self::InvalidLimit => "capture_progress.invalid_limit",
             Self::CapacityExceeded { .. } => "capture_progress.capacity_exceeded",
             Self::Storage(_) => "capture_progress.storage",
+            Self::ConflictingObject => "capture_progress.conflicting_object",
         }
     }
 }
@@ -437,6 +440,273 @@ pub trait CaptureProgressStore: Send + Sync {
         chain_id: &ChainId,
         limit: usize,
     ) -> Result<Vec<ArchivedBlockPlan>, ProgressError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalObjectPlan {
+    dataset_id: String,
+    bucket: String,
+    key: String,
+    etag: String,
+    content_hash: [u8; 32],
+    archive_ref: String,
+    byte_count: u64,
+    parser_build: String,
+    archived_at: KnownTime,
+}
+
+impl HistoricalObjectPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        dataset_id: impl Into<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+        etag: impl Into<String>,
+        content_hash: [u8; 32],
+        archive_ref: impl Into<String>,
+        byte_count: u64,
+        parser_build: impl Into<String>,
+        archived_at: KnownTime,
+    ) -> Result<Self, ProgressError> {
+        let dataset_id = dataset_id.into();
+        let bucket = bucket.into();
+        let key = key.into();
+        let etag = etag.into();
+        let archive_ref = archive_ref.into();
+        let parser_build = parser_build.into();
+        validate_identity(&dataset_id)?;
+        validate_identity(&bucket)?;
+        validate_identity(&key)?;
+        validate_identity(&etag)?;
+        validate_identity(&archive_ref)?;
+        validate_identity(&parser_build)?;
+        if byte_count == 0 {
+            return Err(ProgressError::InvalidInput("zero historical object bytes"));
+        }
+        Ok(Self {
+            dataset_id,
+            bucket,
+            key,
+            etag,
+            content_hash,
+            archive_ref,
+            byte_count,
+            parser_build,
+            archived_at,
+        })
+    }
+
+    #[must_use]
+    pub fn dataset_id(&self) -> &str {
+        &self.dataset_id
+    }
+
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub fn etag(&self) -> &str {
+        &self.etag
+    }
+
+    #[must_use]
+    pub const fn content_hash(&self) -> [u8; 32] {
+        self.content_hash
+    }
+
+    #[must_use]
+    pub fn archive_ref(&self) -> &str {
+        &self.archive_ref
+    }
+
+    #[must_use]
+    pub const fn byte_count(&self) -> u64 {
+        self.byte_count
+    }
+
+    #[must_use]
+    pub fn parser_build(&self) -> &str {
+        &self.parser_build
+    }
+
+    #[must_use]
+    pub const fn archived_at(&self) -> KnownTime {
+        self.archived_at
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalGapRecord {
+    dataset_id: String,
+    bucket: String,
+    key: String,
+    recorded_at: KnownTime,
+}
+
+impl HistoricalGapRecord {
+    pub fn try_new(
+        dataset_id: impl Into<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+        recorded_at: KnownTime,
+    ) -> Result<Self, ProgressError> {
+        let dataset_id = dataset_id.into();
+        let bucket = bucket.into();
+        let key = key.into();
+        validate_identity(&dataset_id)?;
+        validate_identity(&bucket)?;
+        validate_identity(&key)?;
+        Ok(Self {
+            dataset_id,
+            bucket,
+            key,
+            recorded_at,
+        })
+    }
+
+    #[must_use]
+    pub fn dataset_id(&self) -> &str {
+        &self.dataset_id
+    }
+
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub const fn recorded_at(&self) -> KnownTime {
+        self.recorded_at
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalBackfillCursor {
+    dataset_id: String,
+    last_key: String,
+    parser_build: String,
+    coverage_start_key: String,
+    coverage_end_key: String,
+    cursor_version: u64,
+    updated_at: KnownTime,
+}
+
+impl HistoricalBackfillCursor {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        dataset_id: impl Into<String>,
+        last_key: impl Into<String>,
+        parser_build: impl Into<String>,
+        coverage_start_key: impl Into<String>,
+        coverage_end_key: impl Into<String>,
+        cursor_version: u64,
+        updated_at: KnownTime,
+    ) -> Result<Self, ProgressError> {
+        let dataset_id = dataset_id.into();
+        let last_key = last_key.into();
+        let parser_build = parser_build.into();
+        let coverage_start_key = coverage_start_key.into();
+        let coverage_end_key = coverage_end_key.into();
+        validate_identity(&dataset_id)?;
+        validate_identity(&last_key)?;
+        validate_identity(&parser_build)?;
+        validate_identity(&coverage_start_key)?;
+        validate_identity(&coverage_end_key)?;
+        if cursor_version == 0 {
+            return Err(ProgressError::InvalidInput("zero cursor version"));
+        }
+        if coverage_start_key.as_str() > coverage_end_key.as_str() {
+            return Err(ProgressError::InvalidInput(
+                "historical coverage range is inverted",
+            ));
+        }
+        Ok(Self {
+            dataset_id,
+            last_key,
+            parser_build,
+            coverage_start_key,
+            coverage_end_key,
+            cursor_version,
+            updated_at,
+        })
+    }
+
+    #[must_use]
+    pub fn dataset_id(&self) -> &str {
+        &self.dataset_id
+    }
+
+    #[must_use]
+    pub fn last_key(&self) -> &str {
+        &self.last_key
+    }
+
+    #[must_use]
+    pub fn parser_build(&self) -> &str {
+        &self.parser_build
+    }
+
+    #[must_use]
+    pub fn coverage_start_key(&self) -> &str {
+        &self.coverage_start_key
+    }
+
+    #[must_use]
+    pub fn coverage_end_key(&self) -> &str {
+        &self.coverage_end_key
+    }
+
+    #[must_use]
+    pub const fn cursor_version(&self) -> u64 {
+        self.cursor_version
+    }
+
+    #[must_use]
+    pub const fn updated_at(&self) -> KnownTime {
+        self.updated_at
+    }
+}
+
+pub trait HistoricalBackfillProgress: Send + Sync {
+    fn record_object(
+        &self,
+        plan: &HistoricalObjectPlan,
+    ) -> Result<ProgressRecordDisposition, ProgressError>;
+
+    fn record_gap(
+        &self,
+        record: &HistoricalGapRecord,
+    ) -> Result<ProgressRecordDisposition, ProgressError>;
+
+    fn persist_cursor(
+        &self,
+        cursor: &HistoricalBackfillCursor,
+    ) -> Result<ProgressRecordDisposition, ProgressError>;
+
+    fn load_cursor(
+        &self,
+        dataset_id: &str,
+    ) -> Result<Option<HistoricalBackfillCursor>, ProgressError>;
+
+    fn load_object(
+        &self,
+        dataset_id: &str,
+        key: &str,
+    ) -> Result<Option<HistoricalObjectPlan>, ProgressError>;
+
+    fn load_gaps(&self, dataset_id: &str) -> Result<Vec<HistoricalGapRecord>, ProgressError>;
 }
 
 fn validate_identity(value: &str) -> Result<(), ProgressError> {

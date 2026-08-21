@@ -328,6 +328,7 @@ fn committed_source_adapter_covers_every_constructible_kind() {
         | Some(SourceAdapterConfig::NodeSnapshotDirectory { .. })
         | Some(SourceAdapterConfig::OfficialInfo { .. })
         | Some(SourceAdapterConfig::OfficialWs { .. })
+        | Some(SourceAdapterConfig::HistoricalS3 { .. })
         | None => {
             panic!("example committed adapter must remain node-block-directory")
         }
@@ -1096,6 +1097,64 @@ adapter = { kind = "official-ws", egress_id = "official-ws", ping_interval_milli
             .expect_err("fastAssetCtxs")
             .reason_code(),
         "capture_config.invalid_source_adapter"
+    );
+}
+
+#[test]
+fn historical_s3_adapter_requires_requester_pays_and_recovery_trust() {
+    let accepted = format!(
+        "{}\n\n{}",
+        valid_config(),
+        r#"[[sources]]
+id = "historical-l2"
+source_version = "s3-v1"
+trust = "recovery-only"
+class = "historical-block"
+queue_capacity = 1024
+max_payload_bytes = 1048576
+adapter = { kind = "historical-s3", bucket = "hyperliquid-archive", dataset = "l2-snapshots", format = "current", request_payer = "requester", start_key = "market_data/20230916/9/l2Book/SOL.lz4", end_key = "market_data/20230916/9/l2Book/SOL.lz4" }
+"#
+    );
+    let config = CaptureConfig::from_toml(&accepted).expect("historical s3 source");
+    assert!(matches!(
+        config
+            .source("historical-l2")
+            .expect("historical l2")
+            .adapter(),
+        Some(SourceAdapterConfig::HistoricalS3 {
+            request_payer,
+            ..
+        }) if request_payer == "requester"
+    ));
+
+    let owner_pays = accepted.replace("request_payer = \"requester\"", "request_payer = \"owner\"");
+    assert_eq!(
+        CaptureConfig::from_toml(&owner_pays)
+            .expect_err("owner pays")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+
+    let hyperevm = accepted.replace(
+        "dataset = \"l2-snapshots\"",
+        "dataset = \"hyperevm-blocks\"",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&hyperevm)
+            .expect_err("hyperevm")
+            .reason_code(),
+        "capture_config.invalid_source_adapter"
+    );
+
+    let snapshot_trust = accepted.replace(
+        "trust = \"recovery-only\"",
+        "trust = \"reconciled-snapshot\"",
+    );
+    assert_eq!(
+        CaptureConfig::from_toml(&snapshot_trust)
+            .expect_err("snapshot trust")
+            .reason_code(),
+        "capture_config.invalid_source_trust"
     );
 }
 

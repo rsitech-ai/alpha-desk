@@ -1,7 +1,8 @@
 schema_version = 1
 
 # Bootstrap inventory from spec Appendix B plus current node streams and S3 archives.
-# REST/WS/S3/EVM adapters are not on this tree. Node replica_cmds / NodeLine rows
+# REST/WS adapters remain planned. S3 historical import is implemented_unqualified
+# for HyperCore datasets. HyperEVM S3 is T25. Node replica_cmds / NodeLine rows
 # are implemented_unqualified only when hl-protocol parsers and fixtures/source/node-v1 exist.
 # All node_files rows (including market-metadata periodic state, spec §6.1) and
 # s3.replica_cmds are committed. Remaining official S3 archives are historical
@@ -1766,14 +1767,14 @@ domain = "market_data"
 source_role = "evidence-only"
 request_cost = "requester_pays"
 pagination = "by_object"
-parser = "planned"
-fixture_set = "none"
+parser = "hl_capture::historical_s3::import_object"
+fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "reference_snapshot"
-status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+status = "implemented_unqualified"
+limitations = "Importer archives opaque object bytes. Official hyperliquid-archive uploads monthly and may be missing. No candles or spot on S3. lz4 inner layout is not decoded. Not live-qualified"
 
 [[capability]]
 id = "s3.asset_contexts"
@@ -1785,14 +1786,14 @@ domain = "market_data"
 source_role = "evidence-only"
 request_cost = "requester_pays"
 pagination = "by_object"
-parser = "planned"
-fixture_set = "none"
+parser = "hl_capture::historical_s3::import_object"
+fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "reference_snapshot"
-status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+status = "implemented_unqualified"
+limitations = "Importer archives opaque object bytes. Official hyperliquid-archive uploads monthly and may be missing. No candles or spot on S3. lz4 inner layout is not decoded. Not live-qualified"
 
 [[capability]]
 id = "s3.node_fills_by_block"
@@ -1804,14 +1805,14 @@ domain = "account"
 source_role = "evidence-only"
 request_cost = "requester_pays"
 pagination = "by_object"
-parser = "planned"
-fixture_set = "none"
+parser = "hl_capture::historical_s3::import_object"
+fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "canonical_event"
-status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+status = "implemented_unqualified"
+limitations = "Importer archives opaque object bytes. Older fills live under node_fills. Current fills are node_fills_by_block. lz4 inner layout is not decoded. Not live-qualified"
 
 [[capability]]
 id = "s3.node_fills_legacy"
@@ -1823,14 +1824,14 @@ domain = "account"
 source_role = "evidence-only"
 request_cost = "requester_pays"
 pagination = "by_object"
-parser = "planned"
-fixture_set = "none"
+parser = "hl_capture::historical_s3::import_object"
+fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "canonical_event"
-status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+status = "implemented_unqualified"
+limitations = "Importer archives opaque object bytes. Older fills live under node_fills. Current fills are node_fills_by_block. lz4 inner layout is not decoded. Not live-qualified"
 
 [[capability]]
 id = "s3.node_trades_legacy"
@@ -1842,14 +1843,14 @@ domain = "market_data"
 source_role = "evidence-only"
 request_cost = "requester_pays"
 pagination = "by_object"
-parser = "planned"
-fixture_set = "none"
+parser = "hl_capture::historical_s3::import_object"
+fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "canonical_event"
-status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+status = "implemented_unqualified"
+limitations = "Importer archives opaque object bytes. Older fills live under node_fills. Current fills are node_fills_by_block. lz4 inner layout is not decoded. Not live-qualified"
 
 # Official S3 explorer-blocks archive (§6.1 priority 4), not community explorers
 # (§6.1 priority 6). evidence-only / canonical_event is the honest pair.
@@ -1863,14 +1864,14 @@ domain = "node"
 source_role = "evidence-only"
 request_cost = "requester_pays"
 pagination = "by_object"
-parser = "planned"
-fixture_set = "none"
+parser = "hl_capture::historical_s3::import_object"
+fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "canonical_event"
-status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+status = "implemented_unqualified"
+limitations = "Importer archives opaque object bytes. Older fills live under node_fills. Current fills are node_fills_by_block. lz4 inner layout is not decoded. Not live-qualified"
 
 [[capability]]
 id = "s3.replica_cmds"
@@ -1882,14 +1883,14 @@ domain = "node"
 source_role = "committed"
 request_cost = "requester_pays"
 pagination = "by_object"
-parser = "planned"
-fixture_set = "none"
+parser = "hl_capture::historical_s3::import_object"
+fixture_set = "historical_s3"
 retention = "raw_indefinite"
 freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "committed_state"
-status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+status = "implemented_unqualified"
+limitations = "Importer archives opaque replica_cmds objects as recovery evidence. Does not drive the committed block cursor. Not live-qualified"
 
 [[capability]]
 id = "s3.hyperevm_blocks"
@@ -1908,7 +1909,7 @@ freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "evm_fact"
 status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+limitations = "HyperEVM bucket reuses T16 object-manifest infrastructure in T25. Official archives may be monthly, gapped, or incomplete"
 
 [[capability]]
 id = "s3.hyperevm_receipts"
@@ -1927,4 +1928,4 @@ freshness_target_ms = 86400000
 owner = "hl-capture"
 state_target = "evm_fact"
 status = "planned"
-limitations = "S3 historical adapter is not on this tree. Official archives may be monthly, gapped, or incomplete"
+limitations = "HyperEVM bucket reuses T16 object-manifest infrastructure in T25. Official archives may be monthly, gapped, or incomplete"
