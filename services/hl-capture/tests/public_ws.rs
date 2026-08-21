@@ -6,10 +6,10 @@ use bytes::Bytes;
 use domain_types::{ChainId, KnownTime, SourceId};
 use hl_capture::{
     InboundClass, MemoryWsFanout, NoWsFaults, OfficialWsLimits, PlannerConfig, PlannerInput,
-    RawPortWsArchive, SessionState, SubscriptionDemand, WsArchive, WsCaptureCoordinator,
-    WsCaptureError, WsFaultInjector, WsFaultPoint, WsSession, WsSessionCheckpoint,
-    classify_inbound, guard_ws_url, plan_subscriptions, replay_official_ws_fixtures,
-    ws_request_hash,
+    ProcessIpBudget, RawPortWsArchive, SessionState, SubscriptionDemand, WsArchive,
+    WsCaptureCoordinator, WsCaptureError, WsFaultInjector, WsFaultPoint, WsSession,
+    WsSessionCheckpoint, classify_inbound, guard_ws_url, plan_subscriptions,
+    replay_official_ws_fixtures, ws_request_hash,
 };
 use hl_protocol::ObservationClass;
 use hl_protocol::ws::parse_ws_message;
@@ -105,6 +105,7 @@ fn notification_session() -> WsSession {
     WsSession::open(
         connection,
         OfficialWsLimits::official(),
+        ProcessIpBudget::official(),
         0,
         1_000,
         5_000,
@@ -257,6 +258,59 @@ fn bounded_backlog_does_not_drop_archived_messages() {
     .replay_pending(now())
     .expect("drain");
     assert_eq!(fanout.items().len(), 1);
+    assert!(checkpoint.pending().is_empty());
+}
+
+#[test]
+fn snapshot_backlog_retry_is_replace_not_duplicate() {
+    let mut archive = MemoryWsStore::new();
+    let mut fanout = MemoryWsFanout::new(1);
+    let mut session = notification_session();
+    let mut checkpoint = WsSessionCheckpoint::new(session.slot());
+    let planned = session_subscription(&session);
+    WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &NoWsFaults,
+        None,
+    )
+    .ingest(
+        Bytes::from_static(br#"{"channel":"notification","data":{"notification":"fill"}}"#),
+        Some(&planned),
+        now(),
+    )
+    .expect("fill");
+    let snapshot = Bytes::from_static(
+        br#"{"channel":"notification","data":{"notification":"hi","isSnapshot":true}}"#,
+    );
+    let error = WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &NoWsFaults,
+        None,
+    )
+    .ingest(snapshot, Some(&planned), now())
+    .expect_err("full");
+    assert_eq!(error, WsCaptureError::BacklogFull);
+    assert_eq!(checkpoint.pending().len(), 1);
+    fanout.pop_front();
+    let class = WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &NoWsFaults,
+        None,
+    )
+    .replay_pending(now())
+    .expect("drain");
+    assert_eq!(class, InboundClass::SnapshotReplace);
+    assert_eq!(fanout.items().len(), 1);
+    assert_eq!(fanout.items()[0].class(), InboundClass::SnapshotReplace);
     assert!(checkpoint.pending().is_empty());
 }
 

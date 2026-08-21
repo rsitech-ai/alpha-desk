@@ -4,9 +4,11 @@
 //! apply policy. Transport bytes are injected by the adapter.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use hl_protocol::ws::{WsObservation, encode_subscribe, encode_unsubscribe, parse_ws_message};
+use serde_json::Value;
 
 use crate::subscription_plan::{
     OfficialWsLimits, PlannedConnection, PlannedConnectionKind, PlannedSubscription,
@@ -145,6 +147,52 @@ impl MinuteWindow {
     }
 }
 
+/// Process-wide connect and outgoing windows for one official WS host.
+///
+/// ponytail: one process. A cross-process fleet limiter needs a shared store.
+#[derive(Debug, Clone)]
+pub struct ProcessIpBudget {
+    connect: Arc<Mutex<MinuteWindow>>,
+    outgoing: Arc<Mutex<MinuteWindow>>,
+}
+
+impl ProcessIpBudget {
+    #[must_use]
+    pub fn new(max_connect_per_minute: u32, max_outgoing_per_minute: u32) -> Self {
+        Self {
+            connect: Arc::new(Mutex::new(MinuteWindow::new(max_connect_per_minute))),
+            outgoing: Arc::new(Mutex::new(MinuteWindow::new(max_outgoing_per_minute))),
+        }
+    }
+
+    #[must_use]
+    pub fn from_limits(limits: OfficialWsLimits) -> Self {
+        Self::new(
+            limits.max_new_connections_per_minute(),
+            limits.max_outgoing_per_minute(),
+        )
+    }
+
+    #[must_use]
+    pub fn official() -> Self {
+        Self::from_limits(OfficialWsLimits::official())
+    }
+
+    fn try_connect(&self, now_millis: u64) -> bool {
+        self.connect
+            .lock()
+            .map(|mut window| window.try_add(now_millis))
+            .unwrap_or(false)
+    }
+
+    fn try_outgoing(&self, now_millis: u64) -> bool {
+        self.outgoing
+            .lock()
+            .map(|mut window| window.try_add(now_millis))
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TrackedSubscription {
     planned: PlannedSubscription,
@@ -167,8 +215,8 @@ pub struct WsSession {
     reconnect_max_millis: u64,
     subscriptions: BTreeMap<String, TrackedSubscription>,
     outgoing: VecDeque<Bytes>,
-    connect_window: MinuteWindow,
-    outgoing_window: MinuteWindow,
+    budget: ProcessIpBudget,
+    opened_at_millis: u64,
     inflight_posts: u32,
     max_inflight_posts: u32,
     attempt: u32,
@@ -179,6 +227,7 @@ impl WsSession {
     pub fn open(
         connection: PlannedConnection,
         limits: OfficialWsLimits,
+        budget: ProcessIpBudget,
         now_millis: u64,
         ping_interval_millis: u64,
         inactivity_timeout_millis: u64,
@@ -199,16 +248,15 @@ impl WsSession {
                 reconnect_max_millis,
                 subscriptions: BTreeMap::new(),
                 outgoing: VecDeque::new(),
-                connect_window: MinuteWindow::new(limits.max_new_connections_per_minute()),
-                outgoing_window: MinuteWindow::new(limits.max_outgoing_per_minute()),
+                budget,
+                opened_at_millis: now_millis,
                 inflight_posts: 0,
                 max_inflight_posts: limits.max_inflight_posts(),
                 attempt: 0,
             });
         }
-        let mut connect_window = MinuteWindow::new(limits.max_new_connections_per_minute());
-        connect_window
-            .try_add(now_millis)
+        budget
+            .try_connect(now_millis)
             .then_some(())
             .ok_or(WsSessionError::ConnectRateLimited)?;
         let mut session = Self {
@@ -240,8 +288,8 @@ impl WsSession {
             reconnect_base_millis,
             reconnect_max_millis,
             outgoing: VecDeque::new(),
-            connect_window,
-            outgoing_window: MinuteWindow::new(limits.max_outgoing_per_minute()),
+            budget,
+            opened_at_millis: now_millis,
             inflight_posts: 0,
             max_inflight_posts: limits.max_inflight_posts(),
             attempt: 0,
@@ -289,9 +337,8 @@ impl WsSession {
     pub fn on_clock(&mut self, now_millis: u64) -> Result<(), WsSessionError> {
         self.fail_if_shutdown()?;
         for row in self.subscriptions.values_mut() {
-            if let Some(last) = row.last_data_millis
-                && now_millis.saturating_sub(last) >= row.stale_after_millis
-            {
+            let last = row.last_data_millis.unwrap_or(self.opened_at_millis);
+            if now_millis.saturating_sub(last) >= row.stale_after_millis {
                 row.health = SubscriptionHealth::Red;
             }
         }
@@ -317,7 +364,7 @@ impl WsSession {
         Ok(())
     }
 
-    pub fn ingest(&mut self, payload: Bytes, now_millis: u64) -> AppliedInbound {
+    pub fn observe(&mut self, payload: Bytes, now_millis: u64) -> AppliedInbound {
         self.last_rx_millis = now_millis;
         match parse_ws_message(payload.clone()) {
             Err(_) => {
@@ -330,7 +377,31 @@ impl WsSession {
                     content_hash,
                 }
             }
-            Ok(observation) => self.apply_observation(observation, payload, now_millis),
+            Ok(observation) => self.classify_observation(observation, payload),
+        }
+    }
+
+    pub fn ingest(&mut self, payload: Bytes, now_millis: u64) -> AppliedInbound {
+        let applied = self.observe(payload, now_millis);
+        self.commit_applied(&applied, now_millis);
+        applied
+    }
+
+    pub fn commit_applied(&mut self, applied: &AppliedInbound, now_millis: u64) {
+        let Some(identity) = applied.subscription_identity else {
+            return;
+        };
+        let key = hex::encode(identity.as_bytes());
+        let Some(row) = self.subscriptions.get_mut(&key) else {
+            return;
+        };
+        row.last_data_millis = Some(now_millis);
+        row.health = SubscriptionHealth::Green;
+        if matches!(
+            applied.class,
+            InboundClass::SnapshotReplace | InboundClass::DuplicateSnapshot
+        ) {
+            row.snapshot_hash = Some(applied.content_hash);
         }
     }
 
@@ -345,7 +416,7 @@ impl WsSession {
 
     pub fn begin_reconnect(&mut self, now_millis: u64) -> Result<(), WsSessionError> {
         self.fail_if_shutdown()?;
-        if !self.connect_window.try_add(now_millis) {
+        if !self.budget.try_connect(now_millis) {
             return Err(WsSessionError::ConnectRateLimited);
         }
         self.attempt = self.attempt.saturating_add(1);
@@ -379,32 +450,14 @@ impl WsSession {
         Ok(())
     }
 
-    fn apply_observation(
+    fn classify_observation(
         &mut self,
         observation: WsObservation,
         payload: Bytes,
-        now_millis: u64,
     ) -> AppliedInbound {
-        let identity = match &observation {
-            WsObservation::Ack(ack) => Some(ack.subscription().identity()),
-            WsObservation::Snapshot(_) | WsObservation::Incremental(_) => self
-                .subscriptions
-                .iter()
-                .find(|(_, row)| row.planned.identifier() == observation.identifier().unwrap_or(""))
-                .and_then(|(key, _)| decode_identity(key)),
-            WsObservation::Heartbeat(_) | WsObservation::Unknown(_) => None,
-        };
+        let identity = match_subscription(&self.subscriptions, &observation);
         if matches!(observation, WsObservation::Heartbeat(_)) {
             self.awaiting_pong = false;
-        }
-        if let Some(identity) = identity {
-            let key = hex::encode(identity.as_bytes());
-            if let Some(row) = self.subscriptions.get_mut(&key) {
-                row.last_data_millis = Some(now_millis);
-                if row.health != SubscriptionHealth::Red {
-                    row.health = SubscriptionHealth::Green;
-                }
-            }
         }
         let previous = identity.and_then(|id| {
             self.subscriptions
@@ -412,16 +465,6 @@ impl WsSession {
                 .and_then(|row| row.snapshot_hash)
         });
         let class = classify_inbound(&observation, previous);
-        if matches!(
-            class,
-            InboundClass::SnapshotReplace | InboundClass::DuplicateSnapshot
-        ) && let Some(identity) = identity
-        {
-            let key = hex::encode(identity.as_bytes());
-            if let Some(row) = self.subscriptions.get_mut(&key) {
-                row.snapshot_hash = Some(observation.content_hash());
-            }
-        }
         AppliedInbound {
             class,
             content_hash: observation.content_hash(),
@@ -448,7 +491,7 @@ impl WsSession {
     }
 
     fn queue_outgoing(&mut self, frame: Bytes, now_millis: u64) -> Result<(), WsSessionError> {
-        if !self.outgoing_window.try_add(now_millis) {
+        if !self.budget.try_outgoing(now_millis) {
             return Err(WsSessionError::OutgoingRateLimited);
         }
         self.outgoing.push_back(frame);
@@ -489,38 +532,135 @@ fn classify_snapshot(observation: &WsObservation, previous: Option<blake3::Hash>
     }
 }
 
-fn decode_identity(hex_value: &str) -> Option<blake3::Hash> {
-    let bytes = hex::decode(hex_value).ok()?;
-    let bytes: [u8; 32] = bytes.try_into().ok()?;
-    Some(blake3::Hash::from(bytes))
+fn match_subscription(
+    subscriptions: &BTreeMap<String, TrackedSubscription>,
+    observation: &WsObservation,
+) -> Option<blake3::Hash> {
+    match observation {
+        WsObservation::Ack(ack) => Some(ack.subscription().identity()),
+        WsObservation::Snapshot(_) | WsObservation::Incremental(_) => {
+            let family = observation.identifier()?;
+            let extracted = extract_instance_fields(observation.payload());
+            let mut matched = None;
+            for row in subscriptions.values() {
+                if row.planned.identifier() != family {
+                    continue;
+                }
+                if !instance_compatible(&row.planned, &extracted) {
+                    continue;
+                }
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(row.planned.identity());
+            }
+            matched
+        }
+        WsObservation::Heartbeat(_) | WsObservation::Unknown(_) => None,
+    }
+}
+
+#[derive(Default)]
+struct InstanceFields {
+    coin: Option<String>,
+    user: Option<String>,
+    interval: Option<String>,
+}
+
+fn extract_instance_fields(payload: &Bytes) -> InstanceFields {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return InstanceFields::default();
+    };
+    let Some(data) = value.get("data") else {
+        return InstanceFields::default();
+    };
+    InstanceFields {
+        coin: first_string_field(data, &["coin", "s"]),
+        user: first_string_field(data, &["user"]),
+        interval: first_string_field(data, &["interval", "i"]),
+    }
+}
+
+fn first_string_field(data: &Value, keys: &[&str]) -> Option<String> {
+    match data {
+        Value::Object(object) => keys
+            .iter()
+            .find_map(|key| object.get(*key).and_then(Value::as_str).map(str::to_owned)),
+        Value::Array(items) => {
+            let mut found = None;
+            for item in items {
+                let Some(value) = keys
+                    .iter()
+                    .find_map(|key| item.get(*key).and_then(Value::as_str))
+                else {
+                    continue;
+                };
+                match &found {
+                    None => found = Some(value.to_owned()),
+                    Some(existing) if existing == value => {}
+                    Some(_) => return None,
+                }
+            }
+            found
+        }
+        _ => None,
+    }
+}
+
+fn instance_compatible(planned: &PlannedSubscription, extracted: &InstanceFields) -> bool {
+    extracted
+        .coin
+        .as_deref()
+        .is_none_or(|coin| planned.coin() == Some(coin))
+        && extracted
+            .user
+            .as_deref()
+            .is_none_or(|user| planned.user() == Some(user))
+        && extracted
+            .interval
+            .as_deref()
+            .is_none_or(|interval| planned.interval() == Some(interval))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::subscription_plan::{
-        PlannerConfig, PlannerInput, SubscriptionDemand, plan_subscriptions,
+        PlannedConnection, PlannedSubscription, PlannerConfig, PlannerInput, SubscriptionDemand,
+        plan_subscriptions,
     };
     use bytes::Bytes;
 
     fn active_session() -> WsSession {
-        let plan = plan_subscriptions(
-            PlannerConfig::official(),
-            PlannerInput::new(vec![
+        open_session(
+            active_connection(vec![
                 SubscriptionDemand::new("notification")
                     .with_user("0x0000000000000000000000000000000000000001"),
             ]),
-        );
-        let connection = plan
-            .connections()
+            ProcessIpBudget::official(),
+            0,
+        )
+    }
+
+    fn active_connection(demands: Vec<SubscriptionDemand>) -> PlannedConnection {
+        let plan = plan_subscriptions(PlannerConfig::official(), PlannerInput::new(demands));
+        plan.connections()
             .iter()
             .find(|connection| !matches!(connection.kind(), PlannedConnectionKind::FailoverReserve))
             .cloned()
-            .expect("active connection");
+            .expect("active connection")
+    }
+
+    fn open_session(
+        connection: PlannedConnection,
+        budget: ProcessIpBudget,
+        now_millis: u64,
+    ) -> WsSession {
         WsSession::open(
             connection,
             OfficialWsLimits::official(),
-            0,
+            budget,
+            now_millis,
             1_000,
             5_000,
             250,
@@ -528,6 +668,10 @@ mod tests {
             10_000,
         )
         .expect("session")
+    }
+
+    fn identity_hex(planned: &PlannedSubscription) -> String {
+        hex::encode(planned.identity().as_bytes())
     }
 
     #[test]
@@ -609,6 +753,100 @@ mod tests {
             assert!(later.try_add(u64::from(index)));
         }
         assert!(later.try_add(60_000));
+    }
+
+    #[test]
+    fn two_sessions_share_the_process_connect_budget() {
+        let budget = ProcessIpBudget::new(30, 2_000);
+        let first = active_connection(vec![
+            SubscriptionDemand::new("notification")
+                .with_user("0x0000000000000000000000000000000000000001"),
+        ]);
+        let second = active_connection(vec![
+            SubscriptionDemand::new("notification")
+                .with_user("0x0000000000000000000000000000000000000002"),
+        ]);
+        let mut left = open_session(first, budget.clone(), 0);
+        let mut right = open_session(second, budget, 0);
+        let mut accepted = 2_u32;
+        for tick in 1_u64..60 {
+            if left.begin_reconnect(tick).is_ok() {
+                accepted += 1;
+            }
+            if right.begin_reconnect(tick).is_ok() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 30);
+        assert_eq!(
+            left.begin_reconnect(59),
+            Err(WsSessionError::ConnectRateLimited)
+        );
+    }
+
+    #[test]
+    fn dead_second_trades_subscription_goes_red() {
+        let connection = active_connection(vec![
+            SubscriptionDemand::new("trades").with_coin("BTC"),
+            SubscriptionDemand::new("trades").with_coin("ETH"),
+        ]);
+        let btc = identity_hex(
+            connection
+                .subscriptions()
+                .iter()
+                .find(|planned| planned.coin() == Some("BTC"))
+                .expect("btc"),
+        );
+        let eth = identity_hex(
+            connection
+                .subscriptions()
+                .iter()
+                .find(|planned| planned.coin() == Some("ETH"))
+                .expect("eth"),
+        );
+        let mut session = open_session(connection, ProcessIpBudget::official(), 0);
+        session.ingest(
+            Bytes::from_static(
+                br#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"1","sz":"1","hash":"0xabc","time":1,"tid":1,"users":["0x0000000000000000000000000000000000000001","0x0000000000000000000000000000000000000002"]}]}"#,
+            ),
+            100,
+        );
+        session.on_clock(10_000).expect("stale");
+        assert_eq!(session.health(&btc), Some(SubscriptionHealth::Green));
+        assert_eq!(session.health(&eth), Some(SubscriptionHealth::Red));
+        assert_eq!(session.red_subscriptions(), vec![eth]);
+    }
+
+    #[test]
+    fn snapshot_hashes_are_per_subscription() {
+        let connection = active_connection(vec![
+            SubscriptionDemand::new("l2Book").with_coin("BTC"),
+            SubscriptionDemand::new("l2Book").with_coin("ETH"),
+        ]);
+        let mut session = open_session(connection, ProcessIpBudget::official(), 0);
+        let btc = Bytes::from_static(
+            br#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[{"px":"1","sz":"1","n":1}],[{"px":"2","sz":"1","n":1}]]}}"#,
+        );
+        let eth = Bytes::from_static(
+            br#"{"channel":"l2Book","data":{"coin":"ETH","time":1,"levels":[[{"px":"1","sz":"1","n":1}],[{"px":"2","sz":"1","n":1}]]}}"#,
+        );
+        assert_eq!(
+            session.ingest(btc.clone(), 10).class(),
+            InboundClass::SnapshotReplace
+        );
+        assert_eq!(
+            session.ingest(eth.clone(), 11).class(),
+            InboundClass::SnapshotReplace
+        );
+        session.begin_reconnect(20).expect("reconnect");
+        assert_eq!(
+            session.ingest(btc, 30).class(),
+            InboundClass::DuplicateSnapshot
+        );
+        assert_eq!(
+            session.ingest(eth, 31).class(),
+            InboundClass::DuplicateSnapshot
+        );
     }
 
     #[test]

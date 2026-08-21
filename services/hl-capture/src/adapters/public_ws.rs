@@ -518,7 +518,7 @@ where
                 .get(&item.archive_ref)?
                 .ok_or(WsCaptureError::MissingArchive)?;
             let now_millis = u64::try_from(received_at.unix_micros() / 1_000).unwrap_or(0);
-            let applied = self.session.ingest(body.clone(), now_millis);
+            let applied = self.session.observe(body.clone(), now_millis);
             last = applied.class();
             let observation_class = observation_class_of(&applied);
             if observation_class == ObservationClass::CommittedBlock {
@@ -533,6 +533,7 @@ where
                 payload: body,
             }) {
                 Ok(()) => {
+                    self.session.commit_applied(&applied, now_millis);
                     self.checkpoint
                         .pending
                         .retain(|queued| queued.request_hash != item.request_hash);

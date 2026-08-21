@@ -264,6 +264,8 @@ pub struct PlannedSubscription {
     canonical_json: String,
     identifier: String,
     user: Option<String>,
+    coin: Option<String>,
+    interval: Option<String>,
     freshness_target_millis: u64,
 }
 
@@ -286,6 +288,16 @@ impl PlannedSubscription {
     #[must_use]
     pub fn user(&self) -> Option<&str> {
         self.user.as_deref()
+    }
+
+    #[must_use]
+    pub fn coin(&self) -> Option<&str> {
+        self.coin.as_deref()
+    }
+
+    #[must_use]
+    pub fn interval(&self) -> Option<&str> {
+        self.interval.as_deref()
     }
 
     #[must_use]
@@ -471,6 +483,12 @@ pub fn reconnect_jitter_millis(slot: u8, attempt: u32, base: u64, cap: u64) -> u
     if cap <= base {
         return base;
     }
+    let exp = attempt.min(16);
+    let low = base.saturating_mul(1_u64 << exp).min(cap);
+    let high = base.saturating_mul(1_u64 << exp.saturating_add(1)).min(cap);
+    if high <= low {
+        return cap;
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(JITTER_CONTEXT);
     hasher.update(&[slot]);
@@ -478,8 +496,8 @@ pub fn reconnect_jitter_millis(slot: u8, attempt: u32, base: u64, cap: u64) -> u
     let hash = hasher.finalize();
     let mut pick_bytes = [0_u8; 8];
     pick_bytes.copy_from_slice(&hash.as_bytes()[..8]);
-    let span = cap.saturating_sub(base);
-    base + (u64::from_le_bytes(pick_bytes) % (span.saturating_add(1)))
+    let span = high.saturating_sub(low);
+    low + (u64::from_le_bytes(pick_bytes) % span)
 }
 
 #[must_use]
@@ -834,6 +852,8 @@ fn prepare_subscription(
         canonical_json: parsed.canonical_json().to_owned(),
         identifier: parsed.identifier().to_owned(),
         user: demand.user.clone(),
+        coin: demand.coin.clone(),
+        interval: demand.interval.clone(),
         freshness_target_millis: freshness.get(&demand.identifier).copied().unwrap_or(1_000),
     })
 }
@@ -916,6 +936,20 @@ mod tests {
             reconnect_jitter_millis(0, 1, 250, 8_000),
             reconnect_jitter_millis(1, 1, 250, 8_000)
         );
+        assert!(
+            reconnect_jitter_millis(0, 2, 250, 8_000) > reconnect_jitter_millis(0, 1, 250, 8_000)
+        );
+        assert!(
+            reconnect_jitter_millis(0, 3, 250, 8_000) > reconnect_jitter_millis(0, 2, 250, 8_000)
+        );
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_with_attempt() {
+        let earlier = reconnect_jitter_millis(0, 1, 250, 8_000);
+        let later = reconnect_jitter_millis(0, 4, 250, 8_000);
+        assert!(later > earlier);
+        assert_eq!(reconnect_jitter_millis(3, 5, 250, 8_000), 8_000);
     }
 
     #[test]

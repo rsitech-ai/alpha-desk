@@ -71,6 +71,6 @@ pub use subscription_plan::{
     reconnect_jitter_millis,
 };
 pub use ws_session::{
-    AppliedInbound, InboundClass, MinuteWindow, SessionState, SubscriptionHealth, WsSession,
-    WsSessionError, classify_inbound,
+    AppliedInbound, InboundClass, MinuteWindow, ProcessIpBudget, SessionState, SubscriptionHealth,
+    WsSession, WsSessionError, classify_inbound,
 };
