@@ -1,14 +1,11 @@
 //! Crash-safe atomic state adapter.
 //!
-//! Stage 2 names RocksDB 11.1.x with a synced WAL WriteBatch. This workspace
-//! cannot vendor that line: `cmake` is absent, crates.io `rust-rocksdb` wraps
-//! ~10.x, and `librocksdb-sys` is dual-licensed GPL-2.0 which `deny.toml` does
-//! not allow. Domain crates also must not depend on a native engine.
-//!
-//! This adapter still implements [`storage_ports::AtomicStateStore`]: one
-//! fsynced generation plus an atomic HEAD pointer. Success means a later
-//! process can `load_latest` the complete image. It does not claim a RocksDB
-//! 11.1 deployment.
+//! Production engine for [`storage_ports::AtomicStateStore`]: one fsynced
+//! generation plus an atomic HEAD pointer. SCHEMA id is
+//! `file-atomic-state-store/v1`. Stage 2 named RocksDB 11.1; this workspace
+//! cannot vendor it (`deny.toml` has no GPL, `librocksdb-sys` is GPL-2.0,
+//! crates.io `rust-rocksdb` wraps ~10.x). A later permitted engine gets its
+//! own SCHEMA id so a backend swap is `RebuildRequired`.
 
 use std::{
     fs::{self, File},

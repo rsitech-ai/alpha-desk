@@ -30,7 +30,13 @@ pub enum LocalReplayError {
     #[error("local replay ledger could not be constructed: {0}")]
     Ledger(canonical_ledger::LedgerError),
     #[error("durable state store failed during replay restore: {0}")]
-    Store(storage_ports::StateStoreError),
+    Store(#[from] storage_ports::StateStoreError),
+    #[error("checkpoint restore failed: {0}")]
+    Checkpoint(#[from] storage_ports::CheckpointStoreError),
+    #[error("resume must start at genesis or a checkpoint")]
+    MidHistoryResume,
+    #[error("archive height and state watermark are not aligned")]
+    WatermarkMisaligned,
     #[error("local replay applied-block counter overflowed")]
     Overflow,
 }
@@ -46,6 +52,9 @@ impl LocalReplayError {
             }
             Self::Ledger(_) => "core.replay_ledger",
             Self::Store(_) => "core.state_store",
+            Self::Checkpoint(error) => error.reason_code(),
+            Self::MidHistoryResume => "core.resume.mid_history",
+            Self::WatermarkMisaligned => "core.watermark_misaligned",
             Self::Overflow => "core.replay_overflow",
         }
     }
@@ -75,6 +84,10 @@ impl<R: EventReducer, S: AtomicStateStore> LocalReplaySession<R, S> {
                 .map_err(LocalReplayError::Ledger)?,
         };
         Ok(Self { ledger, store })
+    }
+
+    pub fn from_restored(ledger: CanonicalLedger<R>, store: S) -> Self {
+        Self { ledger, store }
     }
 
     pub fn apply_next(

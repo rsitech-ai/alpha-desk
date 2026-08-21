@@ -1,7 +1,9 @@
 use canonical_ledger::{StateDelta, StateImage, StateImageLimits};
 use domain_types::BlockHeight;
 
-pub const STATE_STORE_SCHEMA: &str = "hyperliquid-alpha-desk/rocksdb-state-store/v1";
+pub const STATE_STORE_SCHEMA: &str = "hyperliquid-alpha-desk/file-atomic-state-store/v1";
+pub const STATE_STORE_ENGINE: &str = "file-atomic";
+pub const LEGACY_ROCKSDB_STATE_STORE_SCHEMA: &str = "hyperliquid-alpha-desk/rocksdb-state-store/v1";
 pub const STATE_STORE_CFS: &[&str] = &[
     "meta",
     "market_state",

@@ -67,4 +67,22 @@ fn inspect_block_usage_is_stable() {
         .expect("hl-core usage");
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage: hl-core inspect-block"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hl-core run --config"));
+}
+
+#[test]
+fn run_config_validates_the_example_without_opening_nats() {
+    let path = format!(
+        "{}/../../config/core.example.toml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_hl-core"))
+        .args(["run", "--config", &path])
+        .output()
+        .expect("hl-core run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

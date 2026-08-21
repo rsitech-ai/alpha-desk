@@ -21,4 +21,5 @@ storage-ports = { path = "../storage-ports", version = "=0.1.0" }
 
 [dev-dependencies]
 canonical-events = { path = "../canonical-events", version = "=0.1.0" }
+orderbook = { path = "../orderbook", version = "=0.1.0" }
 tempfile.workspace = true

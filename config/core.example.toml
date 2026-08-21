@@ -1,0 +1,17 @@
+# Local hl-core runtime. This starts no network source by itself.
+
+chain_id = "mainnet"
+genesis_height = 1
+state_path = "state/core-state"
+checkpoint_path = "state/core-checkpoints"
+disk_reserve_bytes = 10737418240
+max_pending_blocks = 64
+shutdown_grace_millis = 15000
+
+[resume]
+mode = "durable"
+
+[nats]
+server_url = "nats://127.0.0.1:4222"
+durable_name = "hl-core-file-replay"
+fetch_batch = 64

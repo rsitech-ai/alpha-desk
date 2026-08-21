@@ -634,6 +634,7 @@ dependencies = [
  "domain-types",
  "getrandom 0.3.4",
  "hex",
+ "orderbook",
  "rustix",
  "storage-ports",
  "tempfile",
@@ -2079,6 +2080,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "toml",
  "tracing",
 ]
 

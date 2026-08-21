@@ -34,8 +34,9 @@ pub use checkpoint::{
 };
 pub use source_catalog::{SourceCatalogStore, SourceCatalogStoreError};
 pub use state_store::{
-    AtomicStateCommit, AtomicStateStore, STATE_STORE_CFS, STATE_STORE_SCHEMA,
-    StateCommitDisposition, StateCommitReceipt, StateStoreError, admit_column_family_schema,
+    AtomicStateCommit, AtomicStateStore, LEGACY_ROCKSDB_STATE_STORE_SCHEMA, STATE_STORE_CFS,
+    STATE_STORE_ENGINE, STATE_STORE_SCHEMA, StateCommitDisposition, StateCommitReceipt,
+    StateStoreError, admit_column_family_schema,
 };
 
 pub const CRATE_BOOTSTRAPPED: bool = true;

@@ -159,6 +159,20 @@ fn schema_mismatch_or_missing_schema_requires_rebuild() {
         .load_latest(StateImageLimits::production())
         .expect_err("missing schema");
     assert!(matches!(error, StateStoreError::RebuildRequired));
+    drop(restarted);
+
+    fs::write(
+        &schema,
+        storage_ports::LEGACY_ROCKSDB_STATE_STORE_SCHEMA.as_bytes(),
+    )
+    .expect("legacy");
+    fs::set_permissions(&schema, fs::Permissions::from_mode(0o600)).expect("mode");
+    let restarted =
+        SyncedWriteBatchStore::open(&root, StateImageLimits::production()).expect("reopen");
+    let error = restarted
+        .load_latest(StateImageLimits::production())
+        .expect_err("legacy rocksdb schema");
+    assert!(matches!(error, StateStoreError::RebuildRequired));
 }
 
 struct Applied {
