@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -20,13 +20,19 @@ fn now() -> KnownTime {
 
 struct MemoryWsStore {
     bodies: BTreeMap<String, Bytes>,
+    holes: BTreeSet<String>,
 }
 
 impl MemoryWsStore {
     fn new() -> Self {
         Self {
             bodies: BTreeMap::new(),
+            holes: BTreeSet::new(),
         }
+    }
+
+    fn hide(&mut self, archive_ref: &str) {
+        self.holes.insert(archive_ref.to_owned());
     }
 }
 
@@ -55,6 +61,9 @@ impl WsArchive for MemoryWsStore {
     }
 
     fn get(&self, archive_ref: &str) -> Result<Option<Bytes>, WsCaptureError> {
+        if self.holes.contains(archive_ref) {
+            return Ok(None);
+        }
         Ok(self.bodies.get(archive_ref).cloned())
     }
 }
@@ -76,6 +85,20 @@ impl WsFaultInjector for OneShotWsFault {
         let mut selected = self.point.lock().expect("fault lock");
         if selected.as_ref() == Some(&point) {
             selected.take();
+            Err(WsCaptureError::InjectedFault(point))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct AlwaysWsFault {
+    point: WsFaultPoint,
+}
+
+impl WsFaultInjector for AlwaysWsFault {
+    fn check(&self, point: WsFaultPoint) -> Result<(), WsCaptureError> {
+        if point == self.point {
             Err(WsCaptureError::InjectedFault(point))
         } else {
             Ok(())
@@ -361,6 +384,58 @@ fn orderly_session_shutdown_is_terminal() {
 fn live_official_all_mids_requires_opt_in() {
     let url = guard_ws_url("wss://api.hyperliquid.xyz/ws").expect("allowlisted");
     assert_eq!(url, "wss://api.hyperliquid.xyz/ws");
+}
+
+#[test]
+fn missing_archive_does_not_strand_later_pending() {
+    let mut archive = MemoryWsStore::new();
+    let mut fanout = MemoryWsFanout::new(8);
+    let mut session = notification_session();
+    let mut checkpoint = WsSessionCheckpoint::new(session.slot());
+    let faults = AlwaysWsFault {
+        point: WsFaultPoint::AfterArchive,
+    };
+    let planned = session_subscription(&session);
+    let first =
+        Bytes::from_static(br#"{"channel":"notification","data":{"notification":"first"}}"#);
+    let second =
+        Bytes::from_static(br#"{"channel":"notification","data":{"notification":"second"}}"#);
+    WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &faults,
+        None,
+    )
+    .ingest(first, Some(&planned), now())
+    .expect_err("fault first");
+    WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &faults,
+        None,
+    )
+    .ingest(second, Some(&planned), now())
+    .expect_err("fault second");
+    assert_eq!(checkpoint.pending().len(), 2);
+    let missing = checkpoint.pending()[0].archive_ref().to_owned();
+    archive.hide(&missing);
+    let class = WsCaptureCoordinator::new(
+        &mut archive,
+        &mut fanout,
+        &mut session,
+        &mut checkpoint,
+        &NoWsFaults,
+        None,
+    )
+    .replay_pending(now())
+    .expect("drain");
+    assert_eq!(class, InboundClass::IncrementalEvent);
+    assert_eq!(fanout.items().len(), 1);
+    assert!(checkpoint.pending().is_empty());
 }
 
 fn session_subscription(_session: &WsSession) -> hl_capture::PlannedSubscription {

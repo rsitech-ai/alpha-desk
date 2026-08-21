@@ -1,4 +1,4 @@
-use api_contracts::{HealthCodecError, WireHealthAssessment, WireHealthState};
+use api_contracts::{HealthCodecError, WireHealthAssessment, WireHealthState, WireSourceHealth};
 
 #[test]
 fn health_assessment_round_trips_through_the_v1_proto() {
@@ -55,4 +55,22 @@ fn empty_identifiers_and_negative_times_are_rejected() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn source_health_round_trips_and_can_suppress_provisional_features() {
+    let health = WireSourceHealth::try_new(
+        "official-ws",
+        WireHealthState::Red,
+        "capture_ws.source_red",
+        21,
+        ["provisional"],
+        true,
+    )
+    .expect("valid source health");
+
+    let decoded = WireSourceHealth::decode(&health.encode_to_vec()).expect("proto must decode");
+    assert_eq!(decoded, health);
+    assert!(decoded.suppress_provisional_features);
+    assert_eq!(decoded.suppresses, ["provisional"]);
 }

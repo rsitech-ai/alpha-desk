@@ -195,6 +195,41 @@ fn health_contract_is_versioned_and_nonempty() {
 }
 
 #[test]
+fn health_assessment_keeps_v1_fields_and_source_health_is_additive() {
+    let set = descriptor_set();
+    let health = file(&set, "health/v1/health.proto");
+    let assessment = message(health, "HealthAssessment");
+    let actual = assessment
+        .field
+        .iter()
+        .map(field_signature)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            ("scope", 1),
+            ("state", 2),
+            ("reason_code", 3),
+            ("observed_at_micros", 4),
+            ("suppresses", 5),
+        ]
+    );
+    let source = message(health, "SourceHealth");
+    let source_fields = source.field.iter().map(field_signature).collect::<Vec<_>>();
+    assert_eq!(
+        source_fields,
+        vec![
+            ("source_id", 1),
+            ("state", 2),
+            ("reason_code", 3),
+            ("observed_at_micros", 4),
+            ("suppresses", 5),
+            ("suppress_provisional_features", 6),
+        ]
+    );
+}
+
+#[test]
 fn generated_artifact_export_is_complete_and_refuses_overwrite() {
     let temporary = tempfile::tempdir().expect("temporary directory must be available");
     let descriptor = temporary.path().join("current.pb");

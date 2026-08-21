@@ -155,3 +155,7 @@ info-capture-e2e:
 # Official public WS planner/lifecycle replay. Not part of `just verify`. Live WS only when HL_PUBLIC_WS_E2E=1.
 public-ws-replay:
     ./tools/ci/public-ws-replay.sh
+
+# Provisional vs committed WS lanes. Not part of `just verify`.
+provisional-ws-replay:
+    ./tools/ci/provisional-ws-replay.sh

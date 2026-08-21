@@ -16,3 +16,12 @@ message HealthAssessment {
   int64 observed_at_micros = 4;
   repeated string suppresses = 5;
 }
+
+message SourceHealth {
+  string source_id = 1;
+  HealthState state = 2;
+  string reason_code = 3;
+  int64 observed_at_micros = 4;
+  repeated string suppresses = 5;
+  bool suppress_provisional_features = 6;
+}

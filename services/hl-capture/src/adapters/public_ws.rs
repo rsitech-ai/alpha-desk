@@ -17,8 +17,8 @@ use storage_ports::{
 };
 
 use crate::config::OFFICIAL_WS_URLS;
-use crate::subscription_plan::{OfficialWsLimits, PlannedSubscription};
-use crate::ws_session::{AppliedInbound, InboundClass, WsSession, WsSessionError};
+use crate::subscription_plan::{OfficialWsLimits, PlannedSubscription, SubscriptionPlan};
+use crate::ws_session::{AppliedInbound, InboundClass, ProcessIpBudget, WsSession, WsSessionError};
 
 const CHECKPOINT_SCHEMA: &str = "hl.ws-session-checkpoint.v1";
 const WS_SOURCE_VERSION: &str = "official-ws-v1";
@@ -93,6 +93,32 @@ pub fn ws_request_hash(
     hasher.update(&inbound_seq.to_be_bytes());
     hasher.update(&received_at_micros.to_be_bytes());
     hasher.finalize()
+}
+
+pub fn open_plan_sessions(
+    plan: &SubscriptionPlan,
+    budget: ProcessIpBudget,
+    now_millis: u64,
+) -> Result<Vec<WsSession>, WsCaptureError> {
+    let limits = OfficialWsLimits::official();
+    let mut sessions = Vec::with_capacity(plan.connections().len());
+    for connection in plan.connections() {
+        sessions.push(
+            WsSession::open(
+                connection.clone(),
+                limits,
+                budget.clone(),
+                now_millis,
+                1_000,
+                5_000,
+                250,
+                8_000,
+                10_000,
+            )
+            .map_err(WsCaptureError::Session)?,
+        );
+    }
+    Ok(sessions)
 }
 
 fn archive_ref_for(body: &[u8]) -> String {
@@ -513,18 +539,26 @@ where
             {
                 continue;
             }
-            let body = self
-                .archive
-                .get(&item.archive_ref)?
-                .ok_or(WsCaptureError::MissingArchive)?;
+            let body = match self.archive.get(&item.archive_ref) {
+                Ok(Some(body)) => body,
+                Ok(None) | Err(WsCaptureError::MissingArchive) | Err(WsCaptureError::Archive) => {
+                    self.drop_pending(&item.request_hash)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let now_millis = u64::try_from(received_at.unix_micros() / 1_000).unwrap_or(0);
             let applied = self.session.observe(body.clone(), now_millis);
             last = applied.class();
             let observation_class = observation_class_of(&applied);
             if observation_class == ObservationClass::CommittedBlock {
-                return Err(WsCaptureError::CommittedLane);
+                self.drop_pending(&item.request_hash)?;
+                continue;
             }
-            let request_hash = decode_hash(&item.request_hash).ok_or(WsCaptureError::Checkpoint)?;
+            let Some(request_hash) = decode_hash(&item.request_hash) else {
+                self.drop_pending(&item.request_hash)?;
+                continue;
+            };
             match self.fanout.push(WsPublished {
                 archive_ref: item.archive_ref.clone(),
                 request_hash,
@@ -534,17 +568,23 @@ where
             }) {
                 Ok(()) => {
                     self.session.commit_applied(&applied, now_millis);
-                    self.checkpoint
-                        .pending
-                        .retain(|queued| queued.request_hash != item.request_hash);
-                    persist(self.checkpoint, self.persist_dir)?;
+                    self.drop_pending(&item.request_hash)?;
                     self.faults.check(WsFaultPoint::AfterFanout)?;
                 }
                 Err(WsCaptureError::BacklogFull) => return Err(WsCaptureError::BacklogFull),
-                Err(error) => return Err(error),
+                Err(_) => {
+                    self.drop_pending(&item.request_hash)?;
+                }
             }
         }
         Ok(last)
+    }
+
+    fn drop_pending(&mut self, request_hash: &str) -> Result<(), WsCaptureError> {
+        self.checkpoint
+            .pending
+            .retain(|queued| queued.request_hash != request_hash);
+        persist(self.checkpoint, self.persist_dir)
     }
 }
 

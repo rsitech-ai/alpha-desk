@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod consumer;
+mod input;
 mod publication;
 mod replay;
 mod source;
@@ -18,10 +19,13 @@ pub use consumer::{
     JetStreamReplayReport, JetStreamReplaySession, committed_block_delivery,
     committed_event_delivery,
 };
+pub use input::CoreInputSubject;
 pub use publication::{
     BLOCK_COMMITTED_SUBJECT, BLOCK_MARKER_SCHEMA_V1, BLOCK_PROVISIONAL_SUBJECT, BlockMarkerError,
-    CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker, decode_committed_block_marker,
-    encode_committed_block_marker, encode_event_payload, subject_for_event_kind,
+    CANONICAL_STREAM, CanonicalSubject, CommittedBlockMarker, HEALTH_SOURCE_SUBJECT,
+    SNAPSHOT_ACCOUNT_SUBJECT, SNAPSHOT_ECOSYSTEM_SUBJECT, SNAPSHOT_MARKET_SUBJECT,
+    decode_committed_block_marker, encode_committed_block_marker, encode_event_payload,
+    subject_for_event_kind,
 };
 pub use replay::{
     LocalBlockInspectReport, LocalReplayError, LocalReplayReport, LocalReplaySession,

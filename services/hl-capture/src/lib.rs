@@ -15,6 +15,7 @@ mod fixture;
 mod info_scheduler;
 mod operator;
 pub mod progress;
+mod provisional_pipeline;
 mod quarantine;
 mod raw_archive;
 mod request_budget;
@@ -37,8 +38,8 @@ pub use adapters::info_rest::{
 pub use adapters::public_ws::{
     MemoryWsFanout, NoWsFaults, RawPortWsArchive, WsArchive, WsCaptureCoordinator, WsCaptureError,
     WsFanout, WsFaultInjector, WsFaultPoint, WsPendingItem, WsPublished, WsSessionCheckpoint,
-    encode_ws_plan_status, guard_ws_url, replay_official_ws_fixtures, write_ws_plan_snapshot,
-    ws_plan_status_path, ws_request_hash,
+    encode_ws_plan_status, guard_ws_url, open_plan_sessions, replay_official_ws_fixtures,
+    write_ws_plan_snapshot, ws_plan_status_path, ws_request_hash,
 };
 pub use app::{CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError};
 pub use backlog::*;
@@ -53,6 +54,7 @@ pub use operator::{
     OperatorError, accept_operator_status, encode_info_budget_status, info_budget_status_path,
     serve_operator_status, write_info_budget_snapshot,
 };
+pub use provisional_pipeline::*;
 pub use quarantine::*;
 pub use raw_archive::*;
 pub use request_budget::*;

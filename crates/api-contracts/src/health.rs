@@ -3,6 +3,7 @@ use thiserror::Error;
 
 use crate::generated::hl::health::v1::{
     HealthAssessment as ProtoHealthAssessment, HealthState as ProtoHealthState,
+    SourceHealth as ProtoSourceHealth,
 };
 
 const INVALID_SCOPE: &str =
@@ -133,6 +134,80 @@ impl WireHealthAssessment {
 
     fn validate(&self) -> Result<(), HealthCodecError> {
         validate_identifier(&self.scope, INVALID_SCOPE)?;
+        validate_identifier(&self.reason_code, INVALID_REASON)?;
+        if self.observed_at_micros < 0 {
+            return Err(HealthCodecError::Invalid {
+                reason: "observed_at_micros must be non-negative".to_owned(),
+            });
+        }
+        for suppression in &self.suppresses {
+            validate_identifier(suppression, INVALID_SUPPRESSION)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireSourceHealth {
+    pub source_id: String,
+    pub state: WireHealthState,
+    pub reason_code: String,
+    pub observed_at_micros: i64,
+    pub suppresses: Vec<String>,
+    pub suppress_provisional_features: bool,
+}
+
+impl WireSourceHealth {
+    pub fn try_new(
+        source_id: impl Into<String>,
+        state: WireHealthState,
+        reason_code: impl Into<String>,
+        observed_at_micros: i64,
+        suppresses: impl IntoIterator<Item = impl Into<String>>,
+        suppress_provisional_features: bool,
+    ) -> Result<Self, HealthCodecError> {
+        let health = Self {
+            source_id: source_id.into(),
+            state,
+            reason_code: reason_code.into(),
+            observed_at_micros,
+            suppresses: suppresses.into_iter().map(Into::into).collect(),
+            suppress_provisional_features,
+        };
+        health.validate()?;
+        Ok(health)
+    }
+
+    #[must_use]
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        ProtoSourceHealth {
+            source_id: self.source_id.clone(),
+            state: self.state.to_proto() as i32,
+            reason_code: self.reason_code.clone(),
+            observed_at_micros: self.observed_at_micros,
+            suppresses: self.suppresses.clone(),
+            suppress_provisional_features: self.suppress_provisional_features,
+        }
+        .encode_to_vec()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, HealthCodecError> {
+        let message = ProtoSourceHealth::decode(bytes)
+            .map_err(|source| HealthCodecError::Decode { source })?;
+        let health = Self {
+            source_id: message.source_id,
+            state: WireHealthState::from_proto(message.state)?,
+            reason_code: message.reason_code,
+            observed_at_micros: message.observed_at_micros,
+            suppresses: message.suppresses,
+            suppress_provisional_features: message.suppress_provisional_features,
+        };
+        health.validate()?;
+        Ok(health)
+    }
+
+    fn validate(&self) -> Result<(), HealthCodecError> {
+        validate_identifier(&self.source_id, INVALID_SCOPE)?;
         validate_identifier(&self.reason_code, INVALID_REASON)?;
         if self.observed_at_micros < 0 {
             return Err(HealthCodecError::Invalid {

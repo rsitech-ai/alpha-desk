@@ -33,7 +33,7 @@ mod generated {
 
 mod health;
 
-pub use health::{HealthCodecError, WireHealthAssessment, WireHealthState};
+pub use health::{HealthCodecError, WireHealthAssessment, WireHealthState, WireSourceHealth};
 
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/alpha-desk-v1.pb"));
