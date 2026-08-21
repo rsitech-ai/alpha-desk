@@ -2,13 +2,13 @@ use std::fs;
 use std::path::Path;
 
 use canonical_events::{
-    CommittedNodeV1MappingContext, ConfirmationClass, EventPayload, EvidenceOnlyReason,
-    MappingDisposition, MappingError, MarketCatalogV1, NodeV1MappingContext,
-    TradeParticipantRoleV1, map_committed_node_v1_block, map_node_v1_record,
+    map_committed_node_v1_block, map_node_v1_record, CommittedNodeV1MappingContext,
+    ConfirmationClass, EventPayload, EvidenceOnlyReason, MappingDisposition, MappingError,
+    MarketCatalogV1, NodeV1MappingContext, TradeParticipantRoleV1,
 };
 use domain_types::{BlockHeight, ChainId, KnownTime, MarketId, SourceId};
+use hl_protocol::node::v1::{parse_node_record, NodeRecordKind, NodeStreamKind};
 use hl_protocol::SourceError;
-use hl_protocol::node::v1::{NodeRecordKind, NodeStreamKind, parse_node_record};
 
 fn fixture(name: &str) -> Vec<u8> {
     fs::read(
@@ -648,11 +648,9 @@ fn independent_empty_committed_block_is_not_reconciled_truth() {
         ConfirmationClass::ReconciledSnapshot
     );
     assert_eq!(mapped.source_block_hashes().len(), 1);
-    assert!(
-        mapped
-            .source_block_hashes()
-            .contains_key(&independent.source_id)
-    );
+    assert!(mapped
+        .source_block_hashes()
+        .contains_key(&independent.source_id));
 }
 
 #[test]
@@ -753,14 +751,18 @@ fn venue_catalog() -> MarketCatalogV1 {
     .unwrap()
 }
 
-fn wrap_event(event: serde_json::Value) -> Vec<u8> {
+fn wrap_events(events: Vec<serde_json::Value>) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "local_time": "2026-07-28T12:00:00",
         "block_time": "2024-07-26T08:31:48.717",
         "block_number": 42,
-        "events": [event]
+        "events": events
     }))
     .unwrap()
+}
+
+fn wrap_event(event: serde_json::Value) -> Vec<u8> {
+    wrap_events(vec![event])
 }
 
 #[test]
@@ -902,4 +904,64 @@ fn batched_l4_update_and_remove_keep_the_resting_user() {
     };
     assert_eq!(cancelled.reason, "raw_book_diff_remove");
     assert_eq!(cancelled.remaining_quantity.to_string(), "0");
+}
+
+#[test]
+fn batched_l4_new_then_update_same_oid_get_distinct_event_ids() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("raw-book-diff.json")).unwrap();
+    let mut update = event.clone();
+    update["raw_book_diff"] = serde_json::json!({ "update": { "sz": "100.0" } });
+    let record = parse_node_record(
+        NodeStreamKind::RawBookDiffs,
+        wrap_events(vec![event, update]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("batched l4 new+update must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].canonical_event_index(), 1);
+    assert!(matches!(events[0].payload(), EventPayload::OrderRested(_)));
+    assert!(matches!(events[1].payload(), EventPayload::OrderRested(_)));
+    assert_ne!(events[0].event_id(), events[1].event_id());
+}
+
+#[test]
+fn batched_order_status_same_oid_same_kind_get_distinct_event_ids() {
+    let event: serde_json::Value = serde_json::from_slice(&fixture("order-status.json")).unwrap();
+    let mut second = event.clone();
+    second["order"]["sz"] = serde_json::json!("100.0");
+    let record = parse_node_record(
+        NodeStreamKind::OrderStatuses,
+        wrap_events(vec![event, second]).into(),
+    )
+    .unwrap();
+    let MappingDisposition::Mapped(events) =
+        map_node_v1_record(&record, &venue_catalog(), &context()).unwrap()
+    else {
+        panic!("batched order statuses must map");
+    };
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].transaction_id().as_str(),
+        events[1].transaction_id().as_str()
+    );
+    assert_eq!(events[0].canonical_event_index(), 0);
+    assert_eq!(events[1].canonical_event_index(), 1);
+    assert!(matches!(
+        events[0].payload(),
+        EventPayload::OrderCancelled(_)
+    ));
+    assert!(matches!(
+        events[1].payload(),
+        EventPayload::OrderCancelled(_)
+    ));
+    assert_ne!(events[0].event_id(), events[1].event_id());
 }

@@ -8,10 +8,10 @@ use domain_types::{
     PositionQuantity, Price, ProtocolTime, Quantity, SourceId, TradeId, TransactionId, TwapId,
 };
 use hl_protocol::node::order_status::{
-    BookSide, OrderStatusClass, OrderStatusV1, parse_order_status_batch,
+    parse_order_status_batch, BookSide, OrderStatusClass, OrderStatusV1,
 };
-use hl_protocol::node::raw_book_diff::{RawBookDiffOp, RawBookDiffV1, parse_raw_book_diff_batch};
-use hl_protocol::node::trade::{TradeV1, parse_trade_batch};
+use hl_protocol::node::raw_book_diff::{parse_raw_book_diff_batch, RawBookDiffOp, RawBookDiffV1};
+use hl_protocol::node::trade::{parse_trade_batch, TradeV1};
 use hl_protocol::node::v1::{NodeRecordKind, NodeRecordV1, NodeStreamKind};
 use serde_json::{Map, Value};
 
@@ -749,6 +749,8 @@ fn map_order_status(
                 order.oid(),
                 order.timestamp(),
             )?,
+            // ponytail: node order-status has limitPx, not a fill print.
+            // fill_price is limitPx and fill_quantity is origSz until the trades stream.
             fill_price: limit_price,
             fill_quantity: original,
         }),
@@ -770,7 +772,7 @@ fn map_order_status(
         block_time,
         transaction_id,
         transaction_index: source_index,
-        canonical_event_index: 0,
+        canonical_event_index: source_index,
         market_ids: vec![market_id],
         account_ids: vec![account_id],
         source_evidence: vec![source_evidence],
@@ -833,7 +835,7 @@ fn map_raw_book_diff(
         block_time,
         transaction_id,
         transaction_index: source_index,
-        canonical_event_index: 0,
+        canonical_event_index: source_index,
         market_ids: vec![market_id],
         account_ids: vec![account_id],
         source_evidence: vec![source_evidence],

@@ -65,6 +65,18 @@ evidence-only. Block-batched order statuses map to the existing V1 kinds
 quantity zero. Snapshots cannot mint a committed watermark. Schema version on
 envelopes remains `"1.0.0"`.
 
+Order-status and L4 batches use a synthetic transaction id (`node-order:{oid}` /
+`node-l4:{oid}`). The event array position is `canonical_event_index`, the same
+slot the trade path uses for position-within-hash, because same-oid diffs are
+not required to be contiguous.
+
+| Source | Canonical |
+| --- | --- |
+| filled `limitPx` | `OrderFilled.fill_price` (not a print; the trades stream holds the match) |
+| filled `origSz` | `OrderFilled.fill_quantity` (`sz` is remaining) |
+| triggered `triggerPx` | `TriggerOrderActivated.trigger_price` and `oracle_price` |
+| event array position | `canonical_event_index` |
+
 The parser version records both mapper and market-catalog versions:
 
 ```text
