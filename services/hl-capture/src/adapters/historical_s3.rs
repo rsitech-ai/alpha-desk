@@ -726,29 +726,19 @@ where
         .cloned()
         .ok_or(HistoricalError::InvalidRange)?;
     let dataset_id = request.dataset.identifier();
-    let resume_key = progress
-        .load_cursor(dataset_id)
-        .map_err(|_| HistoricalError::Progress)?
-        .map(|cursor| cursor.last_key().to_owned());
-
-    let mut imported = 0_usize;
-    let mut duplicates = 0_usize;
-    let mut gaps = 0_usize;
-    let mut last_key = resume_key.clone();
     let mut cursor_version = progress
         .load_cursor(dataset_id)
         .map_err(|_| HistoricalError::Progress)?
         .map(|cursor| cursor.cursor_version())
         .unwrap_or(0_u64);
+
+    let mut imported = 0_usize;
+    let mut duplicates = 0_usize;
+    let mut gaps = 0_usize;
+    let mut last_key = None;
     let mut manifests = Vec::new();
 
     for key in &ordered {
-        if resume_key
-            .as_deref()
-            .is_some_and(|resume| key.as_str() <= resume)
-        {
-            continue;
-        }
         let listed = store.get(&request.bucket, key, request.request_payer)?;
         let Some(object) = listed else {
             let gap = HistoricalGapRecord::try_new(

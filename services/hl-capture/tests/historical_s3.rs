@@ -9,7 +9,7 @@ use hl_capture::{
     PARSER_BUILD, RawPortHistoricalArchive, RequestPayer, enumerate_keys, hyperevm_limitations,
     import_objects, keys_in_range, l2_object_key, select_fills_dataset, select_trades_dataset,
 };
-use storage_ports::{HistoricalBackfillCursor, HistoricalBackfillProgress, HistoricalGapStatus};
+use storage_ports::{HistoricalBackfillProgress, HistoricalGapStatus};
 
 fn now() -> KnownTime {
     KnownTime::from_unix_micros(1_725_000_000_000_000).expect("time")
@@ -308,20 +308,6 @@ fn duplicate_object_import_is_idempotent_and_conflicting_payload_fails() {
     )
     .expect("first");
     assert_eq!(first.imported, 1);
-    progress
-        .persist_cursor(
-            &HistoricalBackfillCursor::try_new(
-                "asset-contexts",
-                "asset_ctxs/20230915.csv.lz4",
-                PARSER_BUILD,
-                "asset_ctxs/20230916.csv.lz4",
-                "asset_ctxs/20230916.csv.lz4",
-                1,
-                now(),
-            )
-            .expect("rewind"),
-        )
-        .expect("rewind");
     let second = import_objects(
         &fixture_store(),
         &mut archive,
@@ -332,6 +318,7 @@ fn duplicate_object_import_is_idempotent_and_conflicting_payload_fails() {
     .expect("second");
     assert_eq!(second.imported, 0);
     assert_eq!(second.duplicates, 1);
+    assert_eq!(second.manifests.len(), 1);
 
     let mut conflict_archive = durable_archive(&directory.path().join("conflict"));
     let conflict_progress = HistoricalProgressStore::memory();
@@ -343,20 +330,6 @@ fn duplicate_object_import_is_idempotent_and_conflicting_payload_fails() {
         &request,
     )
     .expect("seed");
-    conflict_progress
-        .persist_cursor(
-            &HistoricalBackfillCursor::try_new(
-                "asset-contexts",
-                "asset_ctxs/20230915.csv.lz4",
-                PARSER_BUILD,
-                "asset_ctxs/20230916.csv.lz4",
-                "asset_ctxs/20230916.csv.lz4",
-                1,
-                now(),
-            )
-            .expect("rewind"),
-        )
-        .expect("rewind");
     let error = import_objects(
         &OverlayStore {
             inner: fixture_store(),
@@ -375,6 +348,73 @@ fn duplicate_object_import_is_idempotent_and_conflicting_payload_fails() {
     )
     .expect_err("conflict");
     assert!(matches!(error, HistoricalError::Conflict));
+}
+
+#[test]
+fn earlier_range_after_later_cursor_is_imported_not_claimed_idle() {
+    let directory = tempfile::tempdir().expect("dir");
+    let mut archive = durable_archive(directory.path());
+    let progress = HistoricalProgressStore::memory();
+    let later = "node_fills_by_block/20230916/10";
+    let earlier = "node_fills_by_block/20230801/1";
+    let first = import_objects(
+        &fixture_store(),
+        &mut archive,
+        &progress,
+        &NoHistoricalFaults,
+        &BackfillRequest {
+            dataset: DatasetKind::NodeFillsByBlock,
+            format: DatasetFormat::Current,
+            bucket: NODE_MAINNET_BUCKET.to_owned(),
+            keys: vec![later.to_owned()],
+            request_payer: RequestPayer::Requester,
+            imported_at: now(),
+        },
+    )
+    .expect("later");
+    assert_eq!(first.imported, 1);
+    assert_eq!(
+        progress
+            .load_cursor("node_fills_by_block")
+            .expect("cursor")
+            .expect("present")
+            .last_key(),
+        later
+    );
+
+    let report = import_objects(
+        &OverlayStore {
+            inner: fixture_store(),
+            overlays: BTreeMap::from([(
+                (NODE_MAINNET_BUCKET.to_owned(), earlier.to_owned()),
+                b"august-fill".to_vec(),
+            )]),
+        },
+        &mut archive,
+        &progress,
+        &NoHistoricalFaults,
+        &BackfillRequest {
+            dataset: DatasetKind::NodeFillsByBlock,
+            format: DatasetFormat::Current,
+            bucket: NODE_MAINNET_BUCKET.to_owned(),
+            keys: vec![earlier.to_owned()],
+            request_payer: RequestPayer::Requester,
+            imported_at: now(),
+        },
+    )
+    .expect("earlier");
+    assert_eq!(report.imported, 1);
+    assert_eq!(report.duplicates, 0);
+    assert_eq!(report.gaps, 0);
+    assert_eq!(report.coverage_start_key.as_deref(), Some(earlier));
+    assert_eq!(report.coverage_end_key.as_deref(), Some(earlier));
+    assert_eq!(report.last_key.as_deref(), Some(earlier));
+    assert!(
+        progress
+            .load_object("node_fills_by_block", earlier)
+            .expect("object")
+            .is_some()
+    );
 }
 
 #[test]
