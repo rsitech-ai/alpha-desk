@@ -9,14 +9,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use canonical_archive::{ArchiveConfig, LocalParquetArchive};
+use domain_types::{ChainId, SourceId};
 use hl_protocol::info::{
     EncodedInfoRequest, InfoParseContext, InfoRegistry, ParsedInfoResponse, TimePageCursor,
 };
-use hl_protocol::{ErrorDisposition, ObservationClass, SourceAdmission};
+use hl_protocol::{
+    ErrorDisposition, ObservationClass, ObservationError, ReceiveTimestamps, SourceAdmission,
+    SourceCursor, SourceObservation,
+};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use storage_ports::{
+    ArchiveError, RawObservationArchive, RawObservationBatch, RawObservationRange,
+};
 
 use crate::config::OFFICIAL_INFO_REQUEST_URL;
 use crate::egress::{EgressError, InfoHttpResponse, InfoTransport, official_info_post_url};
@@ -25,8 +33,11 @@ use crate::info_scheduler::{
 };
 use crate::request_budget::{RequestBudget, RequestCost, SchedulePriority};
 
-const CHECKPOINT_SCHEMA: &str = "hl.info-job-checkpoint.v1";
+const CHECKPOINT_SCHEMA: &str = "hl.info-job-checkpoint.v2";
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+const INFO_SOURCE_VERSION: &str = "official-info-v1";
+const INFO_PARSER_SCHEMA: &str = "info-rest-v1";
+const INFO_ARCHIVE_BUILD_ID: &str = "hl-capture-info";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfoFaultPoint {
@@ -100,14 +111,7 @@ impl MemoryInfoArchive {
     }
 
     pub fn put(&mut self, body: &[u8]) -> Result<String, InfoCaptureError> {
-        if body.is_empty() {
-            return Err(InfoCaptureError::EmptyBody);
-        }
-        let archive_ref = archive_ref_for(body);
-        self.bodies
-            .entry(archive_ref.clone())
-            .or_insert_with(|| Bytes::copy_from_slice(body));
-        Ok(archive_ref)
+        InfoArchive::put(self, body)
     }
 
     #[must_use]
@@ -126,11 +130,170 @@ impl MemoryInfoArchive {
     }
 
     pub fn mark_published(&mut self, archive_ref: &str) {
-        self.published.insert(archive_ref.to_owned());
+        InfoArchive::mark_published(self, archive_ref);
     }
 
     #[must_use]
     pub fn was_published(&self, archive_ref: &str) -> bool {
+        InfoArchive::was_published(self, archive_ref)
+    }
+}
+
+pub trait InfoArchive {
+    fn put(&mut self, body: &[u8]) -> Result<String, InfoCaptureError>;
+    fn get(&self, archive_ref: &str) -> Result<Option<Bytes>, InfoCaptureError>;
+    fn mark_published(&mut self, archive_ref: &str);
+    fn was_published(&self, archive_ref: &str) -> bool;
+}
+
+impl InfoArchive for MemoryInfoArchive {
+    fn put(&mut self, body: &[u8]) -> Result<String, InfoCaptureError> {
+        if body.is_empty() {
+            return Err(InfoCaptureError::EmptyBody);
+        }
+        let archive_ref = archive_ref_for(body);
+        self.bodies
+            .entry(archive_ref.clone())
+            .or_insert_with(|| Bytes::copy_from_slice(body));
+        Ok(archive_ref)
+    }
+
+    fn get(&self, archive_ref: &str) -> Result<Option<Bytes>, InfoCaptureError> {
+        Ok(self.bodies.get(archive_ref).cloned())
+    }
+
+    fn mark_published(&mut self, archive_ref: &str) {
+        self.published.insert(archive_ref.to_owned());
+    }
+
+    fn was_published(&self, archive_ref: &str) -> bool {
+        self.published.contains(archive_ref)
+    }
+}
+
+pub struct RawPortInfoArchive {
+    archive: Arc<dyn RawObservationArchive>,
+    chain_id: ChainId,
+    source_id: SourceId,
+    max_payload_bytes: usize,
+    published: BTreeSet<String>,
+}
+
+impl std::fmt::Debug for RawPortInfoArchive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RawPortInfoArchive")
+            .field("chain_id", &self.chain_id)
+            .field("source_id", &self.source_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RawPortInfoArchive {
+    #[must_use]
+    pub fn new(
+        archive: Arc<dyn RawObservationArchive>,
+        chain_id: ChainId,
+        source_id: SourceId,
+        max_payload_bytes: usize,
+    ) -> Self {
+        Self {
+            archive,
+            chain_id,
+            source_id,
+            max_payload_bytes,
+            published: BTreeSet::new(),
+        }
+    }
+
+    pub fn open(
+        root: impl AsRef<Path>,
+        chain_id: ChainId,
+        source_id: SourceId,
+        max_payload_bytes: usize,
+    ) -> Result<Self, InfoCaptureError> {
+        let archive = LocalParquetArchive::open(
+            root,
+            ArchiveConfig::production(INFO_ARCHIVE_BUILD_ID)
+                .map_err(|_| InfoCaptureError::Archive)?,
+        )
+        .map_err(|_| InfoCaptureError::Archive)?;
+        Ok(Self::new(
+            Arc::new(archive),
+            chain_id,
+            source_id,
+            max_payload_bytes,
+        ))
+    }
+
+    fn read_body(&self, archive_ref: &str) -> Result<Option<Bytes>, InfoCaptureError> {
+        let range = RawObservationRange::try_new(archive_ref, 0, 0)
+            .map_err(|_| InfoCaptureError::Archive)?;
+        match self
+            .archive
+            .read_observations(&self.chain_id, &self.source_id, range)
+        {
+            Ok(mut iterator) => iterator
+                .next()
+                .transpose()
+                .map_err(|_| InfoCaptureError::Archive)
+                .map(|observation| observation.map(|item| item.payload().clone())),
+            Err(ArchiveError::RangeUnavailable) => Ok(None),
+            Err(_) => Err(InfoCaptureError::Archive),
+        }
+    }
+}
+
+impl InfoArchive for RawPortInfoArchive {
+    fn put(&mut self, body: &[u8]) -> Result<String, InfoCaptureError> {
+        if body.is_empty() {
+            return Err(InfoCaptureError::EmptyBody);
+        }
+        let archive_ref = archive_ref_for(body);
+        if self.read_body(&archive_ref)?.is_some() {
+            return Ok(archive_ref);
+        }
+        let payload = Bytes::copy_from_slice(body);
+        let observation = SourceObservation::new(
+            self.source_id.clone(),
+            INFO_SOURCE_VERSION,
+            ObservationClass::Snapshot,
+            SourceCursor::new(archive_ref.clone(), 0).map_err(|_| InfoCaptureError::Archive)?,
+            // ponytail: content-hash epoch is the lookup key. Wall time is unused
+            // on replay. Pass received_at when T11 opens a live OfficialInfo lane.
+            ReceiveTimestamps::new(1, 0).map_err(|_| InfoCaptureError::Archive)?,
+            INFO_PARSER_SCHEMA,
+            payload,
+            Vec::new(),
+            self.max_payload_bytes,
+        )
+        .map_err(|error| match error {
+            ObservationError::EmptyPayload => InfoCaptureError::EmptyBody,
+            _ => InfoCaptureError::Archive,
+        })?;
+        let spool_hash = *blake3::hash(body).as_bytes();
+        let batch = RawObservationBatch::try_new(
+            self.chain_id.clone(),
+            vec![observation],
+            spool_hash,
+            spool_hash,
+        )
+        .map_err(|_| InfoCaptureError::Archive)?;
+        self.archive
+            .append_batch(&batch)
+            .map_err(|_| InfoCaptureError::Archive)?;
+        Ok(archive_ref)
+    }
+
+    fn get(&self, archive_ref: &str) -> Result<Option<Bytes>, InfoCaptureError> {
+        self.read_body(archive_ref)
+    }
+
+    fn mark_published(&mut self, archive_ref: &str) {
+        self.published.insert(archive_ref.to_owned());
+    }
+
+    fn was_published(&self, archive_ref: &str) -> bool {
         self.published.contains(archive_ref)
     }
 }
@@ -169,8 +332,8 @@ pub struct InfoJobCheckpoint {
     last_archive_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pending_publish_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_publish_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quarantine_reason: Option<String>,
 }
@@ -190,7 +353,7 @@ impl InfoJobCheckpoint {
             overlap_millis,
             last_archive_ref: None,
             request_hash: None,
-            pending_publish_ref: None,
+            pending_publish_refs: Vec::new(),
             quarantine_reason: None,
         }
     }
@@ -222,7 +385,28 @@ impl InfoJobCheckpoint {
 
     #[must_use]
     pub fn pending_publish_ref(&self) -> Option<&str> {
-        self.pending_publish_ref.as_deref()
+        self.pending_publish_refs.last().map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn pending_publish_refs(&self) -> &[String] {
+        &self.pending_publish_refs
+    }
+
+    fn queue_pending(&mut self, archive_ref: String) {
+        self.last_archive_ref = Some(archive_ref.clone());
+        if !self
+            .pending_publish_refs
+            .iter()
+            .any(|queued| queued == &archive_ref)
+        {
+            self.pending_publish_refs.push(archive_ref);
+        }
+    }
+
+    fn drop_pending(&mut self, archive_ref: &str) {
+        self.pending_publish_refs
+            .retain(|queued| queued != archive_ref);
     }
 
     #[must_use]
@@ -285,7 +469,7 @@ pub enum InfoCaptureOutcome {
 }
 
 pub struct InfoCaptureCoordinator<'a> {
-    archive: &'a mut MemoryInfoArchive,
+    archive: &'a mut dyn InfoArchive,
     publisher: &'a mut MemoryInfoPublisher,
     faults: &'a dyn InfoFaultInjector,
     max_body: usize,
@@ -293,7 +477,7 @@ pub struct InfoCaptureCoordinator<'a> {
 
 impl<'a> InfoCaptureCoordinator<'a> {
     pub fn new(
-        archive: &'a mut MemoryInfoArchive,
+        archive: &'a mut dyn InfoArchive,
         publisher: &'a mut MemoryInfoPublisher,
         faults: &'a dyn InfoFaultInjector,
         max_body: usize,
@@ -335,28 +519,46 @@ impl<'a> InfoCaptureCoordinator<'a> {
         received_at: domain_types::KnownTime,
         persist_dir: Option<&Path>,
     ) -> Result<InfoCaptureOutcome, InfoCaptureError> {
-        let Some(archive_ref) = checkpoint.pending_publish_ref.clone() else {
+        let pending = checkpoint.pending_publish_refs.clone();
+        if pending.is_empty() {
             return Ok(InfoCaptureOutcome::Duplicate);
-        };
-        let body = self
-            .archive
-            .get(&archive_ref)
-            .cloned()
-            .ok_or(InfoCaptureError::MissingArchive)?;
-        let request_hash = checkpoint
-            .request_hash
-            .as_deref()
-            .and_then(decode_hash)
-            .unwrap_or_else(|| blake3::hash(&body));
-        self.publish_or_quarantine(
-            &archive_ref,
-            &body,
-            request_hash,
-            checkpoint,
-            registry,
-            received_at,
-            persist_dir,
-        )
+        }
+        let mut published_any = false;
+        for archive_ref in pending {
+            if !checkpoint
+                .pending_publish_refs
+                .iter()
+                .any(|queued| queued == &archive_ref)
+            {
+                continue;
+            }
+            let body = self
+                .archive
+                .get(&archive_ref)?
+                .ok_or(InfoCaptureError::MissingArchive)?;
+            let request_hash = checkpoint
+                .request_hash
+                .as_deref()
+                .and_then(decode_hash)
+                .unwrap_or_else(|| blake3::hash(&body));
+            match self.publish_or_quarantine(
+                &archive_ref,
+                &body,
+                request_hash,
+                checkpoint,
+                registry,
+                received_at,
+                persist_dir,
+            )? {
+                InfoCaptureOutcome::Published => published_any = true,
+                InfoCaptureOutcome::Duplicate | InfoCaptureOutcome::Quarantined => {}
+            }
+        }
+        if published_any {
+            Ok(InfoCaptureOutcome::Published)
+        } else {
+            Ok(InfoCaptureOutcome::Duplicate)
+        }
     }
 
     fn finish_posted(
@@ -369,9 +571,8 @@ impl<'a> InfoCaptureCoordinator<'a> {
     ) -> Result<InfoCaptureOutcome, InfoCaptureError> {
         let request_hash = posted.request_hash;
         let archive_ref = self.archive.put(&posted.body)?;
-        checkpoint.last_archive_ref = Some(archive_ref.clone());
         checkpoint.request_hash = Some(hex::encode(request_hash.as_bytes()));
-        checkpoint.pending_publish_ref = Some(archive_ref.clone());
+        checkpoint.queue_pending(archive_ref.clone());
         persist_checkpoint(checkpoint, persist_dir)?;
         self.faults.check(InfoFaultPoint::AfterArchive)?;
         self.publish_or_quarantine(
@@ -397,7 +598,7 @@ impl<'a> InfoCaptureCoordinator<'a> {
         persist_dir: Option<&Path>,
     ) -> Result<InfoCaptureOutcome, InfoCaptureError> {
         if self.archive.was_published(archive_ref) {
-            checkpoint.pending_publish_ref = None;
+            checkpoint.drop_pending(archive_ref);
             persist_checkpoint(checkpoint, persist_dir)?;
             return Ok(InfoCaptureOutcome::Duplicate);
         }
@@ -415,7 +616,7 @@ impl<'a> InfoCaptureCoordinator<'a> {
                     return Err(InfoCaptureError::Info(info));
                 }
                 checkpoint.quarantine_reason = Some(info.reason_code().to_owned());
-                checkpoint.pending_publish_ref = None;
+                checkpoint.drop_pending(archive_ref);
                 persist_checkpoint(checkpoint, persist_dir)?;
                 return Ok(InfoCaptureOutcome::Quarantined);
             }
@@ -426,7 +627,7 @@ impl<'a> InfoCaptureCoordinator<'a> {
         let _ = parsed.response_hash();
         self.publisher.publish(archive_ref)?;
         self.archive.mark_published(archive_ref);
-        checkpoint.pending_publish_ref = None;
+        checkpoint.drop_pending(archive_ref);
         persist_checkpoint(checkpoint, persist_dir)?;
         self.faults.check(InfoFaultPoint::AfterPublish)?;
         Ok(InfoCaptureOutcome::Published)
@@ -523,7 +724,7 @@ fn decode_hash(value: &str) -> Option<blake3::Hash> {
 pub fn capture_time_pages<T: InfoTransport>(
     transport: &mut T,
     budget: &mut RequestBudget,
-    archive: &mut MemoryInfoArchive,
+    archive: &mut dyn InfoArchive,
     publisher: &mut MemoryInfoPublisher,
     checkpoint: &mut InfoJobCheckpoint,
     registry: InfoRegistry,
@@ -537,6 +738,7 @@ pub fn capture_time_pages<T: InfoTransport>(
     request_url: &str,
     persist_dir: Option<&Path>,
     max_body: usize,
+    faults: &dyn InfoFaultInjector,
 ) -> Result<TimePageCrawl, InfoCaptureError> {
     let capability_id = checkpoint.capability_id().to_owned();
     let job_id = checkpoint.job_id().to_owned();
@@ -547,8 +749,8 @@ pub fn capture_time_pages<T: InfoTransport>(
     let crawl = {
         let mut wrapping = ArchivingInfoTransport {
             inner: transport,
-            archive,
-            checkpoint,
+            archive: &mut *archive,
+            checkpoint: &mut *checkpoint,
             persist_dir,
             max_body,
             last_error: None,
@@ -578,20 +780,19 @@ pub fn capture_time_pages<T: InfoTransport>(
     };
     checkpoint.next_start_millis = crawl.cursor().next_query_start_millis();
     persist_checkpoint(checkpoint, persist_dir)?;
-    if let Some(last) = checkpoint.last_archive_ref.clone()
-        && !archive.was_published(&last)
-    {
-        publisher.publish(&last)?;
-        archive.mark_published(&last);
-        checkpoint.pending_publish_ref = None;
-        persist_checkpoint(checkpoint, persist_dir)?;
-    }
+    faults.check(InfoFaultPoint::AfterArchive)?;
+    InfoCaptureCoordinator::new(archive, publisher, faults, max_body).replay_pending(
+        checkpoint,
+        registry,
+        received_at,
+        persist_dir,
+    )?;
     Ok(crawl)
 }
 
 struct ArchivingInfoTransport<'a, T> {
     inner: &'a mut T,
-    archive: &'a mut MemoryInfoArchive,
+    archive: &'a mut dyn InfoArchive,
     checkpoint: &'a mut InfoJobCheckpoint,
     persist_dir: Option<&'a Path>,
     max_body: usize,
@@ -613,8 +814,7 @@ impl<T: InfoTransport> InfoTransport for ArchivingInfoTransport<'_, T> {
         }
         match self.archive.put(response.body()) {
             Ok(archive_ref) => {
-                self.checkpoint.last_archive_ref = Some(archive_ref.clone());
-                self.checkpoint.pending_publish_ref = Some(archive_ref);
+                self.checkpoint.queue_pending(archive_ref);
                 if let Err(error) = persist_checkpoint(self.checkpoint, self.persist_dir) {
                     self.last_error = Some(error);
                 }
@@ -807,6 +1007,8 @@ pub enum InfoCaptureError {
     CommittedLane,
     #[error("info archive is missing a pending body")]
     MissingArchive,
+    #[error("info raw observation archive failed")]
+    Archive,
     #[error("info job checkpoint is invalid")]
     Checkpoint,
     #[error("info response body is empty")]
@@ -824,6 +1026,7 @@ impl InfoCaptureError {
             Self::Scheduler(error) => error.reason_code(),
             Self::CommittedLane => "capture_info.committed_lane",
             Self::MissingArchive => "capture_info.missing_archive",
+            Self::Archive => "capture_info.archive",
             Self::Checkpoint => "capture_info.checkpoint",
             Self::EmptyBody => "capture_info.empty_body",
             Self::InjectedFault(_) => "capture_info.injected_fault",

@@ -1,20 +1,40 @@
 mod info_rest {
     use std::collections::BTreeMap;
+    use std::path::Path;
     use std::sync::Mutex;
 
-    use domain_types::KnownTime;
+    use domain_types::{ChainId, KnownTime, SourceId};
     use hl_capture::{
         CaptureClock, EgressError, FakeCaptureClock, InfoCaptureCoordinator, InfoCaptureError,
         InfoCaptureOutcome, InfoFaultInjector, InfoFaultPoint, InfoHttpResponse, InfoJobCheckpoint,
-        InfoTransport, MemoryInfoArchive, MemoryInfoPublisher, NoInfoFaults, RequestBudget,
-        SchedulePriority, ScriptedInfoTransport, TimePageStopReason, capture_time_pages,
-        default_info_request_url, fetch_info, forbids_exchange_request, parse_request_cost,
+        InfoTransport, MemoryInfoArchive, MemoryInfoPublisher, NoInfoFaults, RawPortInfoArchive,
+        RequestBudget, SchedulePriority, ScriptedInfoTransport, TimePageStopReason,
+        capture_time_pages, default_info_request_url, fetch_info, forbids_exchange_request,
+        parse_request_cost,
     };
     use hl_protocol::info::{InfoRegistry, TimePageCursor};
     use serde_json::json;
 
     fn now() -> KnownTime {
         KnownTime::from_unix_micros(1).expect("time")
+    }
+
+    fn durable_archive(root: &Path) -> RawPortInfoArchive {
+        RawPortInfoArchive::open(
+            root.join("raw"),
+            ChainId::new("mainnet").expect("chain"),
+            SourceId::new("official-info").expect("source"),
+            1_048_576,
+        )
+        .expect("raw info archive")
+    }
+
+    fn fills_page(records: &[(&str, i64)]) -> InfoHttpResponse {
+        let items: Vec<serde_json::Value> = records
+            .iter()
+            .map(|(id, time)| json!({ "id": id, "time": time }))
+            .collect();
+        InfoHttpResponse::new(200, serde_json::to_vec(&items).expect("json"))
     }
 
     struct OneShotInfoFault {
@@ -140,42 +160,45 @@ mod info_rest {
     #[test]
     fn crash_after_archive_replays_exactly_once() {
         let directory = tempfile::tempdir().expect("dir");
+        let persist = directory.path();
         let mut transport = ScriptedInfoTransport::new([InfoHttpResponse::new(
             200,
             serde_json::to_vec(&json!({ "mids": { "BTC": "1" } })).expect("json"),
         )]);
-        let mut archive = MemoryInfoArchive::new();
         let mut publisher = MemoryInfoPublisher::new();
         let mut checkpoint = InfoJobCheckpoint::new("mids", "official.info.all_mids", 1, 5);
         let faults = OneShotInfoFault::new(InfoFaultPoint::AfterArchive);
-        let error = {
-            let mut coordinator =
-                InfoCaptureCoordinator::new(&mut archive, &mut publisher, &faults, 1_048_576);
-            coordinator
-                .capture_response(
-                    &mut transport,
-                    &mut checkpoint,
-                    InfoRegistry::official(),
-                    &BTreeMap::new(),
-                    now(),
-                    default_info_request_url(),
-                    Some(directory.path()),
-                )
-                .expect_err("crash after archive")
-        };
-        assert!(matches!(
-            error,
-            InfoCaptureError::InjectedFault(InfoFaultPoint::AfterArchive)
-        ));
-        assert_eq!(archive.len(), 1);
-        assert!(publisher.publications().is_empty());
-        assert!(checkpoint.pending_publish_ref().is_some());
+        {
+            let mut archive = durable_archive(persist);
+            let error = {
+                let mut coordinator =
+                    InfoCaptureCoordinator::new(&mut archive, &mut publisher, &faults, 1_048_576);
+                coordinator
+                    .capture_response(
+                        &mut transport,
+                        &mut checkpoint,
+                        InfoRegistry::official(),
+                        &BTreeMap::new(),
+                        now(),
+                        default_info_request_url(),
+                        Some(persist),
+                    )
+                    .expect_err("crash after archive")
+            };
+            assert!(matches!(
+                error,
+                InfoCaptureError::InjectedFault(InfoFaultPoint::AfterArchive)
+            ));
+            assert!(publisher.publications().is_empty());
+            assert_eq!(checkpoint.pending_publish_refs().len(), 1);
+        }
 
-        let loaded = InfoJobCheckpoint::load_from(directory.path(), "mids")
+        let loaded = InfoJobCheckpoint::load_from(persist, "mids")
             .expect("load")
             .expect("checkpoint");
         checkpoint = loaded;
         let mut publisher = MemoryInfoPublisher::new();
+        let mut archive = durable_archive(persist);
         let outcome = {
             let mut coordinator =
                 InfoCaptureCoordinator::new(&mut archive, &mut publisher, &NoInfoFaults, 1_048_576);
@@ -184,7 +207,7 @@ mod info_rest {
                     &mut checkpoint,
                     InfoRegistry::official(),
                     now(),
-                    Some(directory.path()),
+                    Some(persist),
                 )
                 .expect("replay")
         };
@@ -199,7 +222,7 @@ mod info_rest {
                     &mut checkpoint,
                     InfoRegistry::official(),
                     now(),
-                    Some(directory.path()),
+                    Some(persist),
                 )
                 .expect("second")
         };
@@ -376,6 +399,7 @@ mod info_rest {
             default_info_request_url(),
             None,
             1_048_576,
+            &NoInfoFaults,
         )
         .expect("partial");
         assert_eq!(crawl.stop(), TimePageStopReason::Incomplete);
@@ -385,6 +409,132 @@ mod info_rest {
             checkpoint.next_start_millis(),
             crawl.cursor().next_query_start_millis()
         );
+    }
+
+    #[test]
+    fn two_page_crawl_publishes_every_archived_page() {
+        let mut transport = ScriptedInfoTransport::new([
+            fills_page(&[("a", 100), ("b", 200)]),
+            fills_page(&[("c", 900)]),
+        ]);
+        let mut budget =
+            RequestBudget::try_new("official-info", 1_000, 80, 40, 0, 1).expect("budget");
+        let mut archive = MemoryInfoArchive::new();
+        let mut publisher = MemoryInfoPublisher::new();
+        let mut checkpoint =
+            InfoJobCheckpoint::new("fills", "official.info.user_fills_by_time", 50, 5);
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let crawl = capture_time_pages(
+            &mut transport,
+            &mut budget,
+            &mut archive,
+            &mut publisher,
+            &mut checkpoint,
+            InfoRegistry::official(),
+            &extra,
+            TimePageCursor::new(50, 5).expect("cursor"),
+            2,
+            SchedulePriority::P3,
+            0,
+            now(),
+            cost,
+            default_info_request_url(),
+            None,
+            1_048_576,
+            &NoInfoFaults,
+        )
+        .expect("crawl");
+        assert_eq!(transport.posted().len(), 2);
+        assert_eq!(crawl.records().len(), 3);
+        assert_eq!(archive.len(), 2);
+        assert_eq!(publisher.publications().len(), 2);
+        assert!(checkpoint.pending_publish_refs().is_empty());
+    }
+
+    #[test]
+    fn crash_mid_crawl_replays_earlier_page_from_durable_archive() {
+        let directory = tempfile::tempdir().expect("dir");
+        let persist = directory.path();
+        let mut transport = ScriptedInfoTransport::new([
+            fills_page(&[("a", 100), ("b", 200)]),
+            fills_page(&[("c", 900)]),
+        ]);
+        let mut budget =
+            RequestBudget::try_new("official-info", 1_000, 80, 40, 0, 1).expect("budget");
+        let mut publisher = MemoryInfoPublisher::new();
+        let mut checkpoint =
+            InfoJobCheckpoint::new("fills", "official.info.user_fills_by_time", 50, 5);
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let faults = OneShotInfoFault::new(InfoFaultPoint::AfterArchive);
+        let earlier;
+        {
+            let mut archive = durable_archive(persist);
+            let error = capture_time_pages(
+                &mut transport,
+                &mut budget,
+                &mut archive,
+                &mut publisher,
+                &mut checkpoint,
+                InfoRegistry::official(),
+                &extra,
+                TimePageCursor::new(50, 5).expect("cursor"),
+                2,
+                SchedulePriority::P3,
+                0,
+                now(),
+                cost,
+                default_info_request_url(),
+                Some(persist),
+                1_048_576,
+                &faults,
+            )
+            .expect_err("crash before publish");
+            assert!(matches!(
+                error,
+                InfoCaptureError::InjectedFault(InfoFaultPoint::AfterArchive)
+            ));
+            assert_eq!(checkpoint.pending_publish_refs().len(), 2);
+            assert!(publisher.publications().is_empty());
+            earlier = checkpoint.pending_publish_refs()[0].clone();
+        }
+
+        let mut checkpoint = InfoJobCheckpoint::load_from(persist, "fills")
+            .expect("load")
+            .expect("checkpoint");
+        let mut publisher = MemoryInfoPublisher::new();
+        let mut archive = durable_archive(persist);
+        let outcome = {
+            let mut coordinator =
+                InfoCaptureCoordinator::new(&mut archive, &mut publisher, &NoInfoFaults, 1_048_576);
+            coordinator
+                .replay_pending(
+                    &mut checkpoint,
+                    InfoRegistry::official(),
+                    now(),
+                    Some(persist),
+                )
+                .expect("replay")
+        };
+        assert_eq!(outcome, InfoCaptureOutcome::Published);
+        assert_eq!(publisher.publications().len(), 2);
+        assert!(publisher.publications().contains(&earlier));
+
+        let outcome = {
+            let mut coordinator =
+                InfoCaptureCoordinator::new(&mut archive, &mut publisher, &NoInfoFaults, 1_048_576);
+            coordinator
+                .replay_pending(
+                    &mut checkpoint,
+                    InfoRegistry::official(),
+                    now(),
+                    Some(persist),
+                )
+                .expect("second")
+        };
+        assert_eq!(outcome, InfoCaptureOutcome::Duplicate);
+        assert_eq!(publisher.publications().len(), 2);
     }
 
     #[test]

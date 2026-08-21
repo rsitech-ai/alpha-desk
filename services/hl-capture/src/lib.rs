@@ -27,10 +27,10 @@ pub mod spool;
 mod status;
 
 pub use adapters::info_rest::{
-    CaptureClock, FakeCaptureClock, HttpsInfoTransport, InfoCaptureCoordinator, InfoCaptureError,
-    InfoCaptureOutcome, InfoFaultInjector, InfoFaultPoint, InfoJobCheckpoint, MemoryInfoArchive,
-    MemoryInfoPublisher, NoInfoFaults, SystemCaptureClock, capture_time_pages,
-    default_info_request_url,
+    CaptureClock, FakeCaptureClock, HttpsInfoTransport, InfoArchive, InfoCaptureCoordinator,
+    InfoCaptureError, InfoCaptureOutcome, InfoFaultInjector, InfoFaultPoint, InfoJobCheckpoint,
+    MemoryInfoArchive, MemoryInfoPublisher, NoInfoFaults, RawPortInfoArchive, SystemCaptureClock,
+    capture_time_pages, default_info_request_url,
 };
 pub use app::{CaptureRuntime, CaptureRuntimeConfig, CaptureRuntimeError};
 pub use backlog::*;
