@@ -1,0 +1,1 @@
+{"channel":"userNonFundingLedgerUpdates","data":{"isSnapshot":false,"user":"0x0000000000000000000000000000000000000001","nonFundingLedgerUpdates":[{"time":1,"hash":"0xabc","delta":{"type":"mysteryTransfer","usdc":"1"}}]}}

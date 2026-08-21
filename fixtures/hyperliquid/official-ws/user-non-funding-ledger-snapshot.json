@@ -1,0 +1,1 @@
+{"channel":"userNonFundingLedgerUpdates","data":{"isSnapshot":true,"user":"0x0000000000000000000000000000000000000001","nonFundingLedgerUpdates":[{"time":1,"hash":"0xabc","delta":{"type":"deposit","usdc":"1"}},{"time":2,"hash":"0xdef","delta":{"type":"liquidation","accountValue":"1","leverageType":"Cross","liquidatedPositions":[]}}]}}

@@ -1,0 +1,192 @@
+schema_version = 1
+corpus_kind = "normalized-official-documentation-examples"
+production_recording = false
+documentation = "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions"
+captured_at = "2026-08-21"
+note = "Values are normalized public documentation examples, not live websocket recordings. Exact payload bytes are retained once read. hlscreen parity fixtures are deferred (T04 license unnamed)."
+
+[[fixture]]
+file = "ack-all-mids.json"
+kind = "ack"
+identifier = "allMids"
+sha256 = "408a561d57a347b0aa8fae008c2fa840051a5842a5742997762fffe5d0079c75"
+
+[[fixture]]
+file = "all-mids.json"
+kind = "snapshot"
+identifier = "allMids"
+sha256 = "96afaa7dc2d682597a8e8c211f2b31f6b898da62f1b0e91702c2945e9d57bc8b"
+
+[[fixture]]
+file = "notification.json"
+kind = "incremental"
+identifier = "notification"
+sha256 = "a664a5aa296a5dd6968b77691bceeccdde03365fc52c16982e4108fca2b1a4ec"
+
+[[fixture]]
+file = "web-data3.json"
+kind = "snapshot"
+identifier = "webData3"
+sha256 = "f6e2e8eebc0251937fb434253c4e93b01ffae10f5a4c6e4c23a68537fb0e66a7"
+
+[[fixture]]
+file = "twap-states.json"
+kind = "snapshot"
+identifier = "twapStates"
+sha256 = "7c1f0fed3c1beaeeae38d08dcbfc92e650c268090f0c69f5aeb9b846c682c1c6"
+
+[[fixture]]
+file = "clearinghouse-state.json"
+kind = "snapshot"
+identifier = "clearinghouseState"
+sha256 = "d4fe1cc78b0037537a8eb10c33c96aed27423096bba326160846ccc2f51549cd"
+
+[[fixture]]
+file = "open-orders.json"
+kind = "snapshot"
+identifier = "openOrders"
+sha256 = "69163360e1bc2a727d55033ec4394d9650f90a6f77d125f8dd646f1dbe915c08"
+
+[[fixture]]
+file = "candle.json"
+kind = "incremental"
+identifier = "candle"
+sha256 = "8ca2722ee298502c7af02648637ab44d6ba24348bb46c3081a32acb1d58db83f"
+
+[[fixture]]
+file = "l2-book.json"
+kind = "snapshot"
+identifier = "l2Book"
+sha256 = "ca5787919a8f9a07f23270b9fd6c92a48818634352737963e7350bc5fd6c87a9"
+
+[[fixture]]
+file = "trades.json"
+kind = "incremental"
+identifier = "trades"
+sha256 = "c19efacf0fd68d1043bdce0c5d5247be925d27c291e4dd58b1be4862e61a9531"
+
+[[fixture]]
+file = "order-updates.json"
+kind = "incremental"
+identifier = "orderUpdates"
+sha256 = "1444bb0000c79c051df4a5bd01eb2ab6b7bf8f874855f200051040ddc7e7513f"
+
+[[fixture]]
+file = "user-events-fills.json"
+kind = "incremental"
+identifier = "userEvents"
+sha256 = "c968049ae85046c075ed0d6362fcea2bafbc5a577d8ca455ef08ba41ec03b4e9"
+
+[[fixture]]
+file = "user-events-liquidation.json"
+kind = "incremental"
+identifier = "userEvents"
+sha256 = "dabd6ec1edb96a4a5760590cc4d22ddb8d17bc175befcfdeaed0020b3b54a6f9"
+
+[[fixture]]
+file = "user-events-non-user-cancel.json"
+kind = "incremental"
+identifier = "userEvents"
+sha256 = "4d529f05f8bff081029310cfd1878777b6e9624d855a3f0b3a3d85bf6f38a93e"
+
+[[fixture]]
+file = "user-events-unknown-variant.json"
+quarantine = "schema_drift"
+sha256 = "2dc23bfc9ef30bfad3e77aaa53ff586e8259ee90ae79c7752fdaf11bb0d5bd33"
+
+[[fixture]]
+file = "user-fills-snapshot.json"
+kind = "snapshot"
+identifier = "userFills"
+sha256 = "d55de03a3f937301da1ee881d0a03ea18771fe045b62843da1f43be45a4e5ced"
+
+[[fixture]]
+file = "user-fills-incremental.json"
+kind = "incremental"
+identifier = "userFills"
+sha256 = "ac505769fbe9f0413ff8c2307c7b5403f9bc8d92bc3efb12f1ff05c2bc02f020"
+
+[[fixture]]
+file = "user-fundings-snapshot.json"
+kind = "snapshot"
+identifier = "userFundings"
+sha256 = "01be9785d0af866fdf703627cd69c84a3d16a99af944de3a1f20a9f34a97b4ca"
+
+[[fixture]]
+file = "user-non-funding-ledger-snapshot.json"
+kind = "snapshot"
+identifier = "userNonFundingLedgerUpdates"
+sha256 = "f88f5195e93693276854a87678b897634f3715368466418b81d6dbb2a5d31f3b"
+
+[[fixture]]
+file = "user-non-funding-ledger-unknown-delta.json"
+quarantine = "schema_drift"
+sha256 = "2ba2c4599846f4e05e8290d22a525fe864623f6fda2f184702bf2453007a72a3"
+
+[[fixture]]
+file = "active-asset-ctx.json"
+kind = "snapshot"
+identifier = "activeAssetCtx"
+sha256 = "1f75d845f2dd9971d88c9ec08aea8408839dd1bea12ee4465aab58bf00183550"
+
+[[fixture]]
+file = "active-asset-data.json"
+kind = "snapshot"
+identifier = "activeAssetData"
+sha256 = "276626f553725beb378759d375df3d72735615792a405ac60a762727190334df"
+
+[[fixture]]
+file = "user-twap-slice-fills-snapshot.json"
+kind = "snapshot"
+identifier = "userTwapSliceFills"
+sha256 = "6a7ca70b0d0c3b046584e75b073571cd322606d721d3fc311850d662a0d47d2d"
+
+[[fixture]]
+file = "user-twap-history-snapshot.json"
+kind = "snapshot"
+identifier = "userTwapHistory"
+sha256 = "fd5422b5888b1ddf01bff652002a7c73d8e96db33650d93a5617006aac568fa7"
+
+[[fixture]]
+file = "bbo.json"
+kind = "incremental"
+identifier = "bbo"
+sha256 = "7616589e622208a3139def45e4230edfba9e84da5ac2dda9a45c147110a434c2"
+
+[[fixture]]
+file = "spot-state.json"
+kind = "snapshot"
+identifier = "spotState"
+sha256 = "1d309e9fe2a4cf0bdfaca2802c4433509e21e73444fd8e6b8901020903712052"
+
+[[fixture]]
+file = "all-dexs-clearinghouse-state.json"
+kind = "snapshot"
+identifier = "allDexsClearinghouseState"
+sha256 = "e9ec6d0d3567558a4cd81f6ec43fcc006b48062f30090de3485b743d45ccec3d"
+
+[[fixture]]
+file = "all-dexs-asset-ctxs.json"
+kind = "snapshot"
+identifier = "allDexsAssetCtxs"
+sha256 = "4cc887b6bfe202e8cfd4c79b67c9b18c0696866bfe97d24a9637fdfa4dd02dea"
+
+[[fixture]]
+file = "pong.json"
+kind = "heartbeat"
+sha256 = "b7a5c74659445cce2071b5252110605b12ee297c643c3f3f155e0ca40ea876da"
+
+[[fixture]]
+file = "unknown-channel.json"
+kind = "unknown"
+sha256 = "f465ab75ec5c5d6da502cd212ec2094b9420c60a7819158e2248a900348b8f3b"
+
+[[fixture]]
+file = "unknown-channel-state-affecting.json"
+quarantine = "schema_drift"
+sha256 = "36f3b707837fb41c4c614794d37ff7df8353ddcf1f8af9cca10719c51f36eed7"
+
+[[fixture]]
+file = "outcome-meta-updates.json"
+kind = "unknown"
+sha256 = "62bfec4dd78c8b3c1a372167f4da499389605e14c4799c10f4dce019f0b55b87"
