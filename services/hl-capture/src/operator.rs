@@ -2,15 +2,48 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
+use crate::EgressBudgetSnapshot;
 use crate::status::{CaptureHealth, read_status, read_status_snapshot_bytes};
 
 const MAX_REQUEST_BYTES: usize = 8_192;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_SCHEMA: &str = "hl.capture.health.v1";
+const INFO_BUDGET_SCHEMA: &str = "hl.capture.info-budget.v1";
+
+#[derive(Serialize)]
+struct InfoBudgetStatusDoc<'a> {
+    schema_version: &'static str,
+    egress_id: &'a str,
+    ceiling_weight_per_minute: u32,
+    envelope_weight_per_minute: u32,
+    available_priority: u32,
+    available_general: u32,
+    circuit_open_until_millis: Option<u64>,
+    http_429_count: u64,
+    requests_ok: u64,
+}
+
+pub fn encode_info_budget_status(
+    snapshot: &EgressBudgetSnapshot,
+) -> Result<Vec<u8>, OperatorError> {
+    serde_json::to_vec(&InfoBudgetStatusDoc {
+        schema_version: INFO_BUDGET_SCHEMA,
+        egress_id: snapshot.egress_id(),
+        ceiling_weight_per_minute: snapshot.ceiling_weight_per_minute(),
+        envelope_weight_per_minute: snapshot.envelope_weight_per_minute(),
+        available_priority: snapshot.available_priority(),
+        available_general: snapshot.available_general(),
+        circuit_open_until_millis: snapshot.circuit_open_until_millis(),
+        http_429_count: snapshot.http_429_count(),
+        requests_ok: snapshot.requests_ok(),
+    })
+    .map_err(|_| OperatorError::Serialization)
+}
 
 pub async fn serve_operator_status(
     status_path: PathBuf,

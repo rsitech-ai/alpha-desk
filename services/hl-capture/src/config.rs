@@ -35,6 +35,8 @@ pub struct CaptureConfig {
     runtime: RuntimeConfig,
     spool: SpoolConfig,
     sources: Vec<SourceConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    egress: Vec<EgressConfig>,
 }
 
 impl CaptureConfig {
@@ -111,6 +113,13 @@ impl CaptureConfig {
         if independent_committed_sources > 1 {
             return Err(ConfigError::DuplicateIndependentCommittedSource);
         }
+        let mut egress_ids = BTreeSet::new();
+        for egress in &self.egress {
+            egress.validate()?;
+            if !egress_ids.insert(egress.id.as_str()) {
+                return Err(ConfigError::DuplicateEgress);
+            }
+        }
         Ok(())
     }
 
@@ -150,6 +159,11 @@ impl CaptureConfig {
             .iter()
             .filter(|source| source.allows_scheduled_work(at))
             .collect()
+    }
+
+    #[must_use]
+    pub fn egress(&self) -> &[EgressConfig] {
+        &self.egress
     }
 }
 
@@ -744,6 +758,109 @@ impl SourceAdapterConfig {
     }
 }
 
+const OFFICIAL_REST_WEIGHT_PER_MINUTE: u32 = 1_200;
+const MIN_SAFETY_ENVELOPE_PERCENT: u8 = 70;
+const MAX_SAFETY_ENVELOPE_PERCENT: u8 = 80;
+
+fn default_priority_reserve_percent() -> u8 {
+    40
+}
+
+const OFFICIAL_INFO_URLS: &[&str] = &[
+    "https://api.hyperliquid.xyz",
+    "https://api.hyperliquid.xyz/info",
+    "https://api.hyperliquid-testnet.xyz",
+    "https://api.hyperliquid-testnet.xyz/info",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EgressKind {
+    OfficialInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressProxyConfig {
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    rotate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressConfig {
+    id: String,
+    kind: EgressKind,
+    base_url: String,
+    weight_per_minute: u32,
+    safety_envelope_percent: u8,
+    #[serde(default = "default_priority_reserve_percent")]
+    priority_reserve_percent: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy: Option<EgressProxyConfig>,
+}
+
+impl EgressConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !is_safe_source_path_component(&self.id) {
+            return Err(ConfigError::InvalidEgress);
+        }
+        if self.proxy.is_some() {
+            return Err(ConfigError::AnonymousProxyRejected);
+        }
+        match self.kind {
+            EgressKind::OfficialInfo => {
+                if self.base_url.contains("/exchange") {
+                    return Err(ConfigError::ExchangeEndpointForbidden);
+                }
+                if self.weight_per_minute != OFFICIAL_REST_WEIGHT_PER_MINUTE
+                    || !(MIN_SAFETY_ENVELOPE_PERCENT..=MAX_SAFETY_ENVELOPE_PERCENT)
+                        .contains(&self.safety_envelope_percent)
+                    || !(1..=90).contains(&self.priority_reserve_percent)
+                    || !OFFICIAL_INFO_URLS.contains(&self.base_url.as_str())
+                {
+                    return Err(ConfigError::InvalidEgress);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> EgressKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[must_use]
+    pub const fn weight_per_minute(&self) -> u32 {
+        self.weight_per_minute
+    }
+
+    #[must_use]
+    pub const fn safety_envelope_percent(&self) -> u8 {
+        self.safety_envelope_percent
+    }
+
+    #[must_use]
+    pub const fn priority_reserve_percent(&self) -> u8 {
+        self.priority_reserve_percent
+    }
+}
+
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigError {
     #[error("capture configuration TOML is invalid")]
@@ -808,6 +925,14 @@ pub enum ConfigError {
     InvalidStatusListen,
     #[error("validated capture configuration could not be serialized")]
     Serialization,
+    #[error("capture egress identifier is duplicated")]
+    DuplicateEgress,
+    #[error("capture egress configuration is invalid")]
+    InvalidEgress,
+    #[error("anonymous proxy rotation is forbidden")]
+    AnonymousProxyRejected,
+    #[error("capture refused an /exchange endpoint")]
+    ExchangeEndpointForbidden,
 }
 
 impl ConfigError {
@@ -853,6 +978,10 @@ impl ConfigError {
             Self::InvalidRuntimeLimit => "capture_config.invalid_runtime_limit",
             Self::InvalidStatusListen => "capture_config.invalid_status_listen",
             Self::Serialization => "capture_config.serialization",
+            Self::DuplicateEgress => "capture_config.duplicate_egress",
+            Self::InvalidEgress => "capture_config.invalid_egress",
+            Self::AnonymousProxyRejected => "capture_config.anonymous_proxy",
+            Self::ExchangeEndpointForbidden => "capture_config.exchange_forbidden",
         }
     }
 }
