@@ -1,8 +1,8 @@
 mod request_budget {
     use hl_capture::{
         BudgetError, CaptureConfig, ConfigError, RequestBudget, SchedulePriority,
-        encode_info_budget_status, parse_request_cost, request_cost_for_identifier,
-        spec_12_1_base_weight,
+        encode_info_budget_status, forbids_exchange_request, parse_request_cost,
+        request_cost_for_identifier, spec_12_1_base_weight,
     };
     use hl_protocol::info::InfoRegistry;
 
@@ -180,5 +180,74 @@ safety_envelope_percent = 75
         assert_eq!(value["egress_id"], "official-info");
         assert_eq!(value["ceiling_weight_per_minute"], 1_200);
         assert_eq!(value["envelope_weight_per_minute"], 900);
+    }
+
+    #[test]
+    fn fine_grained_refill_matches_one_minute_step() {
+        fn drained() -> RequestBudget {
+            let mut budget = RequestBudget::official("official-info", 75, 0, 1).expect("budget");
+            let general = budget.snapshot(0).available_general();
+            let lease = budget
+                .reserve(0, "drain", SchedulePriority::P4, general)
+                .expect("drain");
+            budget.commit(0, lease, general).expect("spent");
+            budget
+        }
+        let mut dripped = drained();
+        for step in 1..=600 {
+            let _ = dripped.snapshot(step * 100);
+        }
+        let dripped_general = dripped.snapshot(60_000).available_general();
+        let mut stepped = drained();
+        let stepped_general = stepped.snapshot(60_000).available_general();
+        assert_eq!(stepped_general, 540);
+        let delta = i64::from(dripped_general) - i64::from(stepped_general);
+        assert!(
+            delta.abs() <= 1,
+            "drip={dripped_general} step={stepped_general}"
+        );
+    }
+
+    #[test]
+    fn http_429_refills_after_backoff_under_a_ticking_clock() {
+        let mut budget = RequestBudget::official("official-info", 75, 0, 7).expect("budget");
+        let lease = budget
+            .reserve(0, "job-a", SchedulePriority::P4, 20)
+            .expect("reserve");
+        let until = budget.on_429(0, lease).expect("429");
+        assert!(until > 0);
+        let mut now = 0_u64;
+        while now < until {
+            now = now.saturating_add(100);
+            let result = budget.reserve(now, "job-b", SchedulePriority::P4, 2);
+            if now < until {
+                assert!(
+                    matches!(result, Err(BudgetError::CircuitOpen)),
+                    "now={now} until={until} {result:?}"
+                );
+            }
+        }
+        budget
+            .reserve(now, "job-b", SchedulePriority::P4, 2)
+            .expect("after backoff");
+    }
+
+    #[test]
+    fn order_type_and_exchange_path_stay_forbidden() {
+        assert!(forbids_exchange_request(
+            "order",
+            br#"{"type":"order"}"#,
+            "",
+        ));
+        assert!(forbids_exchange_request(
+            "allMids",
+            b"{}",
+            "https://api.hyperliquid.xyz/exchange",
+        ));
+        assert!(!forbids_exchange_request(
+            "exchangeStatus",
+            br#"{"type":"exchangeStatus"}"#,
+            "https://api.hyperliquid.xyz/info",
+        ));
     }
 }

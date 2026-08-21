@@ -12,6 +12,7 @@ use crate::request_budget::{
 };
 
 const MAX_TIME_PAGES: usize = 1_024;
+const REFILL_PERIOD_MILLIS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfoJob {
@@ -226,6 +227,8 @@ pub enum TimePageStopReason {
     EndOfStream,
     SameMillisecondBurst,
     Truncated,
+    BudgetExhausted,
+    Incomplete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,10 +337,10 @@ pub fn crawl_time_pages<T: InfoTransport>(
     if request.page_limit == 0 {
         return Err(SchedulerError::InvalidCursor);
     }
-    let estimated_rows = u32::try_from(request.page_limit).unwrap_or(u32::MAX);
     let mut collected = Vec::new();
-    let mut cursor = request.cursor;
+    let mut cursor = request.cursor.clone();
     let mut pages = 0_usize;
+    let mut now = request.now_millis;
     loop {
         if pages >= MAX_TIME_PAGES {
             return finish_crawl(
@@ -357,15 +360,25 @@ pub fn crawl_time_pages<T: InfoTransport>(
         }
         let mut params = request.extra_params.clone();
         params.insert("startTime".to_owned(), Value::from(start));
-        let reserved = request.cost.estimated_weight(estimated_rows);
-        let lease = budget
-            .reserve(
-                request.now_millis,
-                request.job_id,
-                request.priority,
-                reserved,
-            )
-            .map_err(SchedulerError::Budget)?;
+        let lease = match reserve_page(budget, &request, &mut now) {
+            Ok(lease) => lease,
+            Err(SchedulerError::CircuitOpen) => {
+                return take_progress(
+                    collected,
+                    cursor,
+                    TimePageStopReason::Incomplete,
+                    SchedulerError::CircuitOpen,
+                );
+            }
+            Err(error) => {
+                return take_progress(
+                    collected,
+                    cursor,
+                    TimePageStopReason::BudgetExhausted,
+                    error,
+                );
+            }
+        };
         let fetched = match fetch_info(
             transport,
             registry,
@@ -376,25 +389,44 @@ pub fn crawl_time_pages<T: InfoTransport>(
         ) {
             Ok(fetched) => fetched,
             Err(EgressError::RateLimited) => {
-                budget
-                    .on_429(request.now_millis, lease)
-                    .map_err(SchedulerError::Budget)?;
-                return Err(SchedulerError::RateLimited);
+                budget.on_429(now, lease).map_err(SchedulerError::Budget)?;
+                return take_progress(
+                    collected,
+                    cursor,
+                    TimePageStopReason::Incomplete,
+                    SchedulerError::RateLimited,
+                );
             }
             Err(error) => {
-                budget
-                    .release(request.now_millis, lease)
-                    .map_err(SchedulerError::Budget)?;
-                return Err(SchedulerError::Egress(error));
+                budget.release(now, lease).map_err(SchedulerError::Budget)?;
+                return take_progress(
+                    collected,
+                    cursor,
+                    TimePageStopReason::Incomplete,
+                    SchedulerError::Egress(error),
+                );
             }
         };
-        let page = owned_records_from_value(fetched.parsed().value())?;
+        let page = match owned_records_from_value(fetched.parsed().value()) {
+            Ok(page) => page,
+            Err(error) => {
+                budget.release(now, lease).map_err(SchedulerError::Budget)?;
+                return take_progress(collected, cursor, TimePageStopReason::Incomplete, error);
+            }
+        };
         let actual = request
             .cost
             .actual_weight(u32::try_from(page.len()).unwrap_or(u32::MAX));
-        budget
-            .commit(request.now_millis, lease, actual)
-            .map_err(SchedulerError::Budget)?;
+        let extra_room = remaining_weight(budget, now, request.priority);
+        let payable = actual.min(lease.reserved().saturating_add(extra_room));
+        if let Err(error) = budget.commit(now, lease, payable) {
+            return take_progress(
+                collected,
+                cursor,
+                TimePageStopReason::BudgetExhausted,
+                SchedulerError::Budget(error),
+            );
+        }
         if page.is_empty() {
             return finish_crawl(
                 collected,
@@ -404,22 +436,24 @@ pub fn crawl_time_pages<T: InfoTransport>(
                 TimePageStopReason::EmptyVenue,
             );
         }
-        let view = page_view(&page)?;
-        match cursor
-            .apply_page(&view, request.page_limit)
-            .map_err(|_| SchedulerError::InvalidCursor)?
-        {
-            TimePageOutcome::Next {
+        let view = match page_view(&page) {
+            Ok(view) => view,
+            Err(error) => {
+                return take_progress(collected, cursor, TimePageStopReason::Incomplete, error);
+            }
+        };
+        match cursor.apply_page(&view, request.page_limit) {
+            Ok(TimePageOutcome::Next {
                 cursor: next,
                 records,
-            } => {
+            }) => {
                 append_kept(&mut collected, &page, &records);
                 cursor = next;
             }
-            TimePageOutcome::Exhausted {
+            Ok(TimePageOutcome::Exhausted {
                 cursor: next,
                 records,
-            } => {
+            }) => {
                 append_kept(&mut collected, &page, &records);
                 return finish_crawl(
                     collected,
@@ -429,7 +463,7 @@ pub fn crawl_time_pages<T: InfoTransport>(
                     TimePageStopReason::Exhausted,
                 );
             }
-            TimePageOutcome::NoProgress => {
+            Ok(TimePageOutcome::NoProgress) => {
                 if page.len() < request.page_limit {
                     return finish_crawl(
                         collected,
@@ -452,7 +486,79 @@ pub fn crawl_time_pages<T: InfoTransport>(
                     TimePageStopReason::SameMillisecondBurst,
                 );
             }
+            Err(_) => {
+                return take_progress(
+                    collected,
+                    cursor,
+                    TimePageStopReason::Incomplete,
+                    SchedulerError::InvalidCursor,
+                );
+            }
         }
+    }
+}
+
+fn remaining_weight(
+    budget: &mut RequestBudget,
+    now_millis: u64,
+    priority: SchedulePriority,
+) -> u32 {
+    let snap = budget.snapshot(now_millis);
+    if priority.is_protected() {
+        snap.available_total()
+    } else {
+        snap.available_general()
+    }
+}
+
+fn negotiated_row_estimate(cost: RequestCost, page_limit: u32, remaining: u32) -> Option<u32> {
+    if remaining < cost.base() {
+        return None;
+    }
+    if cost.variable().is_none() {
+        return Some(0);
+    }
+    // ponytail: extra weight is +1/row. Official candle/history coefficients
+    // are not in-tree. Cap the reserved rows so one page cannot exceed the
+    // remaining envelope. Swap the table when T09 snapshots it.
+    Some(page_limit.min(remaining - cost.base()))
+}
+
+fn reserve_page(
+    budget: &mut RequestBudget,
+    request: &TimePageCrawlRequest<'_>,
+    now: &mut u64,
+) -> Result<BudgetLease, SchedulerError> {
+    let page_limit = u32::try_from(request.page_limit).unwrap_or(u32::MAX);
+    for attempt in 0..2_u8 {
+        if attempt == 1 {
+            *now = now.saturating_add(REFILL_PERIOD_MILLIS);
+        }
+        let remaining = remaining_weight(budget, *now, request.priority);
+        let Some(rows) = negotiated_row_estimate(request.cost, page_limit, remaining) else {
+            continue;
+        };
+        let reserved = request.cost.estimated_weight(rows);
+        match budget.reserve(*now, request.job_id, request.priority, reserved) {
+            Ok(lease) => return Ok(lease),
+            Err(BudgetError::Insufficient) => {}
+            Err(BudgetError::CircuitOpen) => return Err(SchedulerError::CircuitOpen),
+            Err(error) => return Err(SchedulerError::Budget(error)),
+        }
+    }
+    Err(SchedulerError::Budget(BudgetError::Insufficient))
+}
+
+fn take_progress(
+    collected: Vec<OwnedPageRecord>,
+    cursor: TimePageCursor,
+    stop: TimePageStopReason,
+    error: SchedulerError,
+) -> Result<TimePageCrawl, SchedulerError> {
+    if collected.is_empty() {
+        Err(error)
+    } else {
+        finish_crawl(collected, cursor, true, Vec::new(), stop)
     }
 }
 
@@ -463,7 +569,11 @@ fn finish_crawl(
     gaps: Vec<TimeRangeGap>,
     stop: TimePageStopReason,
 ) -> Result<TimePageCrawl, SchedulerError> {
-    let earliest = cursor.last_time_millis();
+    let earliest = if truncated {
+        records.iter().map(OwnedPageRecord::time_millis).min()
+    } else {
+        None
+    };
     Ok(TimePageCrawl {
         records,
         coverage: TimePageCoverage::new(truncated, earliest, gaps)

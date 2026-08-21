@@ -5,7 +5,7 @@ mod info_scheduler {
     use hl_capture::{
         BudgetError, InfoHttpResponse, InfoJob, InfoScheduler, RequestBudget, SchedulePriority,
         SchedulerError, ScriptedInfoTransport, TimePageCrawlRequest, TimePageStopReason,
-        crawl_time_pages, fetch_info, parse_request_cost,
+        crawl_time_pages, fetch_info, forbids_exchange_request, parse_request_cost,
     };
     use hl_protocol::info::{InfoRegistry, TimePageCursor};
     use serde_json::{Value, json};
@@ -202,6 +202,8 @@ mod info_scheduler {
         assert_eq!(crawl.stop(), TimePageStopReason::Exhausted);
         assert_eq!(crawl.records().len(), 1);
         assert_eq!(crawl.records()[0].stable_id(), Some("a"));
+        assert!(!crawl.coverage().truncated());
+        assert_eq!(crawl.coverage().earliest_reliable_millis(), None);
     }
 
     #[test]
@@ -304,6 +306,7 @@ mod info_scheduler {
         assert_eq!(crawl.coverage().known_gaps().len(), 1);
         assert_eq!(crawl.coverage().known_gaps()[0].start_millis(), 100);
         assert_eq!(crawl.coverage().known_gaps()[0].end_millis(), 100);
+        assert_eq!(crawl.coverage().earliest_reliable_millis(), Some(100));
     }
 
     #[test]
@@ -329,5 +332,163 @@ mod info_scheduler {
             BudgetError::Insufficient.reason_code(),
             "capture_info.insufficient_budget"
         );
+    }
+
+    #[test]
+    fn exchange_status_reaches_scripted_transport() {
+        let mut transport = ScriptedInfoTransport::new([InfoHttpResponse::new(
+            200,
+            serde_json::to_vec(&json!({ "time": 1 })).expect("json"),
+        )]);
+        fetch_info(
+            &mut transport,
+            InfoRegistry::official(),
+            "official.info.exchange_status",
+            &BTreeMap::new(),
+            now(),
+            "test-archive",
+        )
+        .expect("exchangeStatus");
+        let posted: Value = serde_json::from_slice(&transport.posted()[0]).expect("posted");
+        assert_eq!(posted["type"], "exchangeStatus");
+        assert!(forbids_exchange_request(
+            "order",
+            br#"{"type":"order"}"#,
+            "",
+        ));
+        assert!(forbids_exchange_request(
+            "allMids",
+            b"{}",
+            "https://api.hyperliquid.xyz/exchange",
+        ));
+    }
+
+    #[test]
+    fn untruncated_crawl_earliest_reliable_is_none() {
+        let mut transport = ScriptedInfoTransport::new([page(&[("a", 100), ("b", 900)])]);
+        let mut budget =
+            RequestBudget::try_new("official-info", 1_000, 80, 40, 0, 1).expect("budget");
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let crawl = crawl_time_pages(
+            &mut transport,
+            &mut budget,
+            InfoRegistry::official(),
+            TimePageCrawlRequest::new(
+                "official.info.user_fills_by_time",
+                &extra,
+                TimePageCursor::new(50, 5).expect("cursor"),
+                3,
+                "fills",
+                SchedulePriority::P3,
+                0,
+                now(),
+                "test-archive",
+                cost,
+            ),
+        )
+        .expect("crawl");
+        assert_eq!(crawl.stop(), TimePageStopReason::Exhausted);
+        assert!(!crawl.coverage().truncated());
+        assert_eq!(crawl.coverage().earliest_reliable_millis(), None);
+        assert_eq!(crawl.records().len(), 2);
+    }
+
+    #[test]
+    fn history_page_limit_2000_makes_progress_on_official_envelope() {
+        let mut transport = ScriptedInfoTransport::new([page(&[("a", 100)])]);
+        let mut budget = RequestBudget::official("official-info", 75, 0, 1).expect("budget");
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let crawl = crawl_time_pages(
+            &mut transport,
+            &mut budget,
+            InfoRegistry::official(),
+            TimePageCrawlRequest::new(
+                "official.info.user_fills_by_time",
+                &extra,
+                TimePageCursor::new(0, 5).expect("cursor"),
+                2_000,
+                "fills",
+                SchedulePriority::P4,
+                0,
+                now(),
+                "test-archive",
+                cost,
+            ),
+        )
+        .expect("crawl");
+        assert_eq!(crawl.records().len(), 1);
+        assert_eq!(crawl.stop(), TimePageStopReason::Exhausted);
+        assert_eq!(crawl.coverage().earliest_reliable_millis(), None);
+    }
+
+    #[test]
+    fn mid_crawl_transport_error_keeps_fetched_pages() {
+        let mut transport = ScriptedInfoTransport::new([
+            page(&[("a", 100), ("b", 900)]),
+            InfoHttpResponse::new(500, b"nope".to_vec()),
+        ]);
+        let mut budget =
+            RequestBudget::try_new("official-info", 1_000, 80, 40, 0, 1).expect("budget");
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let crawl = crawl_time_pages(
+            &mut transport,
+            &mut budget,
+            InfoRegistry::official(),
+            TimePageCrawlRequest::new(
+                "official.info.user_fills_by_time",
+                &extra,
+                TimePageCursor::new(50, 5).expect("cursor"),
+                2,
+                "fills",
+                SchedulePriority::P3,
+                0,
+                now(),
+                "test-archive",
+                cost,
+            ),
+        )
+        .expect("partial");
+        assert_eq!(crawl.stop(), TimePageStopReason::Incomplete);
+        assert_eq!(crawl.records().len(), 2);
+        assert_eq!(crawl.cursor().last_time_millis(), Some(900));
+        assert!(crawl.coverage().truncated());
+        assert_eq!(crawl.coverage().earliest_reliable_millis(), Some(100));
+    }
+
+    #[test]
+    fn drained_budget_waits_a_minute_then_crawls() {
+        let mut transport = ScriptedInfoTransport::new([page(&[("a", 100)])]);
+        let mut budget = RequestBudget::official("official-info", 75, 0, 1).expect("budget");
+        let general = budget.snapshot(0).available_general();
+        let drain = budget
+            .reserve(0, "drain", SchedulePriority::P4, general)
+            .expect("drain");
+        budget.commit(0, drain, general).expect("spent");
+        assert_eq!(budget.snapshot(0).available_general(), 0);
+        let extra = BTreeMap::new();
+        let cost = parse_request_cost("base:20 variable:window").expect("cost");
+        let crawl = crawl_time_pages(
+            &mut transport,
+            &mut budget,
+            InfoRegistry::official(),
+            TimePageCrawlRequest::new(
+                "official.info.user_fills_by_time",
+                &extra,
+                TimePageCursor::new(0, 5).expect("cursor"),
+                2,
+                "fills",
+                SchedulePriority::P4,
+                0,
+                now(),
+                "test-archive",
+                cost,
+            ),
+        )
+        .expect("after refill");
+        assert_eq!(crawl.records().len(), 1);
+        assert_eq!(crawl.stop(), TimePageStopReason::Exhausted);
     }
 }

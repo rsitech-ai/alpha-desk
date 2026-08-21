@@ -138,7 +138,7 @@ pub fn fetch_info<T: InfoTransport>(
         return Err(EgressError::CommittedLane);
     }
     let encoded = endpoint.encode(params).map_err(EgressError::Info)?;
-    if encoded.identifier() == "exchange" || encoded_body_is_exchange(encoded.body()) {
+    if forbids_exchange_request(encoded.identifier(), encoded.body(), "") {
         return Err(EgressError::ExchangeForbidden);
     }
     let response = transport.post_info(&encoded)?;
@@ -159,15 +159,38 @@ pub fn fetch_info<T: InfoTransport>(
     }
 }
 
-fn encoded_body_is_exchange(body: &Bytes) -> bool {
+const EXCHANGE_ACTIONS: &[&str] = &[
+    "order",
+    "cancel",
+    "cancelByCloid",
+    "modify",
+    "batchModify",
+    "updateLeverage",
+];
+
+#[must_use]
+pub fn is_exchange_http_path(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path == "/exchange"
+        || path == "exchange"
+        || path.ends_with("/exchange")
+        || path.contains("/exchange/")
+}
+
+#[must_use]
+pub fn forbids_exchange_request(identifier: &str, body: &[u8], url: &str) -> bool {
+    identifier == "exchange"
+        || is_exchange_http_path(identifier)
+        || is_exchange_http_path(url)
+        || encoded_body_is_exchange(body)
+}
+
+fn encoded_body_is_exchange(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return false;
     };
     match value.get("type").and_then(Value::as_str) {
-        Some(
-            "order" | "cancel" | "cancelByCloid" | "modify" | "batchModify" | "updateLeverage",
-        ) => true,
-        Some(kind) => kind.starts_with("exchange"),
+        Some(kind) => EXCHANGE_ACTIONS.contains(&kind) || is_exchange_http_path(kind),
         None => false,
     }
 }

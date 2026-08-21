@@ -204,6 +204,8 @@ pub struct RequestBudget {
     general_cap: u32,
     available_priority: u32,
     available_general: u32,
+    priority_remainder: u64,
+    general_remainder: u64,
     last_refill_millis: u64,
     circuit_open_until_millis: Option<u64>,
     consecutive_429: u32,
@@ -251,6 +253,8 @@ impl RequestBudget {
             general_cap,
             available_priority: priority_cap,
             available_general: general_cap,
+            priority_remainder: 0,
+            general_remainder: 0,
             last_refill_millis: now_millis,
             circuit_open_until_millis: None,
             consecutive_429: 0,
@@ -382,6 +386,8 @@ impl RequestBudget {
         self.consecutive_429 = self.consecutive_429.saturating_add(1);
         self.available_priority = 0;
         self.available_general = 0;
+        self.priority_remainder = 0;
+        self.general_remainder = 0;
         let backoff = self.backoff_millis(self.consecutive_429);
         let open_until = now_millis.saturating_add(backoff);
         self.circuit_open_until_millis = Some(open_until);
@@ -426,14 +432,26 @@ impl RequestBudget {
     fn refill(&mut self, now_millis: u64) {
         if now_millis < self.last_refill_millis {
             self.last_refill_millis = now_millis;
+            self.priority_remainder = 0;
+            self.general_remainder = 0;
             return;
         }
         let elapsed = now_millis - self.last_refill_millis;
         if elapsed == 0 {
             return;
         }
-        self.available_priority = refill_pool(self.available_priority, self.priority_cap, elapsed);
-        self.available_general = refill_pool(self.available_general, self.general_cap, elapsed);
+        self.available_priority = refill_pool(
+            self.available_priority,
+            self.priority_cap,
+            elapsed,
+            &mut self.priority_remainder,
+        );
+        self.available_general = refill_pool(
+            self.available_general,
+            self.general_cap,
+            elapsed,
+            &mut self.general_remainder,
+        );
         self.last_refill_millis = now_millis;
         if let Some(until) = self.circuit_open_until_millis
             && now_millis >= until
@@ -467,13 +485,25 @@ impl RequestBudget {
     }
 }
 
-fn refill_pool(available: u32, cap: u32, elapsed_millis: u64) -> u32 {
+fn refill_pool(available: u32, cap: u32, elapsed_millis: u64, remainder: &mut u64) -> u32 {
+    if cap == 0 {
+        *remainder = 0;
+        return 0;
+    }
     if available >= cap {
+        *remainder = 0;
         return cap;
     }
-    let add = u64::from(cap).saturating_mul(elapsed_millis) / 60_000;
-    let add = u32::try_from(add).unwrap_or(u32::MAX);
-    cap.min(available.saturating_add(add))
+    let credit = u64::from(cap)
+        .saturating_mul(elapsed_millis)
+        .saturating_add(*remainder);
+    let add = u32::try_from(credit / 60_000).unwrap_or(u32::MAX);
+    *remainder = credit % 60_000;
+    let next = cap.min(available.saturating_add(add));
+    if next >= cap {
+        *remainder = 0;
+    }
+    next
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
