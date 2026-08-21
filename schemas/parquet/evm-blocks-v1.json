@@ -1,0 +1,23 @@
+{
+  "format": "hyperliquid-alpha-desk/parquet-schema/v1",
+  "dataset": "evm_blocks",
+  "semantic_version": "1.0.0",
+  "authoritative_columns": [
+    "block_hash",
+    "fact_hash"
+  ],
+  "fields": [
+    {"name": "chain_id", "type": "uint64", "nullable": false},
+    {"name": "block_number", "type": "uint64", "nullable": false},
+    {"name": "block_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "parent_hash", "type": "fixed_size_binary[32]", "nullable": false},
+    {"name": "timestamp", "type": "uint64", "nullable": false},
+    {"name": "miner", "type": "fixed_size_binary[20]", "nullable": false},
+    {"name": "gas_limit", "type": "utf8", "nullable": false},
+    {"name": "gas_used", "type": "utf8", "nullable": false},
+    {"name": "base_fee_per_gas", "type": "utf8", "nullable": true},
+    {"name": "pace", "type": "utf8", "nullable": false},
+    {"name": "tx_count", "type": "uint32", "nullable": false},
+    {"name": "fact_hash", "type": "fixed_size_binary[32]", "nullable": false}
+  ]
+}

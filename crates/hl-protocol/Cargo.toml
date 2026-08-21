@@ -16,6 +16,7 @@ blake3.workspace = true
 bytes.workspace = true
 domain-types = { path = "../domain-types", version = "=0.1.0" }
 hex.workspace = true
+lz4_flex = "0.13.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -24,4 +25,6 @@ tokio = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+domain-types = { path = "../domain-types", version = "=0.1.0" }
+serde_json.workspace = true
 toml.workspace = true
