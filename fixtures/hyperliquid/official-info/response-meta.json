@@ -1,0 +1,1 @@
+{"universe":[{"name":"BTC","szDecimals":5,"maxLeverage":50},{"szDecimals":4,"name":"xyz:XYZ100","maxLeverage":20,"marginTableId":20,"onlyIsolated":true,"marginMode":"strictIsolated"}],"marginTables":[[20,{"description":"hip3","marginTiers":[{"lowerBound":"0.0","maxLeverage":20}]}]],"collateralToken":0}

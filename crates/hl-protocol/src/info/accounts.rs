@@ -6,6 +6,8 @@ use super::decode::{
     history_coverage, malformed, pair_entries, parse_family, require_address, require_array,
     require_decimal, require_i64, require_object, require_str, require_u64,
 };
+use super::perpetuals::ClearinghouseState;
+use super::spot::SpotClearinghouseState;
 use super::{InfoEnumField, InfoError, InfoParseContext, ParsedInfoResponse};
 
 pub const USER_NON_FUNDING_PAGE_LIMIT: usize = 2000;
@@ -73,6 +75,25 @@ pub const SUB_ACCOUNT_KNOWN_FIELDS: &[&str] = &[
     "/clearinghouseState/crossMaintenanceMarginUsed",
     "/clearinghouseState/withdrawable",
     "/clearinghouseState/assetPositions",
+    "/clearinghouseState/assetPositions/type",
+    "/clearinghouseState/assetPositions/position",
+    "/clearinghouseState/assetPositions/position/coin",
+    "/clearinghouseState/assetPositions/position/szi",
+    "/clearinghouseState/assetPositions/position/leverage",
+    "/clearinghouseState/assetPositions/position/leverage/type",
+    "/clearinghouseState/assetPositions/position/leverage/value",
+    "/clearinghouseState/assetPositions/position/leverage/rawUsd",
+    "/clearinghouseState/assetPositions/position/entryPx",
+    "/clearinghouseState/assetPositions/position/positionValue",
+    "/clearinghouseState/assetPositions/position/unrealizedPnl",
+    "/clearinghouseState/assetPositions/position/returnOnEquity",
+    "/clearinghouseState/assetPositions/position/liquidationPx",
+    "/clearinghouseState/assetPositions/position/marginUsed",
+    "/clearinghouseState/assetPositions/position/maxLeverage",
+    "/clearinghouseState/assetPositions/position/cumFunding",
+    "/clearinghouseState/assetPositions/position/cumFunding/allTime",
+    "/clearinghouseState/assetPositions/position/cumFunding/sinceOpen",
+    "/clearinghouseState/assetPositions/position/cumFunding/sinceChange",
     "/clearinghouseState/time",
     "/spotState/balances",
     "/spotState/balances/coin",
@@ -412,8 +433,8 @@ pub struct SubAccount {
     name: String,
     sub_account_user: Address,
     master: Address,
-    clearinghouse_state: Value,
-    spot_state: Value,
+    clearinghouse_state: ClearinghouseState,
+    spot_state: SpotClearinghouseState,
 }
 
 impl SubAccount {
@@ -433,12 +454,12 @@ impl SubAccount {
     }
 
     #[must_use]
-    pub const fn clearinghouse_state(&self) -> &Value {
+    pub const fn clearinghouse_state(&self) -> &ClearinghouseState {
         &self.clearinghouse_state
     }
 
     #[must_use]
-    pub const fn spot_state(&self) -> &Value {
+    pub const fn spot_state(&self) -> &SpotClearinghouseState {
         &self.spot_state
     }
 }
@@ -483,12 +504,18 @@ impl TryFrom<&ParsedInfoResponse<Value>> for SubAccounts {
                     name: require_str(object, &path, "name")?.to_owned(),
                     sub_account_user,
                     master,
-                    // ponytail: nested perp/spot state is T07's clearinghouse/spot types
-                    clearinghouse_state: object
-                        .get("clearinghouseState")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    spot_state: object.get("spotState").cloned().unwrap_or(Value::Null),
+                    clearinghouse_state: ClearinghouseState::from_value(
+                        object.get("clearinghouseState").ok_or_else(|| {
+                            malformed(&child(&path, "clearinghouseState"), "missing field")
+                        })?,
+                        &child(&path, "clearinghouseState"),
+                    )?,
+                    spot_state: SpotClearinghouseState::from_value(
+                        object.get("spotState").ok_or_else(|| {
+                            malformed(&child(&path, "spotState"), "missing field")
+                        })?,
+                        &child(&path, "spotState"),
+                    )?,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;

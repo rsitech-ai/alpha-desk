@@ -219,6 +219,58 @@ pub(crate) fn require_bool(
         .ok_or_else(|| malformed(&child(parent, key), "expected bool"))
 }
 
+pub(crate) fn optional_bool(
+    object: &Map<String, Value>,
+    parent: &str,
+    key: &str,
+) -> Result<Option<bool>, InfoError> {
+    match optional_field(object, key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| malformed(&child(parent, key), "expected bool")),
+    }
+}
+
+pub(crate) fn require_object_field<'a>(
+    object: &'a Map<String, Value>,
+    parent: &str,
+    key: &str,
+) -> Result<&'a Map<String, Value>, InfoError> {
+    require_object(field(object, parent, key)?, &child(parent, key))
+}
+
+pub(crate) fn require_array_field<'a>(
+    object: &'a Map<String, Value>,
+    parent: &str,
+    key: &str,
+) -> Result<&'a Vec<Value>, InfoError> {
+    require_array(field(object, parent, key)?, &child(parent, key))
+}
+
+pub(crate) fn optional_i64(
+    object: &Map<String, Value>,
+    parent: &str,
+    key: &str,
+) -> Result<Option<i64>, InfoError> {
+    match optional_field(object, key) {
+        None => Ok(None),
+        Some(value) => i64_from_value(value, &child(parent, key)).map(Some),
+    }
+}
+
+pub(crate) fn optional_address(
+    object: &Map<String, Value>,
+    parent: &str,
+    key: &str,
+) -> Result<Option<Address>, InfoError> {
+    match optional_str(object, parent, key)? {
+        None => Ok(None),
+        Some(text) => address_from_str(text, &child(parent, key)).map(Some),
+    }
+}
+
 pub(crate) fn require_u64(
     object: &Map<String, Value>,
     parent: &str,
@@ -349,4 +401,79 @@ pub(crate) fn object_map_mids(
         mids.insert(coin.clone(), (market_id, px));
     }
     Ok(mids)
+}
+
+pub(crate) fn string_list(value: &Value, path: &str) -> Result<Vec<String>, InfoError> {
+    require_array(value, path)?
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| malformed(&format!("{path}/{index}"), "expected string"))
+        })
+        .collect()
+}
+
+pub(crate) fn decimal_list(value: &Value, path: &str) -> Result<Vec<Decimal>, InfoError> {
+    require_array(value, path)?
+        .iter()
+        .enumerate()
+        .map(|(index, item)| decimal_from_value(item, &format!("{path}/{index}")))
+        .collect()
+}
+
+pub const DEPLOY_AUCTION_KNOWN_FIELDS: &[&str] = &[
+    "/startTimeSeconds",
+    "/durationSeconds",
+    "/startGas",
+    "/currentGas",
+    "/endGas",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployAuction {
+    start_time_seconds: i64,
+    duration_seconds: u64,
+    start_gas: Decimal,
+    current_gas: Option<Decimal>,
+    end_gas: Option<Decimal>,
+}
+
+impl DeployAuction {
+    #[must_use]
+    pub const fn start_time_seconds(&self) -> i64 {
+        self.start_time_seconds
+    }
+
+    #[must_use]
+    pub const fn duration_seconds(&self) -> u64 {
+        self.duration_seconds
+    }
+
+    #[must_use]
+    pub const fn start_gas(&self) -> Decimal {
+        self.start_gas
+    }
+
+    #[must_use]
+    pub const fn current_gas(&self) -> Option<Decimal> {
+        self.current_gas
+    }
+
+    #[must_use]
+    pub const fn end_gas(&self) -> Option<Decimal> {
+        self.end_gas
+    }
+
+    pub(crate) fn from_value(value: &Value, path: &str) -> Result<Self, InfoError> {
+        let object = require_object(value, path)?;
+        Ok(Self {
+            start_time_seconds: require_i64(object, path, "startTimeSeconds")?,
+            duration_seconds: require_u64(object, path, "durationSeconds")?,
+            start_gas: require_decimal(object, path, "startGas")?,
+            current_gas: optional_decimal(object, path, "currentGas")?,
+            end_gas: optional_decimal(object, path, "endGas")?,
+        })
+    }
 }

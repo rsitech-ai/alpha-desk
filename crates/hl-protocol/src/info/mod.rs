@@ -1,13 +1,19 @@
 pub mod accounts;
+pub mod borrow_lend;
 pub mod builders_agents;
 pub mod fees_referrals;
 pub mod general;
 pub mod orders;
+pub mod outcomes;
 pub mod pagination;
+pub mod perpetuals;
 pub mod registry;
 pub mod request;
 pub mod response;
+pub mod spot;
+pub mod staking;
 pub mod twap;
+pub mod vaults;
 
 mod decode;
 
@@ -16,18 +22,25 @@ use crate::ErrorDisposition;
 const MAX_IDENTITY_BYTES: usize = 256;
 
 pub use accounts::*;
+pub use borrow_lend::*;
 pub use builders_agents::*;
 pub use decode::{
-    BookSide, InfoObservationKind, UserHistoryMeta, history_coverage, market_id_from_coin,
+    BookSide, DeployAuction, InfoObservationKind, UserHistoryMeta, history_coverage,
+    market_id_from_coin,
 };
 pub use fees_referrals::*;
 pub use general::*;
 pub use orders::*;
+pub use outcomes::*;
 pub use pagination::*;
+pub use perpetuals::*;
 pub use registry::*;
 pub use request::*;
 pub use response::*;
+pub use spot::*;
+pub use staking::*;
 pub use twap::*;
+pub use vaults::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapabilityId(String);

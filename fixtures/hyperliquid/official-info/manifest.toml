@@ -139,3 +139,35 @@ sha256 = "0b77dccc9dd6ace948c88c95e54b62b5967c6a5a2b0a4007fb651b587d8ab177"
 [[fixture]]
 file = "response-user-dex-abstraction.json"
 sha256 = "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74"
+
+[[fixture]]
+file = "response-perp-dexs.json"
+sha256 = "f1a763ded8dfd45a1eb6f97185fc6db352f17afc1bf54255be6bbc23b29d47a6"
+
+[[fixture]]
+file = "response-meta.json"
+sha256 = "cda79e747551d871e7baddc7c208b999fa34b54c413bf4234b1ee303da702949"
+
+[[fixture]]
+file = "response-meta-and-asset-ctxs.json"
+sha256 = "4b86c06360e6a23b08f0198aeb8e88a6ee4e988883aee5f7581d1dd0310a32f3"
+
+[[fixture]]
+file = "response-clearinghouse-state.json"
+sha256 = "ace97c0145baeb2b714fbc9e0ba6fdd6c933db57a1e5ef7c06bffdc75830b1e4"
+
+[[fixture]]
+file = "response-spot-meta.json"
+sha256 = "6591a2e7f2bf39831d19c2f4577b873c6235f129c7f5f4c55201bf59260894a8"
+
+[[fixture]]
+file = "response-outcome-meta.json"
+sha256 = "514e0055c6cb0671b40deaf51218e6b239d843ec688822368f952aa25ec5b41d"
+
+[[fixture]]
+file = "response-vault-details.json"
+sha256 = "e73faab0715ca5d75172227a41e7b8ed19683dab236e41a736f30827a72e7bbc"
+
+[[fixture]]
+file = "response-borrow-lend-user.json"
+sha256 = "af6673fcb58f2b69b91fc9262cf8a33b44fcd17b5a1c75ca4a073055e3f6707c"
